@@ -22,20 +22,9 @@ import assert from 'node:assert/strict';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ui } from '../src/ui.mjs';
+import { check, finish, repoRoot } from './support.mjs';
 
-let failures = 0;
-function check(name, fn) {
-  try {
-    fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
-
-const repoRoot = fileURLToPath(new URL('../', import.meta.url));
 const selfPath = fileURLToPath(import.meta.url);
 
 // The browser notification API, precisely: the constructor and the three
@@ -78,19 +67,7 @@ check('setup sanity: the patterns actually match browser Notification API syntax
   for (const [re] of BROWSER_NOTIFICATION_API) assert.match(sample, re, `pattern ${re} failed to match its own target syntax`);
 });
 
-check('setup sanity: this check does not find itself', () => {
-  assert.ok(!files.includes(selfPath), 'the walk must exclude its own file');
-});
-
-check('setup sanity: the daemon\'s own notifyRound (src/notify.mjs) is untouched by this grep', () => {
-  const notifyMjs = readFileSync(path.join(repoRoot, 'src/notify.mjs'), 'utf8');
-  assert.match(notifyMjs, /export function notifyRound/, 'setup failure: src/notify.mjs no longer exports notifyRound -- has it moved?');
-  for (const [re, label] of BROWSER_NOTIFICATION_API) {
-    assert.ok(!re.test(notifyMjs), `the daemon's own notifyRound must not trip the browser-API grep (matched ${label})`);
-  }
-});
-
-check('criterion 21: the browser notification API appears nowhere in shipped code, checks, or the committed sample board', () => {
+check('the browser notification API appears nowhere in shipped code, checks, or the committed sample board, and the client script keeps no page-side notifier and no window.focus( call', () => {
   const hits = [];
   for (const file of files) {
     const text = readFileSync(file, 'utf8');
@@ -99,6 +76,16 @@ check('criterion 21: the browser notification API appears nowhere in shipped cod
     }
   }
   assert.deepEqual(hits, [], `the browser notification API must appear nowhere in the tree:\n${hits.join('\n')}`);
+
+  // The client script itself (src/ui.mjs's exported `ui`), held tighter than the
+  // tree-wide patterns above: no page-side notifyRound, no mention of the browser API at
+  // all, and nothing that pulls the window forward. window.focus( used to appear exactly
+  // once, inside the deleted notifyRound's click handler -- the one exception to "never
+  // steal focus" (ADR.md entry 58).
+  assert.ok(!/function\s+notifyRound\s*\(/.test(ui), 'the browser-side notifyRound must stay deleted, not left as dead code');
+  assert.ok(!/\bNotification\b/.test(ui), 'no reference to the browser Notification API may remain in the client script');
+  assert.equal((ui.match(/window\.focus\(/g) || []).length, 0,
+    'window.focus( must not appear anywhere in the client script -- its one caller, the notification click handler, is deleted');
 });
 
 // No document describes a browser notification, its permission grant, or a tab that
@@ -118,7 +105,7 @@ check('criterion 21: the browser notification API appears nowhere in shipped cod
 // per-browser-profile grant to chase" -- because it matched on nearby words while blind to
 // the negation. Anything that fragile is worse than not checking: it teaches a maintainer
 // to distrust the check rather than the prose. So this stays at the same altitude as
-// criterion 21's code grep, matching only the dead API surface and the three symbol names
+// the code grep above, matching only the dead API surface and the three symbol names
 // a doc could only contain by quoting the deleted code (`requestNotifyPermissionFromSend`,
 // `reopenIfNoClient`, `connectedClientCount`) -- unambiguous either way, never triggered by
 // prose correctly describing their absence. The prose itself was swept by hand and is
@@ -142,7 +129,7 @@ check('setup sanity: DOC_FILES resolves a real, non-trivial set of tracked docum
   assert.ok(!DOC_FILES.some(f => f.endsWith(`${path.sep}ADR.md`)), 'ADR.md must be excluded -- it is exempt, being the record of why the deleted behaviour went');
 });
 
-check('criterion 25: no tracked document names the deleted browser notification API or the symbols the deletion removed', () => {
+check('no tracked document names the deleted browser notification API or the symbols the deletion removed', () => {
   const hits = [];
   for (const file of DOC_FILES) {
     const text = readFileSync(file, 'utf8');
@@ -153,8 +140,4 @@ check('criterion 25: no tracked document names the deleted browser notification 
   assert.deepEqual(hits, [], `no document should reference the deleted browser notification API or its symbols:\n${hits.join('\n')}`);
 });
 
-if (failures) {
-  console.error(`\n${failures} check(s) failed`);
-  process.exit(1);
-}
-console.log('\nall notify-cleanup checks ok');
+finish('notify-cleanup');

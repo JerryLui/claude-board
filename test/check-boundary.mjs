@@ -20,83 +20,50 @@
 // of reach for every other check, and this file restores it the moment the scenario ends).
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, readdirSync, readFileSync, writeFileSync, existsSync, chmodSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, rmSync, readdirSync, readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
-import http from 'node:http';
-import { fileURLToPath } from 'node:url';
-import { spawn } from 'node:child_process';
 import { SECRET_HEADER } from '../src/secret.mjs';
 import { startServer } from '../src/server.mjs';
-
-const here = path.dirname(fileURLToPath(import.meta.url));
-const mcpBin = path.join(here, '..', 'bin', 'mcp.mjs');
-
-let failures = 0;
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
-
-const sleep = ms => new Promise(r => setTimeout(r, ms));
+import {
+  check, fail, finish, sleep, waitForCount, withEnv, projectFor, secretHome, rawGet,
+  spawnShim, makeOpenRecorder, writeStub, STUB_OSASCRIPT_LINGERING, STUB_OPEN,
+  BANNER, rowsFor, spawnsFor,
+} from './support.mjs';
 
 // --- the temp world -------------------------------------------------------------------
 
-const workDir = mkdtempSync(path.join(tmpdir(), 'claude-board-boundary-'));
+// One mkdtemp directory holds everything: the secret file at its top, the daemon's store
+// under `store`, the stubs under `bin`, and one project folder per scenario.
+const { home: workDir, secret: SECRET } = secretHome('claude-board-boundary-', { secret: 'b'.repeat(64), setHome: false });
 const home = path.join(workDir, 'store');
 mkdirSync(home, { recursive: true });
-
-const SECRET_FILE = path.join(workDir, 'secret');
-const SECRET = 'b'.repeat(64);
-writeFileSync(SECRET_FILE, `${SECRET}\n`, { mode: 0o600 });
-process.env.CLAUDE_BOARD_SECRET_FILE = SECRET_FILE;
 process.env.CLAUDE_BOARD_HOME = home;
 
-// The grace is out of reach for the whole file except inside `withGrace` below: every
-// board this check posts is stranded by construction (a question round nobody opens), and
-// a banner per scenario would be a pile of lingering stub children for no assertion.
+// The grace is out of reach for the whole file except for the one scenario that shortens it
+// through `withEnv`: every board this check posts is stranded by construction (a question
+// round nobody opens), and a banner per scenario would be a pile of lingering stub children
+// for no assertion. `withEnv` puts this value back even if the scenario throws, so a failed
+// assertion does not leave the next scenario announcing real absences.
 process.env.CLAUDE_BOARD_STRANDED_GRACE_MS = String(24 * 60 * 60 * 1000);
 
 // --- the stubs on PATH ----------------------------------------------------------------
 //
-// Same shape as test/check-stranded.mjs's: the notifier records the argv it was spawned
-// with, and with a linger it stays alive long enough to record the signal that kills it --
-// which is how "the banner was withdrawn" becomes observable with no banner ever appearing.
-const STUB_OSASCRIPT = `#!/usr/bin/env node
-import fs from 'node:fs';
-const argv = process.argv.slice(2);
-const say = what => fs.appendFileSync(process.env.STUB_OSASCRIPT_LOG, JSON.stringify([what, ...argv]) + '\\n');
-say('spawn');
-const linger = Number(process.env.STUB_OSASCRIPT_LINGER_MS || '0');
-if (linger > 0) {
-  const bye = sig => { say(sig); process.exit(0); };
-  process.on('SIGTERM', () => bye('SIGTERM'));
-  process.on('SIGINT', () => bye('SIGINT'));
-  setTimeout(() => { say('deadline'); process.exit(0); }, linger);
-}
-`;
-// The daemon must open no tab of its own (ADR 55). Stubbed rather than merely unasserted,
-// so a reopen added on that path shows up here instead of on a reader's screen.
-const STUB_OPEN = `#!/usr/bin/env node
-import fs from 'node:fs';
-fs.appendFileSync(process.env.STUB_OPEN_LOG, JSON.stringify(process.argv.slice(2)) + '\\n');
-`;
+// The notifier (test/support.mjs's `STUB_OSASCRIPT_LINGERING`) records the argv it was
+// spawned with, and with a linger it stays alive long enough to record the signal that kills
+// it -- which is how "the banner was withdrawn" becomes observable with no banner ever
+// appearing.
+//
+// The daemon must open no tab of its own (ADR 55). `open` is stubbed rather than merely
+// unasserted, so a reopen added on that path shows up here instead of on a reader's screen.
 const stubDir = path.join(workDir, 'bin');
-mkdirSync(stubDir, { recursive: true });
-for (const [name, source] of [['osascript', STUB_OSASCRIPT], ['open', STUB_OPEN]]) {
-  const p = path.join(stubDir, name);
-  writeFileSync(p, source);
-  chmodSync(p, 0o755);
-}
+writeStub(stubDir, 'osascript', STUB_OSASCRIPT_LINGERING);
+writeStub(stubDir, 'open', STUB_OPEN);
 process.env.PATH = `${stubDir}:${process.env.PATH}`;
 process.env.STUB_OPEN_LOG = path.join(workDir, 'daemon-open.log');
-process.env.STUB_OSASCRIPT_LOG = path.join(workDir, 'osascript.log');
+// One notifier log for the whole file, read per project folder (`rowsFor`, `spawnsFor`)
+// rather than rotated per scenario: a grace armed by one scenario can fire during the next.
+const OSASCRIPT_LOG = path.join(workDir, 'osascript.log');
+process.env.STUB_OSASCRIPT_LOG = OSASCRIPT_LOG;
 // Long enough that a banner's child is still alive when the boundary is declared, so the
 // SIGTERM that withdraws it is recorded rather than raced against the child's own exit.
 // Generous rather than snug: the suite runs four checks at a time beside a 60-second
@@ -104,140 +71,22 @@ process.env.STUB_OSASCRIPT_LOG = path.join(workDir, 'osascript.log');
 // turning a real withdrawal into a red assertion about scheduling.
 process.env.STUB_OSASCRIPT_LINGER_MS = '60000';
 
-const BANNER = folder => `display notification "${folder}: a round is waiting." with title "Board"`;
-
-function osascriptRows() {
-  if (!existsSync(process.env.STUB_OSASCRIPT_LOG)) return [];
-  return readFileSync(process.env.STUB_OSASCRIPT_LOG, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l));
-}
-/** Every recorded row -- spawn and signal alike -- whose banner names `folder`. Filtered
- * per project directory rather than rotated per scenario, for the reason
- * test/check-stranded.mjs gives: a grace armed by one scenario can fire during the next. */
-const rowsFor = folder => osascriptRows().filter(r => r[r.length - 1] === BANNER(folder));
-const spawnsFor = folder => rowsFor(folder).filter(r => r[0] === 'spawn');
-
-async function waitForRows(folder, count, timeoutMs = 3000) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    if (rowsFor(folder).length >= count) break;
-    await sleep(10);
-  }
-  return rowsFor(folder);
-}
-
-/** Run `fn` with a grace short enough to fire inside a check, and put the shipped-out-of-
- * reach value back even if it throws -- a failed assertion must not leave the next
- * scenario announcing real absences. */
-async function withGrace(ms, fn) {
-  const saved = process.env.CLAUDE_BOARD_STRANDED_GRACE_MS;
-  process.env.CLAUDE_BOARD_STRANDED_GRACE_MS = String(ms);
-  try {
-    await fn();
-  } finally {
-    process.env.CLAUDE_BOARD_STRANDED_GRACE_MS = saved;
-  }
-}
-
-/** A real project directory whose basename is what a banner about it would name, and what
- * `cwd` binds a board to. One per scenario, so rows and boards can be attributed. */
-function projectFor(name) {
-  const dir = path.join(workDir, name);
-  mkdirSync(dir, { recursive: true });
-  return dir;
-}
-
-// --- the scripted JSON-RPC client (test/check-mcp.mjs's, verbatim in shape) ------------
-
-class McpClient {
-  constructor(child) {
-    this.child = child;
-    this.buf = '';
-    this.nextId = 1;
-    this.pending = new Map();
-    this.stderr = '';
-    child.stdout.on('data', chunk => this._onData(chunk));
-    child.stderr.on('data', chunk => { this.stderr += chunk.toString(); });
-  }
-
-  _onData(chunk) {
-    this.buf += chunk.toString('utf8');
-    let idx;
-    while ((idx = this.buf.indexOf('\n')) !== -1) {
-      const line = this.buf.slice(0, idx);
-      this.buf = this.buf.slice(idx + 1);
-      if (!line.trim()) continue;
-      let msg;
-      try { msg = JSON.parse(line); } catch { continue; }
-      if (msg.id !== undefined && (msg.result !== undefined || msg.error !== undefined)) {
-        const pend = this.pending.get(msg.id);
-        if (pend) { this.pending.delete(msg.id); pend(msg); }
-      }
-    }
-  }
-
-  requestWithId(method, params) {
-    const id = this.nextId++;
-    const promise = new Promise(resolve => this.pending.set(id, resolve));
-    this.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
-    return { id, promise };
-  }
-
-  request(method, params) {
-    return this.requestWithId(method, params).promise;
-  }
-
-  notify(method, params) {
-    this.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n');
-  }
-
-  close() {
-    try { this.child.stdin.end(); } catch { /* already closed */ }
-    try { this.child.kill(); } catch { /* already dead */ }
-  }
-}
-
-/** A stand-in for `open`, one per shim, recording the URLs it is handed. Separate logs per
- * shim is what makes "which session opened a tab" answerable at all. */
-function makeOpenRecorder(tag) {
-  const dir = projectFor(`opener-${tag}`);
-  const script = path.join(dir, 'fake-open.sh');
-  const log = path.join(dir, 'opened.log');
-  writeFileSync(script, '#!/bin/sh\nprintf \'%s\\n\' "$1" >> "$CLAUDE_BOARD_OPEN_LOG"\n', { mode: 0o755 });
-  return {
-    script,
-    log,
-    opened() {
-      if (!existsSync(log)) return [];
-      return readFileSync(log, 'utf8').split('\n').filter(Boolean);
-    },
-    async waitForOpens(n, timeoutMs = 10_000) {
-      const start = Date.now();
-      while (Date.now() - start < timeoutMs) {
-        if (this.opened().length >= n) return this.opened();
-        await sleep(25);
-      }
-      return this.opened();
-    },
-  };
-}
-
 const liveShims = new Set();
 
 /** One shim process, standing in for one Claude Code session: its own project directory
- * (`cwd`, which is what binds the board) and its own opener log. */
-function spawnShim({ cwd, recorder }) {
-  const env = { ...process.env };
-  Object.assign(env, {
+ * (`cwd`, which is what binds the board) and its own opener log (`recorder`, a
+ * `makeOpenRecorder` in a folder of its own), which is what makes "which session opened a
+ * tab" answerable at all. */
+function spawnSession({ cwd, recorder }) {
+  const client = spawnShim({
     CLAUDE_BOARD_HOME: home,
     CLAUDE_BOARD_PORT: String(port),
     CLAUDE_CODE_ENTRYPOINT: 'cli',
     CLAUDE_BOARD_PROGRESS_MS: '5000',
     CLAUDE_BOARD_OPEN_CMD: recorder.script,
     CLAUDE_BOARD_OPEN_LOG: recorder.log,
-  });
-  delete env.CLAUDE_BOARD_NO_OPEN; // opening is exercised for real, into the recorder
-  const child = spawn(process.execPath, [mcpBin], { env, cwd, stdio: ['pipe', 'pipe', 'pipe'] });
-  const client = new McpClient(child);
+    CLAUDE_BOARD_NO_OPEN: undefined, // opening is exercised for real, into the recorder
+  }, { cwd });
   liveShims.add(client);
   return client;
 }
@@ -264,22 +113,6 @@ async function waitForNewBoard(known, timeoutMs = 8000) {
     await sleep(20);
   }
   throw new Error('timed out waiting for a new board document');
-}
-
-function rawGet(urlStr, headers = {}) {
-  return new Promise((resolve, reject) => {
-    const u = new URL(urlStr);
-    const req = http.request(
-      { hostname: u.hostname, port: u.port, path: u.pathname + u.search, method: 'GET', headers: { host: u.host, ...headers } },
-      res => {
-        const chunks = [];
-        res.on('data', c => chunks.push(c));
-        res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString('utf8') }));
-      }
-    );
-    req.on('error', reject);
-    req.end();
-  });
 }
 
 /** Which board a recorded tab-open actually lands on. The shim normally opens a one-time
@@ -314,13 +147,13 @@ async function main() {
   // === AC 1, 2, 3: declaring a boundary after a real board =============================
 
   await check('a declared boundary mints a new thread on a new board and opens its tab, and closes the abandoned board\'s open round', async () => {
-    const project = projectFor('cleared');
-    const recorder = makeOpenRecorder('cleared');
-    const client = spawnShim({ cwd: project, recorder });
+    const project = projectFor(workDir, 'cleared');
+    const recorder = makeOpenRecorder(projectFor(workDir, 'opener-cleared'));
+    const client = spawnSession({ cwd: project, recorder });
     const known = new Set(boardIds());
     let firstCall;
 
-    await withGrace(60, async () => {
+    await withEnv({ CLAUDE_BOARD_STRANDED_GRACE_MS: 60 }, async () => {
       // The conversation before the /clear: a question round, so there is something
       // genuinely awaited to be walked away from.
       firstCall = client.requestWithId('tools/call', askArgs('Old work', [QUESTION]));
@@ -331,7 +164,7 @@ async function main() {
 
       // Nobody opens it, so the daemon announces it -- which is the state AC 3 is about:
       // a banner standing for a round that is about to be abandoned.
-      const rows = await waitForRows('cleared', 1, 10_000);
+      const rows = await waitForCount(() => rowsFor(OSASCRIPT_LOG, 'cleared'), 1, { timeoutMs: 10_000, intervalMs: 10 });
       assert.deepEqual(rows, [['spawn', '-e', BANNER('cleared')]], 'the abandoned round had a Banner standing for it');
       assert.ok(storedBoard(boardA).strandedBanner, 'and the daemon recorded it on the board');
 
@@ -372,7 +205,7 @@ async function main() {
       assert.ok(spent, 'the mark stays: a round announced once is announced for its whole life');
       assert.equal(spent.returned, false, 'and so does the shut gate -- nobody came back, they cleared');
       assert.equal(spent.pid, null, 'only the pid goes, with the process about to be killed');
-      const withdrawn = await waitForRows('cleared', 2, 10_000);
+      const withdrawn = await waitForCount(() => rowsFor(OSASCRIPT_LOG, 'cleared'), 2, { timeoutMs: 10_000, intervalMs: 10 });
       assert.ok(withdrawn.some(r => r[0] === 'SIGTERM'),
         `SIGTERM specifically: it is the path that withdraws the delivered banner from Notification Center (rows: ${JSON.stringify(withdrawn)})`);
 
@@ -386,7 +219,7 @@ async function main() {
       });
       assert.equal(poke.status, 200);
       await sleep(200); // several graces
-      assert.equal(spawnsFor('cleared').length, 1, 'AC 3: its Banner does not fire afterwards');
+      assert.equal(spawnsFor(OSASCRIPT_LOG, 'cleared').length, 1, 'AC 3: its Banner does not fire afterwards');
     });
 
     // No wait on the abandoned round can ever return again (a late Send stores its
@@ -418,9 +251,9 @@ async function main() {
   // === AC 4: no declaration, no boundary ===============================================
 
   await check('AC 4: a post that does not declare a boundary pushes a round onto the current board', async () => {
-    const project = projectFor('carry-on');
-    const recorder = makeOpenRecorder('carry-on');
-    const client = spawnShim({ cwd: project, recorder });
+    const project = projectFor(workDir, 'carry-on');
+    const recorder = makeOpenRecorder(projectFor(workDir, 'opener-carry-on'));
+    const client = spawnSession({ cwd: project, recorder });
     try {
       const known = new Set(boardIds());
       const first = (await client.request('tools/call', askArgs('Round one', [NOTE]))).result;
@@ -444,9 +277,9 @@ async function main() {
   // === AC 5: declaring with nothing to abandon =========================================
 
   await check('AC 5: declaring a boundary in a conversation that has posted no board is a no-op', async () => {
-    const project = projectFor('virgin');
-    const recorder = makeOpenRecorder('virgin');
-    const client = spawnShim({ cwd: project, recorder });
+    const project = projectFor(workDir, 'virgin');
+    const recorder = makeOpenRecorder(projectFor(workDir, 'opener-virgin'));
+    const client = spawnSession({ cwd: project, recorder });
     try {
       const known = new Set(boardIds());
       const only = (await client.request('tools/call', askArgs('First ever', [NOTE], { fresh: true }))).result;
@@ -470,11 +303,11 @@ async function main() {
   await check('AC 6: two sessions in one project directory are unaffected by each other\'s declarations', async () => {
     // The same directory for both, deliberately: `cwd` is the only thing the two shims
     // have in common, and it is what a daemon-side rule would be tempted to key on.
-    const project = projectFor('shared-project');
-    const recorderA = makeOpenRecorder('shared-a');
-    const recorderB = makeOpenRecorder('shared-b');
-    const a = spawnShim({ cwd: project, recorder: recorderA });
-    const b = spawnShim({ cwd: project, recorder: recorderB });
+    const project = projectFor(workDir, 'shared-project');
+    const recorderA = makeOpenRecorder(projectFor(workDir, 'opener-shared-a'));
+    const recorderB = makeOpenRecorder(projectFor(workDir, 'opener-shared-b'));
+    const a = spawnSession({ cwd: project, recorder: recorderA });
+    const b = spawnSession({ cwd: project, recorder: recorderB });
     try {
       const sessionA = (await a.request('tools/call', askArgs('Session A', [NOTE]))).result;
       const sessionB = (await b.request('tools/call', askArgs('Session B', [NOTE]))).result;
@@ -532,9 +365,7 @@ async function main() {
 try {
   await main();
 } catch (err) {
-  failures++;
-  console.error('FAIL - the check itself threw');
-  console.error((err && err.stack) || err);
+  fail('the check itself threw', err);
 } finally {
   for (const c of liveShims) c.close();
   if (server) {
@@ -545,8 +376,4 @@ try {
   rmSync(workDir, { recursive: true, force: true });
 }
 
-if (failures) {
-  console.error(`\n${failures} boundary check(s) failed`);
-  process.exit(1);
-}
-console.log('\nall boundary checks ok');
+await finish('boundary', { failText: n => `${n} boundary check(s) failed` });

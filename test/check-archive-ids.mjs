@@ -66,18 +66,12 @@ import { ui } from '../src/ui.mjs';
 import { themeBootScript } from '../src/theme.mjs';
 import { indexScript } from '../src/indexpage.mjs';
 import { parseHTML, StandInEvent } from './dom-stand-in.mjs';
+import { check, finish, pageHarness } from './support.mjs';
 
-let failures = 0;
-function check(name, fn) {
-  try {
-    fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
+// test/support.mjs's `loadArchiveThemed` loads the archive exactly as Finder
+// would: both real client scripts, in the real page's own order, against the
+// real file's bytes, with location.protocol genuinely 'file:'.
+const { loadBoard, loadArchiveThemed } = await pageHarness();
 
 // --- fixture: one board whose markdown mints every dangerous heading at once ---
 
@@ -160,42 +154,6 @@ writeFileSync(archivePath, rendered, 'utf8');
 const fileContents = readFileSync(archivePath, 'utf8');
 assert.equal(fileContents, rendered, 'setup failure: the file on disk does not match what was written');
 
-// --- load the archive exactly as Finder would (test/check-archive.mjs's own ---
-// loadArchiveThemed): both real client scripts, in the real page's own order,
-// against the real file's bytes, with location.protocol genuinely 'file:'.
-
-function loadArchiveThemed(html) {
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = () => Promise.reject(new Error('the archive must never call fetch'));
-
-  const document = parseHTML(html);
-  const window = document.defaultView;
-  const location = { protocol: 'file:' };
-  try {
-    // 'EventSource' is DECLARED and never passed, binding the name to undefined
-    // inside this scope so src/ui.mjs's own `typeof EventSource === 'undefined'`
-    // guard takes its early return because THIS FILE decided so, not because of
-    // whether this node build happens to expose a global EventSource (behind a
-    // flag since 22.x) -- and, since the parameter SHADOWS the global either way,
-    // not because of anything left on `globalThis.EventSource` either, which is
-    // why there is no longer a stand-in class or a save/restore dance here for
-    // it, unlike test/check-archive.mjs's loadArchive()/loadPageArchive(), which
-    // read back whether an EventSource was constructed and so thread their own
-    // spy through explicitly as this parameter's argument instead of leaving it
-    // unpassed.
-    new Function('document', 'window', 'location', 'EventSource', themeBootScript)(document, window, location);
-    new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
-    // A freshly parsed document now starts `readyState
-    // === 'loading'`, so the theme control's click listener is not wired
-    // until this simulates the parser reaching the end of the document (see
-    // test/dom-stand-in.mjs's own comment on finishParsing/readyState).
-    document.finishParsing();
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-  return document;
-}
-
 // =================================================================================
 // 0. Setup sanity: the fixture actually reproduces the collision. If any of
 //    these fail, the checks below would be proving nothing.
@@ -218,50 +176,41 @@ check('setup: the markdown headings actually collide with the real ids they used
 });
 
 // =================================================================================
-// 1. The client script must not throw -- an uncaught SyntaxError from
-//    JSON.parse on the heading's text used to kill the whole IIFE.
+// 1. The client scripts run to completion (an uncaught SyntaxError from
+//    JSON.parse on a heading's text used to kill the whole IIFE), and the
+//    archive is still genuinely read-only: body.readonly applied, and every
+//    control disabled except the theme control.
 // =================================================================================
 
-check('archive with colliding headings: the real client scripts run to completion without throwing', () => {
-  assert.doesNotThrow(() => loadArchiveThemed(fileContents),
-    'themeBootScript + ui must not throw when board content mints headings that collide with board-data/send-btn/theme-toggle -- a throw here means the total-DoS regressed');
+check('archive with colliding headings hydrates read-only: body.readonly applied, Send, Discuss and every answer control hard-disabled, and the theme control alone left live', () => {
+  // Called bare: a throw anywhere in either client script (the total-DoS an
+  // uncaught JSON.parse of a heading's text used to be) fails this check.
+  const { document, restore } = loadArchiveThemed(fileContents);
+  try {
+    assert.equal(document.body.classList.contains('readonly'), true,
+      'body.readonly was never applied -- the script returned/threw before reaching the readonly gate, so a file:// archive would render as if it were a live, writable board');
+    const sendBtn = document.querySelector('button#send-btn');
+    const discussBtn = document.querySelector('button#discuss-btn');
+    assert.ok(sendBtn, 'setup failure: no real button#send-btn in the rendered page');
+    assert.ok(discussBtn, 'setup failure: no real button#discuss-btn in the rendered page');
+    assert.equal(sendBtn.disabled, true, 'button#send-btn must be disabled in a read-only archive');
+    assert.equal(discussBtn.disabled, true, 'button#discuss-btn must be disabled in a read-only archive');
+
+    const choices = document.querySelectorAll('.card-choice');
+    assert.ok(choices.length > 0, 'setup failure: no answer widget rendered');
+    choices.forEach(el => assert.equal(el.disabled, true, 'every .card-choice must be disabled in a read-only archive'));
+
+    const themeBtn = document.querySelector('button#theme-toggle');
+    assert.ok(themeBtn, 'setup failure: no real button#theme-toggle in the rendered page');
+    assert.equal(themeBtn.disabled, false,
+      'button#theme-toggle must stay enabled in a read-only archive -- an archive reader is exactly who needs to switch theme (src/theme.mjs)');
+  } finally {
+    restore();
+  }
 });
 
 // =================================================================================
-// 2. The archive is still genuinely read-only: body.readonly applied, and
-//    every control disabled except the theme control.
-// =================================================================================
-
-check('archive with colliding headings: body.readonly is applied (hydration reached past the board-data lookup)', () => {
-  const document = loadArchiveThemed(fileContents);
-  assert.equal(document.body.classList.contains('readonly'), true,
-    'body.readonly was never applied -- the script returned/threw before reaching the readonly gate, so a file:// archive would render as if it were a live, writable board');
-});
-
-check('archive with colliding headings: Send, Discuss and every answer control are hard-disabled', () => {
-  const document = loadArchiveThemed(fileContents);
-  const sendBtn = document.querySelector('button#send-btn');
-  const discussBtn = document.querySelector('button#discuss-btn');
-  assert.ok(sendBtn, 'setup failure: no real button#send-btn in the rendered page');
-  assert.ok(discussBtn, 'setup failure: no real button#discuss-btn in the rendered page');
-  assert.equal(sendBtn.disabled, true, 'button#send-btn must be disabled in a read-only archive');
-  assert.equal(discussBtn.disabled, true, 'button#discuss-btn must be disabled in a read-only archive');
-
-  const choices = document.querySelectorAll('.card-choice');
-  assert.ok(choices.length > 0, 'setup failure: no answer widget rendered');
-  choices.forEach(el => assert.equal(el.disabled, true, 'every .card-choice must be disabled in a read-only archive'));
-});
-
-check('archive with colliding headings: the theme control is the one exception, and stays live', () => {
-  const document = loadArchiveThemed(fileContents);
-  const themeBtn = document.querySelector('button#theme-toggle');
-  assert.ok(themeBtn, 'setup failure: no real button#theme-toggle in the rendered page');
-  assert.equal(themeBtn.disabled, false,
-    'button#theme-toggle must stay enabled in a read-only archive -- an archive reader is exactly who needs to switch theme (src/theme.mjs)');
-});
-
-// =================================================================================
-// 3. The one composed id whose collision is observable in a DOM stand-in: the
+// 2. The one composed id whose collision is observable in a DOM stand-in: the
 //    queued-comment list. Every OTHER real element these headings shadow
 //    (script#board-data, the send bar, the mode toggle, div#blocks) is emitted
 //    in <head> or in .board-head -- EARLIER in
@@ -277,22 +226,10 @@ check('archive with colliding headings: the theme control is the one exception, 
 //    read-only archive at all.
 // =================================================================================
 
-/** The live (non-archive) page: `ui` only, exactly like test/check-comment-mode.mjs's
- * loadBoard -- the theme boot script owns nothing on this path. */
-function loadLiveBoard() {
-  const document = parseHTML(rendered);
-  const window = document.defaultView;
-  const location = { protocol: 'http:' };
-  // 'EventSource' declared and never passed -- see loadArchiveThemed's own
-  // comment above. This call is the one in this file with no readonly gate at
-  // all (an ordinary live, http: session), so it is the one an unflagged node
-  // would actually have opened a connection from.
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
-  return document;
-}
-
 check('a queued comment lands in the real div#comment-list-<blockId>, not in a heading that minted the same id', () => {
-  const document = loadLiveBoard();
+  // The live (non-archive) page: `ui` only -- the theme boot script owns
+  // nothing on this path.
+  const document = loadBoard(rendered);
 
   // Never document.getElementById here either: this check's own setup would
   // otherwise pick the heading and prove nothing.
@@ -326,7 +263,7 @@ check('a queued comment lands in the real div#comment-list-<blockId>, not in a h
 });
 
 // =================================================================================
-// 4. The real guard: no client script may look an id up bare. This covers every
+// 3. The real guard: no client script may look an id up bare. This covers every
 //    lookup, including ones no runtime case above can distinguish and every one
 //    added from here on.
 //
@@ -347,26 +284,33 @@ const CLIENT_SCRIPTS = [
   ['src/indexpage.mjs -- indexScript', indexScript],
 ];
 
+// One pair of patterns, read by the sweep and by its own ablation below -- a copy
+// in each would let a typo in the sweep's pattern stay green under the ablation.
+const BARE_LOOKUP = /[)\]\w$]\s*\.\s*getElementById\s*\(/g;
+const UNQUALIFIED_ID_SELECTOR = /(?:querySelector|querySelectorAll|closest|matches)\s*\(\s*['"`]\s*#/g;
+
 check('no client script looks an id up bare: every getElementById is gone and every #id selector is tag-qualified', () => {
   for (const [label, src] of CLIENT_SCRIPTS) {
-    const bare = src.match(/[)\]\w$]\s*\.\s*getElementById\s*\(/g) || [];
+    const bare = src.match(BARE_LOOKUP) || [];
     assert.equal(bare.length, 0,
       `${label}: found ${bare.length} bare getElementById call(s). Board content is markdown snapshotted from arbitrary files, so a heading or top-level list item can mint any id this page uses (src/markdown.mjs slugify) -- use a tag-qualified querySelector instead ('form#comment-form-' + blockId, 'div#comment-list-' + blockId, 'button#theme-toggle', ...), matching the tag src/render.mjs actually emits`);
 
     // An unqualified '#id' selector has exactly the same hole as
     // getElementById: it matches whichever element comes first in tree order,
     // heading or real. A qualified one starts with a tag name.
-    const unqualified = (src.match(/(?:querySelector|querySelectorAll|closest|matches)\s*\(\s*['"`]\s*#/g) || []);
+    const unqualified = (src.match(UNQUALIFIED_ID_SELECTOR) || []);
     assert.equal(unqualified.length, 0,
       `${label}: found ${unqualified.length} unqualified '#id' selector(s) -- prefix the tag the element actually carries in src/render.mjs`);
   }
 });
 
-check('the sweep above would actually catch a regression (ablation on its own regexes)', () => {
+check('the sweep\'s own patterns match every bare-lookup and unqualified #id sample, and fire on none of the tag-qualified forms the code uses', () => {
   // Without this, a typo in either pattern leaves a permanently-green check
   // over an unguarded file -- this repo's own recurring failure shape.
-  const bareRe = /[)\]\w$]\s*\.\s*getElementById\s*\(/;
-  const unqualRe = /(?:querySelector|querySelectorAll|closest|matches)\s*\(\s*['"`]\s*#/;
+  // Non-global twins of the sweep's own patterns: same source, no lastIndex
+  // carried from one sample to the next.
+  const bareRe = new RegExp(BARE_LOOKUP.source);
+  const unqualRe = new RegExp(UNQUALIFIED_ID_SELECTOR.source);
   for (const sample of [
     "var el = document.getElementById('theme-toggle');",
     "var list = document.getElementById('comment-list-' + entry.blockId);",
@@ -394,8 +338,4 @@ check('the sweep above would actually catch a regression (ablation on its own re
   }
 });
 
-if (failures) {
-  console.error(`\n${failures} check(s) failed`);
-  process.exit(1);
-}
-console.log('\nall archive id-collision checks ok');
+finish('archive id-collision');

@@ -55,32 +55,7 @@ import {
 import { MERMAID_ASSET } from '../src/assets.mjs';
 import { ui } from '../src/ui.mjs';
 import { parseHTML } from './dom-stand-in.mjs';
-
-let failures = 0;
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
-
-/** Lets an assertion run after the parent's own async chain (queueMermaidTask ->
- * the engine's awaits -> the reply post) has actually settled, rather than just
- * been kicked off. Same device as test/check-mermaid-theme.mjs's. */
-function flush(ticks = 40) {
-  return new Promise(resolve => {
-    let n = 0;
-    (function tick() {
-      n++;
-      if (n > ticks) { resolve(); return; }
-      setTimeout(tick, 0);
-    })();
-  });
-}
+import { check, finish, flush, sleep } from './support.mjs';
 
 const DIAGRAM = 'flowchart LR\n  A[Start] --> B[End]';
 
@@ -134,8 +109,9 @@ function stubEngine({ fail = false } = {}) {
  * to run it later. That models the ordering the real page has no control over:
  * the parent's message listener lives in a DEFERRED script that cannot run until
  * the whole page has parsed, while a stage's own scripts run as soon as its
- * frame exists. */
-function loadBoard(stages, engine, { deferClient = false } = {}) {
+ * frame exists. It is also why this is not test/support.mjs's loadBoard, which
+ * parses and boots in one call and so cannot hold the boot back. */
+function loadStages(stages, engine, { deferClient = false } = {}) {
   const blocks = stages.map(html => ({ kind: 'html', html }));
   // A second kind keeps this off the full-page stage layout, which is a
   // different markup shape and not what this file is about.
@@ -152,10 +128,6 @@ function loadBoard(stages, engine, { deferClient = false } = {}) {
   };
   if (!deferClient) bootClient();
   return { document, window, bootClient, frames: document.querySelectorAll('.html-stage') };
-}
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 // =================================================================================
@@ -239,7 +211,7 @@ await check('a question-NESTED stage takes the same injection as a top-level one
 
 await check('archive path: the facade installs, the artifact\'s own loader short-circuits on it, and the parent-rendered SVG lands in the figure', async () => {
   const engine = stubEngine();
-  const { frames } = loadBoard([artifactStage()], engine);
+  const { frames } = loadStages([artifactStage()], engine);
   assert.equal(frames.length, 1, 'setup failure: no stage frame rendered');
   frames[0].loadSrcdoc();
   await flush();
@@ -268,7 +240,7 @@ await check('the archive render survives the parent listening LATE -- the reques
   // fails with the figure still on raw source, while every other check in this
   // file stays green, because every one of them boots the client first.)
   const engine = stubEngine();
-  const { frames, bootClient } = loadBoard([artifactStage()], engine, { deferClient: true });
+  const { frames, bootClient } = loadStages([artifactStage()], engine, { deferClient: true });
   frames[0].loadSrcdoc();
   await flush();
   const pre = frames[0].contentDocument.querySelector('pre.mermaid');
@@ -288,7 +260,7 @@ await check('the archive render survives the parent listening LATE -- the reques
 
 await check('a resend of a batch already in flight is dropped, never drawn twice and never answered twice', async () => {
   const engine = stubEngine();
-  const { window, frames } = loadBoard(['<div class="mermaid">x</div>'], engine);
+  const { window, frames } = loadStages(['<div class="mermaid">x</div>'], engine);
   frames[0].loadSrcdoc();
   const replies = recordReplies(frames[0]);
   // Five copies of ONE request, the shape a facade resending across a slow
@@ -318,7 +290,7 @@ await check('the stage renders a batch in one round trip, and every figure gets 
   const engine = stubEngine();
   const stage = `<pre class="mermaid">flowchart LR\n  A --> B</pre><pre class="mermaid">flowchart TD\n  C --> D</pre>
 <script>window.mermaid.run({ nodes: document.querySelectorAll('pre.mermaid') });</script>`;
-  const { frames } = loadBoard([stage], engine);
+  const { frames } = loadStages([stage], engine);
   frames[0].loadSrcdoc();
   await flush();
   assert.equal(engine.rendered.length, 2, 'both figures must be drawn');
@@ -329,7 +301,7 @@ await check('the stage renders a batch in one round trip, and every figure gets 
 
 await check('startOnLoad: a stage that never calls run still gets its diagrams drawn on load, the way the real engine does', async () => {
   const engine = stubEngine();
-  const { frames } = loadBoard(['<pre class="mermaid">flowchart LR\n  A --> B</pre>'], engine);
+  const { frames } = loadStages(['<pre class="mermaid">flowchart LR\n  A --> B</pre>'], engine);
   frames[0].loadSrcdoc();
   // No artifact script at all: contentLoaded is the only thing that can fire.
   frames[0].contentWindow.mermaid.contentLoaded();
@@ -340,7 +312,7 @@ await check('startOnLoad: a stage that never calls run still gets its diagrams d
 
 await check('startOnLoad: an artifact that turns it off through initialize is never drawn twice', async () => {
   const engine = stubEngine();
-  const { frames } = loadBoard([artifactStage()], engine);
+  const { frames } = loadStages([artifactStage()], engine);
   frames[0].loadSrcdoc();
   await flush();
   assert.equal(engine.rendered.length, 1, 'setup failure: the artifact\'s own run must have drawn once');
@@ -352,7 +324,7 @@ await check('startOnLoad: an artifact that turns it off through initialize is ne
 
 await check('render(): the promise API answers with the svg, and rejects rather than resolving empty when the board cannot draw', async () => {
   const engine = stubEngine();
-  const { frames } = loadBoard(['<div class="mermaid">placeholder</div>'], engine);
+  const { frames } = loadStages(['<div class="mermaid">placeholder</div>'], engine);
   frames[0].loadSrcdoc();
   const stageWindow = frames[0].contentWindow;
   const ok = stageWindow.mermaid.render('x', 'flowchart LR\n  A --> B');
@@ -361,7 +333,7 @@ await check('render(): the promise API answers with the svg, and rejects rather 
   assert.ok(out.svg.includes('<svg'), 'render() resolves with the svg the parent drew');
 
   const failing = stubEngine({ fail: true });
-  const second = loadBoard(['<div class="mermaid">placeholder</div>'], failing);
+  const second = loadStages(['<div class="mermaid">placeholder</div>'], failing);
   second.frames[0].loadSrcdoc();
   const rejected = second.frames[0].contentWindow.mermaid.render('x', 'not a diagram').then(
     () => 'resolved',
@@ -377,7 +349,7 @@ await check('render(): the promise API answers with the svg, and rejects rather 
 
 await check('an unparseable diagram keeps its raw source on screen and releases its claim, so a later pass may still try', async () => {
   const engine = stubEngine({ fail: true });
-  const { frames } = loadBoard([artifactStage()], engine);
+  const { frames } = loadStages([artifactStage()], engine);
   frames[0].loadSrcdoc();
   await flush();
   const pre = frames[0].contentDocument.querySelector('pre.mermaid');
@@ -391,7 +363,7 @@ await check('an engine that cannot load at all degrades to raw source -- the sta
   // missing or corrupt sibling does. Driven by failing the inserted script
   // element, which is the one thing a real browser does here that this stand-in
   // does not do on its own.
-  const { document, frames } = loadBoard([artifactStage()]);
+  const { document, frames } = loadStages([artifactStage()]);
   const realAppend = document.head.appendChild.bind(document.head);
   document.head.appendChild = el => {
     const out = realAppend(el);
@@ -406,24 +378,27 @@ await check('an engine that cannot load at all degrades to raw source -- the sta
     'the reply must have arrived with nulls and released the claim -- an unanswered stage leaves its figures claimed forever');
 });
 
-await check('an IMPOSTOR window.mermaid on the stage does not stop the facade installing', async () => {
+await check('a non-engine already sitting in window.mermaid when the prelude runs does not stop the facade installing, and the facade it installs draws', async () => {
+  // A DOM element carrying id="mermaid" is window.mermaid for free in a browser, and so
+  // is half a truncated engine download -- exactly the shapes the prelude's `shaped()`
+  // guard has to see through, where a truthiness test would take the slot as the
+  // engine and install nothing. The stand-in skips `<script src>` and has no named
+  // element access on Window, so the slot is filled by hand, right where the engine's
+  // own script would have run: after the engine tag, before the prelude's guard.
   const engine = stubEngine();
-  // A DOM element carrying id="mermaid" is window.mermaid for free, which is
-  // exactly the shape the facade's guard has to see through.
-  const stage = '<div id="mermaid"></div><pre class="mermaid">flowchart LR\n  A --> B</pre>' +
-    '<script>window.mermaid = document.getElementById("mermaid");</script>' +
-    '<script>window.mermaid.run({ nodes: document.querySelectorAll("pre.mermaid") });</script>';
-  const { frames } = loadBoard([stage], engine);
+  const { frames } = loadStages(['<pre class="mermaid">flowchart LR\n  A --> B</pre>'], engine);
+  const engineTag = `<script src="${MERMAID_ASSET}"></script>`;
+  const srcdoc = frames[0].getAttribute('srcdoc');
+  assert.ok(srcdoc.includes(engineTag), 'setup failure: the stage must name the engine');
+  frames[0].setAttribute('srcdoc', srcdoc.replace(engineTag,
+    engineTag + '<script>window.mermaid = document.createElement("div"); window.mermaid.setAttribute("id", "mermaid");</script>'));
   frames[0].loadSrcdoc();
+  const stageWindow = frames[0].contentWindow;
+  assert.equal(typeof stageWindow.mermaid.run, 'function',
+    'the facade must install over a value in window.mermaid that is not shaped like the engine');
+  await stageWindow.mermaid.run();
   await flush();
-  // The stage's own second script overwrote the facade with the element, so
-  // nothing can render -- but the FIRST script ran against a facade that was
-  // genuinely installed, which is what this asserts.
-  assert.ok(typeof frames[0].contentWindow.mermaid !== 'undefined', 'setup failure');
-  const clean = loadBoard(['<div id="mermaid"></div><pre class="mermaid">flowchart LR\n  A --> B</pre>'], stubEngine());
-  clean.frames[0].loadSrcdoc();
-  assert.equal(typeof clean.frames[0].contentWindow.mermaid.run, 'function',
-    'the facade must install over an element that merely happens to be named mermaid');
+  assert.equal(engine.rendered.length, 1, 'and the facade it installed draws through the parent');
 });
 
 // =================================================================================
@@ -450,7 +425,7 @@ function recordReplies(frame) {
 
 await check('a malformed mermaid message is inert: no engine call, no reply, no throw', async () => {
   const engine = stubEngine();
-  const { window, frames } = loadBoard(['<div class="mermaid">x</div>'], engine);
+  const { window, frames } = loadStages(['<div class="mermaid">x</div>'], engine);
   frames[0].loadSrcdoc();
   const replies = recordReplies(frames[0]);
   const cb = 'cb-stage';
@@ -472,7 +447,7 @@ await check('a malformed mermaid message is inert: no engine call, no reply, no 
 
 await check('an over-long source is nulled in place, so a batch\'s indices never shift under the stage', async () => {
   const engine = stubEngine();
-  const { window, frames } = loadBoard(['<div class="mermaid">x</div>'], engine);
+  const { window, frames } = loadStages(['<div class="mermaid">x</div>'], engine);
   frames[0].loadSrcdoc();
   const replies = recordReplies(frames[0]);
   postAsStage(window, frames[0], {
@@ -494,7 +469,7 @@ await check('an over-long source is nulled in place, so a batch\'s indices never
 
 await check('the reply goes to the frame that asked and to no other stage on the page', async () => {
   const engine = stubEngine();
-  const { window, frames } = loadBoard([artifactStage(), '<div class="mermaid">other</div>'], engine);
+  const { window, frames } = loadStages([artifactStage(), '<div class="mermaid">other</div>'], engine);
   assert.equal(frames.length, 2, 'setup failure: expected two stages');
   frames[0].loadSrcdoc();
   frames[1].loadSrcdoc();
@@ -508,7 +483,7 @@ await check('the reply goes to the frame that asked and to no other stage on the
 
 await check('securityLevel is never forwarded, whatever the stage asks for', async () => {
   const engine = stubEngine();
-  const { frames } = loadBoard([artifactStage()], engine);
+  const { frames } = loadStages([artifactStage()], engine);
   frames[0].loadSrcdoc();
   await flush();
   assert.ok(engine.initCalls.length >= 1, 'the engine must be initialized for the batch');
@@ -524,7 +499,7 @@ await check('securityLevel is never forwarded, whatever the stage asks for', asy
 
 await check('a stage cannot smuggle anything past the config allowlist', async () => {
   const engine = stubEngine();
-  const { window, frames } = loadBoard(['<div class="mermaid">x</div>'], engine);
+  const { window, frames } = loadStages(['<div class="mermaid">x</div>'], engine);
   frames[0].loadSrcdoc();
   postAsStage(window, frames[0], {
     cb: 'cb-stage',
@@ -553,7 +528,7 @@ await check('a stage cannot smuggle anything past the config allowlist', async (
 
 await check('a stage cannot queue unbounded work on the page\'s own render chain, and a refused batch is still ANSWERED', async () => {
   const engine = stubEngine();
-  const { window, frames } = loadBoard(['<div class="mermaid">x</div>', '<div class="mermaid">y</div>'], engine);
+  const { window, frames } = loadStages(['<div class="mermaid">x</div>', '<div class="mermaid">y</div>'], engine);
   frames[0].loadSrcdoc();
   frames[1].loadSrcdoc();
   const replies = recordReplies(frames[0]);
@@ -586,7 +561,7 @@ await check('a stage cannot queue unbounded work on the page\'s own render chain
 
 await check('a request that never left the frame releases its figures, rather than leaving them claimed forever', async () => {
   const engine = stubEngine();
-  const { frames } = loadBoard(['<pre class="mermaid">flowchart LR\n  A --> B</pre>'], engine);
+  const { frames } = loadStages(['<pre class="mermaid">flowchart LR\n  A --> B</pre>'], engine);
   frames[0].loadSrcdoc();
   const stageWindow = frames[0].contentWindow;
   // What a real browser does when the artifact's own config carries something
@@ -603,7 +578,7 @@ await check('a request that never left the frame releases its figures, rather th
 
 await check('a stage\'s config cannot bleed into the next render -- every batch initializes for itself', async () => {
   const engine = stubEngine();
-  const { window, frames } = loadBoard(['<div class="mermaid">x</div>'], engine);
+  const { window, frames } = loadStages(['<div class="mermaid">x</div>'], engine);
   frames[0].loadSrcdoc();
   postAsStage(window, frames[0], {
     cb: 'cb-stage',
@@ -625,4 +600,4 @@ await check('a stage\'s config cannot bleed into the next render -- every batch 
   assert.deepEqual(second.themeVariables, {}, 'nor its palette');
 });
 
-process.exit(failures ? 1 : 0);
+await finish(null, { failText: null });

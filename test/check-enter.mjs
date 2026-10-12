@@ -21,15 +21,16 @@
 //      click on Send does -- same scroll, same ring, same label, same
 //      send-status.
 //   6. a second Cmd+Enter while armed (something was outstanding) submits,
-//      byte-identical to what a second click on the armed button posts.
+//      byte-identical to what a second click on the armed button posts --
+//      test/check-send-guard.mjs drives both routes and compares the bodies.
 //   7. Escape while armed disarms fully -- label, ring, warning treatment
 //      and send-status all restored, no submit.
 //   8. Discuss has no keyboard path at all.
 //   9. Cmd+Enter is inert in a file:// archive, and inert when no round is
 //      open (the send bar already disabled).
 //   10. a chord fired while a submit is in flight does not double-send.
-//   11. the deleted "Press Enter again to send" arm and its label appear
-//      nowhere -- in the rendered page or in the client script itself.
+//   11. no second armed appearance: criteria 3 and 5 hold the chord's arrival at
+//      Send to the click's own behaviour, label included.
 //
 // What this file deliberately does NOT do, and why:
 //   - It never asserts that a newline character was inserted by plain Enter.
@@ -41,7 +42,7 @@
 //     a disabled element (e.g. a real browser refusing to deliver a
 //     dispatched keydown to a disabled textarea at all) -- the stand-in does
 //     not model that (see test/dom-stand-in.mjs's own note on
-//     Element.disabled), so criterion 6's check dispatches directly at the
+//     Element.disabled), so criterion 10's check dispatches directly at the
 //     target and asserts on the HANDLER's own guard instead.
 //   - Drag-to-rank and text-selection are out of scope entirely -- Cmd+Enter
 //     never touches either.
@@ -49,20 +50,10 @@
 import assert from 'node:assert/strict';
 import { createBoard, applySubmit } from '../src/board.mjs';
 import { renderBoardPage } from '../src/render.mjs';
-import { ui } from '../src/ui.mjs';
-import { parseHTML, StandInEvent } from './dom-stand-in.mjs';
+import { StandInEvent } from './dom-stand-in.mjs';
+import { check, finish, pageHarness } from './support.mjs';
 
-let failures = 0;
-function check(name, fn) {
-  try {
-    fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
+const { loadBoard, openBlocks, withFetchCapture } = await pageHarness();
 
 // Three question blocks, so "next question" and "last question" are
 // meaningfully distinct, and one of them is a 'text' widget (the one
@@ -76,34 +67,6 @@ const BLOCK_SPEC = [
 ];
 const board = createBoard({ title: 'Cmd+Enter board traversal', blocks: BLOCK_SPEC });
 const pageHtml = renderBoardPage(board);
-
-/** Parse the page and run the real `ui` client script against it -- same
- * idiom as test/check-click.mjs's loadBoard -- a fresh document every call,
- * so checks never share mutated state. `protocol` selects the live
- * ('http:') vs. read-only archive ('file:') path, exactly like src/ui.mjs's
- * own `readonly = location.protocol === 'file:'` check. */
-function loadBoard(protocol) {
-  const document = parseHTML(pageHtml);
-  const window = document.defaultView;
-  const location = { protocol: protocol || 'http:' };
-  // 'EventSource' is DECLARED and never passed, binding the name to undefined
-  // inside this scope so src/ui.mjs's own `typeof EventSource === 'undefined'`
-  // guard takes its early return because THIS FILE decided so, not because of
-  // whether this node build happens to expose a global EventSource (behind a
-  // flag since 22.x). Left off the list, the name would resolve to whatever
-  // the host provides, and an unflagged node would open a live connection to
-  // '/api/board/<id>/events' and throw -- from a check that is about Cmd+Enter
-  // traversal. The two sibling sites below declare it for the same reason.
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
-  return document;
-}
-
-/** The three question blocks in round order, the exact set and order
- * `.round-open .question-block` -- what both collectAnswers and the
- * traversal handler itself walk. */
-function openBlocks(document) {
-  return document.querySelectorAll('.round-open .question-block');
-}
 
 /** Fill in a real, distinguishable answer on every question -- two chosen
  * single-select cards and typed free text -- through the real widgets, not
@@ -123,43 +86,6 @@ function fillAnswers(document) {
   textarea.dispatchEvent(new StandInEvent('input'));
 }
 
-/** Answer a single-choice question by clicking the option carrying `label`,
- * through the real widget -- same idiom test/check-send-guard.mjs uses.
- * Used by criterion 6 to build a genuinely partial (something outstanding)
- * board rather than a fully- or entirely-unfilled one. */
-function answerSingle(block, label) {
-  const opt = block.querySelectorAll('.choice-single').find(el => el.textContent.trim() === label);
-  assert.ok(opt, `setup failure: no "${label}" option rendered in this block`);
-  opt.dispatchEvent(new StandInEvent('click'));
-}
-
-/** Defer a question through its real Defer button -- complete, but not
- * "answered" (outstandingBlocks' own distinction). */
-function deferBlock(block) {
-  const btn = block.querySelector('.btn-defer');
-  assert.ok(btn, 'setup failure: no Defer button rendered in this block');
-  btn.dispatchEvent(new StandInEvent('click'));
-}
-
-/** Stub globalThis.fetch for the duration of `fn()`, capturing the single
- * (url, JSON body) pair a submit posts -- same idiom
- * test/check-comment-mode.mjs:307-318 uses to observe whether a submit
- * actually went out. Restores the original fetch even if `fn` throws. */
-function withFetchCapture(fn) {
-  const original = globalThis.fetch;
-  const calls = [];
-  globalThis.fetch = (url, opts) => {
-    calls.push({ url, method: opts.method, body: JSON.parse(opts.body) });
-    return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
-  };
-  try {
-    fn();
-  } finally {
-    globalThis.fetch = original;
-  }
-  return calls;
-}
-
 const CMD_ENTER = { key: 'Enter', metaKey: true };
 
 // === criterion 1 ================================================================
@@ -168,7 +94,7 @@ const CMD_ENTER = { key: 'Enter', metaKey: true };
 // both entry points covered.
 
 check('criterion 1: Cmd+Enter in a note textarea moves focus to the NEXT question\'s note field and scrolls it into view', () => {
-  const document = loadBoard();
+  const document = loadBoard(pageHtml);
   const blocks = openBlocks(document);
   assert.equal(blocks.length, 3, 'setup failure: expected 3 question blocks in the round');
   const note0 = blocks[0].querySelector('[data-note-for]');
@@ -185,7 +111,7 @@ check('criterion 1: Cmd+Enter in a note textarea moves focus to the NEXT questio
 });
 
 check('criterion 1: Cmd+Enter in the text-widget answer textarea also advances to the NEXT question\'s note field and scrolls it into view', () => {
-  const document = loadBoard();
+  const document = loadBoard(pageHtml);
   const blocks = openBlocks(document);
   const answerTA = blocks[1].querySelector('.answer-textarea'); // block[1] is the 'text' widget question
   assert.ok(answerTA, 'setup failure: no text-widget answer-textarea in the fixture');
@@ -208,7 +134,7 @@ check('criterion 1: Cmd+Enter in the text-widget answer textarea also advances t
 // newline itself -- the handler never called preventDefault().
 
 check('criterion 2: plain Enter in a textarea moves no focus, scrolls nothing, arms nothing, submits nothing, and leaves ev.defaultPrevented === false', () => {
-  const document = loadBoard();
+  const document = loadBoard(pageHtml);
   const blocks = openBlocks(document);
   const note0 = blocks[0].querySelector('[data-note-for]');
   const note1 = blocks[1].querySelector('[data-note-for]');
@@ -238,7 +164,7 @@ check('criterion 2: plain Enter in a textarea moves no focus, scrolls nothing, a
 // outstandingBlocks() reports nothing left.
 
 check('criterion 3: Cmd+Enter arriving at Send with nothing outstanding submits on that press -- no relabel, no second press', () => {
-  const document = loadBoard();
+  const document = loadBoard(pageHtml);
   fillAnswers(document);
   const blocks = openBlocks(document);
   const lastNote = blocks[blocks.length - 1].querySelector('[data-note-for]');
@@ -261,8 +187,7 @@ check('criterion 3: Cmd+Enter arriving at Send with nothing outstanding submits 
 
 check('criterion 4: Cmd+Enter on a round with no question block at all submits immediately, the same rule with nothing to be outstanding', () => {
   const noQBoard = createBoard({ title: 'No questions here', blocks: [{ kind: 'markdown', text: 'Just a pointer, nothing to answer.' }] });
-  const document = parseHTML(renderBoardPage(noQBoard));
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, document.defaultView, { protocol: 'http:' });
+  const document = loadBoard(renderBoardPage(noQBoard));
   const sendBtn = document.getElementById('send-btn');
   assert.equal(openBlocks(document).length, 0, 'setup failure: this fixture must render no question blocks');
   assert.equal(sendBtn.disabled, false, 'setup failure: the round is open, so Send must not start disabled');
@@ -281,14 +206,14 @@ check('criterion 4: Cmd+Enter on a round with no question block at all submits i
 // keyboard chord, one by a plain click, compared field by field.
 
 check('criterion 5: arriving at Send with something outstanding arms exactly as a click on Send does -- same scroll, same ring, same label', () => {
-  const docA = loadBoard();
+  const docA = loadBoard(pageHtml);
   const blocksA = openBlocks(docA);
   const lastNoteA = blocksA[blocksA.length - 1].querySelector('[data-note-for]');
   const sendBtnA = docA.getElementById('send-btn');
   lastNoteA.focus();
   const callsA = withFetchCapture(() => lastNoteA.dispatchEvent(new StandInEvent('keydown', CMD_ENTER)));
 
-  const docB = loadBoard();
+  const docB = loadBoard(pageHtml);
   const blocksB = openBlocks(docB);
   const sendBtnB = docB.getElementById('send-btn');
   const callsB = withFetchCapture(() => sendBtnB.dispatchEvent(new StandInEvent('click')));
@@ -303,50 +228,13 @@ check('criterion 5: arriving at Send with something outstanding arms exactly as 
   assert.equal(docA.getElementById('send-status').textContent, docB.getElementById('send-status').textContent, 'the keyboard arm must set the identical send-status text a click arm sets');
 });
 
-// === criterion 6 ================================================================
-// The other half of that rule: "A second Cmd+Enter while armed
-// (because something was outstanding) submits, byte-identical to what a
-// second click on the armed button posts." Same partial-fill on two
-// independent boards -- Q1 answered, Q2 deferred, Q3 left outstanding, same
-// shape test/check-send-guard.mjs's own criterion-5 check uses -- one driven
-// end to end by the keyboard, one by clicks.
-
-check('criterion 6: a second Cmd+Enter while armed submits, posting the exact same body a second click on Send would', () => {
-  const docA = loadBoard();
-  const blocksA = openBlocks(docA);
-  answerSingle(blocksA[0], 'Yes');
-  deferBlock(blocksA[1]);
-  // blocksA[2] left entirely untouched -- the one outstanding question.
-  const lastNoteA = blocksA[blocksA.length - 1].querySelector('[data-note-for]');
-  const sendBtnA = docA.getElementById('send-btn');
-  lastNoteA.focus();
-  lastNoteA.dispatchEvent(new StandInEvent('keydown', CMD_ENTER)); // arms (something outstanding)
-  assert.notEqual(sendBtnA.textContent, 'Send', 'setup failure: first chord must arm Send');
-  const callsA = withFetchCapture(() => sendBtnA.dispatchEvent(new StandInEvent('keydown', CMD_ENTER))); // sends
-  assert.equal(callsA.length, 1, 'the second chord while armed must submit exactly once');
-
-  const docB = loadBoard();
-  const blocksB = openBlocks(docB);
-  answerSingle(blocksB[0], 'Yes');
-  deferBlock(blocksB[1]);
-  const sendBtnB = docB.getElementById('send-btn');
-  sendBtnB.dispatchEvent(new StandInEvent('click')); // click-arms
-  const callsB = withFetchCapture(() => sendBtnB.dispatchEvent(new StandInEvent('click'))); // sends
-  assert.equal(callsB.length, 1, 'setup failure: a second click on the armed button must submit exactly once');
-
-  assert.equal(callsA[0].method, 'POST');
-  assert.match(callsA[0].url, /\/api\/board\/.+\/submit$/, `expected the submit route, got ${JSON.stringify(callsA[0].url)}`);
-  assert.deepEqual(callsA[0].body, callsB[0].body,
-    'the body posted by the armed second chord must be identical to the body a second click on Send posts, given the same filled-in board');
-});
-
 // === criterion 7 ================================================================
 // "Escape while Send is armed disarms it fully, restoring the button's
 // label, ring and warning treatment, and clearing send-status, with
 // nothing submitted."
 
 check('criterion 7: Escape while armed disarms Send fully -- label, ring, warning treatment and send-status all restored, without submitting', () => {
-  const document = loadBoard();
+  const document = loadBoard(pageHtml);
   const blocks = openBlocks(document);
   const lastNote = blocks[blocks.length - 1].querySelector('[data-note-for]');
   const sendBtn = document.getElementById('send-btn');
@@ -370,7 +258,7 @@ check('criterion 7: Escape while armed disarms Send fully -- label, ring, warnin
 // Cmd+Enter does not fire it."
 
 check('criterion 8: tabbing to #discuss-btn and pressing Cmd+Enter does not fire it -- Discuss has no keyboard path at all', () => {
-  const document = loadBoard();
+  const document = loadBoard(pageHtml);
   const discussBtn = document.getElementById('discuss-btn');
   const sendBtn = document.getElementById('send-btn');
   assert.ok(discussBtn, 'setup failure: no #discuss-btn rendered');
@@ -416,7 +304,7 @@ check('criterion 8: tabbing to #discuss-btn and pressing Cmd+Enter does not fire
 // element-level lock has documented exceptions (.expand-btn, the theme control)
 // that a future one could easily extend to the send bar.
 check('criterion 9a: Cmd+Enter does nothing at all in a read-only (file://) archive', () => {
-  const document = loadBoard('file:');
+  const document = loadBoard(pageHtml, { protocol: 'file:' });
   const before = document.activeElement;
   assert.equal(before, document.body, 'setup failure: nothing should be focused yet');
 
@@ -435,8 +323,7 @@ check('criterion 9b: Cmd+Enter does nothing on a board with no open round (send-
   // `.disabled = true` property.
   const sentBoard = createBoard({ title: 'Cmd+Enter -- no open round', blocks: BLOCK_SPEC });
   applySubmit(sentBoard, { action: 'send', answers: [], comments: [] }, 1);
-  const document = parseHTML(renderBoardPage(sentBoard));
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, document.defaultView, { protocol: 'http:' });
+  const document = loadBoard(renderBoardPage(sentBoard));
   const sendBtn = document.getElementById('send-btn');
   assert.equal(sendBtn.disabled, true, 'setup failure: send-btn must render disabled once its only round has been sent');
 
@@ -452,7 +339,7 @@ check('criterion 9b: Cmd+Enter does nothing on a board with no open round (send-
 // setSendBarEnabled(false), but the fetch has not resolved yet.
 
 check('criterion 10: a Cmd+Enter chord fired while a submit is still in flight does not double-send', () => {
-  const document = loadBoard();
+  const document = loadBoard(pageHtml);
   const blocks = openBlocks(document);
   const lastNote = blocks[blocks.length - 1].querySelector('[data-note-for]');
   const sendBtn = document.getElementById('send-btn');
@@ -478,19 +365,4 @@ check('criterion 10: a Cmd+Enter chord fired while a submit is still in flight d
   assert.equal(fetchCallCount, 1, 'a Cmd+Enter fired while the send bar is disabled (mid-submit) must not fire a second submit');
 });
 
-// === criterion 11 ================================================================
-// "No second armed appearance exists anywhere
-// in the page." An absence check on the deleted `armSend` label -- it must
-// appear nowhere, not in a fresh server-rendered page and not in the client
-// script that used to set it.
-
-check('criterion 11: the deleted "Press Enter again to send" label appears nowhere -- not in the rendered page, not in the client script', () => {
-  assert.ok(!pageHtml.includes('Press Enter again to send'), 'the deleted arm label must not appear in server-rendered markup');
-  assert.ok(!ui.includes('Press Enter again to send'), 'the deleted arm label must not appear anywhere in the client script source');
-});
-
-if (failures) {
-  console.error(`\n${failures} check(s) failed`);
-  process.exit(1);
-}
-console.log('\nall Cmd+Enter checks ok');
+finish('Cmd+Enter');

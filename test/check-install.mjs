@@ -17,9 +17,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, readdirSync, mkdirSync, chmodSync, statSync, cpSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { spawnSync, spawn } from 'node:child_process';
-import http from 'node:http';
 // The installer writes the reference allowlist into the plist, and that value is the
 // only place the shipped default exists -- src/resolve.mjs reads
 // an absent variable as an empty allowlist on purpose. Imported rather than copied so
@@ -28,8 +26,8 @@ import { DEFAULT_REF_ROOTS } from '../src/resolve.mjs';
 // Same reason, for the port install.sh falls back to when nothing else names one: the
 // number lives in two files that must not drift.
 import { DEFAULT_PORT } from '../src/handoff.mjs';
+import { check, freePort, listFiles, repoRoot, runMain, sleep, waitForHealthy, writeStub } from './support.mjs';
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const installScript = path.join(repoRoot, 'install.sh');
 const uninstallScript = path.join(repoRoot, 'uninstall.sh');
 
@@ -123,18 +121,6 @@ if (args[0] === 'print') {
 process.exit(0);
 `;
 
-let failures = 0;
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
-
 const workDir = mkdtempSync(path.join(tmpdir(), 'claude-board-install-check-'));
 const launchAgentsDir = path.join(workDir, 'LaunchAgents');
 const logDir = path.join(workDir, 'Logs');
@@ -164,20 +150,12 @@ writeFileSync(storeBoardFile, storeBoardContent);
 const pomodoroFile = path.join(storeDir, 'pomodoro.json');
 writeFileSync(pomodoroFile, JSON.stringify({ deadline: 1234567890, cycles: 2, workMinutes: 25 }));
 
-const claudeStub = path.join(binDir, 'claude-stub.mjs');
-const codexStub = path.join(binDir, 'codex-stub.mjs');
+const claudeStub = writeStub(binDir, 'claude-stub.mjs', STUB_CLAUDE);
+const codexStub = writeStub(binDir, 'codex-stub.mjs', STUB_CODEX);
 // install.sh only asks whether \`opencode\` is on PATH (its registration is a config file,
 // not a command), so the stub standing in for it is an executable that is never run.
-const opencodeStub = path.join(binDir, 'opencode-stub.sh');
-const launchctlStub = path.join(binDir, 'launchctl-stub.mjs');
-writeFileSync(claudeStub, STUB_CLAUDE);
-writeFileSync(codexStub, STUB_CODEX);
-writeFileSync(opencodeStub, '#!/bin/sh\nexit 0\n');
-writeFileSync(launchctlStub, STUB_LAUNCHCTL);
-chmodSync(claudeStub, 0o755);
-chmodSync(codexStub, 0o755);
-chmodSync(opencodeStub, 0o755);
-chmodSync(launchctlStub, 0o755);
+const opencodeStub = writeStub(binDir, 'opencode-stub.sh', '#!/bin/sh\nexit 0\n');
+const launchctlStub = writeStub(binDir, 'launchctl-stub.mjs', STUB_LAUNCHCTL);
 
 const claudeLog = path.join(workDir, 'claude-invocations.log');
 const claudeState = path.join(workDir, 'claude-registrations.json');
@@ -244,18 +222,12 @@ http.createServer((req, res) => {
 `);
 
 // Bind an ephemeral port, note it, release it — then hand that port to the stub.
-const healthPort = await new Promise(resolve => {
-  const probe = http.createServer();
-  probe.listen(0, '127.0.0.1', () => {
-    const p = probe.address().port;
-    probe.close(() => resolve(p));
-  });
-});
+const healthPort = await freePort();
 const healthProc = spawn(process.execPath, [healthStub, String(healthPort), workDir, repoRoot], { stdio: 'ignore' });
 // Wait until it is actually answering, so no install run below races its startup.
 for (let i = 0; i < 50; i++) {
   if (spawnSync('curl', ['-fsS', '--max-time', '1', `http://127.0.0.1:${healthPort}/api/health`]).status === 0) break;
-  await new Promise(resolve => setTimeout(resolve, 100));
+  await sleep(100);
 }
 
 // The local secret install.sh generates, redirected into this temp dir. Load-bearing:
@@ -365,30 +337,6 @@ const NO_CLIENTS = {
 // that pair (checked: no src/*.mjs file reads anything by a path outside src/ except
 // server.mjs's own-version read of package.json, which is wrapped in try/catch and
 // defaults to '0.0.0' when absent), so the copy is a fully working daemon on its own.
-
-function freePort() {
-  return new Promise((resolve, reject) => {
-    const probe = http.createServer();
-    probe.once('error', reject);
-    probe.listen(0, '127.0.0.1', () => {
-      const p = probe.address().port;
-      probe.close(() => resolve(p));
-    });
-  });
-}
-
-/** Poll GET /api/health until it answers or `deadlineMs` runs out. */
-async function waitForHealthy(port, deadlineMs) {
-  const start = Date.now();
-  while (Date.now() - start < deadlineMs) {
-    try {
-      const r = await fetch(`http://127.0.0.1:${port}/api/health`);
-      if (r.ok) return true;
-    } catch { /* not up yet */ }
-    await new Promise(resolve => setTimeout(resolve, 100));
-  }
-  return false;
-}
 
 /** Resolves `true` if `child` exits within `deadlineMs`, `false` if it is still
  * running (left running either way -- the caller kills it). Never rejects: a check
@@ -840,15 +788,6 @@ async function main() {
       'the bundled bin/daemon.mjs must be byte-identical to the clone\'s',
     );
 
-    function listFiles(dir) {
-      let out = [];
-      for (const entry of readdirSync(dir, { withFileTypes: true })) {
-        const full = path.join(dir, entry.name);
-        if (entry.isDirectory()) out = out.concat(listFiles(full));
-        else out.push(full);
-      }
-      return out;
-    }
     const realSrcDir = path.join(repoRoot, 'src');
     const realSrcFiles = listFiles(realSrcDir).map(f => path.relative(realSrcDir, f)).sort();
     const bundledSrcFiles = listFiles(resourcesSrc).map(f => path.relative(resourcesSrc, f)).sort();
@@ -905,9 +844,7 @@ async function main() {
     // main and `--version` prints nothing (QUIRKS.md "A copied homebrew node
     // binary dies before main"). The test only needs a real node ANSWERING AT A
     // DIFFERENT PATH, which a wrapper is.
-    const fakeNode = path.join(binDir, 'node-alias');
-    writeFileSync(fakeNode, `#!/bin/sh\nexec "${process.execPath}" "$@"\n`);
-    chmodSync(fakeNode, 0o755);
+    const fakeNode = writeStub(binDir, 'node-alias', `#!/bin/sh\nexec "${process.execPath}" "$@"\n`);
     const r = spawnSync('bash', [installScript], { env: { ...env, ...quietStubs('rebuild-node'), CLAUDE_BOARD_NODE: fakeNode }, encoding: 'utf8' });
     assert.equal(r.status, 0, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
     assert.notDeepEqual(readFileSync(exec), before, 'a launcher whose baked-in node path changed must be rebuilt');
@@ -1219,7 +1156,7 @@ async function main() {
     assert.equal(lines.filter(l => l[0] === 'mcp' && l[1] === 'remove').length, 2, 'one reconciling remove per install.sh run');
   });
 
-  await check('and write the OpenCode entry into a fresh opencode.json, with the schema pointer OpenCode expects', async () => {
+  await check('the same runs write the OpenCode entry into a fresh opencode.json, with the schema pointer OpenCode expects', async () => {
     const cfg = JSON.parse(readFileSync(opencodeConfig, 'utf8'));
     assert.equal(cfg.$schema, 'https://opencode.ai/config.json');
     assert.deepEqual(cfg.mcp['claude-board'], {
@@ -1613,7 +1550,7 @@ async function main() {
     }
   });
 
-  await check('criterion 8: posting a rendered artifact from ~/Documents/renders resolves on an install upgraded from an older one', async () => {
+  await check('posting a rendered artifact from ~/Documents/renders resolves on an install upgraded from an older one', async () => {
     // ADR.md entry 36's actual consequence, end to end. A machine installed before
     // `~/Documents/renders` joined DEFAULT_REF_ROOTS carries a record naming only the
     // three `~/.claude` directories -- exactly what install.sh itself used to write. Left
@@ -1702,7 +1639,7 @@ async function main() {
     }
   });
 
-  await check('criterion 24: upgrading removes the serve-root record an older install wrote, leaving no trace of it', async () => {
+  await check('upgrading removes the serve-root record an older install wrote, leaving no trace of it', async () => {
     // ADR.md entry 38: `/file/`, CLAUDE_BOARD_SERVE_ROOTS and its allowlist are deleted
     // outright. A machine installed before this change has a `serve_roots` file sitting
     // next to its secret that nothing will ever read again -- install.sh's job is to take
@@ -1756,7 +1693,7 @@ async function main() {
     }
   });
 
-  await check('criterion 14 (fifth conjunct): uninstalling with no intervening install.sh still removes a stale serve-root record', async () => {
+  await check('uninstalling with no intervening install.sh still removes a stale serve-root record', async () => {
     // The check above proves the record is gone once install.sh has run -- but criterion
     // 14 says "uninstalling leaves nothing of them behind", and install.sh is not the only
     // path to an uninstall: a machine can go straight from an old install to
@@ -1971,10 +1908,7 @@ async function main() {
     // `uname` is resolved through PATH, so a stub in front of it is the whole fixture --
     // no seam of its own, and the check exercises the exact line a Linux user would hit.
     const fakeUnameDir = path.join(workDir, 'fake-uname-bin');
-    mkdirSync(fakeUnameDir, { recursive: true });
-    const fakeUname = path.join(fakeUnameDir, 'uname');
-    writeFileSync(fakeUname, '#!/bin/sh\necho Linux\n');
-    chmodSync(fakeUname, 0o755);
+    writeStub(fakeUnameDir, 'uname', '#!/bin/sh\necho Linux\n');
 
     const { root, env: e } = preflightRun('os', { PATH: `${fakeUnameDir}:${process.env.PATH}` });
     const r = spawnSync('bash', [installScript], { env: e, encoding: 'utf8' });
@@ -1986,12 +1920,9 @@ async function main() {
 
   await check('preflight refuses a node older than the engines floor, before writing anything', async () => {
     const oldNodeDir = path.join(workDir, 'old-node-bin');
-    mkdirSync(oldNodeDir, { recursive: true });
-    const oldNode = path.join(oldNodeDir, 'node');
     // Answers --version as an old node and is otherwise the real interpreter: the point is
     // that the refusal happens on the VERSION, before anything executes it for real.
-    writeFileSync(oldNode, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "v18.20.4"; exit 0; fi\nexec ${process.execPath} "$@"\n`);
-    chmodSync(oldNode, 0o755);
+    const oldNode = writeStub(oldNodeDir, 'node', `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "v18.20.4"; exit 0; fi\nexec ${process.execPath} "$@"\n`);
 
     const { root, env: e } = preflightRun('old-node', { CLAUDE_BOARD_NODE: oldNode });
     const r = spawnSync('bash', [installScript], { env: e, encoding: 'utf8' });
@@ -2124,10 +2055,7 @@ async function main() {
     ];
     for (const [label, rel] of cases) {
       const dir = path.join(workDir, 'vm', label.replace(/[^a-z]+/gi, '-'), rel);
-      mkdirSync(dir, { recursive: true });
-      const shim = path.join(dir, 'node');
-      writeFileSync(shim, `#!/bin/sh\nexec ${process.execPath} "$@"\n`);
-      chmodSync(shim, 0o755);
+      writeStub(dir, 'node', `#!/bin/sh\nexec ${process.execPath} "$@"\n`);
 
       const { root, env: e } = preflightRun(`vm-${label.replace(/[^a-z]+/gi, '-')}`, {
         PATH: `${dir}:${process.env.PATH}`,
@@ -2147,10 +2075,7 @@ async function main() {
     // The other direction, on the same machinery: an ordinary directory is not a version
     // manager, and a false positive here would print a scary note on every stable install.
     const plainDir = path.join(workDir, 'vm-plain', 'bin');
-    mkdirSync(plainDir, { recursive: true });
-    const plainNode = path.join(plainDir, 'node');
-    writeFileSync(plainNode, `#!/bin/sh\nexec ${process.execPath} "$@"\n`);
-    chmodSync(plainNode, 0o755);
+    writeStub(plainDir, 'node', `#!/bin/sh\nexec ${process.execPath} "$@"\n`);
     const { env: plainEnv } = preflightRun('vm-plain', {
       PATH: `${plainDir}:${process.env.PATH}`,
       CLAUDE_BOARD_NODE: '',
@@ -2162,12 +2087,9 @@ async function main() {
 
   await check('a version-managed node on PATH is not baked into the plist when a stable one exists', async () => {
     const fakeNvm = path.join(workDir, 'home', '.nvm', 'versions', 'node', 'v0.0.0', 'bin');
-    mkdirSync(fakeNvm, { recursive: true });
-    const shim = path.join(fakeNvm, 'node');
     // A real interpreter under a version-managed path: install.sh executes NODE_BIN
     // (it mints the secret with it), so this has to actually run node.
-    writeFileSync(shim, `#!/bin/sh\nexec ${process.execPath} "$@"\n`);
-    chmodSync(shim, 0o755);
+    const shim = writeStub(fakeNvm, 'node', `#!/bin/sh\nexec ${process.execPath} "$@"\n`);
 
     const agents = path.join(workDir, 'LaunchAgents-nvm');
     const nvmAppDir = path.join(workDir, 'Applications-nvm');
@@ -2213,9 +2135,7 @@ async function main() {
   await check('CLAUDE_BOARD_NODE overrides the interpreter, in the launcher and the registration alike', async () => {
     const agents = path.join(workDir, 'LaunchAgents-override');
     const overrideAppDir = path.join(workDir, 'Applications-override');
-    const chosen = path.join(workDir, 'home', 'chosen-node');
-    writeFileSync(chosen, `#!/bin/sh\nexec ${process.execPath} "$@"\n`);
-    chmodSync(chosen, 0o755);
+    const chosen = writeStub(path.join(workDir, 'home'), 'chosen-node', `#!/bin/sh\nexec ${process.execPath} "$@"\n`);
     const registrations = path.join(workDir, 'claude-registrations-override.json');
 
     const r = spawnSync('bash', [installScript], {
@@ -2617,9 +2537,7 @@ http.createServer((req, res) => {
   });
 
   await check('install fails loudly rather than exiting 0 when the generated plist does not lint', async () => {
-    const failingPlutil = path.join(binDir, 'plutil-fail.mjs');
-    writeFileSync(failingPlutil, '#!/usr/bin/env node\nprocess.exit(1);\n');
-    chmodSync(failingPlutil, 0o755);
+    const failingPlutil = writeStub(binDir, 'plutil-fail.mjs', '#!/usr/bin/env node\nprocess.exit(1);\n');
     const r = spawnSync('bash', [installScript], {
       env: {
         ...env,
@@ -2930,29 +2848,17 @@ http.createServer((req, res) => {
   // user owns, not one this repo put there. The old checks here (an unmodified command
   // file is removed, an edited one survives with its hash record, an orphaned hash
   // record is cleaned up) all tested the hash-comparison guard that shipped that
-  // deletion; with the guard gone, this proves the negative instead: a file sitting at
-  // the path install.sh used to manage is left completely alone, and uninstall.sh's own
-  // source has no code path that could reach it.
+  // deletion; with the guard gone, what is left to prove is that uninstall.sh's own source
+  // has no code path that could reach the old file. Read from the source, not run: the
+  // commands-dir seam went with the step, so the old target is the real
+  // ~/.claude/commands/grill.md, which no run of this suite may aim at.
 
-  await check("uninstall.sh does not touch a file at the path install.sh used to manage (ADR.md entry 5)", async () => {
-    const formerCommandFile = path.join(workDir, 'Commands', 'grill.md');
-    mkdirSync(path.dirname(formerCommandFile), { recursive: true });
-    const untouchedContent = '# not this repo\'s file anymore\n';
-    writeFileSync(formerCommandFile, untouchedContent);
-
-    const r = spawnSync('bash', [uninstallScript], { env, encoding: 'utf8' });
-    assert.equal(r.status, 0, `uninstall must succeed\nstdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
-    assert.ok(existsSync(formerCommandFile), 'uninstall must not delete a file at the old command-file path');
-    assert.equal(readFileSync(formerCommandFile, 'utf8'), untouchedContent, 'and must not modify it either');
-
-    rmSync(formerCommandFile, { force: true });
-  });
-
-  await check("uninstall.sh's own source carries no command-file removal machinery to claim it does not use", async () => {
+  await check("uninstall.sh's own source carries no command-file removal machinery and names no commands/grill.md path", async () => {
     const uninstallSrc = readFileSync(uninstallScript, 'utf8');
     assert.doesNotMatch(uninstallSrc, /GRILL_SRC/, 'uninstall.sh must not reference a commands/grill.md source path');
     assert.doesNotMatch(uninstallSrc, /COMMAND_FILE/, 'uninstall.sh must not reference an installed command-file target');
     assert.doesNotMatch(uninstallSrc, /grill\.sha256/, 'uninstall.sh must not reference the retired hash record');
+    assert.doesNotMatch(uninstallSrc, /commands\/grill\.md/, 'uninstall.sh must not name the file install.sh used to manage at all');
   });
 
   await check('uninstall is safe to run twice', async () => {
@@ -3088,9 +2994,7 @@ http.createServer((req, res) => {
     // own streams -- cbs_run_captured merges them, so both must surface, and only on
     // install.sh's stderr, indented beneath the step that ran the command.
     const root = path.join(workDir, 'mcp-fail-run');
-    const failingClaudeStub = path.join(root, 'bin', 'failing-claude.mjs');
-    mkdirSync(path.dirname(failingClaudeStub), { recursive: true });
-    writeFileSync(failingClaudeStub, [
+    const failingClaudeStub = writeStub(path.join(root, 'bin'), 'failing-claude.mjs', [
       '#!/usr/bin/env node',
       'const args = process.argv.slice(2);',
       "if (args[0] === 'mcp' && args[1] === 'remove') process.exit(1);",
@@ -3102,7 +3006,6 @@ http.createServer((req, res) => {
       'process.exit(1);',
       '',
     ].join('\n'));
-    chmodSync(failingClaudeStub, 0o755);
 
     const mcpFailEnv = {
       ...env,
@@ -3607,18 +3510,9 @@ http.createServer((req, res) => {
   });
 }
 
-main()
-  .catch(err => {
-    failures++;
-    console.error('FAIL - unexpected error');
-    console.error(err);
-  })
-  .finally(() => {
+runMain('install', main, {
+  cleanup: () => {
     healthProc.kill();
     rmSync(workDir, { recursive: true, force: true });
-    if (failures) {
-      console.error(`\n${failures} check(s) failed`);
-      process.exit(1);
-    }
-    console.log('\nall install checks ok');
-  });
+  },
+});

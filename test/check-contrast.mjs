@@ -11,17 +11,7 @@ import { styles, palettes } from '../src/styles.mjs';
 // never through a CSS var(), so `styles` alone can't see them referenced.
 const STYLES_SOURCE = readFileSync(new URL('../src/styles.mjs', import.meta.url), 'utf8');
 
-let failures = 0;
-function check(name, fn) {
-  try {
-    fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error(err && err.stack || err);
-  }
-}
+import { check, finish } from './support.mjs';
 
 // --- WCAG 2.x relative luminance and contrast ratio -------------------------------
 
@@ -240,8 +230,4 @@ check('every palette token is referenced somewhere in the stylesheet, or by anot
   assert.deepEqual(orphans, [], `declared in the palette but never referenced anywhere: ${orphans.join(', ')}`);
 });
 
-if (failures) {
-  console.error(`\n${failures} check(s) failed`);
-  process.exit(1);
-}
-console.log('\nall contrast checks ok');
+finish('contrast');

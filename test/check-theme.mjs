@@ -2,8 +2,8 @@
 // not a hand-summary of what it does -- against rendered board and index pages
 // in test/dom-stand-in.mjs, proving the three-state control (System -> Light ->
 // Dark -> System), its accessible name/tooltip, storage persistence across a
-// reload and across pages, System's "no residue" removeItem contract, the
-// file: no-write guarantee, and readonly survival, all end to end through the
+// reload and across pages, System's "no residue" removeItem contract and the
+// file: no-write guarantee, all end to end through the
 // one real script every page ships (never a mock of it -- QUIRKS.md: "a mock
 // of someone else's renderer is worth exactly as much as the last time someone
 // checked it against the real thing").
@@ -19,24 +19,12 @@ import { createBoard } from '../src/board.mjs';
 import { renderBoardPage } from '../src/render.mjs';
 import { renderIndexPage } from '../src/indexpage.mjs';
 import { themeBootScript, THEME_STORAGE_KEY, THEME_CHANGE_EVENT } from '../src/theme.mjs';
-import { ui } from '../src/ui.mjs';
 import { parseHTML, StandInEvent, StandInLocalStorage } from './dom-stand-in.mjs';
+import { check, finish, pageHarness } from './support.mjs';
 
-let failures = 0;
-function check(name, fn) {
-  try {
-    fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
-
-// --- loader: run the REAL themeBootScript against a freshly parsed document, ---
-// exactly like every other check in this suite runs `ui` (see
-// test/check-archive.mjs's own `loadBoard`). `storage`, if given, is attached to
+// --- loading: run the REAL themeBootScript against a freshly parsed document, ---
+// through test/support.mjs's `loadBoard` with `script: themeBootScript` in
+// place of the `ui` it runs by default. `storage`, if given, is attached to
 // the fresh document's own `window` BEFORE the script runs -- modelling one
 // origin's localStorage outliving any one page load, never auto-created per
 // window (see StandInLocalStorage's own comment in dom-stand-in.mjs).
@@ -46,33 +34,19 @@ function check(name, fn) {
 // inline <head> script runs -- so themeBootScript takes its real, only
 // production branch (`document.addEventListener('DOMContentLoaded', wire)`)
 // here too, not the 'wire() immediately' branch a real page never takes at
-// that point. `document.finishParsing()` simulates the parser reaching the
-// end of the document (readyState -> 'complete', a real 'DOMContentLoaded'
-// dispatched), which is what actually invokes `wire()` and attaches the
-// control's click listener -- every check below that clicks the control
-// depends on this having run. ------------------------------------------------
+// that point. `finish: true` has it call `document.finishParsing()`, which
+// simulates the parser reaching the end of the document (readyState ->
+// 'complete', a real 'DOMContentLoaded' dispatched), which is what actually
+// invokes `wire()` and attaches the control's click listener -- every check
+// below that clicks the control depends on this having run. -------------------
 
-function loadWithTheme(html, protocol, storage) {
-  const document = parseHTML(html);
-  const window = document.defaultView;
-  if (storage) window.localStorage = storage;
-  const location = { protocol };
-  // 'EventSource' is DECLARED and never passed, binding the name to undefined inside
-  // this scope so a guard reading it fires by this file's choice rather than by
-  // whether this node build happens to expose a global EventSource (behind a flag
-  // since 22.x) -- see QUIRKS.md's entry on the trap this closes.
-  new Function('document', 'window', 'location', 'EventSource', themeBootScript)(document, window, location);
-  document.finishParsing();
-  return document;
-}
+const { loadBoard, click } = await pageHarness();
 
 function themeToggleEl(document) {
   const btn = document.getElementById('theme-toggle');
   assert.ok(btn, 'setup failure: no #theme-toggle rendered');
   return btn;
 }
-
-function click(el) { el.dispatchEvent(new StandInEvent('click')); }
 
 // =================================================================================
 // 1. The cycle, the accessible name/tooltip, and persistence across a reload and
@@ -83,7 +57,7 @@ function click(el) { el.dispatchEvent(new StandInEvent('click')); }
   const boardA = createBoard({ title: 'Theme A', blocks: [{ kind: 'markdown', text: '# A' }] });
   const htmlA = renderBoardPage(boardA);
   const storage = new StandInLocalStorage();
-  const docA = loadWithTheme(htmlA, 'http:', storage);
+  const docA = loadBoard(htmlA, { protocol: 'http:', storage, script: themeBootScript, finish: true });
   const btn = themeToggleEl(docA);
 
   check('theme: starts in System -- no data-theme attribute, and the control names it', () => {
@@ -126,7 +100,8 @@ function click(el) { el.dispatchEvent(new StandInEvent('click')); }
   check('theme: a freshly loaded, different board comes up data-theme="light" before any click', () => {
     const boardB = createBoard({ title: 'Theme B', blocks: [{ kind: 'markdown', text: '# B' }] });
     const htmlB = renderBoardPage(boardB);
-    const docB = loadWithTheme(htmlB, 'http:', storage); // same storage instance, brand new document/window
+    // Same storage instance, brand new document/window.
+    const docB = loadBoard(htmlB, { protocol: 'http:', storage, script: themeBootScript, finish: true });
     assert.equal(docB.documentElement.getAttribute('data-theme'), 'light', 'the stored preference must apply before any click, on a different board entirely');
     const btnB = themeToggleEl(docB);
     assert.equal(btnB.getAttribute('aria-label'), 'Theme: Light', 'the control itself must reflect the stored state at load, not just the attribute');
@@ -136,7 +111,7 @@ function click(el) { el.dispatchEvent(new StandInEvent('click')); }
   // a board-only test would miss.
   check('theme: the index page, loaded fresh from the SAME storage a board page wrote, also comes up data-theme="light" before any click', () => {
     const idxHtml = renderIndexPage({ threads: [] });
-    const idxDoc = loadWithTheme(idxHtml, 'http:', storage);
+    const idxDoc = loadBoard(idxHtml, { protocol: 'http:', storage, script: themeBootScript, finish: true });
     assert.equal(idxDoc.documentElement.getAttribute('data-theme'), 'light');
     const idxBtn = themeToggleEl(idxDoc);
     assert.equal(idxBtn.getAttribute('aria-label'), 'Theme: Light');
@@ -194,7 +169,7 @@ check('theme: on file:, cycling the control changes data-theme locally but leave
   const board = createBoard({ title: 'Archive', blocks: [{ kind: 'markdown', text: '# A' }] });
   const html = renderBoardPage(board);
   const storage = new StandInLocalStorage();
-  const document = loadWithTheme(html, 'file:', storage);
+  const document = loadBoard(html, { protocol: 'file:', storage, script: themeBootScript, finish: true });
   const btn = themeToggleEl(document);
 
   assert.equal(document.documentElement.hasAttribute('data-theme'), false);
@@ -219,46 +194,7 @@ check('theme: on file:, cycling the control changes data-theme locally but leave
 });
 
 // =================================================================================
-// 4. The control survives readonly -- in deliberate contrast to the
-//    comment-mode toggle, which test/check-archive.mjs already asserts IS
-//    disabled there.
-// =================================================================================
-
-check('theme: the control is present and NOT disabled in a read-only (file://) board page -- unlike the comment-mode toggle', () => {
-  const board = createBoard({ title: 'Readonly', blocks: [{ kind: 'markdown', text: '# A' }] });
-  const html = renderBoardPage(board);
-  const storage = new StandInLocalStorage();
-  const document = parseHTML(html);
-  const window = document.defaultView;
-  window.localStorage = storage;
-  const location = { protocol: 'file:' };
-  // Same order a real page executes them in: the head boot script first
-  // (readyState still 'loading' -- see loadWithTheme's own comment above),
-  // then ui's own deferred module script, then the parser finishing (which is
-  // what actually wires the control's click listener). 'EventSource' declared
-  // and left unpassed on both, same reason as loadWithTheme above.
-  new Function('document', 'window', 'location', 'EventSource', themeBootScript)(document, window, location);
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
-  document.finishParsing();
-
-  assert.equal(document.body.classList.contains('readonly'), true, 'setup failure: opening from file:// must add body.readonly');
-
-  const btn = themeToggleEl(document);
-  assert.equal(btn.disabled, false, 'the theme control must NOT be disabled in a read-only archive -- an archive reader is exactly who needs it');
-
-  const commentToggle = document.getElementById('comment-mode-toggle');
-  assert.ok(commentToggle, 'setup failure: no comment-mode toggle rendered');
-  assert.equal(commentToggle.disabled, true, 'contrast check: the comment-mode toggle IS disabled in readonly (test/check-archive.mjs owns this claim; re-checked here only as the contrast the ticket names)');
-
-  // And it still actually works there (spec: "In an archive the control must
-  // still work for the sitting; it just writes nothing").
-  click(btn);
-  assert.equal(document.documentElement.getAttribute('data-theme'), 'light');
-  assert.equal(storage.map.size, 0, 'still writes nothing, even while readonly');
-});
-
-// =================================================================================
-// 5. A second tab must not silently overwrite what the
+// 4. A second tab must not silently overwrite what the
 //    reader just chose. localStorage is one value per origin, but each
 //    document's own cycle position is read off ITS OWN data-theme attribute,
 //    snapshotted at boot -- nothing ever told a quiet tab that ANOTHER tab
@@ -274,8 +210,8 @@ check('theme: the control is present and NOT disabled in a read-only (file://) b
   const boardA = createBoard({ title: 'Tab A', blocks: [{ kind: 'markdown', text: '# A' }] });
   const boardB = createBoard({ title: 'Tab B', blocks: [{ kind: 'markdown', text: '# B' }] });
   const sharedStorage = new StandInLocalStorage();
-  const docA = loadWithTheme(renderBoardPage(boardA), 'http:', sharedStorage);
-  const docB = loadWithTheme(renderBoardPage(boardB), 'http:', sharedStorage);
+  const docA = loadBoard(renderBoardPage(boardA), { protocol: 'http:', storage: sharedStorage, script: themeBootScript, finish: true });
+  const docB = loadBoard(renderBoardPage(boardB), { protocol: 'http:', storage: sharedStorage, script: themeBootScript, finish: true });
   const btnA = themeToggleEl(docA);
   const btnB = themeToggleEl(docB);
 
@@ -323,7 +259,7 @@ check('theme: on file:, a storage event must never act -- the listener is gated 
   const board = createBoard({ title: 'Archive', blocks: [{ kind: 'markdown', text: '# A' }] });
   const storage = new StandInLocalStorage();
   storage.setItem(THEME_STORAGE_KEY, 'dark'); // as if a live tab, sharing an origin, had already chosen Dark
-  const document = loadWithTheme(renderBoardPage(board), 'file:', storage);
+  const document = loadBoard(renderBoardPage(board), { protocol: 'file:', storage, script: themeBootScript, finish: true });
   assert.equal(document.documentElement.hasAttribute('data-theme'), false, 'setup failure: file: must never read storage even at boot');
 
   const ev = new StandInEvent('storage');
@@ -333,7 +269,7 @@ check('theme: on file:, a storage event must never act -- the listener is gated 
 });
 
 // =================================================================================
-// 6. themeBootScript's only production branch (readyState
+// 5. themeBootScript's only production branch (readyState
 //    'loading' at the moment it runs, since it is inline in <head> before
 //    <body> even exists) actually runs, and the two jobs inside it happen in
 //    the order that matters -- data-theme is applied SYNCHRONOUSLY, before
@@ -355,7 +291,11 @@ check('theme: readyState starts "loading" (a real page\'s state when this inline
   window.localStorage = storage;
   const location = { protocol: 'http:' };
 
-  // 'EventSource' declared and left unpassed, same reason as loadWithTheme above.
+  // Booted by hand rather than through `loadBoard`, which hands the document
+  // back only once the script has run: the readyState assertion reads it first.
+  // 'EventSource' is declared and left unpassed, binding the name to undefined
+  // here rather than to whatever this node build exposes (QUIRKS.md: "A `new
+  // Function` harness inherits the host's globals").
   new Function('document', 'window', 'location', 'EventSource', themeBootScript)(document, window, location);
 
   // Job 1 (data-theme) must already be correct -- synchronous, no
@@ -383,7 +323,7 @@ check('theme: readyState starts "loading" (a real page\'s state when this inline
 });
 
 // =================================================================================
-// 7. A throwing localStorage backend (private mode / disabled
+// 6. A throwing localStorage backend (private mode / disabled
 //    storage) must never crash the boot script -- a read failure degrades to
 //    System, a write failure is silently swallowed, and the page keeps
 //    theming itself locally either way (src/theme.mjs's own comment: "an
@@ -400,7 +340,7 @@ check('theme: a throwing localStorage backend never crashes the boot script -- a
   const board = createBoard({ title: 'Throwing storage', blocks: [{ kind: 'markdown', text: '# A' }] });
   const html = renderBoardPage(board);
   let document;
-  assert.doesNotThrow(() => { document = loadWithTheme(html, 'http:', new ThrowingStorage()); },
+  assert.doesNotThrow(() => { document = loadBoard(html, { protocol: 'http:', storage: new ThrowingStorage(), script: themeBootScript, finish: true }); },
     'a throwing getItem must not escape the boot script -- readStored()\'s own try/catch must swallow it');
   assert.equal(document.documentElement.hasAttribute('data-theme'), false, 'a throwing getItem must degrade to System, same as no stored preference at all');
 
@@ -410,7 +350,7 @@ check('theme: a throwing localStorage backend never crashes the boot script -- a
 });
 
 // =================================================================================
-// 8. Without a CustomEvent constructor (an old browser), the
+// 7. Without a CustomEvent constructor (an old browser), the
 //    control must still apply data-theme and relabel itself -- only the
 //    mermaid-redraw notification is silently skipped (src/theme.mjs's
 //    notifyThemeChange: `if (typeof CustomEvent !== 'function') return;`).
@@ -422,7 +362,7 @@ check('theme: without a CustomEvent constructor, the control still works -- data
   try {
     const board = createBoard({ title: 'No CustomEvent', blocks: [{ kind: 'markdown', text: '# A' }] });
     const html = renderBoardPage(board);
-    const document = loadWithTheme(html, 'http:', new StandInLocalStorage());
+    const document = loadBoard(html, { protocol: 'http:', storage: new StandInLocalStorage(), script: themeBootScript, finish: true });
     const btn = themeToggleEl(document);
     assert.doesNotThrow(() => click(btn), 'a click must not throw even when CustomEvent does not exist');
     assert.equal(document.documentElement.getAttribute('data-theme'), 'light', 'the theme itself must still apply');
@@ -432,8 +372,4 @@ check('theme: without a CustomEvent constructor, the control still works -- data
   }
 });
 
-if (failures) {
-  console.error(`\n${failures} check(s) failed`);
-  process.exit(1);
-}
-console.log('\nall theme checks ok');
+finish('theme');

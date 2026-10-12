@@ -31,35 +31,16 @@
 import assert from 'node:assert/strict';
 import {
   mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync,
-  cpSync, readdirSync, utimesSync, chmodSync,
+  cpSync, utimesSync, chmodSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { spawnSync, spawn } from 'node:child_process';
-import http from 'node:http';
+import { CC, check, freePort, haveCc, repoRoot, runMain, skipFile, waitForHealthy, writeStub } from './support.mjs';
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const installScript = path.join(repoRoot, 'install.sh');
-const ccCmd = process.env.CLAUDE_BOARD_CC || 'cc';
 
-if (spawnSync(ccCmd, ['--version']).error) {
-  console.log(`==> skipping check-install-payload.mjs: no C compiler ('${ccCmd}') found`);
-  console.log('all install-payload checks ok (skipped)');
-  process.exit(0);
-}
-
-let failures = 0;
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
+if (!haveCc()) skipFile('install-payload', `check-install-payload.mjs: no C compiler ('${CC}') found`);
 
 const workDir = mkdtempSync(path.join(tmpdir(), 'claude-board-install-payload-'));
 // Every install.sh run and every launcher invocation below sees THIS as $HOME, so every
@@ -94,12 +75,8 @@ if (args[0] === 'print' && process.env.STUB_LAUNCHCTL_PRINT_PID) {
 }
 process.exit(0);
 `;
-const claudeStub = path.join(binDir, 'claude-stub.mjs');
-const launchctlStub = path.join(binDir, 'launchctl-stub.mjs');
-writeFileSync(claudeStub, STUB_CLAUDE);
-writeFileSync(launchctlStub, STUB_LAUNCHCTL);
-chmodSync(claudeStub, 0o755);
-chmodSync(launchctlStub, 0o755);
+const claudeStub = writeStub(binDir, 'claude-stub.mjs', STUB_CLAUDE);
+const launchctlStub = writeStub(binDir, 'launchctl-stub.mjs', STUB_LAUNCHCTL);
 
 // install.sh refuses to report success until the daemon answers /api/health, and
 // launchctl is stubbed (starts nothing) -- so this stands in for it, exactly like
@@ -119,29 +96,6 @@ http.createServer((req, res) => {
   res.writeHead(404); res.end();
 }).listen(Number(process.argv[2]), '127.0.0.1');
 `);
-
-function freePort() {
-  return new Promise((resolve, reject) => {
-    const probe = http.createServer();
-    probe.once('error', reject);
-    probe.listen(0, '127.0.0.1', () => {
-      const p = probe.address().port;
-      probe.close(() => resolve(p));
-    });
-  });
-}
-
-async function waitForHealthy(port, deadlineMs) {
-  const start = Date.now();
-  while (Date.now() - start < deadlineMs) {
-    try {
-      const r = await fetch(`http://127.0.0.1:${port}/api/health`);
-      if (r.ok) return true;
-    } catch { /* not up yet */ }
-    await new Promise(resolve => setTimeout(resolve, 100));
-  }
-  return false;
-}
 
 const installHealthPort = await freePort();
 const healthProc = spawn(process.execPath, [
@@ -187,7 +141,6 @@ function runInstall() {
 const appPath = path.join(fakeHome, 'Applications', 'claude-board.app');
 const execPath = path.join(appPath, 'Contents', 'MacOS', 'claude-board');
 const resourcesBin = path.join(appPath, 'Contents', 'Resources', 'bin', 'daemon.mjs');
-const resourcesSrc = path.join(appPath, 'Contents', 'Resources', 'src');
 
 /** Run the ALREADY-BUILT launcher directly (never bin/daemon.mjs) on a free port,
  * wait for /api/health, and return a handle to talk to it. HOME is not passed here on
@@ -260,29 +213,9 @@ async function main() {
     assert.ok(existsSync(execPath), 'the launcher executable must exist');
   });
 
-  await check('the bundle carries a byte-identical copy of the clone\'s bin/daemon.mjs and src/', async () => {
-    assert.ok(
-      readFileSync(resourcesBin).equals(readFileSync(path.join(cloneDir, 'bin', 'daemon.mjs'))),
-      'bin/daemon.mjs must be byte-identical inside the bundle',
-    );
-    function listFiles(dir) {
-      let out = [];
-      for (const entry of readdirSync(dir, { withFileTypes: true })) {
-        const full = path.join(dir, entry.name);
-        if (entry.isDirectory()) out = out.concat(listFiles(full));
-        else out.push(full);
-      }
-      return out;
-    }
-    const cloneSrc = path.join(cloneDir, 'src');
-    const cloneFiles = listFiles(cloneSrc).map(f => path.relative(cloneSrc, f)).sort();
-    const bundledFiles = listFiles(resourcesSrc).map(f => path.relative(resourcesSrc, f)).sort();
-    assert.deepEqual(bundledFiles, cloneFiles, 'the bundle must carry exactly the clone\'s src/ file set');
-    for (const rel of cloneFiles) {
-      assert.ok(readFileSync(path.join(resourcesSrc, rel)).equals(readFileSync(path.join(cloneSrc, rel))), `src/${rel} must be byte-identical`);
-    }
-  });
-
+  // That the staged copy is complete and byte-identical is check-install.mjs's check, on
+  // this repo's own src/ after a fresh and a no-op install; this clone is a copy of the
+  // same tree, so what this file owns is what that copy then does.
   await check('the compiled-in daemon path is INSIDE the bundle, not the clone -- and CLAUDE_BOARD_REPO_ROOT names the clone', async () => {
     const launcher = readFileSync(execPath);
     assert.ok(
@@ -386,13 +319,13 @@ async function main() {
   // --- the other direction: the edit DOES force a rebuild ------------------------------
 
   const second = runInstall();
-  await check('...but the SAME edit makes the next install rebuild rather than report "already current"', async () => {
+  await check('the same clone edit makes the next install rebuild rather than report "already current"', async () => {
     assert.equal(second.status, 0, `stdout:\n${second.stdout}\nstderr:\n${second.stderr}`);
     assert.match(second.stdout, /built and signed/, 'an edited payload must be rebuilt');
     assert.doesNotMatch(second.stdout, /already current/, 'and must not be reported as unchanged');
   });
 
-  await check('...and the rebuilt bundle serves the edited code', async () => {
+  await check('the rebuilt bundle serves the edited clone code', async () => {
     const d = await runBundledLauncher();
     try {
       const res = await fetch(`http://127.0.0.1:${d.port}/api/health`);
@@ -524,13 +457,8 @@ async function main() {
   });
 }
 
-main()
-  .catch(err => {
-    failures++;
-    console.error('FAIL - unexpected error');
-    console.error(err);
-  })
-  .finally(() => {
+runMain('install-payload', main, {
+  cleanup: () => {
     healthProc.kill();
     // Withdraw the LaunchServices record this file's own runs create, before the path it
     // names is deleted a line below. install.sh refuses to REGISTER a bundle under a
@@ -562,9 +490,5 @@ main()
         spawnSync(lsregister, ['-u', spelling], { timeout: 30_000 });
       }
     }
-    if (failures) {
-      console.error(`\n${failures} check(s) failed`);
-      process.exit(1);
-    }
-    console.log('\nall install-payload checks ok');
-  });
+  },
+});

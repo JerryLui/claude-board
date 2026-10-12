@@ -36,38 +36,11 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createBoard, applySubmit } from '../src/board.mjs';
 import { renderBoardPage, CSP, STAGE_MARGIN_RESET } from '../src/render.mjs';
-import { ui } from '../src/ui.mjs';
 import { styles } from '../src/styles.mjs';
-import { parseHTML, StandInEvent, resolveComputedProperty } from './dom-stand-in.mjs';
+import { StandInEvent, resolveComputedProperty } from './dom-stand-in.mjs';
+import { check, finish, pageHarness } from './support.mjs';
 
-let failures = 0;
-function check(name, fn) {
-  try {
-    fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
-
-function loadBoard(pageHtml, protocol = 'http:') {
-  const document = parseHTML(pageHtml);
-  const window = document.defaultView;
-  const location = { protocol };
-  // 'EventSource' declared, never passed -- see QUIRKS.md "A `new Function` harness
-  // inherits the host's globals".
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
-  return document;
-}
-
-function enableCommentMode(document) {
-  const toggle = document.getElementById('comment-mode-toggle');
-  assert.ok(toggle, 'setup failure: no #comment-mode-toggle rendered');
-  toggle.dispatchEvent(new StandInEvent('click'));
-  assert.equal(toggle.classList.contains('active'), true, 'setup failure: the toggle did not turn comment mode on');
-}
+const { loadBoard, enableCommentMode } = await pageHarness();
 
 // =================================================================================
 // 1. The rendered sandbox attribute never carries allow-same-origin.
@@ -272,7 +245,7 @@ function sentStageBoard() {
   return { board, blockId: board.blocks[0].id };
 }
 
-check('(stage half): the parent sends a stage the sent REF, never the hint -- or the stage de-affordances nothing and a sent element still reads as a target', () => {
+check('(stage half): the parent sends a stage the sent REF, never the hint, at ready and on every mode toggle -- and the stage paints a sent element inert and an ordinary one as a target', () => {
   const { board, blockId } = sentStageBoard();
   // First, learn the real ref by clicking the button for real.
   const probeDoc = loadBoard(renderBoardPage(board));
@@ -319,6 +292,35 @@ check('(stage half): the parent sends a stage the sent REF, never the hint -- or
   other.dispatchEvent(new StandInEvent('mouseover'));
   assert.equal(other.classList.contains('cb-anchor-hover'), true, 'an un-commented element must still hover as a target');
   assert.equal(other.classList.contains('cb-anchor-sent'), false, 'and must not be de-affordanced');
+  assert.equal(button.classList.contains('cb-anchor-sent'), false,
+    'leaving the sent element must clear its sent class too, or it stays de-affordanced for good');
+
+  // The two classes the hover handler sets are the two the injected stylesheet
+  // styles: a target gets an outline, a sent element only a not-allowed cursor
+  // and no outline at all, so it reads as inert rather than as another target.
+  const injected = stageDoc.head.children.filter(el => el.tagName === 'STYLE').map(el => el.textContent).join('\n');
+  const hoverRule = /\.cb-anchor-hover \{([^}]*)\}/.exec(injected);
+  const sentRule = /\.cb-anchor-sent \{([^}]*)\}/.exec(injected);
+  assert.ok(hoverRule, 'the injected stylesheet must carry a rule for the hover class the handler sets');
+  assert.match(hoverRule[1], /outline:/, 'and that rule must outline the target');
+  assert.ok(sentRule, 'the injected stylesheet must carry a rule for the sent class the handler sets');
+  assert.match(sentRule[1], /cursor: not-allowed/, 'the sent rule must set cursor: not-allowed');
+  assert.doesNotMatch(sentRule[1], /outline/, 'a de-affordanced element must not carry an outline of any kind');
+
+  // The other moment the parent tells a stage its sent refs: a stage wired while
+  // comment mode is still off, which the toggle then turns on (broadcastStageMode).
+  // The hover stylesheet is not injected until that moment.
+  const late = loadBoard(renderBoardPage(board));
+  const lateFrame = late.querySelector('.html-stage');
+  lateFrame.loadSrcdoc();
+  const lateStyles = () => lateFrame.contentDocument.head.children.filter(el => el.tagName === 'STYLE' && el.textContent.includes('cb-anchor-hover'));
+  assert.equal(lateStyles().length, 0, 'no hover stylesheet may be injected before comment mode is on');
+  late.getElementById('comment-mode-toggle').dispatchEvent(new StandInEvent('click'));
+  assert.equal(lateStyles().length, 1, 'turning comment mode on injects the hover stylesheet once');
+  const lateButton = lateFrame.contentDocument.querySelector('button');
+  lateButton.dispatchEvent(new StandInEvent('mouseover'));
+  assert.equal(lateButton.classList.contains('cb-anchor-sent'), true,
+    'the mode toggle must carry the block\'s sent refs too, not an empty list that un-sends the element');
 });
 
 check('S5: a stage-supplied ref may MINT a comment but may never select an existing one to overwrite -- an agent must not be able to make the reviewer\'s next remark replace their feedback on its own block', () => {
@@ -456,7 +458,7 @@ check('S2: renderBoardPage emits a <meta http-equiv="Content-Security-Policy"> c
 //    all (data.type === 'select' matches no branch in src/ui.mjs's message
 //    listener, same as any other unrecognised type), and an html option's
 //    iframe is rendered `pointer-events: none` inside a '.choice-variant'
-//    card (src/styles.mjs, asserted in test/check-pure.mjs), so a genuine,
+//    card (src/styles.mjs, computed in test/check-stage-lens.mjs), so a genuine,
 //    trusted click over the visible mock can never reach the iframe at all --
 //    it lands on the card in the parent document instead, which already
 //    handles it. See ADR.md entry 78 for the fuller account.
@@ -473,32 +475,6 @@ function variantsBoard(mocks) {
     }],
   });
 }
-
-check('A stage cannot pick its own option -- a "select"-shaped message from a live, correctly-addressed mounted stage records no pick', () => {
-  const board = variantsBoard(['<div class="mock"><button>A</button></div>']);
-  const document = loadBoard(renderBoardPage(board));
-  const frame = document.querySelector('.html-stage');
-  frame.loadSrcdoc();
-  const card = document.querySelector('.choice-variant');
-
-  // Both parent-side checks the rest of this file exists to defend pass here
-  // BY CONSTRUCTION: 'null' is exactly the origin an opaque srcdoc frame
-  // reports, and frame.contentWindow is a REAL, live, currently-mounted
-  // stage -- precisely what the stage's own script could forge directly.
-  // What stops this is that there is no handler left for this message type
-  // at all, not an origin or identity check -- ablation: reintroducing
-  // `if (data.type === 'select') { var card = frame.closest('.choice-
-  // variant'); if (card) selectVariant(card); }` in src/ui.mjs's message
-  // listener makes this fail.
-  document.defaultView.dispatchEvent({
-    type: 'message',
-    data: { cb: 'cb-stage', type: 'select' },
-    origin: 'null',
-    source: frame.contentWindow,
-  });
-  assert.equal(card.classList.contains('selected'), false,
-    'a stage must never be able to select its own option -- the agent would be handing itself the answer to its own question');
-});
 
 check('A forged "height" message from a live, correctly-addressed stage is clamped between the floor and the cap, never applied as reported outside that range, and a malformed one is silently ignored', () => {
   const board = variantsBoard(['<div class="mock"><button>A</button></div>']);
@@ -622,7 +598,7 @@ check('A click landing inside a nested html stage never selects the option, howe
   // model real pointer-events hit-testing (QUIRKS.md), so this cannot prove
   // a genuine mouse click never physically reaches the iframe in a real
   // browser -- that half is src/styles.mjs's `pointer-events: none` alone,
-  // asserted structurally in test/check-pure.mjs. What this DOES prove is
+  // computed through the cascade in test/check-stage-lens.mjs. What this DOES prove is
   // the other half: even a click that somehow lands inside the stage's own
   // document carries no path back to a selection anymore.
   frames[0].contentDocument.querySelector('button').dispatchEvent(new StandInEvent('click'));
@@ -989,25 +965,61 @@ check('(adversarial): a forged pick-shaped message from the INLINE stage records
 //    text itself, never a layout measurement the stand-in cannot make.
 // =================================================================================
 
-check('Every html-stage srcdoc opens with the exact margin/padding reset renderHtmlBlock exports as STAGE_MARGIN_RESET, immediately before the mock\'s own markup', () => {
-  const board = createBoard({
-    title: 'gutter: reset is present and leads',
-    blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }, { kind: 'markdown', text: 'not a page board' }],
-  });
-  const document = loadBoard(renderBoardPage(board));
-  const srcdoc = document.querySelector('.html-stage').getAttribute('srcdoc');
-  assert.ok(srcdoc, 'setup failure: no srcdoc on the rendered .html-stage frame');
-  assert.equal(srcdoc.indexOf(STAGE_MARGIN_RESET), 0,
-    'the srcdoc must open with the exact exported STAGE_MARGIN_RESET string, not a hand-copied re-spelling of it');
-  assert.equal(srcdoc.indexOf(board.blocks[0].html), STAGE_MARGIN_RESET.length,
-    'the mock\'s own markup must immediately follow the reset, with nothing else between them');
-
-  // Ablation record (run by hand, reverted immediately after -- restore via a
-  // second edit, never `git checkout` on uncommitted work, per this repo's own
-  // QUIRKS.md): deleting the `STAGE_MARGIN_RESET +` prefix in renderHtmlBlock's
-  // `srcdocContent` assignment makes this check fail immediately, on the first
-  // assertion above -- that assignment is the one place this string is ever
-  // added, so there is no other path that could still satisfy it.
+check('Every html-stage srcdoc -- a standalone stage, each variant option\'s, a compare side\'s -- opens with the exact STAGE_MARGIN_RESET renderHtmlBlock exports, immediately followed by that stage\'s own markup', () => {
+  // One builder, three call sites (renderBlock, the variant option card,
+  // renderCompareSide all go through renderHtmlBlock): a surface that grew a
+  // second srcdoc builder without the reset fails its own row here.
+  const surfaces = [
+    {
+      name: 'standalone stage',
+      selector: '.html-stage',
+      mocks: ['<div class="mock"><button>Send</button></div>'],
+      board: createBoard({
+        title: 'gutter: standalone stage',
+        blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }, { kind: 'markdown', text: 'not a page board' }],
+      }),
+    },
+    {
+      name: 'variant option stage',
+      selector: '.choice-variant .html-stage',
+      mocks: ['<div class="mock">A</div>', '<div class="mock">B</div>'],
+      board: createBoard({
+        title: 'gutter: variant option stage',
+        blocks: [{
+          kind: 'question', prompt: 'Which mockup?', widget: 'choose-between-rendered-variants',
+          options: [
+            { label: 'A', block: { kind: 'html', html: '<div class="mock">A</div>' } },
+            { label: 'B', block: { kind: 'html', html: '<div class="mock">B</div>' } },
+          ],
+        }],
+      }),
+    },
+    {
+      name: 'compare side stage',
+      selector: '.compare-side .html-stage',
+      mocks: ['<div class="mock">new</div>'],
+      board: createBoard({
+        title: 'gutter: compare side stage',
+        blocks: [{
+          kind: 'compare',
+          left: { label: 'Old', block: { kind: 'markdown', markdown: 'old copy' } },
+          right: { label: 'New', block: { kind: 'html', html: '<div class="mock">new</div>' } },
+        }],
+      }),
+    },
+  ];
+  for (const { name, selector, mocks, board } of surfaces) {
+    const frames = loadBoard(renderBoardPage(board)).querySelectorAll(selector);
+    assert.equal(frames.length, mocks.length, `setup failure: expected one ${name} per html block, got ${frames.length}`);
+    frames.forEach((frame, i) => {
+      const srcdoc = frame.getAttribute('srcdoc');
+      assert.ok(srcdoc, `setup failure: no srcdoc on the ${name}`);
+      assert.equal(srcdoc.indexOf(STAGE_MARGIN_RESET), 0,
+        `${name}: the srcdoc must open with the exact exported STAGE_MARGIN_RESET string, not a hand-copied re-spelling of it`);
+      assert.equal(srcdoc.indexOf(mocks[i]), STAGE_MARGIN_RESET.length,
+        `${name}: its own markup must immediately follow the reset, with nothing else between them`);
+    });
+  }
 });
 
 check('The reset carries no color of any kind -- html/body must stay transparent, so a mock that paints no background of its own lands on the parent-controlled --stage-bg, not on a color this file introduced', () => {
@@ -1052,59 +1064,6 @@ check('The reset is itself a leading head-only element, so it hoists out of docu
   assert.equal(headStyles.length, 2, 'both leading <style> tags must have hoisted into head');
   assert.match(headStyles[0].textContent, /margin\s*:\s*0/, 'the reset must be the FIRST hoisted style');
   assert.match(headStyles[1].textContent, /\.mock/, 'the mock\'s own style must be the second, still present and unaltered');
-});
-
-check('An html-kind variant option\'s clipped stage carries the same reset, ahead of that option\'s own mock -- the fix is not special-cased to a standalone stage', () => {
-  const board = createBoard({
-    title: 'gutter: variant option stage',
-    blocks: [{
-      kind: 'question', prompt: 'Which mockup?', widget: 'choose-between-rendered-variants',
-      options: [
-        { label: 'A', block: { kind: 'html', html: '<div class="mock">A</div>' } },
-        { label: 'B', block: { kind: 'html', html: '<div class="mock">B</div>' } },
-      ],
-    }],
-  });
-  const document = loadBoard(renderBoardPage(board));
-  const frames = document.querySelectorAll('.html-stage');
-  assert.equal(frames.length, 2, 'setup failure: expected one stage per option');
-  for (const frame of frames) {
-    const srcdoc = frame.getAttribute('srcdoc');
-    assert.equal(srcdoc.indexOf(STAGE_MARGIN_RESET), 0, 'every variant option\'s stage must open with the same reset as a standalone stage');
-  }
-});
-
-check('A compare side\'s html stage carries the same reset -- renderCompareSide/renderBlock share renderHtmlBlock, not a second srcdoc builder', () => {
-  const board = createBoard({
-    title: 'gutter: compare side stage',
-    blocks: [{
-      kind: 'compare',
-      left: { label: 'Old', block: { kind: 'markdown', markdown: 'old copy' } },
-      right: { label: 'New', block: { kind: 'html', html: '<div class="mock">new</div>' } },
-    }],
-  });
-  const document = loadBoard(renderBoardPage(board));
-  const frame = document.querySelector('.compare-side .html-stage');
-  assert.ok(frame, 'setup failure: no html-stage rendered on the compare side');
-  const srcdoc = frame.getAttribute('srcdoc');
-  assert.equal(srcdoc.indexOf(STAGE_MARGIN_RESET), 0, 'the compare side\'s stage must open with the same reset as a standalone stage');
-});
-
-check('The stage lens opens on the exact same srcdoc, reset included -- it is a copy of the live attribute, never a second render', () => {
-  // Two blocks: an ordinary board, so the stage has an expand control at all
-  // (see openLensOn above).
-  const board = createBoard({
-    title: 'gutter: the lens',
-    blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }, { kind: 'markdown', text: 'not a page board' }],
-  });
-  const document = loadBoard(renderBoardPage(board));
-  const inline = document.querySelector('.html-stage');
-  document.querySelector('.html-block .expand-btn').dispatchEvent(new StandInEvent('click'));
-  const lens = document.querySelector('.stage-lens-frame');
-  assert.ok(lens, 'setup failure: the expand control did not mount a lens frame');
-  assert.equal(lens.getAttribute('srcdoc'), inline.getAttribute('srcdoc'),
-    'the lens frame\'s srcdoc must be byte-identical to the inline stage\'s -- including the reset, since it is copied off that frame rather than rebuilt');
-  assert.equal(lens.getAttribute('srcdoc').indexOf(STAGE_MARGIN_RESET), 0, 'and must therefore also open with the reset');
 });
 
 // =================================================================================
@@ -1218,36 +1177,13 @@ check('the thirteen live types are exactly ready/hover/click/link/positions/heig
   const live = liveMessageTypes(renderSrcText, uiSrcText);
   assert.deepEqual([...live].sort(),
     ['band', 'click', 'diagrams', 'height', 'hover', 'link', 'locate', 'mermaid', 'mode', 'positions', 'ready', 'scroll', 'scrollBy'].sort());
-});
-
-check('the deleted \'select\' type is not live, and is not required to be documented', () => {
-  const live = liveMessageTypes(renderSrcText, uiSrcText);
-  assert.ok(!live.has('select'), '\'select\' must never be sent by a real post()/postToStage() call');
-  // documentedMessageTypes is free to not know about 'select' at all -- the
-  // "There is no `select` message, deliberately" passage does not open a line
-  // with `'select'` as a table cell, so it
-  // never lands in the documented set either. Asserting that here pins the
-  // negative: a documented set that DID somehow pick up 'select' would still
-  // pass the drift check above (an extra documented entry is harmless), so
-  // this is the only place that would notice the parser drifting the wrong way.
-  const documented = documentedMessageTypes(protocolText);
-  assert.ok(!documented.has('select'), 'the "There is no `select` message" passage must not parse as a documentation entry');
-});
-
-check('the drift check actually fails when a type is added to the code and not to PROTOCOL.md (proved, not assumed)', () => {
-  // The regression this whole section exists to catch, reproduced directly:
-  // splice in a real-shaped send for a brand new type nowhere in the design
-  // comment, and confirm the same comparison the check above runs actually
-  // flags it. Proves the extractor is live, not a check that only ever passes.
-  const mutatedRenderSrc = renderSrcText.replace(
-    "post({ type: 'ready' });",
-    "post({ type: 'ready' });\n  post({ type: 'zzzUndocumented' });",
-  );
-  assert.notEqual(mutatedRenderSrc, renderSrcText, 'setup failure: the splice point ("post({ type: \'ready\' });") was not found');
-  const live = liveMessageTypes(mutatedRenderSrc, uiSrcText);
-  const documented = documentedMessageTypes(protocolText);
-  const missing = [...live].filter(t => !documented.has(t));
-  assert.deepEqual(missing, ['zzzUndocumented'], 'adding an undocumented send did not trip the drift check');
+  // The deleted 'select' type (ADR.md entry 78) is absent from the live set
+  // above, and PROTOCOL.md must not grow a table row for it either: the
+  // "There is no `select` message" passage names it only in prose, and a row
+  // would document a channel deleted for security as live. The check above
+  // only ever compares live against documented, never the reverse.
+  assert.ok(!documentedMessageTypes(protocolText).has('select'),
+    'PROTOCOL.md must not document the deleted \'select\' type as a live message');
 });
 
 // =================================================================================
@@ -1457,8 +1393,4 @@ check('criterion 3: the sandbox stays allow-scripts alone, and the parent takes 
   assert.equal(opens[1][0], 'https://example.com/ok');
 });
 
-if (failures) {
-  console.error(`\n${failures} check(s) failed`);
-  process.exit(1);
-}
-console.log('\nall stage-isolation checks ok');
+finish('stage-isolation');

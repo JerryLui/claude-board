@@ -1,22 +1,19 @@
 // ADR.md entry 117: the daemon judges diagrams with the exact vendored engine
 // before a round can be stored. This check stays at that engine seam so every
 // grammar, refusal class, lazy-load boundary, and fail-open path is pinned without
-// starting a daemon or involving the browser renderer.
+// starting a daemon or involving the browser renderer -- and then one step out, at
+// the board-normalisation door (src/board.mjs's createBoard), where a refusal names
+// the block, fence, file, option or side it came from and the per-post budget runs.
+//
+// Every repo module is imported dynamically, after the globals snapshot: a static
+// import would load the parser before the first check measures what importing it adds.
 
 import assert from 'node:assert/strict';
 import { performance } from 'node:perf_hooks';
-
-let failures = 0;
-function check(name, fn) {
-  try {
-    fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { check, finish } from './support.mjs';
 
 const globalsBeforeParserImport = Object.getOwnPropertyNames(globalThis).sort();
 const rssBeforeImport = process.memoryUsage().rss;
@@ -24,12 +21,13 @@ let globalsAfterParserImport;
 let rssAfterParserImport;
 let globalsBeforeEngine;
 let api;
+let boardApi;
 let importError;
 try {
   api = await import('../src/mermaid-parse.mjs');
   globalsAfterParserImport = Object.getOwnPropertyNames(globalThis).sort();
   rssAfterParserImport = process.memoryUsage().rss;
-  await import('../src/board.mjs');
+  boardApi = await import('../src/board.mjs');
   await import('../src/server.mjs');
   globalsBeforeEngine = Object.getOwnPropertyNames(globalThis).sort();
 } catch (err) {
@@ -89,7 +87,6 @@ if (!importError) {
     'init directive': '%%{init: {"theme": "neutral"}}%%\nflowchart LR\n A --> B',
   };
 
-  const parseTimes = [];
   let firstCallMs = 0;
   let rssBeforeFirstCheck = 0;
   let rssAfterFirstCheck = 0;
@@ -101,8 +98,6 @@ if (!importError) {
     if (type === 'flowchart') {
       firstCallMs = elapsed;
       rssAfterFirstCheck = process.memoryUsage().rss;
-    } else {
-      parseTimes.push(elapsed);
     }
     check(`ADR.md entry 117: vendored Mermaid parses ${type}`, () => {
       assert.equal(result, null);
@@ -217,11 +212,205 @@ if (!importError) {
     assert.ok(!logged[0].includes('\n'));
   });
 
-  const fastest = Math.min(...parseTimes);
-  const slowest = Math.max(...parseTimes);
-  check(`ADR.md entry 117: measured engine parse range ${fastest.toFixed(1)}-${slowest.toFixed(1)} ms`, () => {
-    assert.ok(Number.isFinite(fastest) && Number.isFinite(slowest));
+
+  // --- the board-normalisation door ------------------------------------------------
+  const { createBoard } = boardApi;
+  // board.mjs already loaded this module through src/markdown.mjs; the dynamic import
+  // hands back that same instance, which the lex-count check below wraps.
+  const { marked } = await import('../src/vendor/marked/marked.esm.js');
+
+  /** The message a refused post came back with. Fails the check if the post was
+   * accepted instead -- an assertion on a message nobody threw would pass by accident. */
+  function refusedPost(post) {
+    try {
+      post();
+    } catch (err) {
+      return err.message;
+    }
+    throw new assert.AssertionError({ message: 'the post was accepted; a diagram that does not parse must refuse it' });
+  }
+
+  check('ADR.md entry 117: a bad mermaid block names its id and parser line, while the fixed block lands', () => {
+    const bad = 'flowchart LR\n a --> ((b';
+    const message = refusedPost(() => createBoard({
+      title: 'bad mermaid',
+      blocks: [{ id: 'm1', kind: 'mermaid', text: bad }],
+    }));
+    assert.equal(message,
+      'mermaid block m1 does not parse. Parse error on line 2. Way out: fix the source and post again; a fence you cannot fix goes up by value with its language changed so it renders as code');
+    assert.doesNotThrow(() => createBoard({
+      title: 'fixed mermaid',
+      blocks: [{ id: 'm1', kind: 'mermaid', text: 'flowchart LR\n a --> b' }],
+    }));
+  });
+
+  check('ADR.md entry 117: bad by-value markdown fences name top-level, context and compare positions together', () => {
+    const badFence = '```mermaid\nflowchart LR\n a --> ((b\n```';
+    const lines = refusedPost(() => createBoard({
+      title: 'three bad fences',
+      blocks: [
+        { kind: 'markdown', text: badFence },
+        {
+          kind: 'question', prompt: 'Context?', widget: 'single', options: [{ label: 'Yes' }],
+          context: [{ kind: 'markdown', text: badFence }],
+        },
+        {
+          kind: 'compare',
+          left: { label: 'Left', block: { kind: 'markdown', text: badFence } },
+          right: { label: 'Right', block: null },
+        },
+      ],
+    })).split('\n');
+
+    assert.equal(lines.length, 3, 'one refusal per fence, in one rejected post');
+    assert.match(lines[0], /^mermaid fence 1 in markdown block d1 does not parse\. Parse error on line 2\. Way out:/);
+    assert.match(lines[1], /^mermaid fence 1 in markdown block d2 in context 1 of question q1 does not parse\. Parse error on line 2\. Way out:/);
+    assert.match(lines[2], /^mermaid fence 1 in markdown block d3 on left side of compare block x1 does not parse\. Parse error on line 2\. Way out:/);
+  });
+
+  check('ADR.md entry 117: a bad fence in referenced markdown names the posted file path', () => {
+    const cwd = mkdtempSync(path.join(tmpdir(), 'claude-board-diagram-refusal-'));
+    try {
+      writeFileSync(path.join(cwd, 'broken-diagram.md'), '```mermaid\nflowchart LR\n a --> ((b\n```\n', 'utf8');
+      const message = refusedPost(() => createBoard({
+        title: 'referenced bad fence',
+        cwd,
+        blocks: [{ kind: 'markdown', source: { path: 'broken-diagram.md' } }],
+      }));
+      assert.match(message, /^mermaid fence 1 in markdown block d1 from referenced file broken-diagram\.md does not parse\. Parse error on line 2\. Way out:/);
+      assert.ok(message.includes('fix the file, or post the section by value with the fence marked as code'));
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  /** Every line `fn` printed through console.error, which is where src/board.mjs and the
+   * diagram engine both log what they let through (ADR.md entry 117). */
+  function capturedErrors(fn) {
+    const printed = [];
+    const original = console.error;
+    console.error = (...args) => printed.push(args.join(' '));
+    try {
+      fn();
+    } finally {
+      console.error = original;
+    }
+    return printed;
+  }
+
+  check('ADR.md entry 117: a bad diagram inside a variant option names the option', () => {
+    const message = refusedPost(() => createBoard({
+      title: 'bad variant',
+      blocks: [{
+        kind: 'question',
+        prompt: 'Which?',
+        widget: 'choose-between-rendered-variants',
+        options: [
+          { label: 'Good', block: { kind: 'mermaid', text: 'flowchart LR\n a --> b' } },
+          { label: 'Bad', block: { kind: 'mermaid', text: 'flowchart LR\n a --> ((b' } },
+        ],
+      }],
+    }));
+    assert.match(message,
+      /^mermaid block m2 in option 2 of question q1 does not parse\. Parse error on line 2\. Way out:/);
+  });
+
+  check('ADR.md entry 117: a bad diagram on a compare right side names the side', () => {
+    const message = refusedPost(() => createBoard({
+      title: 'bad right side',
+      blocks: [{
+        kind: 'compare',
+        left: { label: 'Left', block: { kind: 'markdown', text: '# Fine' } },
+        right: { label: 'Right', block: { kind: 'mermaid', text: 'flowchart LR\n a --> ((b' } },
+      }],
+    }));
+    assert.match(message,
+      /^mermaid block m1 on right side of compare block x1 does not parse\. Parse error on line 2\. Way out:/);
+  });
+
+  check('ADR.md entry 117: a post past its diagram budget lands unchecked, with one line logged', () => {
+    // MIN_DIAGRAM_COST is 500 characters and the post's whole allowance is 50,000, so a
+    // hundred two-line diagrams spend it exactly -- the cheapest way to reach the end of
+    // the budget, and the shape the budget exists for.
+    const good = { kind: 'mermaid', text: 'flowchart LR\n a --> b' };
+    const bad = { kind: 'mermaid', text: 'flowchart LR\n a --> ((b' };
+    let board;
+    const printed = capturedErrors(() => {
+      board = createBoard({
+        title: 'budget spent',
+        blocks: [...Array.from({ length: 100 }, () => ({ ...good })), { ...bad }, { ...bad }],
+      });
+    });
+
+    assert.equal(board.blocks.length, 102, 'a spent budget refuses nothing: the post lands whole');
+    assert.equal(board.blocks[100].text, bad.text, 'the unchecked diagram is stored as posted');
+    const budgetLines = printed.filter(line => line.includes('Diagram budget'));
+    assert.equal(budgetLines.length, 1, 'one line per post, not one per diagram left unchecked');
+    assert.match(budgetLines[0],
+      /^Diagram budget of 50,000 characters ran out at mermaid block m101, which costs 500 with 0 left; the rest of this post's diagrams go unchecked$/);
+
+    // The allowance is per post, not per process: the next post checks its first diagram.
+    assert.match(refusedPost(() => createBoard({ title: 'next post', blocks: [{ ...bad }] })),
+      /^mermaid block m1 does not parse\./);
+  });
+
+  check("ADR.md entry 117: a diagram over the engine's own limit is refused without touching the budget", () => {
+    // `readJsonBody` admits 25 MB, so a diagram past the engine's 50,000-character text
+    // limit is a legal post -- and the one diagram the engine is certain to reject. Its
+    // refusal comes off a length test with no parse behind it, so it costs the budget
+    // nothing and must not be paid for out of it: charging it would leave every later
+    // diagram in the post unchecked for work nobody did.
+    const head = 'flowchart LR\n a --> b\n%% ';
+    const oversized = head + 'x'.repeat(50_001 - head.length);
+    let lines;
+    const printed = capturedErrors(() => {
+      lines = refusedPost(() => createBoard({
+        title: 'over the limit first',
+        blocks: [
+          { kind: 'mermaid', text: oversized },
+          { kind: 'mermaid', text: 'flowchart LR\n a --> ((b' },
+        ],
+      })).split('\n');
+    });
+
+    assert.deepEqual(lines, [
+      "mermaid block m1 does not parse. Diagram is 50,001 characters; Mermaid's limit is 50,000. Way out: fix the source and post again; a fence you cannot fix goes up by value with its language changed so it renders as code",
+      'mermaid block m2 does not parse. Parse error on line 2. Way out: fix the source and post again; a fence you cannot fix goes up by value with its language changed so it renders as code',
+    ]);
+    assert.deepEqual(printed.filter(line => line.includes('Diagram budget')), [],
+      'nothing was spent, so nothing is logged as spent');
+  });
+
+  check('ADR.md entry 117: a markdown block is lexed once on the post path', () => {
+    const originalLexer = marked.lexer;
+    let lexes = 0;
+    marked.lexer = function countingLexer(...args) {
+      lexes++;
+      return originalLexer.apply(this, args);
+    };
+    try {
+      createBoard({
+        title: 'one lex per block',
+        blocks: [
+          { kind: 'markdown', text: '# Title\n\n```mermaid\nflowchart LR\n a --> b\n```\n' },
+          {
+            kind: 'question',
+            prompt: 'Pick',
+            widget: 'single',
+            explainer: '```mermaid\nflowchart LR\n a --> b\n```',
+            context: [{ kind: 'markdown', text: '```mermaid\nflowchart LR\n c --> d\n```' }],
+            options: [{ label: 'Yes' }],
+          },
+        ],
+      });
+    } finally {
+      marked.lexer = originalLexer;
+    }
+    // One per markdown document in the post: the block, the question's context block and
+    // its explainer. The door reads its fences off those renders; lexing them again to
+    // find the fences is the doubled markdown work ADR.md entry 117 does without.
+    assert.equal(lexes, 3, 'every markdown document on the post path is lexed exactly once');
   });
 }
 
-if (failures) process.exit(1);
+finish(null, { failText: null });

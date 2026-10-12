@@ -20,18 +20,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { parseHtmlTree } from '../src/anchor.mjs';
 import { createBoard, resolveComment, resolveComments } from '../src/board.mjs';
-
-let failures = 0;
-function check(name, fn) {
-  try {
-    fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
+import { check, finish } from './support.mjs';
 
 function timeMs(fn) {
   const start = process.hrtime.bigint();
@@ -56,7 +45,8 @@ function adversarialUnterminatedTag(n) {
   return '<div>' + '<x' + 'a'.repeat(n) + '</div>';
 }
 
-for (const [n, deadlineMs] of [[20_000, 2_000], [100_000, 2_000], [500_000, 5_000]]) {
+// No 20K row: unfixed, 20K took 136ms, inside any deadline worth setting, so it could not fail.
+for (const [n, deadlineMs] of [[100_000, 2_000], [500_000, 5_000]]) {
   check(`parseHtmlTree on a ${n}-char unterminated tag completes within ${deadlineMs}ms (no quadratic backtracking)`, () => {
     const ms = timeMs(() => parseHtmlTree(adversarialUnterminatedTag(n)));
     console.log(`    ${n} chars -> ${ms.toFixed(1)}ms`);
@@ -86,6 +76,9 @@ check('the same adversarial input reaches the same guard through the real path -
 // deadline sits comfortably above the fixed cost and well below the unfixed
 // cost, so a regression that goes back to resolving inside the per-comment loop
 // fails this check rather than merely getting slower with every comment added.
+// Re-measured against the diagram fixture below (2026-10-12): 3.7ms with the
+// cache, 974ms with resolveComments passing no cache -- which a 1,000ms deadline
+// let through, so the deadline is 250ms.
 
 // ADR.md entry 28 leaves `mermaid` commentable, so the big block is a diagram
 // rather than a markdown list -- a shape a board can genuinely still accumulate
@@ -130,25 +123,24 @@ function boardWithComments(commentCount) {
   return board;
 }
 
-check('resolveComments on 0 comments against a ~500KB diagram block is effectively free', () => {
-  const board = boardWithComments(0);
-  const ms = timeMs(() => resolveComments(board, board.comments));
-  console.log(`    0 comments -> ${ms.toFixed(1)}ms`);
-  assert.ok(ms < 200, `resolveComments took ${ms.toFixed(1)}ms on 0 comments, expected under 200ms`);
-});
-
 check('resolveComments on 300 comments against the SAME block renders+parses that block once, not 300 times', () => {
   const board = boardWithComments(300);
-  const ms = timeMs(() => resolveComments(board, board.comments));
+  // Every dom-path probe above comes back lost against a diagram; one comment names a
+  // node the diagram declares instead, so a verdict that bled from one comment to the
+  // next through the shared cache would show.
+  board.comments[150].anchor = { kind: 'mermaid', ref: 'n150', hint: 'probe 150' };
+  let resolved;
+  const ms = timeMs(() => { resolved = resolveComments(board, board.comments); });
   console.log(`    300 comments -> ${ms.toFixed(1)}ms`);
-  assert.ok(ms < 1_000, `resolveComments took ${ms.toFixed(1)}ms on 300 comments against one block, expected under 1000ms (pre-fix: ~3000ms on a smaller block, growing linearly with comment count)`);
-  // Every comment must still get its own, correctly-computed verdict -- the
-  // shared cache must not let one comment's resolution bleed into another's.
-  assert.equal(board.comments.length, 300);
+  assert.ok(ms < 250, `resolveComments took ${ms.toFixed(1)}ms on 300 comments against one block, expected under 250ms (uncached: ~1000ms, growing linearly with comment count)`);
+  // Every comment still gets its own, correctly-computed verdict -- the shared
+  // cache must not let one comment's resolution bleed into another's.
+  assert.deepEqual(resolved.map(c => c.n), board.comments.map(c => c.n), 'one verdict per comment, in order');
+  for (const i of [0, 149, 150, 151, 299]) {
+    assert.deepEqual(resolved[i], resolveComment(board, board.comments[i]),
+      `comment ${i + 1}'s cached verdict must equal its uncached one`);
+  }
+  assert.deepEqual(resolved.filter(c => c.resolved).map(c => c.n), [151], 'only the comment naming a real node resolves');
 });
 
-if (failures) {
-  console.error(`\n${failures} check(s) failed`);
-  process.exit(1);
-}
-console.log('\nall anchor-perf checks ok');
+finish('anchor-perf');

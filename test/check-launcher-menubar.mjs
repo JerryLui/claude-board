@@ -29,33 +29,10 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync, existsSync, chmodSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { spawnSync, spawn } from 'node:child_process';
-import net from 'node:net';
+import { CC, buildLauncher, check, freePort, haveCc, runMain, skipFile, sleep, waitFor } from './support.mjs';
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const launcherSrc = path.join(repoRoot, 'bin', 'launcher.c');
-const notifySrc = path.join(repoRoot, 'bin', 'notify.m');
-const menubarSrc = path.join(repoRoot, 'bin', 'menubar.m');
-const ccCmd = process.env.CLAUDE_BOARD_CC || 'cc';
-
-if (spawnSync(ccCmd, ['--version']).error) {
-  console.log(`==> skipping check-launcher-menubar.mjs: no C compiler ('${ccCmd}') found`);
-  console.log('all launcher-menubar checks ok (skipped)');
-  process.exit(0);
-}
-
-let failures = 0;
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
+if (!haveCc()) skipFile('launcher-menubar', `check-launcher-menubar.mjs: no C compiler ('${CC}') found`);
 
 const workDir = mkdtempSync(path.join(tmpdir(), 'claude-board-launcher-menubar-'));
 
@@ -91,47 +68,11 @@ http.createServer((req, res) => {
 const compiledHome = path.join(workDir, 'compiled-home');
 mkdirSync(compiledHome, { recursive: true });
 
-// Mirrors install.sh's c_escape; every path here is plain mkdtemp ASCII, so this is a
-// match of the real function rather than a case this file exercises.
-const cEscape = value => value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-
-const headerDir = path.join(workDir, 'header');
-mkdirSync(headerDir, { recursive: true });
-writeFileSync(path.join(headerDir, 'launcher_paths.h'), [
-  `#define CLAUDE_BOARD_NODE "${cEscape(process.execPath)}"`,
-  `#define CLAUDE_BOARD_DAEMON "${cEscape(stubDaemon)}"`,
-  `#define CLAUDE_BOARD_HOME_DIR "${cEscape(compiledHome)}"`,
-  '#define CLAUDE_BOARD_PATH "/usr/bin:/bin:/usr/sbin:/sbin"',
-  `#define CLAUDE_BOARD_STORE_DIR "${cEscape(path.join(workDir, 'store'))}"`,
-  `#define CLAUDE_BOARD_REF_ROOTS_VALUE "${cEscape(path.join(workDir, 'roots'))}"`,
-  `#define CLAUDE_BOARD_REPO_ROOT_VALUE "${cEscape(path.join(workDir, 'repo'))}"`,
-  '',
-].join('\n'));
-
-const launcherExec = path.join(workDir, 'launcher');
-const builds = [[notifySrc, path.join(workDir, 'notify.o')], [menubarSrc, path.join(workDir, 'menubar.o')]]
-  .map(([src, obj]) => spawnSync(ccCmd, ['-O2', '-Wall', '-Wextra', '-fobjc-arc', '-c', '-o', obj, src], { encoding: 'utf8' }));
-if (builds.every(b => b.status === 0)) {
-  builds.push(spawnSync(ccCmd, ['-O2', '-Wall', '-Wextra', '-o', launcherExec, '-I', headerDir,
-    launcherSrc, path.join(workDir, 'notify.o'), path.join(workDir, 'menubar.o'),
-    '-framework', 'Foundation', '-framework', 'UserNotifications', '-framework', 'AppKit'], { encoding: 'utf8' }));
-}
+// The store, ref roots and repo root are buildLauncher's own defaults, each a path under
+// this file's workDir that nothing here reads.
+const { exec: launcherExec, builds } = buildLauncher(workDir, { daemon: stubDaemon, home: compiledHome });
 
 // --- process inspection ---------------------------------------------------------------
-
-/** Bind port 0, read what the kernel picked, release it. Racy in principle, fine here --
- * test/run.mjs runs checks concurrently, so a hardcoded port is the thing that would
- * actually collide. */
-function freePort() {
-  return new Promise((resolve, reject) => {
-    const probe = net.createServer();
-    probe.on('error', reject);
-    probe.listen(0, '127.0.0.1', () => {
-      const { port } = probe.address();
-      probe.close(() => resolve(port));
-    });
-  });
-}
 
 /** Every live child of `pid`, with the argv each was started with. `ps -o args=` reports
  * the command line a process was EXEC'd with, which is what makes it the right instrument
@@ -155,17 +96,9 @@ function processState(pid) {
   return (r.stdout || '').trim();
 }
 
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-
-async function waitFor(what, predicate, timeoutMs = 10_000) {
-  const start = Date.now();
-  for (;;) {
-    const value = await predicate();
-    if (value) return value;
-    if (Date.now() - start > timeoutMs) throw new Error(`timed out waiting for ${what}`);
-    await sleep(50);
-  }
-}
+// Every wait in this file: polled each 50ms, and a throw naming what it waited for once
+// ten seconds have gone.
+const POLL = { timeoutMs: 10_000, intervalMs: 50 };
 
 /** Start the compiled launcher and wait until its stub daemon is answering. `args` is
  * normally empty on purpose: an argv-less invocation is what launchd makes, and it is the
@@ -196,7 +129,7 @@ async function startLauncher(args = []) {
     get exit() { return exit; },
     ticks: () => fetch(`http://127.0.0.1:${port}/ticks`).then(r => r.text()).then(Number),
     exitDaemon: code => fetch(`http://127.0.0.1:${port}/exit/${code}`).then(r => r.text()),
-    waitForExit: (timeoutMs = 10_000) => waitFor('the launcher to exit', () => exit, timeoutMs),
+    waitForExit: (timeoutMs = POLL.timeoutMs) => waitFor(() => exit, { what: 'the launcher to exit', ...POLL, timeoutMs }),
     // Teardown for a scenario that did NOT end by itself. The children are enumerated
     // FIRST and killed second: SIGKILLing the launcher is the one stop it cannot clean up
     // after, so anything still listed as its child after that is already reparented to
@@ -214,33 +147,31 @@ async function startLauncher(args = []) {
       child.stderr.destroy();
     },
   };
-  await waitFor('the stub daemon to answer', async () => {
+  await waitFor(async () => {
     if (exit) throw new Error(`the launcher exited before its daemon came up\nstdout:\n${out}\nstderr:\n${err}`);
     try { return (await handle.ticks()) >= 0; } catch { return false; }
-  });
+  }, { what: 'the stub daemon to answer', ...POLL });
   return handle;
 }
 
 const isItem = c => c.args.includes('--menubar');
 
 async function main() {
-  await check('every half of the launcher compiles clean (-Wall -Wextra, the flags install.sh uses plus one)', async () => {
-    for (const build of builds) {
-      assert.equal(build.status, 0, `stdout:\n${build.stdout}\nstderr:\n${build.stderr}`);
-      assert.equal(build.stdout.trim(), '', `unexpected compiler output:\n${build.stdout}`);
-      assert.equal(build.stderr.trim(), '', `unexpected compiler warning:\n${build.stderr}`);
-    }
-    assert.ok(existsSync(launcherExec), 'the launcher binary must exist after a clean build');
-  });
+  // The clean-build check (all three halves, no warnings) is check-launcher-env.mjs's; a
+  // build that fails here only has to name itself rather than surface as a missing binary.
+  const failedBuild = builds.find(b => b.status !== 0);
+  if (failedBuild || !existsSync(launcherExec)) {
+    throw new Error(`the launcher did not build:\nstdout:\n${failedBuild?.stdout}\nstderr:\n${failedBuild?.stderr}`);
+  }
   chmodSync(launcherExec, 0o755);
 
-  await check('criterion 10: an argv-less launcher forks TWO children -- the daemon, and its own executable re-exec\'d as `--menubar`', async () => {
+  await check('an argv-less launcher forks TWO children -- the daemon, and its own executable re-exec\'d as `--menubar`', async () => {
     const d = await startLauncher();
     try {
-      const kids = await waitFor('two children', () => {
+      const kids = await waitFor(() => {
         const found = childrenOf(d.child.pid);
         return found.length === 2 ? found : null;
-      });
+      }, { what: 'two children', ...POLL });
       const item = kids.find(isItem);
       assert.ok(item, `no --menubar child among ${JSON.stringify(kids)}`);
       // The exact argv, not a substring: it proves the child was reached by execve of THIS
@@ -277,7 +208,7 @@ async function main() {
       stdio: ['ignore', 'ignore', 'ignore'],
     });
     try {
-      const item = await waitFor('the --menubar child', () => childrenOf(child.pid).find(isItem));
+      const item = await waitFor(() => childrenOf(child.pid).find(isItem), { what: 'the --menubar child', ...POLL });
       // `ps -Eww` prints a process's environment after its arguments.
       const dump = spawnSync('ps', ['-Eww', '-o', 'args=', '-p', String(item.pid)], { encoding: 'utf8' }).stdout || '';
       assert.ok(dump.includes(`HOME=${compiledHome}`), `the item must get the compiled-in HOME, not the inherited one:\n${dump}`);
@@ -289,27 +220,27 @@ async function main() {
     }
   });
 
-  await check('criterion 15: SIGKILLing the item leaves the daemon serving and its clock ticking, leaves the launcher supervising, and reaps rather than zombifies the item', async () => {
+  await check('SIGKILLing the item leaves the daemon serving and its clock ticking, leaves the launcher supervising, and reaps rather than zombifies the item', async () => {
     const d = await startLauncher();
     try {
-      const item = await waitFor('the --menubar child', () => childrenOf(d.child.pid).find(isItem));
+      const item = await waitFor(() => childrenOf(d.child.pid).find(isItem), { what: 'the --menubar child', ...POLL });
       const ticksBefore = await d.ticks();
       process.kill(item.pid, 'SIGKILL');
 
       // Reaped, not left as a zombie: waiting on the daemon's pid alone (which is what the
       // launcher did before it had two children) leaves this one unreaped for the life of
       // the job. `ps` is the only instrument that tells the two apart.
-      await waitFor('the item to be reaped', () => processState(item.pid) === '');
+      await waitFor(() => processState(item.pid) === '', { what: 'the item to be reaped', ...POLL });
 
       assert.equal(d.exit, null, `the launcher must still be running:\nstdout:\n${d.stdout}\nstderr:\n${d.stderr}`);
       assert.ok(processState(d.child.pid) !== '', 'the launcher process must still exist');
 
       // "does not stop the Timer": the daemon's own interval must have ADVANCED across the
       // kill, not merely have left a process behind that answers.
-      const ticksAfter = await waitFor('the daemon\'s clock to advance', async () => {
+      const ticksAfter = await waitFor(async () => {
         const now = await d.ticks();
         return now > ticksBefore ? now : null;
-      });
+      }, { what: 'the daemon\'s clock to advance', ...POLL });
       assert.ok(ticksAfter > ticksBefore, `the daemon's clock must keep advancing: ${ticksBefore} -> ${ticksAfter}`);
 
       // ADR 72: a --menubar child that dies is not restarted. A launcher that respawned it
@@ -328,9 +259,9 @@ async function main() {
     // launcher's place would look to launchd exactly like the daemon crashing.
     const d = await startLauncher();
     try {
-      const item = await waitFor('the --menubar child', () => childrenOf(d.child.pid).find(isItem));
+      const item = await waitFor(() => childrenOf(d.child.pid).find(isItem), { what: 'the --menubar child', ...POLL });
       process.kill(item.pid, 'SIGKILL');
-      await waitFor('the item to be reaped', () => processState(item.pid) === '');
+      await waitFor(() => processState(item.pid) === '', { what: 'the item to be reaped', ...POLL });
       await d.exitDaemon(3);
       const exit = await d.waitForExit();
       assert.deepEqual(exit, { code: 3, signal: null }, `the launcher must report the daemon's own exit code:\nstderr:\n${d.stderr}`);
@@ -345,11 +276,11 @@ async function main() {
     // it in Activity Monitor.
     const d = await startLauncher();
     try {
-      const item = await waitFor('the --menubar child', () => childrenOf(d.child.pid).find(isItem));
+      const item = await waitFor(() => childrenOf(d.child.pid).find(isItem), { what: 'the --menubar child', ...POLL });
       await d.exitDaemon(0);
       const exit = await d.waitForExit();
       assert.deepEqual(exit, { code: 0, signal: null }, `stderr:\n${d.stderr}`);
-      await waitFor('the item to go away with its launcher', () => processState(item.pid) === '');
+      await waitFor(() => processState(item.pid) === '', { what: 'the item to go away with its launcher', ...POLL });
     } finally {
       d.stop();
     }
@@ -358,12 +289,12 @@ async function main() {
   await check('SIGTERM to the launcher stops both children and the launcher itself', async () => {
     const d = await startLauncher();
     try {
-      const item = await waitFor('the --menubar child', () => childrenOf(d.child.pid).find(isItem));
+      const item = await waitFor(() => childrenOf(d.child.pid).find(isItem), { what: 'the --menubar child', ...POLL });
       const daemon = childrenOf(d.child.pid).find(c => !isItem(c));
       d.child.kill('SIGTERM');
       const exit = await d.waitForExit();
       assert.deepEqual(exit, { code: 0, signal: null }, `a forwarded SIGTERM must let the daemon shut down cleanly:\nstderr:\n${d.stderr}`);
-      await waitFor('both children to go', () => processState(item.pid) === '' && processState(daemon.pid) === '');
+      await waitFor(() => processState(item.pid) === '' && processState(daemon.pid) === '', { what: 'both children to go', ...POLL });
     } finally {
       d.stop();
     }
@@ -383,7 +314,7 @@ async function main() {
     assert.equal(exit, null, `--menubar must stay running until it is signalled:\nstderr:\n${err}`);
     assert.deepEqual(childrenOf(child.pid), [], '--menubar must fork nothing at all');
     child.kill('SIGTERM');
-    const seen = await waitFor('the run loop to exit', () => exit);
+    const seen = await waitFor(() => exit, { what: 'the run loop to exit', ...POLL });
     assert.deepEqual(seen, { code: 0, signal: null }, `a signalled run loop must exit 0, not die by signal:\nstderr:\n${err}`);
   });
 
@@ -395,10 +326,10 @@ async function main() {
     // any future plist that passed one.
     const d = await startLauncher(['--not-a-mode-this-binary-knows']);
     try {
-      const kids = await waitFor('two children', () => {
+      const kids = await waitFor(() => {
         const found = childrenOf(d.child.pid);
         return found.length === 2 ? found : null;
-      });
+      }, { what: 'two children', ...POLL });
       assert.ok(kids.some(isItem), `the item must be forked on the fallthrough path too: ${JSON.stringify(kids)}`);
     } finally {
       d.stop();
@@ -406,17 +337,4 @@ async function main() {
   });
 }
 
-main()
-  .catch(err => {
-    failures++;
-    console.error('FAIL - unexpected error');
-    console.error(err);
-  })
-  .finally(() => {
-    rmSync(workDir, { recursive: true, force: true });
-    if (failures) {
-      console.error(`\n${failures} check(s) failed`);
-      process.exit(1);
-    }
-    console.log('\nall launcher-menubar checks ok');
-  });
+await runMain('launcher-menubar', main, { cleanup: () => rmSync(workDir, { recursive: true, force: true }) });

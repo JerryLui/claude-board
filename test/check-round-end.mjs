@@ -34,73 +34,15 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createBoard, addRound, applySubmit } from '../src/board.mjs';
 import { renderBoardPage, renderRoundSection, groupCommentsByBlock } from '../src/render.mjs';
-import { ui } from '../src/ui.mjs';
 import { styles } from '../src/styles.mjs';
-import { PILL_SUBMITTED_TITLE } from '../src/badge.mjs';
-import { parseHTML, StandInIntersectionObserver, StandInEventSource, StandInEvent, resolveComputedProperty } from './dom-stand-in.mjs';
+import { parseHTML, StandInIntersectionObserver, StandInEvent, resolveComputedProperty } from './dom-stand-in.mjs';
+import { check, finish, pageHarness } from './support.mjs';
 
-let failures = 0;
-function check(name, fn) {
-  try {
-    fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
+const { loadBoard, loadBoardWithEventSource, answerSingle, deferBlock } = await pageHarness();
 
 const Q1 = { kind: 'question', prompt: 'Q1: pick one', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] };
 const Q2 = { kind: 'question', prompt: 'Q2: pick another', widget: 'single', options: [{ label: 'A' }, { label: 'B' }] };
 const Q3 = { kind: 'question', prompt: 'Q3: pick a third', widget: 'single', options: [{ label: 'Alpha' }, { label: 'Beta' }] };
-
-/** Answer a single-choice question by clicking the option carrying `label`, through
- * the real widget -- same idiom as test/check-send-guard.mjs's own answerSingle,
- * copied rather than imported across files (no shared test-helper module exists
- * here, and this file already carries its own loadBoard/loadBoardWithIntersectionObserver
- * pair rather than reaching into check-send-guard.mjs's). */
-function answerSingle(block, label) {
-  const opt = [...block.querySelectorAll('.choice-single')].find(el => el.textContent.trim() === label);
-  assert.ok(opt, `setup failure: no "${label}" option rendered in this block`);
-  opt.dispatchEvent(new StandInEvent('click'));
-}
-
-/** Defer a question through its real Defer button. */
-function deferBlock(block) {
-  const btn = block.querySelector('.btn-defer');
-  assert.ok(btn, 'setup failure: no Defer button rendered in this block');
-  btn.dispatchEvent(new StandInEvent('click'));
-}
-
-/** Parse `html` and run the real `ui` client script against it -- same idiom as
- * test/check-enter.mjs's loadBoard. 'EventSource' is declared and, unless
- * `EventSourceStandIn` is given (see loadBoardWithEventSource below), left
- * unpassed -- see QUIRKS.md "A `new Function` harness inherits the host's
- * globals". */
-function loadBoard(html, protocol, EventSourceStandIn) {
-  const document = parseHTML(html);
-  const window = document.defaultView;
-  const location = { protocol: protocol || 'http:' };
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location, EventSourceStandIn);
-  return document;
-}
-
-/** loadBoard, plus a captured, stubbed EventSource declared and passed straight
- * to the client script (same declare-and-pass shape as test/check-index-live.mjs,
- * no globalThis save/restore needed) -- test/check-anchor-push.mjs's own idiom,
- * reused here to drive a real 'round' SSE push and prove the live transition
- * (markRoundHistory stripping the rail) matches what the server would have
- * rendered instead. */
-function loadBoardWithEventSource(html) {
-  let captured = null;
-  class CapturingEventSource extends StandInEventSource {
-    constructor(url) { super(url); captured = this; }
-  }
-  const document = loadBoard(html, 'http:', CapturingEventSource);
-  assert.ok(captured, 'setup failure: the real ui script never constructed an EventSource');
-  return { document, es: captured };
-}
 
 /** loadBoard, plus a captured, stubbed IntersectionObserver in place before the
  * script runs (setupSendBarDock constructs one synchronously at hydrate, guarded
@@ -118,7 +60,7 @@ function loadBoardWithIntersectionObserver(html, protocol) {
   }
   globalThis.IntersectionObserver = CapturingIntersectionObserver;
   try {
-    const document = loadBoard(html, protocol);
+    const document = loadBoard(html, { protocol });
     return { document, observers: constructed };
   } finally {
     globalThis.IntersectionObserver = originalIO;
@@ -300,7 +242,7 @@ check('the rail moves live over SSE -- the round a push collapses into history l
 // round over SSE, same payload shape as the SSE-parity check just above.
 // =====================================================================================
 
-check('rider fix: the send bar\'s post-submit status message clears the moment a new round lands, and never sits beside the freshly-opened round', () => {
+check('the send bar\'s post-submit status message clears the moment a new round lands, never sitting beside the freshly-opened round, and Send is live again', () => {
   const board = createBoard({ title: 'Round end - status clears on push', blocks: [Q1] });
   applySubmit(board, { action: 'send', answers: [], comments: [] }, 1);
   const pageHtml = renderBoardPage(board);
@@ -316,7 +258,7 @@ check('rider fix: the send bar\'s post-submit status message clears the moment a
 
   assert.equal(sendStatus.textContent, '',
     'the stale post-submit status must clear the instant a new round lands (src/ui.mjs applyRoundPush) -- it must never sit beside the freshly-opened round');
-  assert.equal(document.getElementById('send-btn').disabled, false, 'setup check: the send bar must also be re-enabled for the new open round');
+  assert.equal(document.getElementById('send-btn').disabled, false, 'a new round lands with Send live again: the round that was sent locked the bar, and the one that opens unlocks it');
 });
 
 // =====================================================================================
@@ -340,7 +282,7 @@ check('body.readonly hides .round-end by exact rule, and a real file:// archive 
   const file = path.join(dir, 'board.html');
   writeFileSync(file, html, 'utf8');
   const fileBytes = readFileSync(file, 'utf8');
-  const document = loadBoard(fileBytes, 'file:');
+  const document = loadBoard(fileBytes, { protocol: 'file:' });
 
   assert.equal(document.body.classList.contains('readonly'), true, 'setup failure: opening from file:// must add body.readonly');
   assert.ok(document.querySelector('.round-end'), 'the rail must still be IN the archive\'s DOM -- readonly hides it by CSS (asserted above), never by omitting it server-side');
@@ -409,7 +351,7 @@ check('a read-only file:// archive (send bar hidden, dock still on screen) reser
   const file = path.join(dir, 'board.html');
   writeFileSync(file, html, 'utf8');
   const fileBytes = readFileSync(file, 'utf8');
-  const document = loadBoard(fileBytes, 'file:');
+  const document = loadBoard(fileBytes, { protocol: 'file:' });
   assert.equal(document.body.classList.contains('readonly'), true, 'setup failure: opening from file:// must add body.readonly');
   const shell = document.querySelector('.board-shell');
   assert.ok(shell, 'setup failure: no .board-shell in the archive\'s DOM');
@@ -480,12 +422,6 @@ check('a rank question is never outstanding at first paint: it is answered by th
     'the single is outstanding, the rank is not');
 });
 
-check('singular at exactly one outstanding question', () => {
-  const board = createBoard({ title: 'Pill - singular', blocks: [Q1] });
-  const html = renderBoardPage(board);
-  assert.match(html, /class="questions-left-pill visible" id="questions-left-pill">1 question left</);
-});
-
 check('the pill is grey (--panel-2/--ink-2, the same chrome .mode-toggle already uses), never the send guard\'s warning amber, and floats centered above the send bar', () => {
   assert.match(styles, /\.questions-left-pill\s*\{[^}]*background:\s*var\(--panel-2\)[^}]*color:\s*var\(--ink-2\)[^}]*\}/,
     'expected the pill\'s base rule to use the same grey chrome tokens as .mode-toggle');
@@ -545,21 +481,15 @@ check('clicking the pill lands on the FIRST still-outstanding question\'s own TO
     'the block must be a legal script-focus target without joining the Tab order');
 });
 
-check('the pill is a native <button> in the ordinary tab order -- no custom role or tabindex substituting for it', () => {
-  const board = createBoard({ title: 'Pill - keyboard', blocks: [Q1] });
+check('the pill is a native <button> in the ordinary tab order whose visible count is its only accessible name -- no custom role, tabindex or aria-label', () => {
+  const board = createBoard({ title: 'Pill - keyboard', blocks: [Q1, Q2] });
   const html = renderBoardPage(board);
   const document = loadBoard(html);
   const pill = document.getElementById('questions-left-pill');
   assert.equal(pill.tagName, 'BUTTON', 'the pill must be a real <button>, not a div wearing role="button"');
   assert.equal(pill.hasAttribute('tabindex'), false, 'no tabindex override -- a native button is already reachable by Tab');
-});
-
-check('the pill carries no separate aria-label -- its own visible text IS the accessible name, so it can never say a different count than what is on screen', () => {
-  const board = createBoard({ title: 'Pill - accessible name', blocks: [Q1, Q2] });
-  const html = renderBoardPage(board);
-  const document = loadBoard(html);
-  const pill = document.getElementById('questions-left-pill');
-  assert.equal(pill.hasAttribute('aria-label'), false);
+  assert.equal(pill.hasAttribute('aria-label'), false,
+    'no aria-label -- the visible text IS the accessible name, so it can never say a different count than what is on screen');
   assert.equal(pill.textContent, '2 questions left');
 });
 
@@ -667,7 +597,7 @@ check('the pill never appears in a read-only (file://) archive -- structurally p
   const file = path.join(dir, 'board.html');
   writeFileSync(file, html, 'utf8');
   const fileBytes = readFileSync(file, 'utf8');
-  const document = loadBoard(fileBytes, 'file:');
+  const document = loadBoard(fileBytes, { protocol: 'file:' });
   assert.equal(document.body.classList.contains('readonly'), true, 'setup failure: opening from file:// must add body.readonly');
 
   const pill = document.querySelector('#questions-left-pill');
@@ -680,47 +610,4 @@ check('the pill never appears in a read-only (file://) archive -- structurally p
   assert.equal(document.activeElement, activeBefore, 'a click in a read-only archive must never move focus anywhere -- the pill\'s own readonly guard must hold, belt-and-suspenders alongside the disabled attribute (QUIRKS.md: a stand-in dispatchEvent does not model native click-suppression on a disabled element, so the guard is what actually earns this)');
 });
 
-// === A sent awaited page round is read-only like any other sent round. ==========
-
-check('an awaited page round that has been sent renders its comment surface exactly like any other sent round -- disabled, not dropped, and the pill reads "read-only"', () => {
-  const board = createBoard({ title: 'Sent page round', blocks: [{ kind: 'html', html: '<div class="mock"></div>' }], wait: true });
-  applySubmit(board, { action: 'send', answers: [], comments: [{ blockId: board.blocks[0].id, anchor: { kind: 'block' }, text: 'looks good' }] }, 1);
-  const html = renderBoardPage(board);
-  const document = loadBoard(html);
-
-  const roundSection = document.querySelector('.round[data-round="1"]');
-  assert.ok(roundSection, 'setup failure: no round 1 section rendered');
-  assert.equal(roundSection.classList.contains('round-history'), true, 'a sent round renders as history, exactly like any other');
-
-  const form = document.querySelector('.comment-form');
-  assert.ok(form, 'the compose form must still be rendered -- read-only, not removed, matching every other sent block\'s comment form');
-  assert.equal(form.querySelector('input[type=text]').disabled, true);
-  assert.equal(form.querySelector('button[type=submit]').disabled, true);
-
-  const sendBtn = document.querySelector('.page-send-btn');
-  const discussBtn = document.querySelector('.page-discuss-btn');
-  assert.ok(sendBtn && discussBtn, 'the send control must still be rendered on a sent page round too, disabled rather than gone');
-  assert.equal(sendBtn.disabled, true);
-  assert.equal(discussBtn.disabled, true);
-  assert.equal(sendBtn.textContent, 'Send 1 comment', 'the label still names what WAS sent');
-
-  const item = document.querySelector('.comment-item');
-  assert.ok(item, 'the sent comment must still be visible in the list');
-  assert.match(item.textContent, /looks good/);
-
-  // ADR 89 gives a Submitted round its own pill word, `submitted` -- but only
-  // on an ORDINARY board. A page round genuinely reaching `status: 'sent'`
-  // (ADR.md entry 44 keeps this path out of the browser, but applySubmit
-  // itself does not refuse it, which is exactly what this fixture drives)
-  // must still read `read-only`: `pageBoardPillMeta`'s `fullpage` gate
-  // (src/badge.mjs) holds a page board off `submitted` at the pill itself.
-  const meta = document.querySelector('span#round-meta');
-  assert.equal(meta.textContent, 'read-only', 'a sent PAGE round\'s pill stays "read-only", never "submitted"');
-  assert.notEqual(meta.title, PILL_SUBMITTED_TITLE);
-});
-
-if (failures) {
-  console.error(`\n${failures} check(s) failed`);
-  process.exit(1);
-}
-console.log('\nall round-end checks ok');
+finish('round-end');

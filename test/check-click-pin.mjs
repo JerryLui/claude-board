@@ -16,20 +16,10 @@
 import assert from 'node:assert/strict';
 import { createBoard } from '../src/board.mjs';
 import { renderBoardPage } from '../src/render.mjs';
-import { ui } from '../src/ui.mjs';
-import { parseHTML, StandInEvent } from './dom-stand-in.mjs';
+import { StandInEvent } from './dom-stand-in.mjs';
+import { check, finish, pageHarness } from './support.mjs';
 
-let failures = 0;
-function check(name, fn) {
-  try {
-    fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
+const { loadBoard } = await pageHarness();
 
 // A trailing markdown block keeps this an ORDINARY board (isPageRound false):
 // a lone `html` block is a page round (ADR.md entry 33) whose comment gesture
@@ -47,12 +37,7 @@ const blockId = board.blocks[0].id;
 const pageHtml = renderBoardPage(board);
 
 check('clicking an element, then submitting the opened comment form, draws a numbered pin into that block\'s .pin-layer, positioned from the real (loaded) stage document', () => {
-  const document = parseHTML(pageHtml);
-  const window = document.defaultView;
-  const location = { protocol: 'http:' };
-  // 'EventSource' declared, never passed -- see QUIRKS.md "A `new Function` harness
-  // inherits the host's globals" for why.
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
+  const document = loadBoard(pageHtml);
 
   const frame = document.querySelector('.html-stage');
   assert.ok(frame, 'setup failure: no .html-stage iframe on the rendered page');
@@ -131,12 +116,7 @@ check('two different elements inside the same stage get two different, independe
   const twoElBlockId = twoElBoard.blocks[0].id;
   const twoElHtml = renderBoardPage(twoElBoard);
 
-  const document = parseHTML(twoElHtml);
-  const window = document.defaultView;
-  const location = { protocol: 'http:' };
-  // 'EventSource' declared, never passed -- see QUIRKS.md "A `new Function` harness
-  // inherits the host's globals" for why.
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
+  const document = loadBoard(twoElHtml);
 
   const frame = document.querySelector('.html-stage');
   const modeToggle = document.getElementById('comment-mode-toggle');
@@ -212,9 +192,7 @@ check('a stored dom ref on a CONTEXT diagram is dropped rather than walked: the 
     anchor: { kind: 'dom', ref: '2', hint: 'flowchart LR A --> B' },
   });
 
-  const document = parseHTML(renderBoardPage(contextBoard));
-  const window = document.defaultView;
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, { protocol: 'http:' });
+  const document = loadBoard(renderBoardPage(contextBoard));
 
   const item = document.querySelector('.context-item.mermaid-block');
   assert.ok(item, 'setup failure: no context diagram item on the page');
@@ -237,8 +215,4 @@ check('a stored dom ref on a CONTEXT diagram is dropped rather than walked: the 
     'and never at the control group the re-based index happens to hit (ablation: drop the .context-item guard from renderDomPins and it lands here)');
 });
 
-if (failures) {
-  console.error(`\n${failures} check(s) failed`);
-  process.exit(1);
-}
-console.log('\nall click-pin checks ok');
+finish('click-pin');

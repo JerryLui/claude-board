@@ -18,22 +18,12 @@
 import assert from 'node:assert/strict';
 import { createBoard, applySubmit } from '../src/board.mjs';
 import { renderBoardPage } from '../src/render.mjs';
-import { ui } from '../src/ui.mjs';
 import { styles } from '../src/styles.mjs';
-import { PILL_READONLY_TITLE, ROUND_OPEN_UNAWAITED_TITLE, PILL_SUBMITTED_TITLE, pageBoardPillMeta } from '../src/badge.mjs';
-import { parseHTML, StandInEvent, resolveComputedProperty } from './dom-stand-in.mjs';
+import { ROUND_OPEN_UNAWAITED_TITLE, PILL_SUBMITTED_TITLE, PILL_READONLY_TITLE } from '../src/badge.mjs';
+import { parseHTML, StandInEvent } from './dom-stand-in.mjs';
+import { check, finish, pageHarness } from './support.mjs';
 
-let failures = 0;
-function check(name, fn) {
-  try {
-    fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
+const { loadBoard, condensed, progress, computed } = await pageHarness();
 
 // Two blocks (or any non-single-html shape) is deliberately NOT a page board
 // (src/render.mjs's isPageBoard, ADR.md entry 33) -- this file's whole subject
@@ -49,20 +39,6 @@ function ordinaryBoard() {
   });
 }
 
-function loadBoard(pageHtml, protocol = 'http:') {
-  const document = parseHTML(pageHtml);
-  const window = document.defaultView;
-  const location = { protocol };
-  // 'EventSource' is DECLARED and never passed, binding the name to undefined inside
-  // this scope so src/ui.mjs's own `typeof EventSource === 'undefined'` guard takes
-  // its early return by this file's choice, not because of whether this node build
-  // happens to expose a global EventSource (behind a flag since 22.x) -- left off
-  // the list, an http: load here would open a live connection to
-  // '/api/board/<id>/events' and throw, from a check that is about the header alone.
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
-  return document;
-}
-
 /** Drives the mechanism this file exists to check: sets the document's own
  * scroll offset and fires the 'scroll' event a real browser would, on the
  * SAME window refreshDocumentScrollChrome (src/ui.mjs) listens on -- never a
@@ -75,10 +51,6 @@ function scrollDocumentTo(document, top) {
   window.pageYOffset = top;
   window.dispatchEvent(new StandInEvent('scroll'));
 }
-
-const condensed = (document) => document.body.classList.contains('stage-scrolled');
-const progress = (document) => document.body.style.getPropertyValue('--stage-p');
-const computed = (el, prop) => resolveComputedProperty(styles, el, true, prop);
 
 // =================================================================================
 // AC 7: the header condenses on document scroll, into the same pill.
@@ -177,28 +149,27 @@ check('AC 7: the state label shows on an ordinary board too -- the countdown whi
   // here is exactly what this assertion exists to catch.
   assert.equal(meta2.title, ROUND_OPEN_UNAWAITED_TITLE,
     'an ordinary board\'s open, unawaited round must not claim commenting is off directly above a live Send button');
-  assert.notEqual(meta2.title, PILL_READONLY_TITLE,
-    'the page-board-only title must not leak onto an ordinary board\'s live round');
 });
 
 check('AC 7 / ADR 89: an ordinary board whose round was Submitted shows "submitted" in the state label, not "read-only"', () => {
   const board = ordinaryBoard();
   applySubmit(board, { action: 'send', answers: [], comments: [] }, board.rounds[0].n);
-  const document = loadBoard(renderBoardPage(board));
+  const pageHtml = renderBoardPage(board);
+  const document = loadBoard(pageHtml);
   const meta = document.querySelector('span#round-meta');
   assert.equal(computed(meta, 'display'), 'inline');
   assert.equal(meta.textContent, 'submitted', 'a Submitted round gets its own word (ADR 89), not the never-Awaited/Lapsed "read-only"');
   assert.equal(meta.title, PILL_SUBMITTED_TITLE, 'and a title true of a round whose answer went out, not either read-only title');
-  assert.notEqual(meta.title, PILL_READONLY_TITLE);
-  assert.notEqual(meta.title, ROUND_OPEN_UNAWAITED_TITLE);
+  assert.notEqual(meta.title, ROUND_OPEN_UNAWAITED_TITLE, 'a Submitted round and an open unawaited one never share a title');
+  assert.notEqual(meta.title, PILL_READONLY_TITLE, 'a Submitted round must not claim commenting is off');
 
-  // Hydrate must not flicker: src/render.mjs's own deterministic fallback and
-  // src/ui.mjs's pageBoardPillMeta (spliced into `ui`, run here for real) must
-  // agree on the identical round.
-  const now = Date.now();
-  const hydrated = pageBoardPillMeta(board.rounds[0], now, false);
-  assert.equal(meta.textContent, hydrated.text, 'server first paint and client hydrate must show the same word');
-  assert.equal(meta.title, hydrated.title, 'server first paint and client hydrate must show the same title');
+  // Hydrate must not flicker: src/render.mjs keeps its first-paint word and
+  // title in step with src/ui.mjs's pageBoardPillMeta by hand, and hydrate
+  // overwrites the slot with the latter -- so the first paint is read from the
+  // served bytes before `ui` runs, not from the hydrated document above.
+  const firstPaint = parseHTML(pageHtml).querySelector('span#round-meta');
+  assert.equal(firstPaint.textContent, meta.textContent, 'server first paint and client hydrate must show the same word');
+  assert.equal(firstPaint.getAttribute('title'), meta.title, 'server first paint and client hydrate must show the same title');
 });
 
 check('AC 7: the condensed pill reuses the page board\'s own chrome tokens, pinned as a fact about the stylesheet', () => {
@@ -502,15 +473,4 @@ check('AC 8: a page board is unaffected -- this document\'s own scroll event dri
   assert.equal(condensed(document), false);
 });
 
-// This file counted its failures and then exited 0 regardless, so every check above
-// could go red and test/run.mjs still scored the file green. That is how the
-// EventSource trap this file's harness carried stayed invisible while the rest of the
-// suite was swept: under a preloaded global EventSource, eight of these printed FAIL
-// into a run that still reported "all checks ok". `check` here is synchronous and
-// every call is top-level, so by the time evaluation reaches this line all of them
-// have run and `failures` is final.
-if (failures) {
-  console.error(`\n${failures} check(s) failed`);
-  process.exit(1);
-}
-console.log('\nall header-condense checks ok');
+finish('header-condense');

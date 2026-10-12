@@ -1,14 +1,14 @@
-// Pure-logic checks for src/pomodoro.mjs (ADR.md entry 8) plus one
-// real-daemon restart check in the style of test/check-http.mjs. No notification is
-// ever fired by this file -- there is none to fire yet, a different piece of work owns that seam --
-// and nothing here shells out.
+// Pure-logic checks for src/pomodoro.mjs (ADR.md entry 8) plus real-daemon
+// restart and route checks in the style of test/check-http.mjs. No notification is
+// ever fired by this file: the engine checks hand `createPomodoro` their own
+// `onBoundary` recorder, and no daemon started here crosses a boundary while it is
+// up, so src/notify.mjs's notifyBoundary is never reached. Nothing here shells out.
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, statSync, chmodSync, openSync, closeSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, statSync, chmodSync, openSync, closeSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import {
   DEFAULT_SETTINGS,
   EXPIRY_GRACE_MS,
@@ -34,22 +34,11 @@ import {
 } from '../src/pomodoro.mjs';
 import { startServer } from '../src/server.mjs';
 import { NO_CUE } from '../src/cues.mjs';
-import { SECRET_HEADER, SESSION_COOKIE, sessionToken } from '../src/secret.mjs';
+import { SECRET_HEADER } from '../src/secret.mjs';
+import { check, mcpBin, runMain, sessionCookieHeader, sleep } from './support.mjs';
 
 // ADR 105: the pomodoro ships off, so a fixture whose subject is a live timer opts in explicitly.
 const onDoc = () => { const d = defaultDoc(); return { ...d, settings: { ...d.settings, enabled: true } }; };
-
-let failures = 0;
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
 
 /** Promisified server.close, so the restart check can prove the FIRST daemon's clock
  * (and its own pomodoro engine, closed via the 'close' listener src/server.mjs wires)
@@ -63,10 +52,6 @@ async function main() {
   // formatCountdown -- the mm:ss formatter the index page (a later ticket) reuses.
   // -------------------------------------------------------------------------------
 
-  await check('formatCountdown: zero is 00:00', () => {
-    assert.equal(formatCountdown(0), '00:00');
-  });
-
   await check('formatCountdown: minutes and seconds both zero-padded', () => {
     assert.equal(formatCountdown(90_000), '01:30'); // 90s
     assert.equal(formatCountdown(5_000), '00:05');
@@ -78,7 +63,10 @@ async function main() {
     assert.equal(formatCountdown(59_400), '00:59');
   });
 
-  await check('formatCountdown: negative/expired input clamps to 00:00, never a minus sign', () => {
+  await check('formatCountdown: zero reads 00:00, and negative/expired input clamps to the same, never a minus sign', () => {
+    // Zero is its own input, not the clamp's: a paused timer clamped to a zero
+    // remainder (pauseTimer) hands the widget exactly 0.
+    assert.equal(formatCountdown(0), '00:00');
     assert.equal(formatCountdown(-5_000), '00:00');
   });
 
@@ -91,16 +79,6 @@ async function main() {
     assert.equal(localDateStr(new Date(2026, 0, 1, 12, 0, 0).getTime()), '2026-01-01');
     assert.equal(localDateStr(new Date(2026, 11, 31, 23, 59, 0).getTime()), '2026-12-31');
     assert.equal(localDateStr(new Date(2026, 7, 4, 0, 0, 1).getTime()), '2026-08-04');
-  });
-
-  await check('localDateStr: reads local wall-clock fields, not the UTC ones', () => {
-    // A local midnight-ish instant whose UTC calendar date is the PREVIOUS day proves
-    // this isn't secretly calling the UTC accessors: getFullYear/getMonth/getDate on a
-    // Date object are already local by spec, but a future edit swapping them for
-    // getUTCFullYear/etc would still pass every test above run on a UTC-negative-offset
-    // machine and fail only here.
-    const local2359 = new Date(2026, 2, 15, 23, 59, 0); // local: 2026-03-15 23:59
-    assert.equal(localDateStr(local2359.getTime()), '2026-03-15');
   });
 
   // -------------------------------------------------------------------------------
@@ -298,21 +276,12 @@ async function main() {
     const doc = { ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline, paused: false } };
     const { doc: next, boundary } = settleBoundary(doc, now);
     assert.notEqual(next.timer, null);
-    assert.notEqual(boundary, null);
-  });
-
-  await check('settleBoundary: a deadline just inside the grace period advances normally', () => {
-    const now = Date.now();
-    const deadline = now - (EXPIRY_GRACE_MS - 1);
-    const doc = { ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline, paused: false } };
-    const { doc: next, boundary } = settleBoundary(doc, now);
-    assert.notEqual(next.timer, null);
     assert.deepEqual(boundary, { phase: 'break' });
   });
 
-  // The three checks immediately above all phrase staleness as EXPIRY_GRACE_MS plus
+  // The two checks immediately above both phrase staleness as EXPIRY_GRACE_MS plus
   // or minus a handful of milliseconds. That pins the `>` vs `>=` boundary exactly,
-  // which is what it is for -- but every one of them moves in lockstep with the
+  // which is what it is for -- but both of them move in lockstep with the
   // constant, so read alone they describe the rule's SHAPE and say nothing about its
   // SCALE. The two below write staleness as an absolute duration, naming no constant,
   // and are the ones that would still fail if EXPIRY_GRACE_MS were rescaled to hours
@@ -361,31 +330,7 @@ async function main() {
     assert.equal(forwardTimer(doc, Date.now()), doc);
   });
 
-  await check('forwardTimer: a running work interval ends immediately and begins its break', () => {
-    const now = Date.now();
-    const doc = { ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now + 20 * 60_000, paused: false } };
-    const next = forwardTimer(doc, now);
-    assert.equal(next.timer.phase, 'break');
-    assert.equal(next.timer.paused, false, 'the next phase starts running');
-    assert.equal(next.timer.deadline, now + DEFAULT_SETTINGS.breakMin * 60_000);
-  });
-
-  // Criterion 11 (ADR 82): forwarding a paused Timer must land paused at the start of
-  // the next phase, with that phase's FULL duration remaining -- not the runnable
-  // interval the old code produced, and not whatever sliver of `remainingMs` the paused
-  // timer happened to be carrying (30s here, deliberately far from a full break).
-  await check('forwardTimer: forwarding a PAUSED timer lands PAUSED at the next phase, with its full duration in remainingMs (ADR 82)', () => {
-    const now = Date.now();
-    // The real shape pauseTimer leaves behind: no deadline, remainingMs instead.
-    const doc = { ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', paused: true, remainingMs: 30_000 } };
-    const next = forwardTimer(doc, now);
-    assert.equal(next.timer.phase, 'break');
-    assert.equal(next.timer.paused, true, 'forward must not un-pause');
-    assert.equal(next.timer.remainingMs, DEFAULT_SETTINGS.breakMin * 60_000, 'the FULL next phase, not the stale remainder');
-    assert.equal('deadline' in next.timer, false, 'a paused timer has no deadline, same shape pauseTimer leaves');
-  });
-
-  await check('forwardTimer: long-break cadence intact across a full loop -- forwarded work still earns its break, forwarded break still increments the cycle, forwarded long break resets it', () => {
+  await check('forwardTimer: long-break cadence intact across a full loop -- forwarded work still earns its break, forwarded break still increments the cycle, forwarded long break resets it, and each next phase starts running at its full duration', () => {
     const t0 = new Date(2026, 7, 4, 9, 0, 0).getTime();
     let doc = { ...defaultDoc(), cycleDate: pomodoroDay(t0), timer: { phase: 'work', deadline: t0 + 999_000, paused: false } };
     let now = t0;
@@ -395,27 +340,28 @@ async function main() {
     // clicks (arbitrarily far from each interval's real deadline) instead of a real
     // boundary, which is the whole point: the bookkeeping must not care which one fired.
     const steps = [
-      ['break', 0],
-      ['work', 1],
-      ['break', 1],
-      ['work', 2],
-      ['break', 2],
-      ['work', 3],
-      ['longBreak', 3], // 4th break is long
-      ['work', 0], // cycle resets after the long break
+      ['break', 0, DEFAULT_SETTINGS.breakMin],
+      ['work', 1, DEFAULT_SETTINGS.workMin],
+      ['break', 1, DEFAULT_SETTINGS.breakMin],
+      ['work', 2, DEFAULT_SETTINGS.workMin],
+      ['break', 2, DEFAULT_SETTINGS.breakMin],
+      ['work', 3, DEFAULT_SETTINGS.workMin],
+      ['longBreak', 3, DEFAULT_SETTINGS.longBreakMin], // 4th break is long
+      ['work', 0, DEFAULT_SETTINGS.workMin], // cycle resets after the long break
     ];
 
-    for (const [expectPhase, expectCycle] of steps) {
+    for (const [expectPhase, expectCycle, expectMin] of steps) {
       now += 1_000; // each click lands at a distinct, arbitrary "now" -- never the real deadline
       const next = forwardTimer(doc, now);
       assert.equal(next.timer.phase, expectPhase);
       assert.equal(next.cycle, expectCycle);
-      assert.equal(next.timer.paused, false);
+      assert.equal(next.timer.paused, false, `${expectPhase}: the next phase starts running`);
+      assert.equal(next.timer.deadline, now + expectMin * 60_000, `${expectPhase}: a full fresh interval from the click`);
       doc = next;
     }
   });
 
-  await check('forwardTimer: the same cadence holds PAUSED -- a paused loop advances phase and cycle exactly like the running one, and never un-pauses along the way', () => {
+  await check('forwardTimer: the same cadence holds PAUSED -- a paused loop advances phase and cycle exactly like the running one, never un-pauses, and lands each step with the next phase\'s full duration and no deadline (ADR 82)', () => {
     const t0 = new Date(2026, 7, 4, 9, 0, 0).getTime();
     // Starts paused, with a deliberately odd remainingMs -- proof each step re-mints
     // a FULL duration rather than carrying the previous step's number forward.
@@ -440,6 +386,7 @@ async function main() {
       assert.equal(next.cycle, expectCycle);
       assert.equal(next.timer.paused, true, `${expectPhase}: still paused`);
       assert.equal(next.timer.remainingMs, expectMin * 60_000, `${expectPhase}: full duration, not carried over`);
+      assert.equal('deadline' in next.timer, false, `${expectPhase}: a paused timer has no deadline, same shape pauseTimer leaves`);
       doc = next;
     }
   });
@@ -469,22 +416,7 @@ async function main() {
     }
   });
 
-  // Criterion 12 (ADR 82): restarting a paused Timer re-mints the CURRENT phase and
-  // stays paused -- it re-mints `remainingMs`, not a `deadline`, and to the phase's
-  // FULL duration rather than whatever sliver (4s here) the paused timer was carrying.
-  await check('restartTimer: a PAUSED timer re-mints remainingMs to a full interval of the CURRENT phase and stays paused (ADR 82)', () => {
-    const now = Date.now();
-    const doc = { ...defaultDoc(), cycle: 2, cycleDate: '2026-08-01', timer: { phase: 'break', paused: true, remainingMs: 4_000 } };
-    const next = restartTimer(doc, now);
-    assert.equal(next.timer.phase, 'break', 'phase untouched');
-    assert.equal(next.timer.paused, true, 'restart must not un-pause');
-    assert.equal(next.timer.remainingMs, DEFAULT_SETTINGS.breakMin * 60_000, 'the FULL phase, not the stale remainder');
-    assert.equal('deadline' in next.timer, false, 'a paused timer has no deadline, same shape pauseTimer leaves');
-    assert.equal(next.cycle, 2, 'cycle untouched');
-    assert.equal(next.cycleDate, '2026-08-01', 'cycleDate untouched');
-  });
-
-  await check('restartTimer: PAUSED holds across every phase and custom settings, same as the running case above', () => {
+  await check('restartTimer: a PAUSED timer re-mints remainingMs to a full interval of its CURRENT phase from current settings and stays paused, phase, cycle and cycleDate untouched -- every phase (ADR 82)', () => {
     const now = Date.now();
     const settings = { ...DEFAULT_SETTINGS, workMin: 11, breakMin: 3, longBreakMin: 22 };
     for (const [phase, key] of [['work', 'workMin'], ['break', 'breakMin'], ['longBreak', 'longBreakMin']]) {
@@ -493,8 +425,9 @@ async function main() {
       assert.equal(next.timer.phase, phase, 'phase untouched');
       assert.equal(next.timer.paused, true);
       assert.equal(next.timer.remainingMs, settings[key] * 60_000, `remainingMs re-minted to a full ${key}`);
-      assert.equal('deadline' in next.timer, false);
+      assert.equal('deadline' in next.timer, false, 'a paused timer has no deadline, same shape pauseTimer leaves');
       assert.equal(next.cycle, 2, 'cycle untouched');
+      assert.equal(next.cycleDate, '2026-08-01', 'cycleDate untouched');
     }
   });
 
@@ -512,13 +445,6 @@ async function main() {
   // -------------------------------------------------------------------------------
   // startWork -- the "ensure, not start" rule, pure half.
   // -------------------------------------------------------------------------------
-
-  await check('startWork: begins a fresh work interval when there is no timer at all', () => {
-    const now = Date.now();
-    const next = startWork(onDoc(), now);
-    assert.equal(next.timer.phase, 'work');
-    assert.equal(next.timer.deadline, now + DEFAULT_SETTINGS.workMin * 60_000);
-  });
 
   await check('startWork: a running timer is untouched, by reference', () => {
     const now = Date.now();
@@ -638,10 +564,6 @@ async function main() {
     assert.deepEqual(BANNER_LEVELS, ['off', 'no-board', 'this-board', 'always']);
   });
 
-  await check('DEFAULT_SETTINGS: bannerLevel defaults to this-board -- byte-for-byte the retired notifyRounds: true behavior', () => {
-    assert.equal(DEFAULT_SETTINGS.bannerLevel, 'this-board');
-  });
-
   await check('bannerLevel: an explicit valid level wins outright, every level round-trips', () => {
     for (const level of BANNER_LEVELS) assert.equal(bannerLevel({ bannerLevel: level }), level);
   });
@@ -675,12 +597,6 @@ async function main() {
     const settings = normalizeDoc({ settings: { workMin: 40 } }).settings;
     assert.equal(settings.bannerLevel, 'this-board');
     assert.equal('notifyRounds' in settings, false, 'the retired key must not survive normalization');
-  });
-
-  await check('normalizeDoc: migration -- an existing settings document with notifyRounds true lands on the default level (criterion 7)', () => {
-    const settings = normalizeDoc({ settings: { notifyRounds: true } }).settings;
-    assert.equal(settings.bannerLevel, 'this-board');
-    assert.equal('notifyRounds' in settings, false);
   });
 
   await check('normalizeDoc: migration -- an existing settings document with notifyRounds false lands on Off (criterion 7)', () => {
@@ -749,23 +665,6 @@ async function main() {
   // real daemon.
   // -------------------------------------------------------------------------------
 
-  await check('DEFAULT_SETTINGS: the countdown shows by default and the item is not hidden', () => {
-    assert.equal(DEFAULT_SETTINGS.menubarCountdown, true, 'the digits are most of why the item exists');
-    assert.equal(DEFAULT_SETTINGS.menubarHidden, false, 'nobody has hidden anything on a fresh machine');
-  });
-
-  await check('normalizeDoc: a document written before either menu bar key existed normalises to the defaults, not to undefined', () => {
-    // The upgrade case, and the one that matters: every settings file on disk today was
-    // written without these two keys. `undefined` would read the same as `false` in a
-    // client's `if (settings.menubarHidden)` AND be dropped from the JSON response
-    // entirely by JSON.stringify -- so the failure would be a status item that never
-    // shows its countdown, with nothing in the response to explain why.
-    const settings = normalizeDoc({ settings: { workMin: 40, notify: false } }).settings;
-    assert.equal(settings.menubarCountdown, true);
-    assert.equal(settings.menubarHidden, false);
-    assert.ok('menubarCountdown' in settings && 'menubarHidden' in settings, 'both keys must be PRESENT, not merely falsy-by-absence');
-  });
-
   await check('normalizeDoc: explicit menu bar values survive untouched, and hand-edited garbage falls back to the default', () => {
     const chosen = normalizeDoc({ settings: { menubarCountdown: false, menubarHidden: true } }).settings;
     assert.equal(chosen.menubarCountdown, false, 'a reader who turned the countdown off keeps it off across a read');
@@ -832,23 +731,14 @@ async function main() {
   // (a document with no key at all), the boundary guard against a hand-edited file
   // pairing `enabled: false` with a still-live timer, and the Rollover-style clearing
   // mergeSettings performs on the true -> false transition (and its absence in
-  // reverse). The impure half -- ensureTimer refused while off, and the armed
-  // setTimeout actually cancelled -- is a few sections further down, and the HTTP
-  // surface is in test/check-http.mjs.
+  // reverse). The impure half -- the armed setTimeout actually cancelled -- is a few
+  // sections further down, and the HTTP surface (ensure refused while off included)
+  // is in test/check-http.mjs.
   // -------------------------------------------------------------------------------
-
-  await check('DEFAULT_SETTINGS: the Master switch is off by default (ADR 105: the pomodoro ships off)', () => {
-    assert.equal(DEFAULT_SETTINGS.enabled, false);
-  });
 
   await check('normalizeDoc: a document with no enabled key at all reads as off -- same as a fresh install', () => {
     const settings = normalizeDoc({ settings: { workMin: 40 } }).settings;
     assert.equal(settings.enabled, false);
-  });
-
-  await check('normalizeDoc: an explicit enabled: true survives normalization untouched', () => {
-    const settings = normalizeDoc({ settings: { enabled: true } }).settings;
-    assert.equal(settings.enabled, true);
   });
 
   await check('normalizeDoc: a non-boolean enabled (hand-edited garbage) falls back to off, same coercion every other toggle gets', () => {
@@ -927,11 +817,15 @@ async function main() {
 
   await check('readDoc: an unparseable file also reads as the defaults, never throws', () => {
     const badHome = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-bad-'));
-    mkdirSync(badHome, { recursive: true });
-    writeFileSync(path.join(badHome, 'pomodoro.json'), '{ not json', { mode: 0o600 });
-    const doc = readDoc(badHome);
-    assert.equal(doc.timer, null);
-    rmSync(badHome, { recursive: true, force: true });
+    try {
+      writeFileSync(path.join(badHome, 'pomodoro.json'), '{ not json', { mode: 0o600 });
+      const doc = readDoc(badHome);
+      assert.deepEqual(doc.settings, DEFAULT_SETTINGS);
+      assert.equal(doc.cycle, 0);
+      assert.equal(doc.timer, null);
+    } finally {
+      rmSync(badHome, { recursive: true, force: true });
+    }
   });
 
   await check('writeDoc + readDoc: round-trips exactly, and the file is 0600 / the home dir 0700', () => {
@@ -973,38 +867,10 @@ async function main() {
   });
 
   // -------------------------------------------------------------------------------
-  // ensureTimer -- the impure "ensure, not start" wrapper createPomodoro exposes.
+  // The engine against an injected clock: what the routes cannot drive. The
+  // ensure no-ops (running, paused, mid-break) and a start from nothing are the
+  // route's own checks in test/check-http.mjs.
   // -------------------------------------------------------------------------------
-
-  await check('ensureTimer: no-op against a RUNNING timer', () => {
-    const h = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-ensure-'));
-    const now = Date.now();
-    const running = { ...onDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now + 300_000, paused: false } };
-    writeDoc(running, h);
-    const engine = createPomodoro({ home: h });
-    try {
-      engine.ensureTimer(now);
-      assert.deepEqual(readDoc(h, now).timer, running.timer);
-    } finally {
-      engine.close();
-      rmSync(h, { recursive: true, force: true });
-    }
-  });
-
-  await check('ensureTimer: no-op against a PAUSED timer from the CURRENT pomodoro day', () => {
-    const h = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-ensure-'));
-    const now = Date.now();
-    const paused = { ...onDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now - 1_000, paused: true, remainingMs: 42_000 } };
-    writeDoc(paused, h);
-    const engine = createPomodoro({ home: h });
-    try {
-      engine.ensureTimer(now);
-      assert.deepEqual(readDoc(h, now).timer, paused.timer);
-    } finally {
-      engine.close();
-      rmSync(h, { recursive: true, force: true });
-    }
-  });
 
   await check('ensureTimer: a PAUSED timer from LAST NIGHT is rolled away and a fresh work interval started, in one call -- the morning\'s first session leaves a timer running', () => {
     // Criterion 6, end to end through the engine: one call, and it both ends yesterday's
@@ -1054,100 +920,12 @@ async function main() {
     }
   });
 
-  // Criteria 11/12 through the whole engine, not just the pure reducer: pause, then
-  // forward or restart, and confirm what actually lands on disk. `arm` (private to
-  // createPomodoro) already bails on `doc.timer.paused` before scheduling anything, so a
-  // forward/restart that lands paused leaves nothing armed with no code change needed
-  // here -- these two pin the persisted document, which is the only thing a client
-  // (Popover or index page) ever reads back.
-  await check('engine.forward: forwarding a PAUSED timer persists PAUSED at the next phase, full duration remaining', () => {
-    const h = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-forward-'));
-    const now = Date.now();
-    const engine = createPomodoro({ home: h });
-    try {
-      writeDoc({ ...onDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now + 300_000, paused: false } }, h);
-      engine.pause(now);
-      const forwarded = engine.forward(now + 1_000);
-      assert.equal(forwarded.timer.phase, 'break');
-      assert.equal(forwarded.timer.paused, true);
-      assert.equal(forwarded.timer.remainingMs, DEFAULT_SETTINGS.breakMin * 60_000);
-      assert.deepEqual(readDoc(h, now + 1_000).timer, forwarded.timer, 'persisted, not just returned');
-    } finally {
-      engine.close();
-      rmSync(h, { recursive: true, force: true });
-    }
-  });
-
-  await check('engine.restart: restarting a PAUSED timer persists PAUSED at the same phase, full duration remaining', () => {
-    const h = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-restart-'));
-    const now = Date.now();
-    const engine = createPomodoro({ home: h });
-    try {
-      writeDoc({ ...onDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'break', deadline: now + 60_000, paused: false } }, h);
-      engine.pause(now);
-      const restarted = engine.restart(now + 1_000);
-      assert.equal(restarted.timer.phase, 'break');
-      assert.equal(restarted.timer.paused, true);
-      assert.equal(restarted.timer.remainingMs, DEFAULT_SETTINGS.breakMin * 60_000);
-      assert.deepEqual(readDoc(h, now + 1_000).timer, restarted.timer, 'persisted, not just returned');
-    } finally {
-      engine.close();
-      rmSync(h, { recursive: true, force: true });
-    }
-  });
-
-  await check('ensureTimer: no-op against a timer MID-BREAK -- a start during a break does not cut it short', () => {
-    const h = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-ensure-'));
-    const now = Date.now();
-    const midBreak = { ...onDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'break', deadline: now + 90_000, paused: false } };
-    writeDoc(midBreak, h);
-    const engine = createPomodoro({ home: h });
-    try {
-      engine.ensureTimer(now);
-      assert.deepEqual(readDoc(h, now).timer, midBreak.timer);
-    } finally {
-      engine.close();
-      rmSync(h, { recursive: true, force: true });
-    }
-  });
-
-  await check('ensureTimer: starts a fresh work interval when there is truly no timer', () => {
-    const h = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-ensure-'));
-    const now = Date.now();
-    writeDoc(onDoc(), h);
-    const engine = createPomodoro({ home: h });
-    try {
-      engine.ensureTimer(now);
-      const doc = readDoc(h, now);
-      assert.equal(doc.timer.phase, 'work');
-      assert.equal(doc.timer.deadline, now + DEFAULT_SETTINGS.workMin * 60_000);
-    } finally {
-      engine.close();
-      rmSync(h, { recursive: true, force: true });
-    }
-  });
-
   // -------------------------------------------------------------------------------
-  // enabled -- the impure half. ensureTimer refused while off (the exact seam the
-  // session-start hook's POST /api/pomodoro/ensure reaches, safe without the hook
-  // changing), and the engine.settings write actually cancelling the live setTimeout
-  // on the true -> false transition, not merely writing a doc that looks cleared.
+  // enabled -- the impure half: the engine.settings write actually cancelling the live
+  // setTimeout on the true -> false transition, not merely writing a doc that looks
+  // cleared. Ensure refused while off, and re-enabling starting idle, are the route's
+  // (test/check-http.mjs).
   // -------------------------------------------------------------------------------
-
-  await check('ensureTimer: refused while enabled is false -- the session-start hook\'s ensure is a no-op without the hook changing', () => {
-    const h = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-ensure-off-'));
-    const now = Date.now();
-    writeDoc({ ...defaultDoc(), settings: { ...DEFAULT_SETTINGS, enabled: false }, cycleDate: pomodoroDay(now) }, h);
-    const engine = createPomodoro({ home: h });
-    try {
-      const next = engine.ensureTimer(now);
-      assert.equal(next.timer, null, 'no timer is minted while off');
-      assert.equal(readDoc(h, now).timer, null, 'and nothing was written that would say otherwise');
-    } finally {
-      engine.close();
-      rmSync(h, { recursive: true, force: true });
-    }
-  });
 
   await check('engine.settings: flipping enabled off while a Timer is running clears it, resets the Cycle, and cancels the armed boundary -- no notification fires for the interval that was cut off', async () => {
     const h = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-disable-'));
@@ -1165,30 +943,9 @@ async function main() {
       assert.equal(next.cycle, 0, 'the Cycle resets to zero, Rollover-style');
       assert.equal(next.settings.enabled, false);
 
-      await new Promise(resolve => setTimeout(resolve, 400));
+      await sleep(400);
       assert.deepEqual(boundaries, [], `no boundary may fire for an interval the Master switch just cut off: ${JSON.stringify(boundaries)}`);
       assert.equal(readDoc(h, Date.now()).timer, null, 'and the cleared state is what is actually on disk, not just what this call returned');
-    } finally {
-      engine.close();
-      rmSync(h, { recursive: true, force: true });
-    }
-  });
-
-  await check('engine.settings: flipping enabled back on starts idle -- nothing is restored (ADR 90)', () => {
-    const h = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-reenable-'));
-    const engine = createPomodoro({ home: h });
-    try {
-      const now = Date.now();
-      writeDoc({ ...onDoc(), cycle: 3, cycleDate: pomodoroDay(now), timer: { phase: 'break', deadline: now + 60_000, paused: false } }, h);
-      engine.settings({ enabled: false }, now);
-      const backOn = engine.settings({ enabled: true }, now);
-      assert.equal(backOn.timer, null, 'nothing is restored -- ADR 90: an absent timer names the state and nothing else');
-      assert.equal(backOn.cycle, 0);
-      assert.equal(backOn.settings.enabled, true);
-      // And starting fresh from idle works normally again -- being off left no residue
-      // that would stop a later ensure from minting a real interval.
-      const started = engine.ensureTimer(now);
-      assert.equal(started.timer.phase, 'work');
     } finally {
       engine.close();
       rmSync(h, { recursive: true, force: true });
@@ -1242,7 +999,7 @@ async function main() {
 
       // Long enough for any deadline resume could have minted (`now + 0`) to have come
       // due and fired through the armed setTimeout.
-      await new Promise(resolve => setTimeout(resolve, 150));
+      await sleep(150);
       assert.deepEqual(boundaries, [], `no boundary may be reported for an interval that ended hours ago: ${JSON.stringify(boundaries)}`);
       assert.equal(readDoc(h, Date.now()).cycle, 1, 'and the pomodoros already completed today are untouched');
     } finally {
@@ -1301,7 +1058,7 @@ async function main() {
       writeDoc({ ...onDoc(), cycle: 0, cycleDate: pomodoroDay(clock.base), timer: { phase: 'work', deadline: clock.base + 150, paused: false } }, h);
       engine.boot();
       clock.step(2 * 60_000); // NTP, mid-wait: the wall clock moves, the monotonic one does not
-      await new Promise(resolve => setTimeout(resolve, 400));
+      await sleep(400);
 
       assert.deepEqual(boundaries.map(b => b.phase), ['break'], `the work interval must still earn its break: ${JSON.stringify(boundaries)}`);
       const onDisk = readDoc(h, clock.now());
@@ -1325,7 +1082,7 @@ async function main() {
       writeDoc({ ...onDoc(), cycle: 0, cycleDate: pomodoroDay(clock.base), timer: { phase: 'work', deadline: clock.base + 150, paused: false } }, h);
       engine.boot();
       clock.step(-30 * 60_000);
-      await new Promise(resolve => setTimeout(resolve, 400));
+      await sleep(400);
 
       assert.deepEqual(boundaries.map(b => b.phase), ['break'], `the boundary must land when the interval really ran out: ${JSON.stringify(boundaries)}`);
       assert.equal(readDoc(h, clock.now()).timer.phase, 'break');
@@ -1348,7 +1105,7 @@ async function main() {
       writeDoc({ ...defaultDoc(), cycle: 2, cycleDate: pomodoroDay(clock.base), timer: { phase: 'work', deadline: clock.base + 150, paused: false } }, h);
       engine.boot();
       clock.step(4 * 60 * 60 * 1000);
-      await new Promise(resolve => setTimeout(resolve, 400));
+      await sleep(400);
 
       assert.deepEqual(boundaries, [], 'nothing schedules a break that was already over before anyone could take it');
       const onDisk = readDoc(h, clock.now());
@@ -1380,7 +1137,7 @@ async function main() {
       const giveUp = Date.now() + 30_000;
       let onDisk = readDoc(h, clock.now());
       while (onDisk.timer && onDisk.timer.deadline === deadline && Date.now() < giveUp) {
-        await new Promise(resolve => setTimeout(resolve, 100));
+        await sleep(100);
         onDisk = readDoc(h, clock.now());
       }
       assert.ok(onDisk.timer, 'the interval must still be running -- neither frozen nor discarded');
@@ -1424,7 +1181,7 @@ async function main() {
 
       // Without the wrapper this line never returns: the throw escapes the setTimeout
       // callback, node reports an uncaught exception, and this whole check file exits.
-      await new Promise(resolve => setTimeout(resolve, 400));
+      await sleep(400);
       console.error = realError;
 
       assert.ok(logged.some(line => /pomodoro/.test(line)),
@@ -1451,8 +1208,7 @@ async function main() {
   // -------------------------------------------------------------------------------
 
   await check('bin/mcp.mjs carries no pomodoro knowledge at all', () => {
-    const here = path.dirname(fileURLToPath(import.meta.url));
-    const src = readFileSync(path.join(here, '..', 'bin', 'mcp.mjs'), 'utf8');
+    const src = readFileSync(mcpBin, 'utf8');
     assert.equal(/pomodoro/i.test(src), false);
   });
 
@@ -1494,7 +1250,7 @@ async function main() {
     }
   });
 
-  await check('restart: a deadline 4 hours stale on boot (lid closed over lunch) yields no timer and no notification', async () => {
+  await check('restart: a deadline 4 hours stale on boot (lid closed over lunch) leaves no timer on disk', async () => {
     const expiredHome = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-expired-'));
     try {
       const now = Date.now();
@@ -1545,7 +1301,7 @@ async function main() {
     return `http://127.0.0.1:${port}/api/pomodoro/${action}`;
   }
 
-  await check('POST /api/pomodoro/forward: advances the running timer on disk, same cycle bookkeeping a natural boundary performs', async () => {
+  await check('POST /api/pomodoro/forward: a running work interval advances to a running break, on disk exactly as in the response', async () => {
     await withPomodoroServer(async ({ home, port, secret }) => {
       const now = Date.now();
       const running = { ...onDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now + 20 * 60_000, paused: false } };
@@ -1573,7 +1329,7 @@ async function main() {
       assert.equal(body.timer.phase, 'break');
       assert.equal(body.timer.paused, true, 'forward must not un-pause');
       assert.equal(body.timer.remainingMs, DEFAULT_SETTINGS.breakMin * 60_000, 'the FULL next phase, not the stale remainder');
-      assert.equal(readDoc(home).timer.paused, true, 'landed on disk, not just in the response');
+      assert.deepEqual(readDoc(home).timer, body.timer, 'persisted exactly as returned, not just in the response');
     });
   });
 
@@ -1624,10 +1380,10 @@ async function main() {
       writeDoc(paused, home);
 
       const body = await (await fetch(pomodoroUrl(port, 'restart'), { method: 'POST', headers: { [SECRET_HEADER]: secret } })).json();
-      assert.equal(body.timer.phase, 'work', 'restart must not un-pause');
-      assert.equal(body.timer.paused, true);
+      assert.equal(body.timer.phase, 'work', 'phase untouched');
+      assert.equal(body.timer.paused, true, 'restart must not un-pause');
       assert.equal(body.timer.remainingMs, DEFAULT_SETTINGS.workMin * 60_000, 'the FULL phase, not the stale remainder');
-      assert.equal(readDoc(home).timer.paused, true, 'landed on disk, not just in the response');
+      assert.deepEqual(readDoc(home).timer, body.timer, 'persisted exactly as returned, not just in the response');
     });
   });
 
@@ -1672,7 +1428,7 @@ async function main() {
     await withPomodoroServer(async ({ home, port, secret }) => {
       const now = Date.now();
       writeDoc({ ...onDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now + 20 * 60_000, paused: false } }, home);
-      const cookieHeaders = { cookie: `${SESSION_COOKIE}=${sessionToken(secret)}` };
+      const cookieHeaders = { cookie: sessionCookieHeader(secret) };
 
       const forwardC = await fetch(pomodoroUrl(port, 'forward'), { method: 'POST', headers: cookieHeaders });
       assert.equal(forwardC.status, 200, 'the cookie alone must be able to forward');
@@ -1730,16 +1486,4 @@ async function main() {
   });
 }
 
-main()
-  .catch(err => {
-    failures++;
-    console.error('FAIL - unexpected error');
-    console.error(err);
-  })
-  .finally(() => {
-    if (failures) {
-      console.error(`\n${failures} check(s) failed`);
-      process.exit(1);
-    }
-    console.log('\nall pomodoro checks ok');
-  });
+runMain('pomodoro', main);

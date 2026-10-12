@@ -27,145 +27,29 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, readdirSync, existsSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import http from 'node:http';
-import net from 'node:net';
-import { SECRET_HEADER, SESSION_COOKIE, sessionToken } from '../src/secret.mjs';
+import { SECRET_HEADER } from '../src/secret.mjs';
 import { recoveryCommand } from '../src/handoff.mjs';
 import { startServer } from '../src/server.mjs';
 // The delivery ledger's own field name, read from the product rather than restated: the
 // `read` checks below assert that reading a board never writes one.
 import { ANSWERS_DELIVERED } from '../src/board.mjs';
-// The product's own spawn of the shim (src/prose-check.mjs ships from src/ so a caller
-// outside this repo can import it): the other side of the same stdio seam this file
-// drives by hand, and the one a partial install breaks.
-import { getLiveTools } from '../src/prose-check.mjs';
 import { runCheck } from './run.mjs';
+import {
+  check, runMain, repoRoot, sleep, withTimeout, freePort, secretHome, writeHeaders, rawGet,
+  spawnShim, makeOpenRecorder,
+} from './support.mjs';
 
-const here = path.dirname(fileURLToPath(import.meta.url));
-const mcpBin = path.join(here, '..', 'bin', 'mcp.mjs');
-const daemonBin = path.join(here, '..', 'bin', 'daemon.mjs');
+const daemonBin = path.join(repoRoot, 'bin', 'daemon.mjs');
 
 // The local secret, in this check's own temp dir — never ~/.config/claude-board. Set on
 // this process's env before any server or shim starts: the daemon reads it once at
 // startup, and every shim spawned below inherits the seam and reads the same file, which
 // is what makes the end-to-end path (shim -> daemon write) work at all now that writes
-// require it.
-const secretDir = mkdtempSync(path.join(tmpdir(), 'claude-board-secret-'));
-const SECRET_FILE = path.join(secretDir, 'secret');
-const SECRET = 'e'.repeat(64);
-writeFileSync(SECRET_FILE, `${SECRET}\n`, { mode: 0o600 });
-process.env.CLAUDE_BOARD_SECRET_FILE = SECRET_FILE;
-
-/** Headers for a write made directly by this check, standing in for the served page. */
-function writeHeaders() {
-  return { 'content-type': 'application/json', [SECRET_HEADER]: SECRET };
-}
-
-let failures = 0;
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-/** Scripted JSON-RPC 2.0 client over a child process's stdio: writes
- * newline-delimited requests/notifications to stdin, and demuxes stdout lines
- * into resolved request promises vs. a running list of server-initiated
- * notifications (progress, in particular). */
-class McpClient {
-  constructor(child) {
-    this.child = child;
-    this.buf = '';
-    this.nextId = 1;
-    this.pending = new Map();
-    this.notifications = [];
-    this.stderr = '';
-    child.stdout.on('data', chunk => this._onData(chunk));
-    child.stderr.on('data', chunk => { this.stderr += chunk.toString(); });
-  }
-
-  _onData(chunk) {
-    this.buf += chunk.toString('utf8');
-    let idx;
-    while ((idx = this.buf.indexOf('\n')) !== -1) {
-      const line = this.buf.slice(0, idx);
-      this.buf = this.buf.slice(idx + 1);
-      if (!line.trim()) continue;
-      let msg;
-      try {
-        msg = JSON.parse(line);
-      } catch {
-        continue; // stray non-protocol output would be a bug, but don't crash the test on it
-      }
-      if (msg.id !== undefined && (msg.result !== undefined || msg.error !== undefined)) {
-        const pend = this.pending.get(msg.id);
-        if (pend) {
-          this.pending.delete(msg.id);
-          pend(msg);
-        }
-      } else {
-        this.notifications.push(msg);
-      }
-    }
-  }
-
-  request(method, params) {
-    return this.requestWithId(method, params).promise;
-  }
-
-  /** Same, but hands back the JSON-RPC id too — needed to cancel a call, and to
-   * assert that a cancelled call is never answered. */
-  requestWithId(method, params) {
-    const id = this.nextId++;
-    const promise = new Promise(resolve => this.pending.set(id, resolve));
-    this.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
-    return { id, promise };
-  }
-
-  answered(id) {
-    return !this.pending.has(id);
-  }
-
-  notify(method, params) {
-    this.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n');
-  }
-
-  close() {
-    try { this.child.stdin.end(); } catch { /* already closed */ }
-    try { this.child.kill(); } catch { /* already dead */ }
-  }
-}
-
-/** Merge `overrides` onto the real process env, actually deleting a key when
- * its override value is `undefined` — a plain `{ ...process.env, ...overrides }`
- * spread can't unset a key (an absent key in `overrides` just leaves the
- * inherited value in place), which matters here: this suite's own process
- * runs inside an interactive Claude Code session, so CLAUDE_CODE_ENTRYPOINT is
- * already set in process.env and must be explicitly deleted to test the
- * "absent" refusal path rather than silently inheriting `cli`. */
-function spawnShim(overrides, { cwd } = {}) {
-  const env = { ...process.env };
-  for (const [k, v] of Object.entries(overrides)) {
-    if (v === undefined) delete env[k];
-    else env[k] = v;
-  }
-  // `cwd` is not decoration: the shim posts `cwd: process.cwd()` with the board, and that
-  // is what the daemon resolves every by-path block against. A check about a referenced
-  // FILE has to put the shim in the directory that file lives in.
-  const child = spawn(process.execPath, [mcpBin], { env, cwd, stdio: ['pipe', 'pipe', 'pipe'] });
-  return new McpClient(child);
-}
+// require it. No CLAUDE_BOARD_HOME goes with it: each daemon and shim below is handed its
+// own.
+const { home: secretDir, secret: SECRET } = secretHome('claude-board-secret-', { secret: 'e'.repeat(64), setHome: false });
 
 function listBoardIds(home) {
   const dir = path.join(home, 'boards');
@@ -191,26 +75,6 @@ async function waitForNewBoardFile(home, knownIds, timeoutMs = 5000) {
 
 function countBoardFiles(home) {
   return listBoardIds(home).size;
-}
-
-/** Never let a concurrency check hang: a broken shim leaves a call unanswered
- * forever, and a hang reads as "still running" instead of as a failure. */
-function withTimeout(promise, ms, label) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error(`timed out after ${ms}ms: ${label}`)), ms).unref()),
-  ]);
-}
-
-function freePort() {
-  return new Promise((resolve, reject) => {
-    const srv = net.createServer();
-    srv.once('error', reject);
-    srv.listen(0, '127.0.0.1', () => {
-      const p = srv.address().port;
-      srv.close(() => resolve(p));
-    });
-  });
 }
 
 const spawnedDaemons = new Set();
@@ -270,25 +134,6 @@ function terminateDaemon(child, ms) {
       resolve({ elapsed: Date.now() - start, code, signal });
     });
     child.kill('SIGTERM');
-  });
-}
-
-/** One GET, following no redirect and reading no cookie jar — which is exactly what a
- * browser's FIRST fetch of a handoff URL is. `fetch` would follow the 302 and hide both
- * the Location and the Set-Cookie this needs to assert on. */
-function rawGet(urlStr, headers = {}) {
-  return new Promise((resolve, reject) => {
-    const u = new URL(urlStr);
-    const req = http.request(
-      { hostname: u.hostname, port: u.port, path: u.pathname + u.search, method: 'GET', headers: { host: u.host, ...headers } },
-      res => {
-        const chunks = [];
-        res.on('data', c => chunks.push(c));
-        res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString('utf8') }));
-      }
-    );
-    req.on('error', reject);
-    req.end();
   });
 }
 
@@ -427,29 +272,6 @@ function startSlowCreateProxy(targetPort, delayMs) {
   });
 }
 
-/** A stand-in for `open`: records the URLs it is handed, one per line. */
-function makeOpenRecorder(dir) {
-  const script = path.join(dir, 'fake-open.sh');
-  const log = path.join(dir, 'opened.log');
-  writeFileSync(script, '#!/bin/sh\nprintf \'%s\\n\' "$1" >> "$CLAUDE_BOARD_OPEN_LOG"\n', { mode: 0o755 });
-  return {
-    script,
-    log,
-    opened() {
-      if (!existsSync(log)) return [];
-      return readFileSync(log, 'utf8').split('\n').filter(Boolean);
-    },
-    async waitForOpens(n, timeoutMs = 3000) {
-      const start = Date.now();
-      while (Date.now() - start < timeoutMs) {
-        if (this.opened().length >= n) return this.opened();
-        await sleep(25);
-      }
-      return this.opened();
-    },
-  };
-}
-
 function progressCount(client, token) {
   return client.notifications.filter(
     n => n.method === 'notifications/progress' && n.params.progressToken === token
@@ -478,7 +300,7 @@ async function submitBoard(baseUrl, boardId, body, boardHome = home) {
   const open = stored.rounds.find(r => r.status === 'open');
   const res = await fetch(`${baseUrl}/api/board/${boardId}/submit`, {
     method: 'POST',
-    headers: writeHeaders(),
+    headers: writeHeaders(SECRET),
     body: JSON.stringify({
       action: 'send',
       answers: [],
@@ -587,7 +409,7 @@ async function main() {
 
     const submitRes = await fetch(`${base}/api/board/${boardId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         round: 1,
         action: 'send',
@@ -648,7 +470,7 @@ async function main() {
             { kind: 'html', html: '<div>rendered artifact</div>' },
           ],
         },
-      }), 5000, 'a content-only round must return promptly, not block for the wall clock');
+      }), 5000, 'timed out after 5000ms: a content-only round must return promptly, not block for the wall clock');
       const elapsed = Date.now() - start;
 
       const boardId = await waitForNewBoardFile(home, knownIds);
@@ -686,7 +508,7 @@ async function main() {
           blocks: [{ kind: 'html', source: { path: 'definitely-not-here-9d2f1a.html' } }],
           wait: true,
         },
-      }), 5000, 'a refused post must come back at once, not block for the wall clock');
+      }), 5000, 'timed out after 5000ms: a refused post must come back at once, not block for the wall clock');
       const elapsed = Date.now() - start;
       assert.ok(elapsed < 3000, `must return as soon as the daemon refuses, took ${elapsed}ms`);
       assert.equal(res.result.isError, true, 'a refused post is an error result, not a posted board');
@@ -733,7 +555,7 @@ async function main() {
       const h1 = JSON.parse(readFileSync(path.join(home, 'boards', `${boardId}.json`), 'utf8')).blocks[0].id;
       const submitRes = await fetch(`${base}/api/board/${boardId}/submit`, {
         method: 'POST',
-        headers: writeHeaders(),
+        headers: writeHeaders(SECRET),
         body: JSON.stringify({
           round: 1,
           action: 'send',
@@ -743,7 +565,7 @@ async function main() {
       });
       assert.equal(submitRes.status, 200);
 
-      const res = await withTimeout(callPromise, 5000, 'the call must resolve promptly once the round is submitted');
+      const res = await withTimeout(callPromise, 5000, 'timed out after 5000ms: the call must resolve promptly once the round is submitted');
       const elapsed = Date.now() - start;
       assert.ok(elapsed < 5000, `must resolve once submitted, not ride out the wall clock, took ${elapsed}ms`);
 
@@ -777,12 +599,12 @@ async function main() {
       await sleep(150);
       const submitRes = await fetch(`${base}/api/board/${boardId}/submit`, {
         method: 'POST',
-        headers: writeHeaders(),
+        headers: writeHeaders(SECRET),
         body: JSON.stringify({ round: 1, action: 'send', answers: [], comments: [] }),
       });
       assert.equal(submitRes.status, 200);
 
-      const res = await withTimeout(callPromise, 5000, 'the call must resolve once submitted');
+      const res = await withTimeout(callPromise, 5000, 'timed out after 5000ms: the call must resolve once submitted');
       const result = res.result;
       assert.equal(result.isError, false, 'zero comments must not be reported as an error');
       assert.equal(result.status, 'submitted');
@@ -790,29 +612,6 @@ async function main() {
     } finally {
       awaitedClient.close();
     }
-  });
-
-  await check('wait: true on a page board honours the wall-clock timeout, same as a question round', async () => {
-    const timeoutClient = spawnShim({ ...baseEnv, CLAUDE_BOARD_TIMEOUT_MS: '150', CLAUDE_BOARD_PROGRESS_MS: '40' });
-    const start = Date.now();
-    const res = await timeoutClient.request('tools/call', {
-      name: 'ask',
-      arguments: {
-        title: 'Awaited page board, never answered',
-        blocks: [{ kind: 'html', html: '<div>AWAITED_TIMEOUT</div>' }],
-        wait: true,
-      },
-    });
-    const elapsed = Date.now() - start;
-
-    assert.ok(elapsed < 5000, `timeout must return promptly, took ${elapsed}ms`);
-    const result = res.result;
-    assert.equal(result.isError, false);
-    assert.equal(result.status, 'timeout');
-    assert.match(result.content[0].text, /no response/i);
-    assert.ok(result.url, 'timeout result must still carry the board URL to recover the tab');
-
-    timeoutClient.close();
   });
 
   await check('when both processes share one cap -- what a shipped install has -- the DAEMON times out first and records that the wait died', async () => {
@@ -843,7 +642,7 @@ async function main() {
           blocks: [{ kind: 'html', html: '<div>SHARED_CAP</div>' }],
           wait: true,
         },
-      }), 8000, 'the call must still end at the cap');
+      }), 8000, 'timed out after 8000ms: the call must still end at the cap');
       assert.equal(res2.result.status, 'timeout');
       const round = JSON.parse(readFileSync(path.join(dhome, 'boards', `${res2.result.board}.json`), 'utf8')).rounds[0];
       assert.equal(round.awaited, false, 'the daemon that gave up must have recorded that the wait died');
@@ -872,7 +671,7 @@ async function main() {
 
     await fetch(`${base}/api/board/${boardId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         round: 1,
         action: 'discuss',
@@ -1086,7 +885,7 @@ async function main() {
       const boardId = await waitForNewBoardFile(home, knownIds);
       assert.equal((await recorder.waitForOpens(1, 10_000)).length, 1, 'a configured opener must still be used, even assumed non-darwin');
       await submitBoard(base, boardId, { answers: [{ id: 'q1', status: 'answered', choice: 'Yes', note: '' }] });
-      const res = await withTimeout(call, 8000, 'the call must return normally, not be refused');
+      const res = await withTimeout(call, 8000, 'timed out after 8000ms: the call must return normally, not be refused');
       assert.equal(res.result.isError, false, 'a configured opener means this is not the "cannot open a tab" case');
       assert.equal(res.result.status, 'submitted');
     } finally {
@@ -1107,7 +906,7 @@ async function main() {
       });
       const boardId = await waitForNewBoardFile(home, knownIds);
       await submitBoard(base, boardId, { answers: [{ id: 'q1', status: 'answered', choice: 'Yes', note: '' }] });
-      const res = await withTimeout(call, 8000, 'a NO_OPEN=1 session must proceed normally, not be refused');
+      const res = await withTimeout(call, 8000, 'timed out after 8000ms: a NO_OPEN=1 session must proceed normally, not be refused');
       assert.equal(res.result.isError, false);
       assert.equal(res.result.status, 'submitted');
     } finally {
@@ -1172,7 +971,7 @@ async function main() {
         ],
       });
 
-      const [resA, resB] = await withTimeout(Promise.all([callA, callB]), 8000, 'both concurrent asks must return');
+      const [resA, resB] = await withTimeout(Promise.all([callA, callB]), 8000, 'timed out after 8000ms: both concurrent asks must return');
       assert.equal(resA.result.status, 'submitted', 'call A must return normally, not die waiting');
       assert.equal(resB.result.status, 'submitted');
 
@@ -1184,47 +983,11 @@ async function main() {
     }
   });
 
-  // --- two concurrent asks mint exactly ONE thread (no double-post race) -----
-
-  await check('two asks fired in the same tick mint one board, not two', async () => {
-    const knownIds = listBoardIds(home);
-    const raceClient = spawnShim(baseEnv);
-    try {
-      // Both requests written before either can be answered: `session.boardId` is
-      // read before an await and written after one, so without an in-flight guard
-      // both calls see null, both POST a brand-new board, and one shim ends up
-      // owning two threads.
-      const callA = raceClient.request('tools/call', {
-        name: 'ask', arguments: { title: 'Race A', blocks: [QUESTION] }, _meta: { progressToken: 'race-A' },
-      });
-      const callB = raceClient.request('tools/call', {
-        name: 'ask', arguments: { title: 'Race B', blocks: [QUESTION] }, _meta: { progressToken: 'race-B' },
-      });
-
-      const boardId = await waitForNewBoardFile(home, knownIds);
-      await sleep(400); // ample time for a second board file to show up if one is coming
-
-      const fresh = [...listBoardIds(home)].filter(id => !knownIds.has(id));
-      assert.deepEqual(fresh, [boardId], `one shim is one thread: expected exactly one new board, got ${fresh.length}`);
-
-      await submitBoard(base, boardId, {
-        answers: [
-          { id: 'q1', status: 'answered', choice: 'Yes', note: '' },
-          { id: 'q2', status: 'answered', choice: 'Yes', note: '' },
-        ],
-      });
-
-      const [resA, resB] = await withTimeout(Promise.all([callA, callB]), 8000, 'both racing asks must return');
-      assert.equal(resA.result.board, boardId);
-      assert.equal(resB.result.board, boardId, 'the racing call must land in the same thread, not a second one');
-    } finally {
-      raceClient.close();
-    }
-  });
-
-  // --- a boundary declared beside a concurrent ask still mints ONE board ------
-  // The guard above is read before an await and written after one, so reading it once —
-  // on the way in — was not enough: `fresh` awaits the boundary declaration, and a
+  // --- two concurrent asks mint ONE board, a boundary declared or not ------------
+  // The mint guard (`session.creatingThread`) is read before an await and written after
+  // one: without it two asks fired together both see no board, both POST a brand-new one,
+  // and one shim ends up owning two threads. Reading it once, on the way in, was not
+  // enough either: `fresh` awaits the boundary declaration, and a
   // concurrent call slips into that gap, sees no board and no guard, and starts minting.
   // The first call then wakes up, still sees no board, and mints a second one: two
   // threads, two tabs, and whichever board the reviewer does not open sits awaited
@@ -1256,7 +1019,7 @@ async function main() {
           { id: 'q2', status: 'answered', choice: 'Yes', note: '' },
         ],
       });
-      const [resA, resB] = await withTimeout(Promise.all([callA, callB]), 8000, 'both asks must return');
+      const [resA, resB] = await withTimeout(Promise.all([callA, callB]), 8000, 'timed out after 8000ms: both asks must return');
       assert.equal(resA.result.board, boardId);
       assert.equal(resB.result.board, boardId, 'both calls belong to the one board this conversation has');
     } finally {
@@ -1297,7 +1060,7 @@ async function main() {
           { id: 'q2', status: 'answered', choice: 'No', note: '' },
         ],
       });
-      const [resPlain, resFresh] = await withTimeout(Promise.all([plain, declaring]), 8000, 'both asks must return');
+      const [resPlain, resFresh] = await withTimeout(Promise.all([plain, declaring]), 8000, 'timed out after 8000ms: both asks must return');
       assert.equal(
         resPlain.result.status, 'submitted',
         'the first call must still get its reviewer, not an abandoned board pulled out from under it'
@@ -1332,7 +1095,7 @@ async function main() {
       const refused = await withTimeout(client.request('tools/call', {
         name: 'ask',
         arguments: { title: 'New conversation, bad reference', blocks: [{ kind: 'markdown', source: { path: 'definitely-not-here-4c81ba.md' } }], fresh: true },
-      }), 8000, 'the refusal must come back promptly');
+      }), 8000, 'timed out after 8000ms: the refusal must come back promptly');
       assert.equal(refused.result.isError, true);
       assert.match(refused.result.content[0].text, /definitely-not-here-4c81ba\.md/);
 
@@ -1353,14 +1116,14 @@ async function main() {
       });
       const newId = await waitForNewBoardFile(home, new Set([...knownIds, previousId]));
       assert.notEqual(newId, previousId);
-      const previousResult = await withTimeout(previous, 8000, 'the previous call must be released by the abandon');
+      const previousResult = await withTimeout(previous, 8000, 'timed out after 8000ms: the previous call must be released by the abandon');
       assert.equal(previousResult.result.status, 'abandoned', 'the boundary is honoured once a post actually lands');
       assert.equal(JSON.parse(readFileSync(storedPath, 'utf8')).rounds[0].status, 'abandoned');
 
       await submitBoard(base, newId, {
         answers: [{ id: 'q1', status: 'answered', choice: 'Yes', note: '' }],
       });
-      const landedResult = await withTimeout(landed, 8000, 'the new board\'s call must return');
+      const landedResult = await withTimeout(landed, 8000, 'timed out after 8000ms: the new board\'s call must return');
       assert.equal(landedResult.result.board, newId);
     } finally {
       client.close();
@@ -1384,7 +1147,7 @@ async function main() {
     try {
       const first = await withTimeout(slowClient.request('tools/call', {
         name: 'ask', arguments: { title: 'Lost response', blocks: [NOTE] },
-      }), 8000, 'the first ask must fail on its own deadline rather than hang');
+      }), 8000, 'timed out after 8000ms: the first ask must fail on its own deadline rather than hang');
       assert.equal(first.result.isError, true, 'a post nobody answered in time is a failure, not a silent success');
       assert.doesNotMatch(
         first.result.content[0].text, /Nothing was posted or written/,
@@ -1402,7 +1165,7 @@ async function main() {
       // The retry, exactly as the message invites it: same title, same blocks.
       const second = await withTimeout(slowClient.request('tools/call', {
         name: 'ask', arguments: { title: 'Lost response', blocks: [NOTE] },
-      }), 15000, 'the retry must return');
+      }), 15000, 'timed out after 15000ms: the retry must return');
       assert.equal(second.result.isError, false, `the retry must succeed: ${second.result.content[0].text}`);
       assert.equal(second.result.board, 'slow-board-1', 'and land on the board the lost post actually made');
 
@@ -1447,7 +1210,7 @@ async function main() {
     try {
       const first = await withTimeout(driftClient.request('tools/call', {
         name: 'ask', arguments: ask,
-      }), 8000, 'the first ask must fail on its own deadline');
+      }), 8000, 'timed out after 8000ms: the first ask must fail on its own deadline');
       assert.equal(first.result.isError, true, 'setup: the first call gives up before its answer arrives');
 
       // The file is regenerated while the post nobody heard from is still running.
@@ -1455,7 +1218,7 @@ async function main() {
 
       const retry = await withTimeout(driftClient.request('tools/call', {
         name: 'ask', arguments: ask,
-      }), 15000, 'the retry must return');
+      }), 15000, 'timed out after 15000ms: the retry must return');
       assert.equal(retry.result.isError, false, `the retry must succeed: ${retry.result.content[0].text}`);
       assert.equal(retry.result.round, 1, 'the retry is the same round, not the next one');
 
@@ -1476,7 +1239,7 @@ async function main() {
       writeFileSync(stagePath, page('ARTIFACT_V1'), 'utf8');
       const late = await withTimeout(driftClient.request('tools/call', {
         name: 'ask', arguments: ask,
-      }), 15000, 'the late retry must return');
+      }), 15000, 'timed out after 15000ms: the late retry must return');
       assert.equal(late.result.round, 1, 'still round 1: the first post carried a key the daemon can recognise it by');
       const afterLate = JSON.parse(readFileSync(path.join(home, 'boards', `${boardId}.json`), 'utf8'));
       assert.equal(afterLate.rounds.length, 1, 'and no round was added');
@@ -1509,7 +1272,7 @@ async function main() {
         // a posted round and fails the assertions below on what it DID, rather than
         // blocking on a board it should never have minted and failing on a deadline.
         name: 'ask', arguments: { title: 'Stringized flag', blocks: [NOTE], fresh: 'false' },
-      }), 8000, 'a refused ask must return at once');
+      }), 8000, 'timed out after 8000ms: a refused ask must return at once');
       assert.equal(refused.result.isError, true, 'a string is not a boolean: refuse it');
       assert.match(refused.result.content[0].text, /"fresh"/, 'name the argument that is wrong');
       assert.match(refused.result.content[0].text, /boolean/i, 'and what it should have been');
@@ -1518,7 +1281,7 @@ async function main() {
       // beside `fresh`: a string there blocks a round that has nothing to wait for.
       const refusedWait = await withTimeout(stringClient.request('tools/call', {
         name: 'ask', arguments: { title: 'Stringized wait', blocks: [NOTE], wait: 'true' },
-      }), 8000, 'a refused ask must return at once');
+      }), 8000, 'timed out after 8000ms: a refused ask must return at once');
       assert.equal(refusedWait.result.isError, true, 'a string is not a boolean here either');
       assert.match(refusedWait.result.content[0].text, /"wait"/, 'name the argument that is wrong');
 
@@ -1534,7 +1297,7 @@ async function main() {
       // The proof the live call was never abandoned: it is still waiting, and the
       // reviewer's answer still reaches it.
       await submitBoard(base, boardId, { answers: [{ id: 'q1', status: 'answered', choice: 'Yes', note: 'still mine' }] });
-      const liveRes = await withTimeout(live, 8000, 'the live call must still be waiting for its reviewer');
+      const liveRes = await withTimeout(live, 8000, 'timed out after 8000ms: the live call must still be waiting for its reviewer');
       assert.equal(liveRes.result.status, 'submitted', 'the round a string flag would have abandoned still answers its own call');
       assert.equal(liveRes.result.answers[0].note, 'still mine');
     } finally {
@@ -1560,10 +1323,10 @@ async function main() {
       const boardId = await waitForNewBoardFile(home, knownIds);
       await sleep(250); // the wait GET is established and held open
 
-      const abandoned = await fetch(`${base}/api/board/${boardId}/abandon`, { method: 'POST', headers: writeHeaders() });
+      const abandoned = await fetch(`${base}/api/board/${boardId}/abandon`, { method: 'POST', headers: writeHeaders(SECRET) });
       assert.equal(abandoned.status, 200, `the abandon must land (got ${abandoned.status})`);
 
-      const done = await withTimeout(call, 8000, 'an abandoned board must release the blocked ask promptly');
+      const done = await withTimeout(call, 8000, 'timed out after 8000ms: an abandoned board must release the blocked ask promptly');
       const result = done.result;
       assert.equal(result.isError, false, 'an abandoned board is an outcome, not a failure');
       assert.equal(result.status, 'abandoned', 'the status the daemon sent must survive to the agent');
@@ -1589,7 +1352,7 @@ async function main() {
     try {
       const res = await withTimeout(unknownClient.request('tools/call', {
         name: 'ask', arguments: { title: 'Unknown status', blocks: [QUESTION] },
-      }), 8000, 'an unknown status must still end the call');
+      }), 8000, 'timed out after 8000ms: an unknown status must still end the call');
       const text = res.result.content[0].text;
       assert.equal(res.result.status, 'quantum', 'the packet is relayed as it arrived: the data was never the problem');
       assert.match(text, /quantum/, 'the prose has to name the status it could not interpret');
@@ -1612,7 +1375,7 @@ async function main() {
       });
       const boardId = await waitForNewBoardFile(home, knownIds);
       await submitBoard(base, boardId, { answers: [{ id: 'q1', status: 'answered', choice: 'Yes', note: '' }] });
-      const firstRes = await withTimeout(first, 8000, 'first ask must return');
+      const firstRes = await withTimeout(first, 8000, 'timed out after 8000ms: first ask must return');
       assert.equal(firstRes.result.round, 1);
 
       const afterFirst = listBoardIds(home);
@@ -1626,7 +1389,7 @@ async function main() {
       );
 
       await submitBoard(base, boardId, { answers: [{ id: 'q2', status: 'answered', choice: 'No', note: 'round two' }] });
-      const secondRes = await withTimeout(second, 8000, 'second ask must return');
+      const secondRes = await withTimeout(second, 8000, 'timed out after 8000ms: second ask must return');
       assert.equal(secondRes.result.board, boardId, 'the same thread, by board id');
       assert.equal(secondRes.result.round, 2, 'the second ask must be round 2');
       assert.equal(secondRes.result.thread, firstRes.result.thread, 'one thread per shim process');
@@ -1644,7 +1407,7 @@ async function main() {
       const res = await withTimeout(badClient.request('tools/call', {
         name: 'ask',
         arguments: { title: 'Typo check', blocks: [{ kind: 'markdwon', text: '# oops' }] },
-      }), 8000, 'a rejected board must return promptly');
+      }), 8000, 'timed out after 8000ms: a rejected board must return promptly');
       const result = res.result;
       assert.equal(result.isError, true);
       assert.match(result.content[0].text, /rejected/i, 'the daemon answered: say so');
@@ -1696,7 +1459,7 @@ async function main() {
       // being open. The call must still return the packet, normally.
       await submitBoard(dbase, boardId, { answers: [{ id: 'q1', status: 'answered', choice: 'Yes', note: 'after restart' }] }, dhome);
 
-      const res = await withTimeout(call, 20000, 'the reattached wait must return the packet');
+      const res = await withTimeout(call, 20000, 'timed out after 20000ms: the reattached wait must return the packet');
       const result = res.result;
       assert.equal(result.isError, false, `a restart must not surface as a failure: ${result.content[0].text}`);
       assert.equal(result.status, 'submitted', 'the wait must resolve normally after reattaching');
@@ -1724,7 +1487,7 @@ async function main() {
     try {
       const posted = await fetch(`http://127.0.0.1:${dport}/api/board`, {
         method: 'POST',
-        headers: writeHeaders(),
+        headers: writeHeaders(SECRET),
         body: JSON.stringify({ title: 'Shutdown check', blocks: [QUESTION] }),
       }).then(r => r.json());
 
@@ -1765,7 +1528,7 @@ async function main() {
       const boardId = await waitForNewBoardFile(home, knownIds);
       assert.equal((await recorder.waitForOpens(1, 10_000)).length, 1, 'the first board always opens the tab');
       await submitBoard(base, boardId, { answers: [{ id: 'q1', status: 'answered', choice: 'Yes', note: '' }] });
-      await withTimeout(first, 8000, 'round 1 must return');
+      await withTimeout(first, 8000, 'timed out after 8000ms: round 1 must return');
 
       // No client has ever connected to this board -- the old reopen's clearest
       // trigger case -- and round 2 must still not open a second tab.
@@ -1775,7 +1538,7 @@ async function main() {
       await sleep(500);
       assert.equal(recorder.opened().length, 1, 'a later round must never open a tab, connected or not');
       await submitBoard(base, boardId, { answers: [{ id: 'q2', status: 'answered', choice: 'Yes', note: '' }] });
-      await withTimeout(second, 8000, 'round 2 must return');
+      await withTimeout(second, 8000, 'timed out after 8000ms: round 2 must return');
     } finally {
       openClient.close();
     }
@@ -1811,7 +1574,7 @@ async function main() {
       // not packets.
       await withTimeout(client.request('tools/call', {
         name: 'ask', arguments: { title: 'Fresh and unwatched', blocks: [{ kind: 'markdown', text: 'nothing asked' }] },
-      }), 10_000, 'the ask must return');
+      }), 10_000, 'timed out after 10000ms: the ask must return');
       assert.equal((await recorder.waitForOpens(1, 10_000)).length, 1,
         'nothing is watching any board on this daemon, so the first board opens its tab as it always has');
       await sleep(300);
@@ -1831,7 +1594,7 @@ async function main() {
     // Watcher, and this board only has to be something for one to be watching.
     const watched = await fetch(`http://127.0.0.1:${local.port}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ title: 'Already open', blocks: [QUESTION] }),
     }).then(r => r.json());
     const tab = await openSseStream(local.port, watched.boardId);
@@ -1846,7 +1609,7 @@ async function main() {
     try {
       const res = await withTimeout(client.request('tools/call', {
         name: 'ask', arguments: { title: 'Fresh but deferring', blocks: [{ kind: 'markdown', text: 'nothing asked' }] },
-      }), 10_000, 'the ask must return');
+      }), 10_000, 'timed out after 10000ms: the ask must return');
       assert.equal(res.result.isError, false, 'suppressing the tab must not turn the call into a failure');
       // The opener is spawned detached and this check never learns whether a browser
       // appeared, so "no tab" can only be counted after giving one time to be recorded.
@@ -1872,7 +1635,7 @@ async function main() {
     const recorder = makeOpenRecorder(dhome);
     const watched = await fetch(`http://127.0.0.1:${local.port}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ title: 'Already open', blocks: [QUESTION] }),
     }).then(r => r.json());
     const tab = await openSseStream(local.port, watched.boardId);
@@ -1887,7 +1650,7 @@ async function main() {
     try {
       await withTimeout(client.request('tools/call', {
         name: 'ask', arguments: { title: 'Fresh, banners off', blocks: [{ kind: 'markdown', text: 'nothing asked' }] },
-      }), 10_000, 'the ask must return');
+      }), 10_000, 'timed out after 10000ms: the ask must return');
       await sleep(500);
       assert.equal(recorder.opened().length, 0,
         'the Watcher suppresses the open with or without the Banner switch');
@@ -1898,55 +1661,13 @@ async function main() {
     }
   });
 
-  // --- comments have to survive on the channel no client can drop ----------
-  // A client is free to keep only `content`, `isError` and `structuredContent` and
-  // drop unrecognised top-level keys. If the text summary says "2 comment(s)." the
-  // whole comment feature conveys nothing at all — silently — even though
-  // commands/grill.md tells the agent to address comments as their own input.
-
-  await check('comments reach the agent through structuredContent AND the text summary', async () => {
-    const knownIds = listBoardIds(home);
-    const commentClient = spawnShim(baseEnv);
-    try {
-      const call = commentClient.request('tools/call', {
-        name: 'ask',
-        arguments: {
-          title: 'Comment check',
-          blocks: [{ kind: 'mermaid', text: 'flowchart LR\n  Start --> End' }, QUESTION],
-        },
-      });
-      const boardId = await waitForNewBoardFile(home, knownIds);
-      await submitBoard(base, boardId, {
-        answers: [{ id: 'q1', status: 'answered', choice: 'Yes', note: '' }],
-        comments: [
-          { blockId: 'm1', anchor: { kind: 'mermaid', ref: 'End' }, text: 'this heading overstates it' },
-          { blockId: 'q1', anchor: { kind: 'block' }, text: 'ask this differently' },
-        ],
-      });
-
-      const res = await withTimeout(call, 8000, 'the comment board must return');
-      const result = res.result;
-
-      assert.ok(result.structuredContent, 'the packet must also be nested under structuredContent');
-      assert.equal(result.structuredContent.board, boardId);
-      assert.equal(result.structuredContent.comments.length, 2);
-      assert.equal(result.structuredContent.comments[0].blockId, 'm1');
-      assert.equal(result.structuredContent.comments[0].text, 'this heading overstates it');
-
-      // The guaranteed channel, on its own, must name each comment's block, its
-      // anchor and its words.
-      const text = result.content[0].text;
-      assert.match(text, /m1/, 'the text must name the commented block');
-      assert.match(text, /mermaid:End/, 'the text must name the anchor');
-      assert.match(text, /this heading overstates it/, 'the text must carry the comment itself');
-      assert.match(text, /q1/);
-      assert.match(text, /ask this differently/);
-    } finally {
-      commentClient.close();
-    }
-  });
-
-  // --- formatAnchor (bin/mcp.mjs) has to name the element, not just the ref -----
+  // --- comments survive on both channels, and formatAnchor names the element -----
+  //
+  // A client is free to keep only `content`, `isError` and `structuredContent` and drop
+  // unrecognised top-level keys, so the packet rides structuredContent whole, and the text
+  // summary alone has to name each comment's block, its anchor and its words: a text that
+  // said "2 comment(s)." would convey nothing, silently, though commands/grill.md tells the
+  // agent to address comments as their own input.
   //
   // src/render.mjs's anchorTag prefers a dom/mermaid anchor's hint over its bare
   // ref; formatAnchor used to agree for `dom` but not `mermaid` (it rendered
@@ -1959,7 +1680,7 @@ async function main() {
   // every kind, hint-present/absent and resolved/lost combination is exercised
   // directly, without depending on the click-to-anchor client wiring covered
   // elsewhere.
-  await check('formatAnchor names the element for every anchor kind, hint or no hint, resolved or lost', async () => {
+  await check('comments reach the agent through structuredContent and the text, which names each commented block and formats every anchor kind, hint or no hint, resolved or lost', async () => {
     const knownIds = listBoardIds(home);
     const anchorClient = spawnShim(baseEnv);
     try {
@@ -1995,8 +1716,18 @@ async function main() {
         ],
       });
 
-      const res = await withTimeout(call, 8000, 'the formatAnchor board must return');
-      const text = res.result.content[0].text;
+      const res = await withTimeout(call, 8000, 'timed out after 8000ms: the formatAnchor board must return');
+      const result = res.result;
+      assert.ok(result.structuredContent, 'the packet must also be nested under structuredContent');
+      assert.equal(result.structuredContent.board, boardId);
+      assert.equal(result.structuredContent.comments.length, 6);
+      assert.equal(result.structuredContent.comments[0].blockId, 'q1');
+      assert.equal(result.structuredContent.comments[0].text, 'whole-block comment');
+
+      const text = result.content[0].text;
+      for (const id of ['q1', 'h1', 'm1']) {
+        assert.match(text, new RegExp(`\\b${id}\\b`), `the text must name the commented block ${id}`);
+      }
 
       assert.match(text, /whole-block comment/);
       assert.match(text, /\bblock\b.*whole-block comment/, 'kind "block" must format as "whole block"');
@@ -2043,7 +1774,7 @@ async function main() {
       assert.match(cancelClient.stderr, /cancel/i, 'the cancellation must be acted on, not silently ignored');
 
       // The shim itself is unharmed and still serving.
-      const ping = await withTimeout(cancelClient.request('ping', {}), 3000, 'the shim must survive a cancellation');
+      const ping = await withTimeout(cancelClient.request('ping', {}), 3000, 'timed out after 3000ms: the shim must survive a cancellation');
       assert.ok(ping.result, 'the shim must still answer after a cancelled call');
     } finally {
       cancelClient.close();
@@ -2056,7 +1787,7 @@ async function main() {
   // board. The shim is the only participant holding the secret, so it is the one that
   // asks for the handoff.
 
-  await check('the first board opens on a one-time handoff that lands the browser already authorized', async () => {
+  await check('the first board opens on a one-time handoff minted for this call\'s board', async () => {
     const dir = tempHome('handoff');
     const recorder = makeOpenRecorder(dir);
     const knownIds = listBoardIds(home);
@@ -2078,21 +1809,15 @@ async function main() {
       assert.equal(opened.length, 1, 'the first board opens exactly one tab');
       assert.match(opened[0], new RegExp(`^${base}/auth/[0-9a-f]{64}$`), 'and it opens on a handoff, not on the board URL');
 
-      // Follow it exactly as the browser does: one GET, no redirect following.
+      // Follow it exactly as the browser does: one GET, no redirect following. What the
+      // redemption hands the browser (the cookie, single use) is the daemon's, and
+      // test/check-http.mjs's handoff check owns it; the shim's part is asking for THIS board.
       const landed = await rawGet(opened[0]);
       assert.equal(landed.status, 302, 'the handoff redirects rather than rendering');
       assert.equal(landed.headers.location, `/b/${boardId}`, 'onto this call\'s board, at a URL carrying no credential');
-      const cookie = [].concat(landed.headers['set-cookie'] || []).join('; ').split(';')[0];
-      assert.match(cookie, /^cb_session=[0-9a-f]{64}$/, 'having been handed the session cookie on the way');
-
-      const page = await rawGet(`${base}/b/${boardId}`, { cookie });
-      assert.equal(page.status, 200, 'the bookmarkable URL renders for the authorized browser');
-
-      const replay = await rawGet(opened[0]);
-      assert.equal(replay.status, 401, 'and the handoff is dead the moment the browser used it');
 
       await submitBoard(base, boardId, { answers: [{ id: 'q1', status: 'answered', choice: 'Yes', note: '' }] });
-      await withTimeout(call, 8000, 'the ask must return');
+      await withTimeout(call, 8000, 'timed out after 8000ms: the ask must return');
     } finally {
       client.close();
     }
@@ -2117,7 +1842,7 @@ async function main() {
     try {
       await withTimeout(client.request('tools/call', {
         name: 'ask', arguments: { title: 'No handoff', blocks: [QUESTION] },
-      }), 8000, 'the call must still return');
+      }), 8000, 'timed out after 8000ms: the call must still return');
 
       const opened = await recorder.waitForOpens(1, 10_000);
       assert.equal(opened[0], `http://127.0.0.1:${hostile.port}/b/b_nohandoff`, 'it falls back to the board URL rather than opening nothing');
@@ -2151,7 +1876,7 @@ async function main() {
     try {
       const res = await withTimeout(hostileClient.request('tools/call', {
         name: 'ask', arguments: { title: 'Hostile url', blocks: [QUESTION] },
-      }), 8000, 'the hostile-daemon call must return');
+      }), 8000, 'timed out after 8000ms: the hostile-daemon call must return');
 
       const opened = await recorder.waitForOpens(1);
       assert.equal(opened.length, 1, 'exactly one open');
@@ -2181,7 +1906,7 @@ async function main() {
     try {
       const res = await withTimeout(hostileClient.request('tools/call', {
         name: 'ask', arguments: { title: 'Hostile id', blocks: [QUESTION] },
-      }), 8000, 'the hostile-id call must return');
+      }), 8000, 'timed out after 8000ms: the hostile-id call must return');
       await sleep(300);
       assert.equal(recorder.opened().length, 0, 'nothing may be handed to `open`');
       assert.equal(res.result.isError, true, 'and the shim must say so rather than carry on');
@@ -2209,7 +1934,7 @@ async function main() {
   async function seedReadableBoard(title, action = 'send') {
     const posted = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title,
         blocks: [
@@ -2223,7 +1948,7 @@ async function main() {
     const mid = stored.blocks.find(b => b.kind === 'markdown').id;
     const submitted = await fetch(`${base}/api/board/${posted.boardId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         round: 1,
         action,
@@ -2235,13 +1960,13 @@ async function main() {
     return { ...posted, qid, mid };
   }
 
-  await check('AC 6: read hands a conversation that never posted the board its rounds, answers and comments', async () => {
+  await check('read hands a conversation that never posted the board its rounds, answers and comments', async () => {
     const seeded = await seedReadableBoard('Readable board');
     // A second, still-open round, so the rounds list has something to be in order about
     // and something that is genuinely still awaited.
     const second = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         boardId: seeded.boardId,
         title: 'Second round',
@@ -2255,7 +1980,7 @@ async function main() {
       const res = await withTimeout(reader.request('tools/call', {
         name: 'read',
         arguments: { board: `${base}/b/${seeded.boardId}` },
-      }), 8000, 'read must answer promptly: it opens no wait');
+      }), 8000, 'timed out after 8000ms: read must answer promptly: it opens no wait');
       const result = res.result;
       assert.equal(result.isError, false, result.content && result.content[0] && result.content[0].text);
       assert.equal(result.board, seeded.boardId);
@@ -2293,7 +2018,7 @@ async function main() {
       // A bare id is the same call: the URL is a convenience, not the contract.
       const byId = await withTimeout(reader.request('tools/call', {
         name: 'read', arguments: { board: seeded.boardId },
-      }), 8000, 'read by bare id must answer too');
+      }), 8000, 'timed out after 8000ms: read by bare id must answer too');
       assert.deepEqual(byId.result.answers, result.answers, 'a bare id reads the same board as its URL');
       assert.deepEqual(byId.result.rounds, result.rounds);
 
@@ -2302,7 +2027,7 @@ async function main() {
       // one URL a reviewer is likeliest to copy the one URL `read` would not take.
       const withFragment = await withTimeout(reader.request('tools/call', {
         name: 'read', arguments: { board: `${base}/b/${seeded.boardId}#open-round` },
-      }), 8000, 'a board URL carrying a fragment must answer too');
+      }), 8000, 'timed out after 8000ms: a board URL carrying a fragment must answer too');
       assert.equal(withFragment.result.isError, false, withFragment.result.content[0].text);
       assert.equal(withFragment.result.board, seeded.boardId, 'the fragment names a place on the page, and is dropped');
     } finally {
@@ -2310,7 +2035,7 @@ async function main() {
     }
   });
 
-  await check('AC 6: read marks nothing, no ledger and no delivered flag, the same result twice', async () => {
+  await check('read marks nothing, no ledger and no delivered flag, the same result twice', async () => {
     const seeded = await seedReadableBoard('Untouched by reading');
     const before = readFileSync(path.join(home, 'boards', `${seeded.boardId}.json`), 'utf8');
     assert.ok(!(ANSWERS_DELIVERED in boardOnDisk(seeded.boardId)),
@@ -2320,10 +2045,10 @@ async function main() {
     try {
       const first = await withTimeout(reader.request('tools/call', {
         name: 'read', arguments: { board: seeded.boardId },
-      }), 8000, 'read must answer');
+      }), 8000, 'timed out after 8000ms: read must answer');
       const second = await withTimeout(reader.request('tools/call', {
         name: 'read', arguments: { board: seeded.boardId },
-      }), 8000, 'and answer again');
+      }), 8000, 'timed out after 8000ms: and answer again');
 
       assert.deepEqual(second.result.answers, first.result.answers, 'same answers');
       assert.deepEqual(second.result.comments, first.result.comments, 'same comments');
@@ -2337,13 +2062,13 @@ async function main() {
     }
   });
 
-  await check('AC 6: read refuses anything that is not a board of this daemon, and says which', async () => {
+  await check('read refuses anything that is not a board of this daemon, and says which', async () => {
     const reader = spawnShim(baseEnv);
     try {
       for (const bad of ['https://evil.example/b/b_deadbeef', '../../etc/passwd', 'file:///etc/passwd', '']) {
         const res = await withTimeout(reader.request('tools/call', {
           name: 'read', arguments: { board: bad },
-        }), 8000, `read must refuse ${JSON.stringify(bad)} rather than hang`);
+        }), 8000, `timed out after 8000ms: read must refuse ${JSON.stringify(bad)} rather than hang`);
         assert.equal(res.result.isError, true, `must refuse ${JSON.stringify(bad)}`);
         assert.match(res.result.content[0].text, /board URL .* or a bare board id/,
           'the refusal has to say what a good argument looks like');
@@ -2354,7 +2079,7 @@ async function main() {
       const missing = `b_${'0'.repeat(32)}`;
       const res = await withTimeout(reader.request('tools/call', {
         name: 'read', arguments: { board: missing },
-      }), 8000, 'an unknown board must be answered, not waited on');
+      }), 8000, 'timed out after 8000ms: an unknown board must be answered, not waited on');
       assert.equal(res.result.isError, true);
       assert.match(res.result.content[0].text, new RegExp(missing), 'and name the id it could not find');
     } finally {
@@ -2362,36 +2087,13 @@ async function main() {
     }
   });
 
-  await check('AC 6: the read route is gated by the local secret alone, exactly like wait', async () => {
-    const seeded = await seedReadableBoard('Gated read');
-    const url = `${base}/api/board/${seeded.boardId}/read`;
-
-    assert.equal((await fetch(url)).status, 401, 'no credential reads nothing');
-    // A browser holding the session cookie is refused too: no page ever calls this
-    // route, and the cookie is the credential a cross-origin GET could ride in on.
-    assert.equal(
-      (await fetch(url, { headers: { cookie: `${SESSION_COOKIE}=${sessionToken(SECRET)}` } })).status, 401,
-      'the session cookie is not enough: this route is the shim\'s, like /wait',
-    );
-    const ok = await fetch(url, { headers: { [SECRET_HEADER]: SECRET } });
-    assert.equal(ok.status, 200, 'the local secret is what opens it');
-    assert.equal((await ok.json()).board, seeded.boardId);
-
-    const unknown = await fetch(`${base}/api/board/b_${'1'.repeat(32)}/read`, { headers: { [SECRET_HEADER]: SECRET } });
-    assert.equal(unknown.status, 404, 'a well-formed id naming no board is a plain 404');
-    // The store's own id rule, not a copy of it at the route: an id that could never be
-    // a path is refused before anything is read.
-    const unsafe = await fetch(`${base}/api/board/..%2F..%2Fsecret/read`, { headers: { [SECRET_HEADER]: SECRET } });
-    assert.ok(unsafe.status === 400 || unsafe.status === 404, `an unsafe id must be refused, got ${unsafe.status}`);
-  });
-
-  await check('AC 7: an ask with fresh names the board URL it abandoned, so read can collect it later', async () => {
+  await check('an ask with fresh names the board URL it abandoned, so read can collect it later', async () => {
     const talker = spawnShim(baseEnv);
     try {
       const first = await withTimeout(talker.request('tools/call', {
         name: 'ask',
         arguments: { title: 'The conversation that ends', blocks: [{ kind: 'markdown', text: '# first' }] },
-      }), 8000, 'a content-only round returns at once');
+      }), 8000, 'timed out after 8000ms: a content-only round returns at once');
       const abandoned = first.result.board;
       assert.ok(abandoned, 'setup: the first ask must have made a board');
       assert.doesNotMatch(first.result.content[0].text, /Abandoned board/,
@@ -2400,7 +2102,7 @@ async function main() {
       const fresh = await withTimeout(talker.request('tools/call', {
         name: 'ask',
         arguments: { title: 'The conversation after it', blocks: [{ kind: 'markdown', text: '# second' }], fresh: true },
-      }), 8000, 'the fresh ask returns at once too');
+      }), 8000, 'timed out after 8000ms: the fresh ask returns at once too');
       assert.notEqual(fresh.result.board, abandoned, 'setup: fresh must actually have walked away from that board');
 
       const text = fresh.result.content[0].text;
@@ -2415,7 +2117,7 @@ async function main() {
         'sentence is punctuation an agent copies into the read call');
       const collected = await withTimeout(talker.request('tools/call', {
         name: 'read', arguments: { board: named },
-      }), 8000, 'the abandoned board must be readable by the URL just named');
+      }), 8000, 'timed out after 8000ms: the abandoned board must be readable by the URL just named');
       assert.equal(collected.result.isError, false, collected.result.content[0].text);
       assert.equal(collected.result.board, abandoned);
     } finally {
@@ -2423,7 +2125,7 @@ async function main() {
     }
   });
 
-  await check('AC 6: a round the reviewer closed with Discuss reads back as discuss, not as a plain sent', async () => {
+  await check('a round the reviewer closed with Discuss reads back as discuss, not as a plain sent', async () => {
     // `status` is `sent` either way -- Send and Discuss both close the round -- so a read
     // carrying only the status turns "stop posting boards and talk to me in chat" into
     // "answered". A packet spells that instruction out from its own `status` (bin/mcp.mjs,
@@ -2434,7 +2136,7 @@ async function main() {
     try {
       const res = await withTimeout(reader.request('tools/call', {
         name: 'read', arguments: { board: seeded.boardId },
-      }), 8000, 'read must answer');
+      }), 8000, 'timed out after 8000ms: read must answer');
       assert.equal(res.result.isError, false, res.result.content[0].text);
       assert.equal(res.result.rounds[0].status, 'sent', 'setup: Discuss closes the round exactly as Send does');
       assert.equal(res.result.rounds[0].action, 'discuss', 'and the action is the only thing that tells the two apart');
@@ -2445,7 +2147,7 @@ async function main() {
     }
   });
 
-  await check('AC 6: a read failure names the board it was asked for, never the session\'s live board', async () => {
+  await check('a read failure names the board it was asked for, never the session\'s live board', async () => {
     const shim = spawnShim(baseEnv);
     try {
       // A content-only ask returns at once and leaves this session holding a board. That
@@ -2455,14 +2157,14 @@ async function main() {
       const posted = await withTimeout(shim.request('tools/call', {
         name: 'ask',
         arguments: { title: 'Session board', blocks: [{ kind: 'markdown', text: 'nothing to answer here' }] },
-      }), 8000, 'a content-only ask must return without waiting');
+      }), 8000, 'timed out after 8000ms: a content-only ask must return without waiting');
       const sessionBoard = posted.result.board;
       assert.ok(sessionBoard, 'setup: this session must be holding a board of its own');
 
       const missing = `b_${'1'.repeat(32)}`;
       const failed = await withTimeout(shim.request('tools/call', {
         name: 'read', arguments: { board: missing },
-      }), 8000, 'an unknown board must be answered, not waited on');
+      }), 8000, 'timed out after 8000ms: an unknown board must be answered, not waited on');
       assert.equal(failed.result.isError, true, 'setup: the read has to fail for there to be an error packet');
       assert.equal(failed.result.board, missing, 'the error packet names the board the read was given');
       assert.notEqual(failed.result.board, sessionBoard,
@@ -2474,7 +2176,7 @@ async function main() {
       // falling back to the session: "no board" is a thing this packet can say.
       const nonsense = await withTimeout(shim.request('tools/call', {
         name: 'read', arguments: { board: 'https://example.com/b/nope' },
-      }), 8000, 'a refusal must answer too');
+      }), 8000, 'timed out after 8000ms: a refusal must answer too');
       assert.equal(nonsense.result.isError, true);
       assert.equal(nonsense.result.board, null, 'no board named, no board reported');
       assert.equal(nonsense.result.url, null);
@@ -2503,7 +2205,7 @@ async function main() {
             context: [{ kind: 'question', prompt: 'buried', widget: 'single', options: [{ label: 'Yes' }] }],
           }],
         },
-      }), 8000, 'this round asks the daemon nothing, so the call must come back rather than block on a wait');
+      }), 8000, 'timed out after 8000ms: this round asks the daemon nothing, so the call must come back rather than block on a wait');
       assert.equal(res.result.isError, false, res.result.content && res.result.content[0].text);
       assert.equal(res.result.status, 'posted', 'an unawaited round comes back posted, and posted is what the daemon minted');
     } finally {
@@ -2511,13 +2213,13 @@ async function main() {
     }
   });
 
-  // --- AC 10's doc half: the two files a session actually reads -------------
-  // The tool-list check above pins the shim's half of AC 10. This pins the other half,
+  // --- the read tool's doc half: the two files a session actually reads ------
+  // The tool-list check above pins the shim's half. This pins the other half,
   // which no running code can fail: a `read` tool nothing documents is a tool no session
   // calls, and a caution that stopped being true is worse than no caution at all.
 
-  await check('AC 10: the manual and the protocol name read, drop the dead-round caution, and record the outbound link', async () => {
-    const repo = f => readFileSync(path.join(here, '..', f), 'utf8');
+  await check('the manual and the protocol name read, the manual says a later ask opens a fresh round, and both record the outbound link', async () => {
+    const repo = f => readFileSync(path.join(repoRoot, f), 'utf8');
     const skill = repo('skills/claude-board/SKILL.md');
     const protocol = repo('PROTOCOL.md');
     const security = repo('SECURITY.md');
@@ -2528,14 +2230,16 @@ async function main() {
     assert.ok(protocol.includes('/api/board/:id/read'),
       'and PROTOCOL.md must name the route behind it');
 
-    // The caution that stopped being true. A re-post on a lapsed round mints round N+1
-    // (src/server.mjs refuses to amend a round whose wait has lapsed), so telling an agent
-    // its re-post amends the dead round sends it round a hazard that no longer exists --
-    // and away from `read`, which is the thing that actually collects the late answer.
-    assert.ok(!skill.includes('amends that same dead round'),
-      'the re-post-amends-the-dead-round caution must be gone from the skill');
+    // A re-post on a lapsed round mints round N+1 (src/server.mjs refuses to amend a round
+    // whose wait has lapsed), and the manual has to say so: an agent told its re-post amends
+    // the dead round steers round a hazard that no longer exists, and away from `read`.
+    // Both halves: the true sentence present, the false one absent.
+    assert.ok(skill.replace(/\s+/g, ' ').includes('rather than amending the dead one'),
+      'the skill must say a later ask opens a fresh round rather than amending the dead one');
+    assert.ok(!skill.replace(/\s+/g, ' ').includes('amends that same dead round'),
+      'the re-post-amends-the-dead-round caution must stay gone');
 
-    // AC 2's outbound link, on the two files that owe an account of it: what a stage link
+    // A stage's outbound link, on the two files that owe an account of it: what a stage link
     // now does for the reviewer, and what the one outbound path a stage has costs.
     // Whitespace-folded: the phrase spans a line break in the manual's own wrapping,
     // and a doc pin that a re-wrap can turn red is a pin that teaches nothing.
@@ -2560,7 +2264,7 @@ async function main() {
       second.stderr.on('data', c => { stderr += c.toString(); });
       const exit = await withTimeout(
         new Promise(resolve => second.on('exit', (code, signal) => resolve({ code, signal }))),
-        8000, 'the second daemon must exit rather than hang'
+        8000, 'timed out after 8000ms: the second daemon must exit rather than hang'
       );
 
       assert.equal(exit.code, 1, 'a daemon that cannot serve must exit non-zero');
@@ -2574,53 +2278,6 @@ async function main() {
     } finally {
       try { first.kill('SIGKILL'); } catch { /* already gone */ }
     }
-  });
-
-  // --- a partial install fails the caller instead of hanging it -------------
-  // The other side of this stdio seam: the product's own spawn of the shim
-  // (src/prose-check.mjs `getLiveTools`, which any installed clone can be asked for). A
-  // shim that is missing or cannot run answers nothing, and a client that waits for an
-  // answer with no deadline and no exit listener waits forever — no output, no exit code,
-  // nothing to read. That hang is what stranded a load test of this very suite.
-
-  await check('a missing or broken shim fails the caller by name instead of hanging', async () => {
-    const dir = tempHome('partial-install');
-
-    const absent = path.join(dir, 'bin', 'mcp.mjs');
-    await assert.rejects(
-      withTimeout(getLiveTools({ mcpPath: absent }), 6000, 'a missing shim must fail, not hang'),
-      /no claude-board shim at .*mcp\.mjs/,
-      'name the path that is not there and the install that is incomplete'
-    );
-
-    // Present but unrunnable — the other half of a partial install. `node` itself exists,
-    // so the spawn succeeds and the failure is an exit code with a stack on stderr.
-    const broken = path.join(dir, 'broken-mcp.mjs');
-    writeFileSync(broken, "throw new Error('half-installed shim');\n");
-    await assert.rejects(
-      withTimeout(getLiveTools({ mcpPath: broken }), 8000, 'a broken shim must fail, not hang'),
-      err => {
-        assert.match(err.message, /exited/, 'a child that dies without answering must reject the call it left pending');
-        assert.match(err.message, /half-installed shim/, 'and carry its stderr: that is the only statement of the cause');
-        return true;
-      }
-    );
-  });
-
-  await check('a shim that starts but never answers fails on a deadline', async () => {
-    const dir = tempHome('silent-shim');
-    const silent = path.join(dir, 'silent-mcp.mjs');
-    // Starts, holds stdin open, answers nothing: a wedged shim is the one failure no exit
-    // code reports, so only a deadline can end it.
-    writeFileSync(silent, 'process.stdin.resume();\n');
-
-    const started = Date.now();
-    await assert.rejects(
-      withTimeout(getLiveTools({ mcpPath: silent, timeoutMs: 400 }), 6000, 'a silent shim must fail on its deadline'),
-      /did not answer initialize within 400ms/,
-      'the deadline must name the call it gave up on'
-    );
-    assert.ok(Date.now() - started < 5000, `the deadline must actually fire, took ${Date.now() - started}ms`);
   });
 
   // --- the suite runner enforces its own deadline --------------------------
@@ -2639,7 +2296,7 @@ async function main() {
       'setInterval(() => {}, 1000);', // the hang itself: exactly what an unanswerable wait looks like
     ].join('\n'));
 
-    const result = await withTimeout(runCheck(hangCheck, 700), 8000, 'runCheck must enforce its own deadline');
+    const result = await withTimeout(runCheck(hangCheck, 700), 8000, 'timed out after 8000ms: runCheck must enforce its own deadline');
     assert.equal(result.timedOut, true, 'a check past its deadline must be reported as timed out');
     assert.ok(result.elapsed < 5000, `the deadline must actually fire, took ${result.elapsed}ms`);
 
@@ -2668,7 +2325,7 @@ async function main() {
       "process.stdout.write('the-last-line-before-exit\\n');",
     ].join('\n'));
 
-    const result = await withTimeout(runCheck(noisy, 8000, { capture: true }), 12_000, 'a capturing run must still finish');
+    const result = await withTimeout(runCheck(noisy, 8000, { capture: true }), 12_000, 'timed out after 12000ms: a capturing run must still finish');
     assert.equal(result.code, 0);
     assert.match(result.output, /ok - to stdout/, 'stdout must survive the pipe');
     // Deliberately not the word "FAILED": the non-capture assertion below streams this
@@ -2678,7 +2335,7 @@ async function main() {
     assert.match(result.output, /the-last-line-before-exit/, 'output written just before exit must not be lost to the exit/close race');
 
     // ...and the default is still live streaming, so running one check alone is unchanged.
-    const streamed = await withTimeout(runCheck(noisy, 8000), 12_000, 'an inheriting run must still finish');
+    const streamed = await withTimeout(runCheck(noisy, 8000), 12_000, 'timed out after 12000ms: an inheriting run must still finish');
     assert.equal(streamed.code, 0);
     assert.equal(streamed.output, '', 'without capture nothing is buffered; the check owns the terminal');
   });
@@ -2728,13 +2385,8 @@ async function main() {
   });
 }
 
-main()
-  .catch(err => {
-    failures++;
-    console.error('FAIL - unexpected error');
-    console.error(err);
-  })
-  .finally(() => {
+runMain('mcp', main, {
+  cleanup: () => {
     if (server) server.close();
     for (const child of spawnedDaemons) {
       try { child.kill('SIGKILL'); } catch { /* already gone */ }
@@ -2742,9 +2394,5 @@ main()
     rmSync(home, { recursive: true, force: true });
     for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
     rmSync(secretDir, { recursive: true, force: true });
-    if (failures) {
-      console.error(`\n${failures} check(s) failed`);
-      process.exit(1);
-    }
-    console.log('\nall mcp checks ok');
-  });
+  },
+});

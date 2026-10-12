@@ -26,57 +26,13 @@
 // nothing of its own to compile against.
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, existsSync, chmodSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, existsSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { spawnSync, spawn } from 'node:child_process';
-import net from 'node:net';
+import { CC, buildLauncher, check, freePort, haveCc, repoRoot, runMain, skipFile } from './support.mjs';
 
-// Bind port 0, read what the kernel picked, release it. Racy in principle, fine here:
-// nothing else in this suite binds anything, and the alternative is hardcoding a port
-// that collides with a developer's own running daemon.
-function freePort() {
-  return new Promise((resolve, reject) => {
-    const probe = net.createServer();
-    probe.on('error', reject);
-    probe.listen(0, '127.0.0.1', () => {
-      const { port } = probe.address();
-      probe.close(() => resolve(port));
-    });
-  });
-}
-
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const launcherSrc = path.join(repoRoot, 'bin', 'launcher.c');
-// The other half of the same binary (ADR.md entry 19): launcher.c calls cb_notify, so a
-// build of launcher.c alone does not link. Compiled here for the same reason install.sh
-// compiles it -- separately, because -fobjc-arc is an Objective-C flag and clang says so
-// when it is handed a .c file alongside.
-const notifySrc = path.join(repoRoot, 'bin', 'notify.m');
-// The third half (ADR 72): launcher.c calls cb_menubar, so a build without this does not
-// link either. It also means every launcher run below really does fork a second child --
-// which is the point, since this suite's whole subject is what the launcher hands a child.
-const menubarSrc = path.join(repoRoot, 'bin', 'menubar.m');
-const ccCmd = process.env.CLAUDE_BOARD_CC || 'cc';
-
-if (spawnSync(ccCmd, ['--version']).error) {
-  console.log(`==> skipping check-launcher-env.mjs: no C compiler ('${ccCmd}') found`);
-  console.log('all launcher-env checks ok (skipped)');
-  process.exit(0);
-}
-
-let failures = 0;
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
+if (!haveCc()) skipFile('launcher-env', `check-launcher-env.mjs: no C compiler ('${CC}') found`);
 
 const workDir = mkdtempSync(path.join(tmpdir(), 'claude-board-launcher-env-'));
 
@@ -113,42 +69,18 @@ const compiledPath = '/usr/bin:/bin:/usr/sbin:/sbin';
 // clone path once CLAUDE_BOARD_DAEMON points inside the bundle instead.
 const compiledRepoRoot = path.join(workDir, 'compiled-repo');
 
-// Mirrors install.sh's c_escape: backslash and double-quote are the only two bytes that
-// would otherwise end a C string literal early. This test's own paths are all plain
-// mkdtemp-generated ASCII, so this is a belt-and-braces match of the real function
-// rather than a scenario this suite expects to exercise.
-function cEscape(value) {
-  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-}
-
-const headerDir = path.join(workDir, 'header');
-mkdirSync(headerDir, { recursive: true });
-const headerPath = path.join(headerDir, 'launcher_paths.h');
-writeFileSync(headerPath, [
-  `#define CLAUDE_BOARD_NODE "${cEscape(process.execPath)}"`,
-  `#define CLAUDE_BOARD_DAEMON "${cEscape(stubDaemon)}"`,
-  `#define CLAUDE_BOARD_HOME_DIR "${cEscape(compiledHome)}"`,
-  `#define CLAUDE_BOARD_PATH "${cEscape(compiledPath)}"`,
-  `#define CLAUDE_BOARD_STORE_DIR "${cEscape(compiledStore)}"`,
-  `#define CLAUDE_BOARD_REF_ROOTS_VALUE "${cEscape(compiledRefRoots)}"`,
-  `#define CLAUDE_BOARD_REPO_ROOT_VALUE "${cEscape(compiledRepoRoot)}"`,
-  '',
-].join('\n'));
-
-const launcherExec = path.join(workDir, 'launcher');
-const notifyObj = path.join(workDir, 'notify.o');
-const menubarObj = path.join(workDir, 'menubar.o');
-const objBuilds = [[notifySrc, notifyObj], [menubarSrc, menubarObj]]
-  .map(([src, obj]) => spawnSync(ccCmd,
-    ['-O2', '-Wall', '-Wextra', '-fobjc-arc', '-c', '-o', obj, src], { encoding: 'utf8' }));
-// Only linked if both objects compiled: a link attempted on top of a failed compile
-// reports a missing symbol, which names the wrong problem.
-const builds = objBuilds.some(b => b.status !== 0) ? objBuilds : [...objBuilds, spawnSync(ccCmd,
-  ['-O2', '-Wall', '-Wextra', '-o', launcherExec, '-I', headerDir, launcherSrc, notifyObj, menubarObj,
-   // AppKit joins the two frameworks UNUserNotificationCenter needs because the click
-   // -serving mode becomes an NSApplication to receive its own notification's response
-   // (ADR.md entry 57, bin/notify.m). install.sh links the same three.
-   '-framework', 'Foundation', '-framework', 'UserNotifications', '-framework', 'AppKit'], { encoding: 'utf8' })];
+// All three halves of the one binary, built the way install.sh builds them: launcher.c
+// calls cb_notify (ADR.md entry 19) and cb_menubar (ADR 72), so it links against neither
+// alone. It also means every launcher run below really does fork a second child -- which
+// is the point, since this suite's whole subject is what the launcher hands a child.
+const { exec: launcherExec, builds } = buildLauncher(workDir, {
+  daemon: stubDaemon,
+  home: compiledHome,
+  path: compiledPath,
+  store: compiledStore,
+  refRoots: compiledRefRoots,
+  repoRoot: compiledRepoRoot,
+});
 
 async function main() {
   await check('every half of the launcher compiles clean against the generated header (no warnings, same flags install.sh uses plus -Wextra)', async () => {
@@ -217,17 +149,17 @@ async function main() {
 
   const run = spawnSync(launcherExec, [], { env: poisonedParentEnv, encoding: 'utf8', timeout: 10_000 });
 
-  await check('the launcher runs the stub daemon and it prints its environment', async () => {
+  let childEnv;
+  await check('the launcher execs the stub daemon, exits 0, and the stub\'s stdout parses as its environment dump', async () => {
+    // Parsed first, so a launcher that exits non-zero after the stub printed still hands
+    // the checks below a dump to read, and fails here alone.
+    try { childEnv = JSON.parse(run.stdout); } catch { /* asserted below, with the launcher's output */ }
     assert.equal(run.status, 0, `launcher exited ${run.status} (signal ${run.signal})\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
     assert.doesNotMatch(run.stderr || '', /cannot exec/, 'the launcher must be able to exec the stub daemon');
+    assert.ok(childEnv, `the stub's stdout must parse as the JSON environment dump it was told to print:\n${run.stdout}`);
   });
 
-  let childEnv;
-  await check('the stub daemon\'s stdout parses as the JSON environment dump it was told to print', async () => {
-    childEnv = JSON.parse(run.stdout);
-  });
-
-  await check('acceptance criterion: a NODE_OPTIONS entry does not cause injected code to run in the daemon', async () => {
+  await check('a NODE_OPTIONS entry in the parent does not cause injected code to run in the daemon', async () => {
     // The real proof, not just "the string is gone": the --require target never ran, so
     // it never wrote its marker file. (Ablation: pass NODE_OPTIONS through unfiltered
     // and this marker file exists after the run above.)
@@ -235,7 +167,7 @@ async function main() {
     assert.ok(!('NODE_OPTIONS' in childEnv), 'and the variable itself must be absent from the child\'s environment');
   });
 
-  await check('acceptance criterion: the daemon receives only the explicitly named set of variables -- everything else is absent', async () => {
+  await check('the daemon receives only the explicitly named set of variables -- everything else is absent', async () => {
     const expectedNames = [
       'HOME', 'PATH',
       'CLAUDE_BOARD_HOME', 'CLAUDE_BOARD_REF_ROOTS',
@@ -356,17 +288,4 @@ async function main() {
   });
 }
 
-main()
-  .catch(err => {
-    failures++;
-    console.error('FAIL - unexpected error');
-    console.error(err);
-  })
-  .finally(() => {
-    rmSync(workDir, { recursive: true, force: true });
-    if (failures) {
-      console.error(`\n${failures} check(s) failed`);
-      process.exit(1);
-    }
-    console.log('\nall launcher-env checks ok');
-  });
+await runMain('launcher-env', main, { cleanup: () => rmSync(workDir, { recursive: true, force: true }) });

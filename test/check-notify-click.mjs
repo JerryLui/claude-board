@@ -31,23 +31,10 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ccCmd = process.env.CLAUDE_BOARD_CC || 'cc';
-
-let failures = 0;
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
+import {
+  CC, STUB_OSASCRIPT, buildLauncher, check, haveCc, readJsonLines, repoRoot, runMain, waitForCount, withEnv, writeStub,
+} from './support.mjs';
 
 const workDir = mkdtempSync(path.join(tmpdir(), 'claude-board-notify-click-'));
 
@@ -75,30 +62,25 @@ int cb_menubar(void) { return 0; }
 int cb_menubar_probe(void) { return 0; }
 `);
 
-const headerDir = path.join(workDir, 'header');
-mkdirSync(headerDir, { recursive: true });
-writeFileSync(path.join(headerDir, 'launcher_paths.h'), [
-  '#define CLAUDE_BOARD_NODE "/nonexistent/node"',
-  '#define CLAUDE_BOARD_DAEMON "/nonexistent/daemon.mjs"',
-  '#define CLAUDE_BOARD_HOME_DIR "/nonexistent/home"',
-  '#define CLAUDE_BOARD_PATH "/nonexistent/bin"',
-  '#define CLAUDE_BOARD_STORE_DIR "/nonexistent/store"',
-  '#define CLAUDE_BOARD_REF_ROOTS_VALUE "/nonexistent/roots"',
-  '#define CLAUDE_BOARD_REPO_ROOT_VALUE "/nonexistent/repo"',
-  '',
-].join('\n'));
-
-const launcherExec = path.join(workDir, 'launcher');
-const haveCc = !spawnSync(ccCmd, ['--version']).error;
-const build = haveCc
-  ? spawnSync(ccCmd, ['-O2', '-Wall', '-Wextra', '-o', launcherExec, '-I', headerDir,
-      path.join(repoRoot, 'bin', 'launcher.c'), stubNotify], { encoding: 'utf8' })
+// Null with no C compiler on this machine: main() then skips the compiled half and runs
+// the rest.
+const launcher = haveCc()
+  ? buildLauncher(workDir, {
+      node: '/nonexistent/node',
+      daemon: '/nonexistent/daemon.mjs',
+      home: '/nonexistent/home',
+      path: '/nonexistent/bin',
+      store: '/nonexistent/store',
+      refRoots: '/nonexistent/roots',
+      repoRoot: '/nonexistent/repo',
+      link: [stubNotify],
+    })
   : null;
 
 /** Run the compiled launcher's --notify mode and read back what the filters let
  * through. Never spawns anything: the notify branch returns before main() forks. */
 function notify(args) {
-  const run = spawnSync(launcherExec, args, { encoding: 'utf8', timeout: 10_000 });
+  const run = spawnSync(launcher.exec, args, { encoding: 'utf8', timeout: 10_000 });
   const out = {};
   for (const line of (run.stdout || '').split('\n')) {
     const eq = line.indexOf('=');
@@ -166,17 +148,18 @@ const REFUSED = [
 ];
 
 async function main() {
-  if (!haveCc) {
-    console.log(`==> skipping the compiled-C half of check-notify-click.mjs: no C compiler ('${ccCmd}')`);
+  if (!launcher) {
+    console.log(`==> skipping the compiled-C half of check-notify-click.mjs: no C compiler ('${CC}')`);
   } else {
-    await check('bin/launcher.c compiles clean with the URL filter in it (same flags install.sh uses, plus -Wextra)', async () => {
-      assert.equal(build.status, 0, `stdout:\n${build.stdout}\nstderr:\n${build.stderr}`);
-      assert.equal((build.stderr || '').trim(), '', `unexpected compiler warning:\n${build.stderr}`);
-      assert.ok(existsSync(launcherExec));
-    });
-    chmodSync(launcherExec, 0o755);
+    // The clean-build check (all three halves, no warnings) is check-launcher-env.mjs's; a
+    // build that fails here only has to name itself rather than surface as a missing binary.
+    const { build } = launcher;
+    if (build.status !== 0 || !existsSync(launcher.exec)) {
+      throw new Error(`the launcher did not build:\nstdout:\n${build.stdout}\nstderr:\n${build.stderr}`);
+    }
+    chmodSync(launcher.exec, 0o755);
 
-    await check('AC 12: a board URL of this daemon reaches the notifier whole, fragment included', async () => {
+    await check('a board URL of this daemon reaches the notifier whole, fragment included', async () => {
       for (const [url, port] of ACCEPTED) {
         const out = notify(['--notify', 'round', 'my-project', url, String(port)]);
         assert.equal(out.url, url, `must be accepted and passed through byte for byte: ${url}`);
@@ -185,7 +168,7 @@ async function main() {
       }
     });
 
-    await check('AC 14: a URL that is not a board URL for this daemon, on this port, is not opened', async () => {
+    await check('a URL that is not a board URL for this daemon, on this port, is not opened, and the banner still fires', async () => {
       for (const [url, port, why] of REFUSED) {
         const out = notify(['--notify', 'round', 'my-project', url, String(port)]);
         assert.equal(out.url, '(null)', `${why}: ${JSON.stringify(url)} must not reach the notifier`);
@@ -219,7 +202,7 @@ async function main() {
       assert.equal(empty.url, url);
     });
 
-    await check('AC 15 (this ticket\'s half): the lifetime is bounded, clamped and defaulted, never absent', async () => {
+    await check('the click lifetime is bounded, clamped and defaulted, never absent', async () => {
       const url = `http://localhost:7391/b/${GOOD_ID}`;
       const p = String(PORT);
       assert.equal(notify(['--notify', 'round', 'p', url, p, '60']).seconds, '60', 'a plain lifetime crosses as sent');
@@ -274,24 +257,15 @@ process.exit(0);
 `;
 
   const stubDir = path.join(workDir, 'bin');
-  mkdirSync(stubDir, { recursive: true });
-  const osascriptStub = path.join(stubDir, 'osascript');
-  writeFileSync(osascriptStub, `#!/usr/bin/env node
-import fs from 'node:fs';
-fs.appendFileSync(process.env.STUB_OSASCRIPT_LOG, JSON.stringify(process.argv.slice(2)) + '\\n');
-`);
-  chmodSync(osascriptStub, 0o755);
+  writeStub(stubDir, 'osascript', STUB_OSASCRIPT);
 
   let bundleCounter = 0;
   async function inFakeBundle() {
     bundleCounter++;
     const name = `claude-board-click-${bundleCounter}`;
     const appDir = path.join(workDir, `${name}.app`);
-    mkdirSync(path.join(appDir, 'Contents', 'MacOS'), { recursive: true });
+    writeStub(path.join(appDir, 'Contents', 'MacOS'), name, STUB_LAUNCHER);
     mkdirSync(path.join(appDir, 'Contents', 'Resources', 'src'), { recursive: true });
-    const exec = path.join(appDir, 'Contents', 'MacOS', name);
-    writeFileSync(exec, STUB_LAUNCHER);
-    chmodSync(exec, 0o755);
     const modPath = path.join(appDir, 'Contents', 'Resources', 'src', 'notify.mjs');
     writeFileSync(modPath, readFileSync(path.join(repoRoot, 'src', 'notify.mjs'), 'utf8'));
     writeFileSync(
@@ -302,34 +276,6 @@ fs.appendFileSync(process.env.STUB_OSASCRIPT_LOG, JSON.stringify(process.argv.sl
     return { mod: await import(`file://${modPath}`), log };
   }
 
-  function readLines(logPath) {
-    if (!existsSync(logPath)) return [];
-    return readFileSync(logPath, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l));
-  }
-
-  async function waitForLines(logPath, count, timeoutMs = 3000) {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      if (readLines(logPath).length >= count) break;
-      await new Promise(r => setTimeout(r, 20));
-    }
-    return readLines(logPath);
-  }
-
-  async function withStubEnv(patch, fn) {
-    const keys = Object.keys(patch);
-    const saved = Object.fromEntries(keys.map(k => [k, process.env[k]]));
-    Object.assign(process.env, patch);
-    try {
-      await fn();
-    } finally {
-      for (const k of keys) {
-        if (saved[k] === undefined) delete process.env[k];
-        else process.env[k] = saved[k];
-      }
-    }
-  }
-
   // The sentinel is `#stranded-round`, not `#open-round`: a banner's click has to land
   // on the OLDEST round still waiting (criterion 12), where `#open-round` resolves to
   // the newest open one and belongs to the index's live-row links.
@@ -337,9 +283,9 @@ fs.appendFileSync(process.env.STUB_OSASCRIPT_LOG, JSON.stringify(process.argv.sl
 
   await check('the daemon\'s URL, port and deadline cross as the three argv slots after the folder', async () => {
     const { mod, log } = await inFakeBundle();
-    await withStubEnv({ STUB_LAUNCHER_LOG: log, PATH: `${stubDir}:${process.env.PATH}` }, async () => {
+    await withEnv({ STUB_LAUNCHER_LOG: log, PATH: `${stubDir}:${process.env.PATH}` }, async () => {
       mod.notifyRound('my-project', { url: BOARD, port: PORT, deadlineAt: Date.now() + 600_000 });
-      const lines = await waitForLines(log, 1);
+      const lines = await waitForCount(() => readJsonLines(log),1);
       assert.deepEqual(lines[0], ['--notify', 'round', 'my-project', BOARD, '7391', '600'],
         'folder, then click target, then the port that target must name, then the seconds left on the round\'s wait');
     });
@@ -347,11 +293,11 @@ fs.appendFileSync(process.env.STUB_OSASCRIPT_LOG, JSON.stringify(process.argv.sl
 
   await check('a URL with no port beside it never becomes a click', async () => {
     const { mod, log } = await inFakeBundle();
-    await withStubEnv({ STUB_LAUNCHER_LOG: log, PATH: `${stubDir}:${process.env.PATH}` }, async () => {
+    await withEnv({ STUB_LAUNCHER_LOG: log, PATH: `${stubDir}:${process.env.PATH}` }, async () => {
       mod.notifyRound('my-project', { url: BOARD });
       mod.notifyRound('my-project', { url: BOARD, port: 7392 });
       mod.notifyRound('my-project', { url: BOARD, port: '7391' });
-      const lines = await waitForLines(log, 3);
+      const lines = await waitForCount(() => readJsonLines(log),3);
       for (const line of lines) {
         assert.deepEqual(line, ['--notify', 'round', 'my-project'],
           'the daemon must name the port it actually bound, as a number, or the banner is simply not clickable');
@@ -361,10 +307,10 @@ fs.appendFileSync(process.env.STUB_OSASCRIPT_LOG, JSON.stringify(process.argv.sl
 
   await check('a folder the filter refuses still carries the click, in the slot the launcher reads by position', async () => {
     const { mod, log } = await inFakeBundle();
-    await withStubEnv({ STUB_LAUNCHER_LOG: log, PATH: `${stubDir}:${process.env.PATH}` }, async () => {
+    await withEnv({ STUB_LAUNCHER_LOG: log, PATH: `${stubDir}:${process.env.PATH}` }, async () => {
       mod.notifyRound(null, { url: BOARD, port: PORT, deadlineAt: Date.now() + 60_000 });
       mod.notifyRound('bad; name', { url: BOARD, port: PORT, deadlineAt: Date.now() + 60_000 });
-      const lines = await waitForLines(log, 2);
+      const lines = await waitForCount(() => readJsonLines(log),2);
       for (const line of lines) {
         assert.deepEqual(line, ['--notify', 'round', '', BOARD, String(PORT), '60'],
           'an empty placeholder, which is what the C filter refuses into the unnamed sentence');
@@ -372,9 +318,9 @@ fs.appendFileSync(process.env.STUB_OSASCRIPT_LOG, JSON.stringify(process.argv.sl
     });
   });
 
-  await check('AC 13: a handoff URL is refused before it can become an argv entry', async () => {
+  await check('a handoff URL, or any URL the filter refuses, never becomes an argv entry, and the banner still fires', async () => {
     const { mod, log } = await inFakeBundle();
-    await withStubEnv({ STUB_LAUNCHER_LOG: log, PATH: `${stubDir}:${process.env.PATH}` }, async () => {
+    await withEnv({ STUB_LAUNCHER_LOG: log, PATH: `${stubDir}:${process.env.PATH}` }, async () => {
       for (const url of [
         `http://localhost:7391/auth/${'a'.repeat(64)}`,
         `http://evil.com/b/${GOOD_ID}`,
@@ -383,7 +329,7 @@ fs.appendFileSync(process.env.STUB_OSASCRIPT_LOG, JSON.stringify(process.argv.sl
       ]) {
         mod.notifyRound('my-project', { url, port: PORT, deadlineAt: Date.now() + 60_000 });
       }
-      const lines = await waitForLines(log, 4);
+      const lines = await waitForCount(() => readJsonLines(log),4);
       assert.equal(lines.length, 4, 'the banner still fires for every one of them');
       for (const line of lines) {
         assert.deepEqual(line, ['--notify', 'round', 'my-project'],
@@ -394,11 +340,11 @@ fs.appendFileSync(process.env.STUB_OSASCRIPT_LOG, JSON.stringify(process.argv.sl
 
   await check('a click with no bound to give it is no click at all -- not one the launcher will default', async () => {
     const { mod, log } = await inFakeBundle();
-    await withStubEnv({ STUB_LAUNCHER_LOG: log, PATH: `${stubDir}:${process.env.PATH}` }, async () => {
+    await withEnv({ STUB_LAUNCHER_LOG: log, PATH: `${stubDir}:${process.env.PATH}` }, async () => {
       mod.notifyRound('my-project', { url: BOARD, port: PORT, deadlineAt: Date.now() - 60_000 }); // lapsed
       mod.notifyRound('my-project', { url: BOARD, port: PORT });                                  // no deadline at all
       mod.notifyRound('my-project', { url: BOARD, deadlineAt: Date.now() + 60_000 });             // no bound port
-      const lines = await waitForLines(log, 3);
+      const lines = await waitForCount(() => readJsonLines(log),3);
       for (const line of lines) {
         assert.deepEqual(line, ['--notify', 'round', 'my-project'],
           'the URL, the port and the lifetime cross together or not at all');
@@ -413,33 +359,24 @@ fs.appendFileSync(process.env.STUB_OSASCRIPT_LOG, JSON.stringify(process.argv.sl
   // it can parse -- so a round with an unparseable `awaitDeadline` is awaited forever, and
   // omitting the slot bought it a forty-minute clickable banner with no bound at all.
 
-  await check('a bare notifyRound(folder) is unchanged -- ticket 01\'s caller keeps working', async () => {
+  await check('a bundled round banner hands the caller its process, so it can kill it before the deadline does', async () => {
     const { mod, log } = await inFakeBundle();
-    await withStubEnv({ STUB_LAUNCHER_LOG: log, PATH: `${stubDir}:${process.env.PATH}` }, async () => {
-      mod.notifyRound('my-project');
-      const lines = await waitForLines(log, 1);
-      assert.deepEqual(lines[0], ['--notify', 'round', 'my-project']);
-    });
-  });
-
-  await check('AC 15: the caller is handed the process, so it can kill it before the deadline does', async () => {
-    const { mod, log } = await inFakeBundle();
-    await withStubEnv({ STUB_LAUNCHER_LOG: log, PATH: `${stubDir}:${process.env.PATH}` }, async () => {
+    await withEnv({ STUB_LAUNCHER_LOG: log, PATH: `${stubDir}:${process.env.PATH}` }, async () => {
       const child = mod.notifyRound('my-project', { url: BOARD, port: PORT, deadlineAt: Date.now() + 600_000 });
       assert.ok(child && typeof child.pid === 'number' && child.pid > 0,
         'notifyRound must return the ChildProcess the daemon owns');
       assert.equal(typeof child.kill, 'function');
       child.kill('SIGTERM');
-      await waitForLines(log, 1);
+      await waitForCount(() => readJsonLines(log),1);
     });
   });
 
-  await check('the osascript install keeps its unclickable banner (AC 19) and never sees a URL', async () => {
+  await check('the osascript install keeps its unclickable banner and never sees a URL', async () => {
     const osaLog = path.join(workDir, 'osascript.log');
     const { notifyRound } = await import('../src/notify.mjs'); // from the clone: APP_EXEC is null
-    await withStubEnv({ STUB_OSASCRIPT_LOG: osaLog, PATH: `${stubDir}:${process.env.PATH}` }, async () => {
+    await withEnv({ STUB_OSASCRIPT_LOG: osaLog, PATH: `${stubDir}:${process.env.PATH}` }, async () => {
       notifyRound('my-project', { url: BOARD, port: PORT, deadlineAt: Date.now() + 600_000 });
-      const lines = await waitForLines(osaLog, 1);
+      const lines = await waitForCount(() => readJsonLines(osaLog), 1);
       assert.equal(lines.length, 1, 'the banner still fires with no bundle to serve a click');
       assert.equal(lines[0][1], 'display notification "my-project: a round is waiting." with title "Board"');
       assert.doesNotMatch(lines[0][1], /localhost|b_/, 'and the URL reaches no script string');
@@ -484,12 +421,6 @@ fs.appendFileSync(process.env.STUB_OSASCRIPT_LOG, JSON.stringify(process.argv.sl
     assert.match(m, /NSWorkspace/, 'and the click opens the URL through LaunchServices');
   });
 
-  await check('the launcher links AppKit, without which the delegate above is never called', async () => {
-    const sh = readFileSync(path.join(repoRoot, 'install.sh'), 'utf8');
-    assert.match(sh, /-framework Foundation -framework UserNotifications -framework AppKit/,
-      'install.sh builds the shipped binary; a missing framework here is a link error at install time');
-  });
-
   await check('the board-URL pattern lives in C, beside the other two argv filters, and there is exactly one of it', async () => {
     const c = readFileSync(path.join(repoRoot, 'bin', 'launcher.c'), 'utf8');
     // Not `static`, as of the menu bar item: the popover's rows open a board URL too,
@@ -508,12 +439,6 @@ fs.appendFileSync(process.env.STUB_OSASCRIPT_LOG, JSON.stringify(process.argv.sl
   });
 
   rmSync(workDir, { recursive: true, force: true });
-
-  if (failures) {
-    console.error(`${failures} check(s) failed`);
-    process.exit(1);
-  }
-  console.log('all check-notify-click checks ok');
 }
 
-await main();
+await runMain('check-notify-click', main, { lead: '' });

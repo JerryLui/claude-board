@@ -23,65 +23,14 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync, symlinkSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import http from 'node:http';
 import net from 'node:net';
-import { fileURLToPath } from 'node:url';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { startServer } from '../src/server.mjs';
 import { SESSION_COOKIE } from '../src/secret.mjs';
 import { shellQuote } from '../src/handoff.mjs';
 import { localUrl, remoteCommand, pickHandoffUrl, isBoardId, DEFAULT_REMOTE_PORT, DEFAULT_REMOTE_DIR } from '../bin/remote.mjs';
+import { check, execFileAsync, freePort, rawRequest, repoRoot, runMain, sleep, waitFor } from './support.mjs';
 
-const execFileP = promisify(execFile);
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const remoteBin = path.join(repoRoot, 'bin', 'remote.mjs');
-
-let failures = 0;
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
-
-function rawGet(port, pathName, host, headers = {}) {
-  return new Promise((resolve, reject) => {
-    const req = http.request({ host: '127.0.0.1', port, method: 'GET', path: pathName, headers: { host, ...headers } }, res => {
-      const chunks = [];
-      res.on('data', c => chunks.push(c));
-      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString('utf8') }));
-    });
-    req.on('error', reject);
-    req.end();
-  });
-}
-
-async function waitFor(fn, { timeoutMs = 5000, intervalMs = 25 } = {}) {
-  const start = Date.now();
-  for (;;) {
-    const v = await fn();
-    if (v) return v;
-    if (Date.now() - start >= timeoutMs) return null;
-    await new Promise(r => setTimeout(r, intervalMs));
-  }
-}
-
-/** A port with nothing listening on it: bind 0, read it, close. */
-function closedPort() {
-  return new Promise((resolve, reject) => {
-    const srv = net.createServer();
-    srv.listen(0, '127.0.0.1', () => {
-      const { port } = srv.address();
-      srv.close(err => (err ? reject(err) : resolve(port)));
-    });
-    srv.on('error', reject);
-  });
-}
 
 // --- fixtures ---------------------------------------------------------------------
 
@@ -153,7 +102,7 @@ async function helper(args, envOverrides = {}, { expectOpen = true } = {}) {
   for (const [k, v] of Object.entries(env)) if (v === undefined) delete env[k];
   let code = 0, stdout = '', stderr = '';
   try {
-    ({ stdout, stderr } = await execFileP(process.execPath, [remoteBin, ...args], { env, encoding: 'utf8', timeout: 30_000 }));
+    ({ stdout, stderr } = await execFileAsync(process.execPath, [remoteBin, ...args], { env, encoding: 'utf8', timeout: 30_000 }));
   } catch (err) {
     code = typeof err.code === 'number' ? err.code : 1;
     stdout = err.stdout ?? '';
@@ -162,7 +111,7 @@ async function helper(args, envOverrides = {}, { expectOpen = true } = {}) {
   // The opener creates its record before it writes the line, and it can outlive the helper:
   // wait for a whole line, not just the file.
   if (expectOpen) await waitFor(() => { const t = existsSync(openRecord) ? readFileSync(openRecord, 'utf8') : ''; return t.length > 0 && t.endsWith('\n'); });
-  else await new Promise(r => setTimeout(r, 150)); // room for a stray opener to show itself
+  else await sleep(150); // room for a stray opener to show itself
   const opened = existsSync(openRecord) ? readFileSync(openRecord, 'utf8').split('\n').filter(Boolean) : [];
   const sshArgs = existsSync(sshRecord) ? readFileSync(sshRecord, 'utf8').split('\n').filter(Boolean) : null;
   return { code, stdout, stderr, opened, sshArgs };
@@ -176,11 +125,10 @@ function cookieParts(res) {
 async function main() {
   // --- pure pieces --------------------------------------------------------------
 
-  await check('defaults: local port 7392, remote clone ~/Documents/claude-board', () => {
-    assert.equal(DEFAULT_REMOTE_PORT, 7392);
-    assert.equal(DEFAULT_REMOTE_DIR, '~/Documents/claude-board');
-  });
-
+  // The two defaults' values are pinned where they act: the port by the `open` check
+  // with CLAUDE_BOARD_REMOTE_PORT unset (localhost:7392), the clone path by every `login`
+  // run, which strips CLAUDE_BOARD_REMOTE_DIR and so reaches the mini's clone only at
+  // ~/Documents/claude-board; INSTALL.md's spelling of both is the check just below.
   await check('INSTALL.md documents the setup with the helper\'s own defaults, and package.json runs it', () => {
     const doc = readFileSync(path.join(repoRoot, 'INSTALL.md'), 'utf8');
     const section = doc.slice(doc.indexOf('## Remote review'));
@@ -244,7 +192,7 @@ async function main() {
   assert.notEqual(relayPort, daemonPort);
 
   await check('setup: node is not on the stand-in mini\'s PATH', async () => {
-    await assert.rejects(execFileP('/usr/bin/env', ['-i', `HOME=${miniHome}`, 'PATH=/usr/bin:/bin', '/bin/sh', '-c', 'command -v node']));
+    await assert.rejects(execFileAsync('/usr/bin/env', ['-i', `HOME=${miniHome}`, 'PATH=/usr/bin:/bin', '/bin/sh', '-c', 'command -v node']));
   });
 
   const host = `localhost:${relayPort}`;
@@ -260,7 +208,7 @@ async function main() {
     assert.match(url, new RegExp(`^http://localhost:${relayPort}/auth/[0-9a-f]{64}$`), 'localhost on the local port, never 127.0.0.1');
 
     // What the browser does with it, through the relay: Host is localhost:<local port>.
-    const redeemed = await rawGet(relayPort, new URL(url).pathname, host, HTML);
+    const redeemed = await rawRequest(relayPort, 'GET', new URL(url).pathname, { host, headers: HTML });
     assert.equal(redeemed.status, 302);
     assert.equal(redeemed.headers.location, '/', 'relative, so it lands on localhost:<local port> unchanged');
     const parts = cookieParts(redeemed);
@@ -268,9 +216,9 @@ async function main() {
     assert.ok(!parts.some(p => /^domain=/i.test(p)), 'host-only: no Domain attribute, so it lives under localhost alone and never reaches 127.0.0.1\'s jar');
     assert.ok(parts.some(p => /^max-age=\d+$/i.test(p)), 'persistent, so it survives a browser restart');
 
-    const index = await rawGet(relayPort, '/', host, { ...HTML, cookie: parts[0] });
+    const index = await rawRequest(relayPort, 'GET', '/', { host, headers: { ...HTML, cookie: parts[0] } });
     assert.equal(index.status, 200, 'the mini\'s index shows under localhost');
-    const bare = await rawGet(relayPort, '/', host, HTML);
+    const bare = await rawRequest(relayPort, 'GET', '/', { host, headers: HTML });
     assert.notEqual(bare.status, 200, 'and not without the cookie');
   });
 
@@ -279,7 +227,7 @@ async function main() {
     const r = await helper(['login', id]);
     assert.equal(r.code, 0, r.stderr);
     assert.match(r.sshArgs.at(-1), new RegExp(`--print ${id}'$`));
-    const redeemed = await rawGet(relayPort, new URL(r.opened[0]).pathname, host, HTML);
+    const redeemed = await rawRequest(relayPort, 'GET', new URL(r.opened[0]).pathname, { host, headers: HTML });
     assert.equal(redeemed.headers.location, `/b/${id}`);
   });
 
@@ -321,7 +269,7 @@ async function main() {
   });
 
   await check('login: with the tunnel down it says so and spends no handoff', async () => {
-    const r = await helper(['login'], { CLAUDE_BOARD_REMOTE_PORT: String(await closedPort()) }, { expectOpen: false });
+    const r = await helper(['login'], { CLAUDE_BOARD_REMOTE_PORT: String(await freePort()) }, { expectOpen: false });
     assert.notEqual(r.code, 0);
     assert.match(r.stderr, /tunnel is down/);
     assert.doesNotMatch(r.stderr, /LocalForward \d+ 127\.0\.0\.1:7391/, 'the remote daemon may run on its own CLAUDE_BOARD_PORT, so the hint names no fixed port');
@@ -358,13 +306,8 @@ async function main() {
   });
 }
 
-main()
-  .catch(err => {
-    failures++;
-    console.error('FAIL - unexpected error');
-    console.error(err);
-  })
-  .finally(async () => {
+runMain('remote', main, {
+  cleanup: async () => {
     for (const s of relaySockets) s.destroy();
     if (relay) await new Promise(resolve => relay.close(resolve));
     if (server) {
@@ -372,9 +315,5 @@ main()
       await new Promise(resolve => server.close(resolve));
     }
     rmSync(scratch, { recursive: true, force: true });
-    if (failures) {
-      console.error(`\n${failures} check(s) failed`);
-      process.exit(1);
-    }
-    console.log('\nall remote checks ok');
-  });
+  },
+});

@@ -329,8 +329,9 @@ export const ui = `
     // (src/theme.mjs): the theme control is the one exception -- an
     // archive reader is exactly who needs it. Re-enabled right after the
     // blanket disable above rather than excluded from that selector, so the
-    // selector's own literal text stays intact (test/check-pure.mjs asserts
-    // it verbatim) and this reads as the carve-out it is.
+    // selector stays one blanket rule (test/check-archive.mjs's readonly checks
+    // prove what it reaches, the page board's comment field included) and this
+    // reads as the carve-out it is.
     var themeToggleBtn = document.querySelector('button#theme-toggle');
     if (themeToggleBtn) themeToggleBtn.disabled = false;
     // Back-to-top is the second exception, for the same reason and by the same
@@ -5663,7 +5664,7 @@ export const ui = `
    * reviewer is already looking and has no reason to touch it), so a fixed
    * retry count just moves the mute hole from "one dropped POST" to "three or
    * however many" -- worse during exactly the daemon-restart storm where
-   * failures cluster, since isAttended no longer tolerates a Watcher that has
+   * failures cluster, since the daemon no longer counts a Watcher that has
    * never successfully reported at all. Idle the instant a report lands
    * (nothing schedules anything on success): only a FAILED report may ever
    * leave a timer armed, so an attended tab that is reporting fine costs

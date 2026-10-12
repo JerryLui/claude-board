@@ -35,30 +35,13 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import http from 'node:http';
-import { fileURLToPath } from 'node:url';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { startServer } from '../src/server.mjs';
 import { SECRET_HEADER } from '../src/secret.mjs';
 import { DEFAULT_PORT } from '../src/handoff.mjs';
 import { readDoc as readPomodoroDoc, writeDoc as writePomodoroDoc } from '../src/pomodoro.mjs';
+import { check, execFileAsync, freePort, repoRoot, runMain, sleep, waitFor } from './support.mjs';
 
-const execFileP = promisify(execFile);
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const installMdPath = path.join(repoRoot, 'INSTALL.md');
-
-let failures = 0;
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
 
 /** Pull every ```json fenced block out of INSTALL.md and return the one shaped like a
  * settings.json hook entry with the ensure route in it. Anything else in the file --
@@ -79,31 +62,6 @@ function extractHookEntry(markdown) {
     }
   }
   return null;
-}
-
-/** An address with nothing listening on it, for the "daemon is down" case. Bind to
- * port 0 to get a free ephemeral port from the OS, then close immediately -- a small
- * window where something else could grab it before the check runs, same tradeoff
- * every "closed port" test at this scale accepts. */
-function closedPort() {
-  return new Promise((resolve, reject) => {
-    const srv = http.createServer();
-    srv.listen(0, '127.0.0.1', () => {
-      const { port } = srv.address();
-      srv.close(err => (err ? reject(err) : resolve(port)));
-    });
-    srv.on('error', reject);
-  });
-}
-
-async function waitFor(fn, { timeoutMs, intervalMs }) {
-  const start = Date.now();
-  for (;;) {
-    const v = await fn();
-    if (v) return v;
-    if (Date.now() - start >= timeoutMs) return null;
-    await new Promise(r => setTimeout(r, intervalMs));
-  }
 }
 
 // --- fixtures ---------------------------------------------------------------------
@@ -131,7 +89,7 @@ function runHookAgainstPort(targetPort, extraEnv) {
   // header): a check that means "the hook starts an interval" must not be satisfiable by
   // the hook standing down. Anything wanting it back passes it in extraEnv.
   const { CLAUDE_BOARD_NO_POMODORO: _unattended, ...inherited } = process.env;
-  return execFileP('bash', ['-c', hookEntry.command], {
+  return execFileAsync('bash', ['-c', hookEntry.command], {
     env: { ...inherited, HOME: childHome, CLAUDE_BOARD_PORT: String(targetPort), ...extraEnv },
     timeout: 5000,
   });
@@ -212,7 +170,7 @@ async function main() {
       const doc = await pomodoroDoc();
       assert.equal(doc.timer.deadline, deadlineBefore, 'ensure against a running timer must be a true no-op');
       samples++;
-      await new Promise(r => setTimeout(r, 50));
+      await sleep(50);
     }
     assert.ok(samples >= 5, 'sanity: the sampling window must actually have sampled more than once');
   });
@@ -235,12 +193,14 @@ async function main() {
       const doc = await pomodoroDoc();
       assert.equal(doc.timer.phase, 'break', 'starting mid-break must not switch the phase to work');
       assert.equal(doc.timer.deadline, breakDeadline, 'the break deadline must be untouched, to the millisecond');
-      await new Promise(r => setTimeout(r, 50));
+      await sleep(50);
     }
   });
 
   await check('running the hook with nothing listening on the port still exits 0 and prints nothing (the property that protects the editor)', async () => {
-    const deadPort = await closedPort();
+    // A port bound and released: a small window where something else could grab it before
+    // the hook runs, the tradeoff every "closed port" test at this scale accepts.
+    const deadPort = await freePort();
     const startedAt = Date.now();
     const { stdout, stderr } = await runHookAgainstPort(deadPort);
     const elapsedMs = Date.now() - startedAt;
@@ -296,7 +256,7 @@ async function main() {
       const now = readFileSync(pomodoroFile);
       assert.ok(now.equals(before), `an unattended session must leave pomodoro.json byte-identical; it became:\n${now}`);
       samples++;
-      await new Promise(r => setTimeout(r, 50));
+      await sleep(50);
     }
     assert.ok(samples >= 5, 'sanity: the sampling window must actually have sampled more than once');
   });
@@ -321,19 +281,10 @@ async function main() {
   });
 }
 
-main()
-  .catch(err => {
-    failures++;
-    console.error('FAIL - unexpected error');
-    console.error(err);
-  })
-  .finally(async () => {
+runMain('install-doc', main, {
+  cleanup: async () => {
     if (server) await new Promise(resolve => server.close(resolve));
     rmSync(daemonHome, { recursive: true, force: true });
     rmSync(childHome, { recursive: true, force: true });
-    if (failures) {
-      console.error(`\n${failures} check(s) failed`);
-      process.exit(1);
-    }
-    console.log('\nall install-doc checks ok');
-  });
+  },
+});

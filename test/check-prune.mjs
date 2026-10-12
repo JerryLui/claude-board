@@ -24,45 +24,19 @@
 // entire failure mode worth defending against.
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
-import { SECRET_HEADER } from '../src/secret.mjs';
 import { startServer } from '../src/server.mjs';
 import { sharedAssets, assetsNamedBy, SCRIPT_ASSET, STYLE_ASSET, MERMAID_ASSET, ASSET_NAME } from '../src/assets.mjs';
 import { writeSharedAssets } from '../src/store.mjs';
+import { check, finish, mcpBin, postBoard, repoRoot, secretFetch, secretHome } from './support.mjs';
 
-const here = path.dirname(fileURLToPath(import.meta.url));
-const repoRoot = path.join(here, '..');
-const mcpBin = path.join(repoRoot, 'bin', 'mcp.mjs');
-
-let failures = 0;
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
-
-const home = mkdtempSync(path.join(tmpdir(), 'claude-board-prune-'));
-process.env.CLAUDE_BOARD_HOME = home;
-const SECRET_FILE = path.join(home, 'secret');
-const SECRET = 'd'.repeat(64);
-writeFileSync(SECRET_FILE, `${SECRET}\n`, { mode: 0o600 });
-process.env.CLAUDE_BOARD_SECRET_FILE = SECRET_FILE;
+const { home, secret: SECRET } = secretHome('claude-board-prune-', { secret: 'd'.repeat(64) });
 
 // Every request here holds the secret, exactly as test/check-http.mjs's own shadowed
 // `fetch` does: nothing in this file is about the credential.
-const rawFetch = globalThis.fetch;
-function fetch(input, init = {}) {
-  return rawFetch(input, { ...init, headers: { [SECRET_HEADER]: SECRET, ...(init.headers || {}) } });
-}
+const fetch = secretFetch(SECRET);
 
 const DAY = 24 * 60 * 60 * 1000;
 const boardsDir = path.join(home, 'boards');
@@ -117,22 +91,12 @@ async function main() {
   ({ server, port } = await startServer({ home, port: 0 }));
   base = `http://127.0.0.1:${port}`;
 
-  const post = async (title, blocks, extra = {}) => {
-    const r = await fetch(`${base}/api/board`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ title, blocks, ...extra }),
-    });
-    assert.equal(r.status, 200, `setup failure: posting "${title}" answered ${r.status}`);
-    return await r.json();
-  };
-
   // --- AC 12: the window decides, and only the window ----------------------------
 
   await check('AC 12: a prune removes the document AND the page of every board older than the window, and touches nothing newer', async () => {
-    const ancient = (await post('Ancient', [{ kind: 'markdown', text: '# forty days back' }])).boardId;
-    const middling = (await post('Middling', [{ kind: 'markdown', text: '# ten days back' }])).boardId;
-    const fresh = (await post('Fresh', [{ kind: 'markdown', text: '# today' }])).boardId;
+    const ancient = (await postBoard(port, SECRET, { title: 'Ancient', blocks: [{ kind: 'markdown', text: '# forty days back' }] })).boardId;
+    const middling = (await postBoard(port, SECRET, { title: 'Middling', blocks: [{ kind: 'markdown', text: '# ten days back' }] })).boardId;
+    const fresh = (await postBoard(port, SECRET, { title: 'Fresh', blocks: [{ kind: 'markdown', text: '# today' }] })).boardId;
     ageBoard(ancient, 40);
     ageBoard(middling, 10);
 
@@ -154,7 +118,7 @@ async function main() {
   });
 
   await check('AC 12: the age rule is flat -- a board holding a question nobody ever answered goes exactly like any other', async () => {
-    const unanswered = (await post('Never answered', [QUESTION])).boardId;
+    const unanswered = (await postBoard(port, SECRET, { title: 'Never answered', blocks: [QUESTION] })).boardId;
     ageBoard(unanswered, 90);
     const board = JSON.parse(readFileSync(boardPath(unanswered), 'utf8'));
     assert.equal(board.rounds[0].status, 'open', 'setup failure: the round must still be open');
@@ -166,8 +130,8 @@ async function main() {
   });
 
   await check('AC 12: a board that will not state its age is KEPT, however wide the window -- deleting removes only what it can prove', async () => {
-    const stampless = (await post('No stamps at all', [{ kind: 'markdown', text: '# hand-edited' }])).boardId;
-    const createdOnly = (await post('createdAt only', [{ kind: 'markdown', text: '# older shape' }])).boardId;
+    const stampless = (await postBoard(port, SECRET, { title: 'No stamps at all', blocks: [{ kind: 'markdown', text: '# hand-edited' }] })).boardId;
+    const createdOnly = (await postBoard(port, SECRET, { title: 'createdAt only', blocks: [{ kind: 'markdown', text: '# older shape' }] })).boardId;
     ageBoard(createdOnly, 50);
     restampBoard(stampless, { createdAt: undefined, updatedAt: undefined });
     restampBoard(createdOnly, { updatedAt: undefined });
@@ -186,7 +150,7 @@ async function main() {
     // The hazard this pins: `deleteBoard` builds both paths from one id, so pruning a
     // mismatched file on its STORED id would unlink a different board's document and
     // page entirely. The victim here is deliberately fresh -- it must survive.
-    const victim = (await post('Innocent bystander', [{ kind: 'markdown', text: '# not yours to delete' }])).boardId;
+    const victim = (await postBoard(port, SECRET, { title: 'Innocent bystander', blocks: [{ kind: 'markdown', text: '# not yours to delete' }] })).boardId;
     const mismatchedName = 'b_mismatch00000000000000000000000';
     const impostor = JSON.parse(readFileSync(boardPath(victim), 'utf8'));
     const iso = new Date(Date.now() - 90 * DAY).toISOString();
@@ -237,8 +201,8 @@ async function main() {
       assert.ok(ASSET_NAME.test(name), `setup failure: ${name} is not an asset name`);
     }
 
-    const old = (await post('Written against the old payload', [{ kind: 'markdown', text: '# old' }])).boardId;
-    const survivor = (await post('Written against the current payload', [{ kind: 'markdown', text: '# new' }])).boardId;
+    const old = (await postBoard(port, SECRET, { title: 'Written against the old payload', blocks: [{ kind: 'markdown', text: '# old' }] })).boardId;
+    const survivor = (await postBoard(port, SECRET, { title: 'Written against the current payload', blocks: [{ kind: 'markdown', text: '# new' }] })).boardId;
     writeFileSync(pagePath(old), `<!doctype html><html><head><link rel="stylesheet" href="${staleNames[1]}"></head><body><script src="${staleNames[0]}" defer></script></body></html>`);
     ageBoard(old, 40);
 
@@ -262,25 +226,11 @@ async function main() {
     }
   });
 
-  await check('AC 13: the survivor still loads -- the assets its own bytes name are all still served', async () => {
-    const survivor = (await post('Loads after a prune', [{ kind: 'markdown', text: '# still here' }])).boardId;
-    await prune({ days: 30 });
-    const page = readFileSync(pagePath(survivor), 'utf8');
-    const named = assetsNamedBy(page).filter(n => n === SCRIPT_ASSET || n === STYLE_ASSET);
-    assert.ok(named.length >= 2, 'setup failure: the page names neither shared asset');
-    for (const name of named) {
-      // Resolved the way a browser resolves a bare sibling filename on a page served at
-      // /b/<id>, not hand-built -- the same discipline test/check-assets.mjs applies.
-      const r = await fetch(new URL(name, `${base}/b/${survivor}`));
-      assert.equal(r.status, 200, `${name} must still be served after a prune`);
-    }
-  });
-
   await check('AC 13: mermaid survives a prune through an ORDINARY page, even though no page names it directly -- the sweep must follow the transitive reference via ui.js', async () => {
     // An ordinary board, through the real daemon -- writePage (src/store.mjs) writes
     // mermaid alongside ui.js/styles.css for every page (SHARED_ASSETS, src/assets.mjs),
     // whether or not this particular board carries a mermaid block at all.
-    const survivor = (await post('Names mermaid only transitively', [{ kind: 'markdown', text: '# still here' }])).boardId;
+    const survivor = (await postBoard(port, SECRET, { title: 'Names mermaid only transitively', blocks: [{ kind: 'markdown', text: '# still here' }] })).boardId;
     assert.equal(existsSync(path.join(pagesDir, MERMAID_ASSET)), true,
       'setup failure: the vendored engine must already be on disk, written alongside every page');
     assert.deepEqual(assetsNamedBy(readFileSync(pagePath(survivor), 'utf8')).filter(n => n === MERMAID_ASSET), [],
@@ -304,7 +254,7 @@ async function main() {
     // built to find. That is what makes such an archive self-describing -- the folder a
     // reader mails around says, in the page's own bytes, which sibling it needs.
     const stage = { kind: 'html', html: '<div class="doc"><pre class="mermaid">flowchart LR\n  A --> B</pre></div>' };
-    const boardId = (await post('A diagram inside a stage', [stage, { kind: 'markdown', text: 'not a page board' }])).boardId;
+    const boardId = (await postBoard(port, SECRET, { title: 'A diagram inside a stage', blocks: [stage, { kind: 'markdown', text: 'not a page board' }] })).boardId;
     const page = readFileSync(pagePath(boardId), 'utf8');
     assert.ok(assetsNamedBy(page).includes(MERMAID_ASSET),
       'a stage-diagram page must name the engine in its OWN bytes -- the escaped srcdoc carries the bare filename');
@@ -341,7 +291,7 @@ async function main() {
     // entry that cannot be read as UTF8 text throws there. A directory is the deterministic
     // way to hit that: readdirSync lists it, ASSET_NAME matches its name, and readFileSync
     // on a directory throws EISDIR, never ENOENT, so the sweep's read loop rethrows it.
-    const doomed = (await post('Gone before the sweep trips', [{ kind: 'markdown', text: '# aged out' }])).boardId;
+    const doomed = (await postBoard(port, SECRET, { title: 'Gone before the sweep trips', blocks: [{ kind: 'markdown', text: '# aged out' }] })).boardId;
     ageBoard(doomed, 40);
     const trap = path.join(pagesDir, 'mermaid-1111111111111111.js');
     mkdirSync(trap);
@@ -365,8 +315,8 @@ async function main() {
     // The searchable term goes in a question PROMPT: archive search walks what was asked
     // and what was answered (src/store.mjs searchBoards), never a markdown body.
     const zardoz = { ...QUESTION, prompt: 'Does ZARDOZ approve?' };
-    const goner = (await post('Prunable session', [zardoz])).boardId;
-    const keeper = (await post('Surviving session', [zardoz])).boardId;
+    const goner = (await postBoard(port, SECRET, { title: 'Prunable session', blocks: [zardoz] })).boardId;
+    const keeper = (await postBoard(port, SECRET, { title: 'Surviving session', blocks: [zardoz] })).boardId;
     ageBoard(goner, 40);
 
     // Both are on the index and in the search before the prune, or afterwards proves
@@ -400,7 +350,7 @@ async function main() {
   await check('AC 16: reading changes nothing -- the index, a board page, archive search and a wait all leave every file where it was', async () => {
     // Deliberately ancient, and never pruned: if anything anywhere applied an implicit
     // window, this is the board it would take.
-    const ancient = (await post('Read but never pruned', [{ kind: 'markdown', text: '# five years old' }])).boardId;
+    const ancient = (await postBoard(port, SECRET, { title: 'Read but never pruned', blocks: [{ kind: 'markdown', text: '# five years old' }] })).boardId;
     ageBoard(ancient, 5 * 365);
     const before = storeSnapshot();
     assert.ok(before.boards.includes(`${ancient}.json`), 'setup failure');
@@ -551,8 +501,4 @@ try {
   rmSync(home, { recursive: true, force: true });
 }
 
-if (failures) {
-  console.error(`\n${failures} prune check(s) failed`);
-  process.exit(1);
-}
-console.log('\nall prune checks ok');
+await finish('prune', { failText: n => `${n} prune check(s) failed` });

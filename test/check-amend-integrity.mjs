@@ -2,8 +2,8 @@
 // D26-D30 below, all of which are the same shape: a push lands, and something
 // on screen goes on saying what was true before it.
 //
-// Harness idiom is test/check-anchor-push.mjs's, deliberately: 'EventSource' is
-// declared as a named parameter of the `new Function` call that runs the real
+// The page loads through test/support.mjs's loadBoardWithEventSource: 'EventSource'
+// is declared as a named parameter of the `new Function` call that runs the real
 // `ui` script, and a stubbed, captured instance is passed as its argument, so
 // the real payloads can be dispatched at it afterward. `resync` additionally
 // needs `fetch`, stubbed the way test/check-comment-mode.mjs already stubs it.
@@ -18,63 +18,29 @@
 //   D28. every push path closes the stage lens, not only the diagram lens.
 //   D30. a context-nested html stage carries exactly ONE pin layer, so its
 //        comments are drawn once, where the stage itself says they are.
-//   ...and the two other pushes of the same shape, at the end of this file: a
+//   ...and the other pushes of the same shape, further down: an amend that
+//        replaces a question takes this tab's answer to the old one with it; a
 //        'submitted' push renders what was SUBMITTED rather than the receiving
-//        tab's own unsent draft, and a resync answered after a live push is
-//        dropped rather than applied backwards over it.
+//        tab's own unsent draft, nested questions included; a resync answered
+//        after a live push is dropped rather than applied backwards over it; a
+//        resync that missed nothing leaves the page alone, and one that missed a
+//        Send or a whole round catches up on it; and an amend to a page board
+//        renders the same markup a reload does.
 
 import assert from 'node:assert/strict';
 import { createBoard, addRound, amendRound, applySubmit, abandonOpenRounds, resolveComments } from '../src/board.mjs';
 import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock } from '../src/render.mjs';
+// The daemon's own push builder, imported rather than re-implemented: a check
+// that rebuilt the payload locally would assert its own copy of the rule and
+// stay green through any change to the real one (which is how the amend path's
+// missing `fullpage` survived two other push checks).
+import { buildRoundPushPayload } from '../src/server.mjs';
 import { ui } from '../src/ui.mjs';
 import { ROUND_OPEN_UNAWAITED_TITLE } from '../src/badge.mjs';
-import { parseHTML, StandInEvent, StandInEventSource } from './dom-stand-in.mjs';
+import { parseHTML, StandInEvent } from './dom-stand-in.mjs';
+import { check, checkAsync, finish, flush, pageHarness } from './support.mjs';
 
-let failures = 0;
-function report(name, err) {
-  if (!err) { console.log(`ok - ${name}`); return; }
-  failures++;
-  console.error(`FAIL - ${name}`);
-  console.error((err && err.stack) || err);
-}
-function check(name, fn) {
-  try { fn(); report(name); } catch (err) { report(name, err); }
-}
-async function checkAsync(name, fn) {
-  try { await fn(); report(name); } catch (err) { report(name, err); }
-}
-
-/** src/server.mjs's own buildRoundPushPayload, reimplemented rather than
- * imported (it is not exported) -- the same three calls in the same order. */
-function buildRoundPushPayload(board, round, mode, blockIds) {
-  const resolved = resolveComments(board, board.comments);
-  const commentsByBlock = groupCommentsByBlock(resolved);
-  const boardForClient = { ...board, comments: resolved };
-  const html = mode === 'new-round'
-    ? renderRoundSection(board, round, commentsByBlock)
-    : blockIds.map(id => {
-      const block = board.blocks.find(b => b.id === id);
-      return block ? renderBlock(block, board, commentsByBlock, false) : '';
-    }).join('\n');
-  return { round, mode, blockIds, html, board: boardForClient };
-}
-
-// Declare-and-pass, the harness idiom this file's own header comment names:
-// 'EventSource' is a named parameter of the `new Function` call, bound to a
-// captured, stubbed instance, rather than left off and picked up from
-// whatever the node process's own global happens to be.
-function loadBoardWithEventSource(pageHtml) {
-  let captured = null;
-  class CapturingEventSource extends StandInEventSource {
-    constructor(url) { super(url); captured = this; }
-  }
-  const document = parseHTML(pageHtml);
-  const window = document.defaultView;
-  const location = { protocol: 'http:' };
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location, CapturingEventSource);
-  assert.ok(captured, 'setup failure: the real ui script never constructed an EventSource');
-  return { document, es: captured };
-}
+const { loadBoardWithEventSource } = await pageHarness();
 
 /** The blocks a round shows as its OWN children -- what the reviewer reads as
  * "the round", as opposed to anything nested inside one of them. */
@@ -121,7 +87,7 @@ await checkAsync('a resync catching up on an amended compare side re-renders the
     es.dispatch('open', '');
     // resync is a fetch, a .text() and two .then hops deep -- a macrotask turn
     // drains all of it, where counting microtasks by hand would not.
-    await new Promise(r => setTimeout(r, 0));
+    await flush(1);
   } finally {
     globalThis.fetch = originalFetch;
     globalThis.DOMParser = originalParser;
@@ -207,6 +173,48 @@ check('a push disarms the send guard, so the button can never keep naming a coun
   assert.equal(document.querySelectorAll('.flagged').length, 0, 'and the ring on the question it flagged');
 });
 
+// --- a replaced question starts clean ----------------------------------------
+//
+// A replace-amend re-renders the block fresh from the server, so its widgets come
+// back blank -- but the client's own selections/notes/deferred are keyed by block
+// id, and the id survives the amend. Left alone, they ride along invisibly: the
+// reviewer sees a blank question while Send posts the pick, the note and the Defer
+// they gave the OLD prompt under the new one.
+
+check('an amend that replaces a question clears the pick, note and Defer this tab gave the old one, so Send posts it unanswered (ablation: delete applyRoundPush\'s clearFieldState(patch.changedBlockIds))', () => {
+  const q = prompt => ({ kind: 'question', prompt, widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] });
+  const board = createBoard({ title: 'Replace-amend', blocks: [q('Q1: ship it?'), q('Q2: rename it?')] });
+  const [q1, q2] = board.blocks.map(b => b.id);
+  const { document, es } = loadBoardWithEventSource(renderBoardPage(board));
+  const block = id => document.querySelector(`.question-block[data-block-id="${id}"]`);
+  block(q1).querySelectorAll('.choice-single').find(el => el.textContent.trim() === 'No').dispatchEvent(new StandInEvent('click'));
+  const note = block(q1).querySelector('textarea[data-note-for]');
+  note.value = 'a note against the old prompt';
+  note.dispatchEvent(new StandInEvent('input'));
+  block(q2).querySelector('.btn-defer').dispatchEvent(new StandInEvent('click'));
+
+  amendRound(board, { blocks: [{ id: q1, ...q('Q1: ship the NEW copy?') }, { id: q2, ...q('Q2: rename it to what?') }] });
+  es.dispatch('round', JSON.stringify(buildRoundPushPayload(board, 1, 'amend', [q1, q2])));
+
+  const sendBtn = document.getElementById('send-btn');
+  const originalFetch = globalThis.fetch;
+  const posted = [];
+  globalThis.fetch = (url, opts) => { posted.push(JSON.parse(opts.body)); return Promise.resolve({ ok: true, status: 200, json: async () => ({}) }); };
+  try {
+    sendBtn.dispatchEvent(new StandInEvent('click'));
+    assert.equal(posted.length, 0, 'both replaced questions are blank again, so the first press must arm rather than send');
+    assert.equal(sendBtn.textContent, '2 questions unanswered — send anyway?');
+    sendBtn.dispatchEvent(new StandInEvent('click'));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(posted.length, 1, 'setup failure: the armed second press must submit');
+  const byId = Object.fromEntries(posted[0].answers.map(a => [a.id, a]));
+  assert.equal(byId[q1].status, 'unanswered', 'the pick made against the old prompt must not ride under the new one');
+  assert.equal(byId[q1].note, '', 'nor the note typed against it');
+  assert.equal(byId[q2].status, 'unanswered', 'nor a Defer pressed on the old question');
+});
+
 // --- D28 ---------------------------------------------------------------------
 
 check('all three push paths close the stage lens, not just the diagram lens (ablation: drop stageLensClose() from any of them and a pick control stays bound to a card the push replaced)', () => {
@@ -287,28 +295,47 @@ check('a stage cannot grow the pending-locate table without bound, and cannot na
 // wires) BEFORE clearing them, so the second tab painted its own private draft
 // over the immutable record of someone else's answer.
 
-check('a just-sent round shows what was submitted, never this tab\'s unsent draft (ablation: move applySubmittedPush\'s clearFieldState back below wireRoot and the second tab repaints its own selection onto the record)', () => {
+// A question nested in a compare side is in board.blocks only inside its owner,
+// so the top-level ids alone would leave its draft in place: the ids also have to
+// come from the DOM subtree being replaced.
+
+check('a just-sent round shows what was submitted, never this tab\'s unsent draft, for a question nested in a compare side too (ablation: move applySubmittedPush\'s clearFieldState back below wireRoot, or drop its replacedIds, and the second tab repaints its own selection onto the record)', () => {
   const board = createBoard({
     title: 'Two tabs, one Send',
-    blocks: [{ kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] }],
+    blocks: [
+      { kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] },
+      {
+        kind: 'compare',
+        left: { label: 'A', block: { kind: 'question', prompt: 'Keep this side?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] } },
+        right: { label: 'B', block: { kind: 'markdown', text: 'the other side' } },
+      },
+    ],
   });
   const qid = board.blocks[0].id;
+  const nestedId = board.blocks[1].left.block.id;
   const { document, es } = loadBoardWithEventSource(renderBoardPage(board));
 
   // THIS tab's private, unsent state: a different choice and a note nobody else
   // has ever seen, entered through the real widgets.
-  const pick = label => Array.from(document.querySelectorAll('.choice-single')).find(el => el.textContent.indexOf(label) !== -1);
+  const pickIn = (id, label) => Array.from(document.querySelector(`.question-block[data-block-id="${id}"]`).querySelectorAll('.choice-single'))
+    .find(el => el.textContent.indexOf(label) !== -1);
+  const pick = label => pickIn(qid, label);
   pick('No').dispatchEvent(new StandInEvent('click'));
+  pickIn(nestedId, 'No').dispatchEvent(new StandInEvent('click'));
   const draftNote = document.querySelector(`textarea[data-note-for="${qid}"]`);
   draftNote.value = 'my private draft, never sent';
   draftNote.dispatchEvent(new StandInEvent('input'));
   assert.equal(pick('No').classList.contains('selected'), true, 'setup failure: the draft choice was not recorded');
+  assert.equal(pickIn(nestedId, 'No').classList.contains('selected'), true, 'setup failure: the nested draft choice was not recorded');
 
   // The OTHER tab answers differently and sends. Everything from here is the
   // daemon's own payload, built the way handleSubmit builds it.
   applySubmit(board, {
     action: 'send',
-    answers: [{ id: qid, status: 'answered', choice: 'Yes', note: 'what actually went out' }],
+    answers: [
+      { id: qid, status: 'answered', choice: 'Yes', note: 'what actually went out' },
+      { id: nestedId, status: 'answered', choice: 'Yes', note: '' },
+    ],
     comments: [],
   }, 1);
   const resolved = resolveComments(board, board.comments);
@@ -316,10 +343,12 @@ check('a just-sent round shows what was submitted, never this tab\'s unsent draf
   es.dispatch('submitted', JSON.stringify({ round: 1, board: { ...board, comments: resolved }, html }));
 
   const section = document.querySelector('.round[data-round="1"]');
-  const selected = Array.from(section.querySelectorAll('.choice-single.selected'));
-  assert.equal(selected.length, 1, `the record must show exactly one choice, got ${selected.length}`);
-  assert.equal(selected[0].getAttribute('data-choice'), 'Yes',
-    'and it must be the choice that was actually submitted, not the one this tab had merely picked');
+  for (const [id, where] of [[qid, 'top-level'], [nestedId, 'nested']]) {
+    const selected = Array.from(section.querySelector(`.question-block[data-block-id="${id}"]`).querySelectorAll('.choice-single.selected'));
+    assert.equal(selected.length, 1, `the ${where} question's record must show exactly one choice, got ${selected.length}`);
+    assert.equal(selected[0].getAttribute('data-choice'), 'Yes',
+      `and it must be the choice that was actually submitted, not the one this tab had merely picked (${where})`);
+  }
 
   const noteEl = section.querySelector(`textarea[data-note-for="${qid}"]`);
   assert.equal(noteEl.textContent, 'what actually went out', 'the server rendered the note that was sent');
@@ -370,7 +399,7 @@ await checkAsync('a resync answered after a live amend is dropped, not applied b
     yes.dispatchEvent(new StandInEvent('click')); // and the reviewer answers it
 
     release(); // ...and only now does the pre-amend snapshot arrive
-    await new Promise(r => setTimeout(r, 0));
+    await flush(1);
   } finally {
     globalThis.fetch = originalFetch;
     globalThis.DOMParser = originalParser;
@@ -433,12 +462,12 @@ await checkAsync('of two catch-ups in flight, the older one answering last is dr
     assert.equal(pending.length, 2, 'setup: one catch-up per nudge, both in the air at once');
 
     pending[1]({ ok: true, status: 200, text: async () => freshPage }); // the fresher answers first
-    await new Promise(r => setTimeout(r, 0));
+    await flush(1);
     assert.equal(parsed.length, 1, 'setup: the fresher snapshot was read');
     assert.equal(countdown.textContent, '', 'setup: ...and applied -- the board is closed, so the countdown is gone');
 
     pending[0]({ ok: true, status: 200, text: async () => stalePage }); // the older answers last
-    await new Promise(r => setTimeout(r, 0));
+    await flush(1);
     assert.equal(parsed.length, 1,
       'the older snapshot must be dropped where it is decided, not read and handed to applyResync to be diffed against a board it predates');
   } finally {
@@ -447,6 +476,56 @@ await checkAsync('of two catch-ups in flight, the older one answering last is dr
   }
 
   assert.equal(countdown.textContent, '', 'and the closed board stays closed');
+});
+
+// --- what a reconnect catches up on, and what it leaves alone ---------------
+//
+// 'open' fires on the first connection and on every reconnect, and the stream has
+// no replay, so each one re-reads the board and diffs it. Three outcomes, driven
+// in order on one tab: nothing was missed (the page, an open lens included, is
+// left exactly as it was -- a network blip must not close what the reviewer is
+// reading); a Send landed while away (that round collapses into history, with no
+// block changing, the status-only branch); a whole round arrived while away (it
+// lands as the new page it would have been).
+
+await checkAsync('a reconnect that missed nothing leaves an open lens open, one that missed a Send collapses that round into history, and one that missed a round lands it (ablation: delete applyResync\'s nothing-missed return, its status-only markRoundHistory, or its new-round replay)', async () => {
+  const board = createBoard({
+    title: 'Away',
+    blocks: [
+      { kind: 'question', prompt: 'Q1: pick one', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] },
+      { kind: 'html', html: '<p id="mock">the artifact</p>' },
+    ],
+  });
+  const { document, es } = loadBoardWithEventSource(renderBoardPage(board));
+  const originalFetch = globalThis.fetch;
+  const originalParser = globalThis.DOMParser;
+  const fetched = [];
+  let served = renderBoardPage(board);
+  globalThis.fetch = async url => { fetched.push(url); return { ok: true, status: 200, text: async () => served }; };
+  globalThis.DOMParser = class { parseFromString(text) { return parseHTML(text); } };
+  const reconnect = async () => { es.dispatch('open', ''); await flush(1); };
+  try {
+    document.querySelector('.html-block .expand-btn').dispatchEvent(new StandInEvent('click'));
+    assert.ok(document.querySelector('.stage-lens-frame'), 'setup failure: the stage lens did not open');
+    await reconnect();
+    assert.equal(fetched[0], '/b/' + encodeURIComponent(board.id), 'the catch-up must re-read this board\'s own page');
+    assert.ok(document.querySelector('.stage-lens-frame'), 'a reconnect that missed nothing must not close the lens the reviewer has open');
+
+    applySubmit(board, { action: 'send', answers: [], comments: [] }, 1);
+    served = renderBoardPage(board);
+    await reconnect();
+    assert.equal(document.querySelector('.round[data-round="1"]').classList.contains('round-history'), true,
+      'a round sent from another tab while this one was away must collapse into history on the catch-up');
+
+    addRound(board, { blocks: [{ kind: 'question', prompt: 'Q2: and another', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] }] });
+    served = renderBoardPage(board);
+    await reconnect();
+    const round2 = document.querySelector('.round[data-round="2"]');
+    assert.ok(round2 && round2.querySelector('.question-block'), 'a round posted while this tab was away must land on the catch-up');
+  } finally {
+    globalThis.fetch = originalFetch;
+    globalThis.DOMParser = originalParser;
+  }
 });
 
 // --- an abandoned board, on an ORDINARY board's surface ----------------------
@@ -496,7 +575,7 @@ await checkAsync('an ordinary board whose round was abandoned stops counting dow
   globalThis.DOMParser = class { parseFromString(text) { return parseHTML(text); } };
   try {
     es.dispatch('awaitExpired', JSON.stringify({ round: 1 }));
-    await new Promise(r => setTimeout(r, 0));
+    await flush(1);
   } finally {
     globalThis.fetch = originalFetch;
     globalThis.DOMParser = originalParser;
@@ -521,5 +600,54 @@ await checkAsync('an ordinary board whose round was abandoned stops counting dow
   assert.match(meta.title, /reads the board/, 'the promise names the read path, the only way an abandoned board pays out');
 });
 
-if (failures) process.exit(1);
-console.log('\nall amend-integrity checks ok');
+// --- the live push and the page it would reload as are the same markup -------
+//
+// buildRoundPushPayload derives `fullpage` for the 'new-round' branch by going
+// through renderRoundSection, which computes it itself -- but the amend branch
+// renders bare blocks with no round wrapper, so it has to derive it too. Passing
+// nothing meant `false`: the pushed fragment came back as an ORDINARY stage, and
+// applyRoundPush replaces the block outright, so a page board picked up a kicker
+// and an expand control over its 100vh frame and lost `.page-comments`, dropping
+// the comment form below the fold of a page that cannot scroll. Nothing repaired
+// it short of a reload, and the reload rendered something different.
+
+check('an amend push of a page-board block renders it as a PAGE, byte-identical to what a reload of the same board renders, and an ordinary stage keeps its kicker on the same path', () => {
+  // An awaited lone html block: a page board whose comment surface is live.
+  const board = createBoard({
+    title: 'Rendered artifact',
+    blocks: [{ kind: 'html', html: '<div class="doc"><h1>Quarterly</h1><button id="theme">Toggle theme</button></div>' }],
+    wait: true,
+  });
+  const blockId = board.blocks[0].id;
+  const payload = buildRoundPushPayload(board, 1, 'amend', [blockId]);
+
+  const reloaded = renderRoundSection(board, 1, groupCommentsByBlock([]));
+  // The block's own section out of each, so the round wrapper renderRoundSection
+  // adds around it is not what this compares. An html block section nests no
+  // other <section>, so its first closing tag is its own.
+  const section = (html) => {
+    const start = html.indexOf('<section class="block html-block"');
+    assert.notEqual(start, -1, 'setup failure: no html block section in this markup');
+    const end = html.indexOf('</section>', start);
+    assert.notEqual(end, -1, 'setup failure: unclosed block section');
+    return html.slice(start, end + '</section>'.length);
+  };
+  assert.equal(section(payload.html).trim(), section(reloaded).trim(),
+    'the amend fragment and the reload must be the same block markup -- one board cannot render two ways');
+
+  assert.ok(!payload.html.includes('block-kicker'), 'no kicker over a full-viewport artifact');
+  assert.ok(!payload.html.includes('expand-btn'), 'and no expand control');
+  assert.ok(payload.html.includes('page-comments'), 'and the comment surface still floats over the frame');
+
+  // And the same call for an ORDINARY board's stage is untouched: this derives
+  // the layout from the round's own shape, it does not impose one.
+  const ordinary = createBoard({
+    title: 'artifact + note',
+    blocks: [{ kind: 'html', html: '<div class="doc"><h1>Quarterly</h1></div>' }, { kind: 'markdown', text: 'a stats line' }],
+  });
+  const ordinaryPush = buildRoundPushPayload(ordinary, 1, 'amend', [ordinary.blocks[0].id]);
+  assert.ok(ordinaryPush.html.includes('block-kicker'), 'an ordinary stage keeps its kicker on the same path');
+  assert.ok(ordinaryPush.html.includes('expand-btn'), 'and its lens control');
+});
+
+await finish('amend-integrity', { failText: null });

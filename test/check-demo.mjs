@@ -9,80 +9,23 @@
 //
 // Patterned after test/check-http.mjs (a real in-process daemon via startServer,
 // never a mock) for the happy path, and test/check-mcp.mjs's dead-port/no-secret
-// checks (`freePort`, the "throwaway server then close it" dead-port trick, and the
-// `makeOpenRecorder` stand-in for `open`) for the two failure shapes -- duplicated
-// here rather than imported, since every check file in this suite is a standalone
-// process (test/run.mjs spawns each one fresh) and none of these helpers are
-// exported.
+// checks for the two failure shapes: test/support.mjs's `freePort`, the "throwaway
+// server then close it" dead-port trick, and test/support.mjs's `makeOpenRecorder`
+// stand-in for `open`.
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import net from 'node:net';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { startServer } from '../src/server.mjs';
 import { readBoard } from '../src/store.mjs';
 import { KIND_LETTER, WIDGETS } from '../src/board.mjs';
+import { check, execFileAsync, finish, freePort, makeOpenRecorder } from './support.mjs';
 
-const execFileP = promisify(execFile);
 const demoBin = fileURLToPath(new URL('../bin/demo.mjs', import.meta.url));
 const samplePath = fileURLToPath(new URL('../examples/sample-board.json', import.meta.url));
 const sample = JSON.parse(readFileSync(samplePath, 'utf8'));
-
-let failures = 0;
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
-
-/** A port nothing is listening on: bind ephemeral, read it back, close it. */
-function freePort() {
-  return new Promise((resolve, reject) => {
-    const srv = net.createServer();
-    srv.once('error', reject);
-    srv.listen(0, '127.0.0.1', () => {
-      const p = srv.address().port;
-      srv.close(() => resolve(p));
-    });
-  });
-}
-
-/** A stand-in for `open`: records the single URL it is handed. Same shape as
- * test/check-mcp.mjs's makeOpenRecorder. */
-function makeOpenRecorder(dir) {
-  const script = path.join(dir, 'fake-open.sh');
-  const log = path.join(dir, 'opened.log');
-  writeFileSync(script, '#!/bin/sh\nprintf \'%s\\n\' "$1" >> "$CLAUDE_BOARD_OPEN_LOG"\n', { mode: 0o755 });
-  return {
-    script,
-    log,
-    opened() {
-      if (!existsSync(log)) return [];
-      return readFileSync(log, 'utf8').split('\n').filter(Boolean);
-    },
-    // Polled, not a fixed sleep: the recorder is a real detached grandchild
-    // process (bin/demo.mjs spawns it detached+unref'd, same as
-    // bin/authorize.mjs), and how long it takes to fork/exec/write is not this
-    // check's to guess at.
-    async waitForOpens(n, timeoutMs = 5000) {
-      const start = Date.now();
-      while (Date.now() - start < timeoutMs) {
-        if (this.opened().length >= n) return this.opened();
-        await new Promise(r => setTimeout(r, 25));
-      }
-      return this.opened();
-    },
-  };
-}
 
 const home = mkdtempSync(path.join(tmpdir(), 'claude-board-demo-'));
 const secretFile = path.join(home, 'secret');
@@ -100,7 +43,7 @@ async function main() {
     // process (see QUIRKS.md "execFileSync deadlocks against an in-process
     // daemon") -- a synchronous spawn would block the event loop the daemon
     // needs to answer its own request.
-    const { stdout, stderr } = await execFileP(process.execPath, [demoBin], {
+    const { stdout, stderr } = await execFileAsync(process.execPath, [demoBin], {
       env: {
         ...process.env,
         CLAUDE_BOARD_PORT: String(port),
@@ -136,7 +79,7 @@ async function main() {
       assert.ok(questionWidgets.has(widget), `sample question widget "${widget}" did not land on the posted board`);
     }
 
-    const opened = await recorder.waitForOpens(1);
+    const opened = await recorder.waitForOpens(1, 5000);
     assert.deepEqual(opened, [url], 'the printed URL is exactly what got handed to the opener');
   });
 
@@ -153,7 +96,7 @@ async function main() {
       CLAUDE_BOARD_OPEN_LOG: recorder.log,
     };
     delete env.CLAUDE_BOARD_PORT;
-    const { stdout } = await execFileP(process.execPath, [demoBin], { env, encoding: 'utf8', timeout: 15_000 });
+    const { stdout } = await execFileAsync(process.execPath, [demoBin], { env, encoding: 'utf8', timeout: 15_000 });
     assert.match(stdout.trim(), new RegExp(`^http://127\\.0\\.0\\.1:${port}/b/b_[0-9a-f]{32}$`),
       'the record alone must carry the demo to the daemon\'s actual port');
   });
@@ -166,7 +109,7 @@ async function main() {
     const start = Date.now();
     let err;
     try {
-      await execFileP(process.execPath, [demoBin], {
+      await execFileAsync(process.execPath, [demoBin], {
         env: {
           ...process.env,
           CLAUDE_BOARD_PORT: String(deadPort),
@@ -195,7 +138,7 @@ async function main() {
 
     let err;
     try {
-      await execFileP(process.execPath, [demoBin], {
+      await execFileAsync(process.execPath, [demoBin], {
         env: {
           ...process.env,
           CLAUDE_BOARD_PORT: String(deadPort),
@@ -222,8 +165,4 @@ try {
   rmSync(home, { recursive: true, force: true });
 }
 
-if (failures) {
-  console.error(`\n${failures} check(s) failed`);
-  process.exit(1);
-}
-console.log('\nall demo checks ok');
+await finish('demo');

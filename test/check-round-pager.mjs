@@ -7,8 +7,7 @@
 // asserted on renderBoardPage's own markup resolved through the stylesheet's
 // real cascade (test/check-pure.mjs's idiom), and every flip is a genuine click
 // or keydown against test/dom-stand-in.mjs running the real `ui` script
-// (test/check-round-end.mjs's idiom, whose loaders these are copied from --
-// there is no shared test-helper module in this repo, by convention).
+// (test/check-round-end.mjs's idiom, through test/support.mjs's page harness).
 //
 // WHY A PAGE MODEL RATHER THAN A SCROLL MODEL, and what that costs. The round
 // badge used to be driven by an IntersectionObserver over a band under the
@@ -28,24 +27,15 @@
 // not "a browser painted it there".
 
 import assert from 'node:assert/strict';
-import { createBoard, addRound, applySubmit } from '../src/board.mjs';
+import { createBoard, addRound, applySubmit, abandonOpenRounds } from '../src/board.mjs';
 import { renderBoardPage, renderRoundSection, groupCommentsByBlock } from '../src/render.mjs';
 import { roundPageLabel, roundNumberLabel } from '../src/badge.mjs';
 import { styles } from '../src/styles.mjs';
 import { ui } from '../src/ui.mjs';
-import { parseHTML, StandInEvent, StandInEventSource, resolveComputedProperty } from './dom-stand-in.mjs';
+import { parseHTML, StandInEvent, resolveComputedProperty } from './dom-stand-in.mjs';
+import { check, finish, pageHarness } from './support.mjs';
 
-let failures = 0;
-function check(name, fn) {
-  try {
-    fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
+const { loadBoard, loadBoardWithEventSource, click, answerSingle, reportScroll, condensed } = await pageHarness();
 
 const ARTIFACT = '<style>.doc{font:14px system-ui}</style><div class="doc"><h1>Quarterly</h1></div>';
 const Q = { kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] };
@@ -92,30 +82,6 @@ function questionThenArtifactWithQuestion() {
   return board;
 }
 
-// 'EventSource' is declared and, unless `EventSourceStandIn` is given (see
-// loadBoardWithEventSource below), left unpassed -- see QUIRKS.md "A `new
-// Function` harness inherits the host's globals".
-function loadBoard(html, protocol, EventSourceStandIn) {
-  const document = parseHTML(html);
-  const window = document.defaultView;
-  const location = { protocol: protocol || 'http:' };
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location, EventSourceStandIn);
-  return document;
-}
-
-// declare-and-pass, same shape as test/check-index-live.mjs -- no globalThis
-// save/restore needed.
-function loadBoardWithEventSource(html) {
-  let captured = null;
-  class CapturingEventSource extends StandInEventSource {
-    constructor(url) { super(url); captured = this; }
-  }
-  const document = loadBoard(html, undefined, CapturingEventSource);
-  assert.ok(captured, 'setup failure: the real ui script never constructed an EventSource');
-  return { document, es: captured };
-}
-
-const click = el => el.dispatchEvent(new StandInEvent('click'));
 const currentPage = document => {
   const els = [...document.querySelectorAll('.round-current')];
   assert.equal(els.length, 1, 'exactly one round section may be the current page at any moment');
@@ -124,22 +90,6 @@ const currentPage = document => {
 const pagerLabels = document => [...document.querySelectorAll('.round-page')].map(b => b.textContent);
 const owedRounds = document => [...document.querySelectorAll('.round-page-owed')].map(b => b.getAttribute('data-round'));
 
-/** Answer a single-choice question through the real widget -- test/check-round-end.mjs's
- * own answerSingle, copied rather than imported (no shared test-helper module here). */
-function answerSingle(block, label) {
-  const opt = [...block.querySelectorAll('.choice-single')].find(el => el.textContent.trim() === label);
-  assert.ok(opt, `setup failure: no "${label}" option rendered in this block`);
-  click(opt);
-}
-
-/** What a page board's stage reports as it is scrolled (ADR.md entry 40) --
- * forged from the stage's OWN window, the only source the parent's listener
- * trusts. test/check-page-board.mjs's own reportScroll, same reason as above. */
-function reportScroll(frame, top) {
-  frame.contentWindow.parent.postMessage({ cb: 'cb-stage', type: 'scroll', top }, '*');
-}
-
-const condensed = document => document.body.classList.contains('stage-scrolled');
 const backToTopVisible = document => {
   const el = document.querySelector('button#back-to-top');
   assert.ok(el, 'setup failure: no back-to-top control rendered');
@@ -330,7 +280,7 @@ check('criterion 19 + ADR 42: the layout follows the PAGE -- an artifact round f
 // Criterion 20: a page already sent is read-only.
 // =====================================================================================
 
-check('criterion 20: flipping back to a sent page takes the send bar away, and returning to the open round brings it back', () => {
+check('criterion 20: flipping back to a sent page takes the send bar away, returning to the open round brings it back, and an abandoned round is not a sent page (ADR 114)', () => {
   const document = loadBoard(renderBoardPage(threeRounds()));
   const sendBtn = document.querySelector('button#send-btn');
   const discussBtn = document.querySelector('button#discuss-btn');
@@ -349,6 +299,16 @@ check('criterion 20: flipping back to a sent page takes the send bar away, and r
   assert.equal(document.body.classList.contains('sent-page'), false);
   assert.notEqual(resolveComputedProperty(styles, sendBar, true, 'display'), 'none');
   assert.equal(sendBtn.disabled, false, 'the open round is still sendable -- the lock is about the PAGE, not about the board');
+
+  // ADR 114: a round closed as abandoned (its conversation declared a boundary
+  // and walked away) still takes a late Send, so the page lock asks "has nobody
+  // sent it", never "is it still open".
+  const abandoned = createBoard({ title: 'Abandoned', blocks: [Q] });
+  assert.deepEqual(abandonOpenRounds(abandoned), [1], 'setup: the one open round is abandoned');
+  const abandonedDoc = loadBoard(renderBoardPage(abandoned));
+  assert.equal(abandonedDoc.body.classList.contains('sent-page'), false, 'an abandoned round is not a sent page');
+  assert.equal(abandonedDoc.querySelector('button#send-btn').disabled, false,
+    'an abandoned round keeps Send live -- the daemon still stores a late Send on it');
 });
 
 check('criterion 20: the keyboard path cannot send from a sent page either', () => {
@@ -363,7 +323,7 @@ check('criterion 20: the keyboard path cannot send from a sent page either', () 
     'Cmd+Enter on a sent page must not start a submit -- the chord\'s own guard is "the send button is disabled", which the page lock is what makes true here');
 });
 
-check('criterion 20: a sent page\'s own controls are inert -- three independent locks, none of them removed', () => {
+check('criterion 20: a sent page\'s own controls are inert -- the server renders its widgets disabled, and body.sent-page makes the page itself pointer-inert', () => {
   const board = threeRounds();
   const html = renderBoardPage(board);
   const document = loadBoard(html);
@@ -378,10 +338,9 @@ check('criterion 20: a sent page\'s own controls are inert -- three independent 
   assert.equal(resolveComputedProperty(styles, choice, true, 'pointer-events'), 'none',
     'and body.sent-page makes the page itself inert, the same shape body.readonly uses');
 
-  // 3. the client's own live collapse, for a round that goes sent without a
-  // re-render -- proved elsewhere (markRoundHistory), asserted here only as
-  // "still called", since removing it would leave a live tab editable.
-  assert.ok(ui.includes('function markRoundHistory'), 'the live collapse must still exist -- the page lock is a THIRD lock, not a replacement');
+  // The client's own live collapse, for a round that goes sent without a
+  // re-render, is driven by the 'submitted' push check below and by
+  // test/check-round-end.mjs's SSE rail check.
 });
 
 check('criterion 20: a round going sent under the reviewer locks the page they are standing on, with no flip and no reload', () => {
@@ -621,7 +580,7 @@ check('ADR 42: an arrow key does not flip the page out from under an open lens',
 // Criterion 26: both controls, always.
 // =====================================================================================
 
-check('criterion 26: both controls are present on every kind of board -- single round, page board, and a read-only archive', () => {
+check('criterion 26: both controls are present on a single-round board, a page board and a three-round board, the pill naming every round', () => {
   const boards = {
     'a single-round board': createBoard({ title: 'One', blocks: [Q] }),
     'a page board': createBoard({ title: 'Artifact', blocks: [{ kind: 'html', html: ARTIFACT }] }),
@@ -721,7 +680,7 @@ check('criterion 26: the pager survives the read-only archive\'s blanket disable
   // file:// hydrates read-only and hard-disables every button on the page. An
   // archive's rounds are still pages, and flipping between them is navigation,
   // not editing -- the same carve-out the diagram's expand control has.
-  const document = loadBoard(renderBoardPage(threeRounds()), 'file:');
+  const document = loadBoard(renderBoardPage(threeRounds()), { protocol: 'file:' });
   assert.equal(document.body.classList.contains('readonly'), true, 'setup failure: expected file:// to hydrate read-only');
 
   const prev = document.querySelector('button#round-prev');
@@ -760,7 +719,7 @@ check('criterion 26: the two controls are two positions -- the dock bottom-centr
   assert.equal(next.closest('.round-pager-dock'), null);
 });
 
-check('the page board\'s comment panel clears the round pager by reading its REAL measured height, not a guessed number -- SOURCE ONLY, see note below', () => {
+check('the page board\'s comment panel clears the round pager by the dock\'s measured height -- its bottom reads --round-pager-dock-h, and the client script measures the dock with a ResizeObserver and writes that property (source only, see note below)', () => {
   // 2379f12 turned the dock into a two-row box (a caption line above the
   // pill), and .page-comments went on clearing a hardcoded '44px' sized for
   // the old one-row pill -- so the panel started sitting under the dock
@@ -824,8 +783,4 @@ check('the page board\'s comment panel clears the round pager by reading its REA
   assert.match(ui, /setupPagerDockHeightTracking\(\);/, 'the function must actually be CALLED on the page, not merely defined and left unused');
 });
 
-if (failures) {
-  console.error(`\n${failures} round-pager check(s) failed`);
-  process.exit(1);
-}
-console.log('\nall round-pager checks ok');
+finish('round-pager', { failText: n => `${n} round-pager check(s) failed` });

@@ -21,21 +21,13 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { checkProseFile, formatFailures, parseBlockShapes, parsePacketStatuses } from '../src/prose-check.mjs';
+import { check, configure, finish } from './support.mjs';
 
 const SKILL_PATH = fileURLToPath(new URL('../skills/claude-board/SKILL.md', import.meta.url));
 const PROTOCOL_PATH = fileURLToPath(new URL('../PROTOCOL.md', import.meta.url));
 const README_PATH = fileURLToPath(new URL('../README.md', import.meta.url));
 
-let failed = 0;
-function check(name, fn) {
-  try {
-    fn();
-    console.log(`ok   ${name}`);
-  } catch (err) {
-    failed++;
-    console.error(`FAIL ${name}\n     ${err.message}`);
-  }
-}
+configure({ format: 'aligned' });
 
 const prose = readFileSync(SKILL_PATH, 'utf8');
 const protocol = readFileSync(PROTOCOL_PATH, 'utf8');
@@ -43,6 +35,18 @@ const readme = readFileSync(README_PATH, 'utf8');
 // Prose wraps at the line, so every rule matched below is matched on whitespace-normalized
 // text rather than a regex threaded with \s* at every wrap point.
 const norm = s => s.replace(/\s+/g, ' ');
+
+
+// Every rule below is a function of the text it judges, so "the other direction" further
+// down runs the SAME function against a copy with one fact removed and demands that it
+// throw. An ablation that re-ran its own copy of a pattern, or asserted its own edit, would
+// prove only itself.
+function fails(rule, text, message = /./) {
+  let err = null;
+  try { rule(text); } catch (e) { err = e; }
+  assert.ok(err instanceof assert.AssertionError, 'the check still passed on text that lost what it guards');
+  assert.match(err.message, message);
+}
 
 // --- the generic battery, against a live shim ---------------------------------
 const result = await checkProseFile(SKILL_PATH);
@@ -57,18 +61,15 @@ check('the manual matches the live shim', () => {
 // for as long as there were five, and nothing caught it, because nothing was checking
 // for absence.
 const { blockKinds, widgets } = parseBlockShapes(protocol);
-check('every block kind PROTOCOL.md defines is documented', () => {
-  const missing = blockKinds.filter(k => !prose.includes(k));
-  assert.deepEqual(missing, [], `undocumented block kinds: ${missing.join(', ')}`);
-});
-check('every widget PROTOCOL.md defines is documented', () => {
-  const missing = widgets.filter(w => !prose.includes(w));
-  assert.deepEqual(missing, [], `undocumented widgets: ${missing.join(', ')}`);
-});
-check('every packet status PROTOCOL.md defines is documented', () => {
-  const missing = parsePacketStatuses(protocol).filter(s => !prose.includes(s));
-  assert.deepEqual(missing, [], `undocumented packet statuses: ${missing.join(', ')}`);
-});
+const documentsEvery = (what, names) => text => {
+  const missing = names.filter(n => !text.includes(n));
+  assert.deepEqual(missing, [], `undocumented ${what}: ${missing.join(', ')}`);
+};
+const documentsEveryWidget = documentsEvery('widgets', widgets);
+const documentsEveryStatus = documentsEvery('packet statuses', parsePacketStatuses(protocol));
+check('every block kind PROTOCOL.md defines is documented', () => documentsEvery('block kinds', blockKinds)(prose));
+check('every widget PROTOCOL.md defines is documented', () => documentsEveryWidget(prose));
+check('every packet status PROTOCOL.md defines is documented', () => documentsEveryStatus(prose));
 
 // --- the traps -----------------------------------------------------------------
 // Each of these is a fact a caller got wrong, or omitted, while every caller kept its
@@ -82,28 +83,22 @@ check('the fallback is required to relay the message verbatim', () => {
   assert.match(prose, /verbatim/i);
   assert.match(prose, /recovery command/i);
 });
-check('branching on status rather than choice is stated', () => {
-  assert.match(prose, /never on `choice`/i);
+const branchesOnStatus = text => {
+  assert.match(text, /never on `choice`/i);
   // The specific trap: `deferred` can carry a choice, so a caller reading `choice`
   // alone records a decision the reviewer explicitly declined to make.
-  assert.match(prose, /deferred/);
-});
-check('an unresolvable reference is described as a refused post, and the boundary with it', () => {
-  // ADR.md entry 112: the post is refused whole, so the manual has to say so and name the
-  // ways out. The claim it replaced -- the block still lands, the post still returns 200,
-  // nothing in the return value tells you -- taught the agent to ignore a broken reference.
-  assert.match(norm(prose), /refused whole/i);
-  assert.match(norm(prose), /`CLAUDE_BOARD_REF_ROOTS`/);
-  assert.doesNotMatch(norm(prose), /still lands|still returns 200|nothing in the return value/i);
-});
-check('the refusal check fails on prose that regains the landed-block claim', () => {
-  const reverted = norm(prose).replace(
-    /is refused whole\*\* [^.]*?\./,
-    'still lands and the post still returns 200.',
-  );
-  assert.match(reverted, /still lands/i);
-  assert.doesNotMatch(reverted, /refused whole/i);
-});
+  assert.match(text, /deferred/);
+};
+check('branching on status rather than choice is stated', () => branchesOnStatus(prose));
+// ADR.md entry 112: the post is refused whole, so the manual has to say so and name the
+// ways out. The claim it replaced -- the block still lands, the post still returns 200,
+// nothing in the return value tells you -- taught the agent to ignore a broken reference.
+const describesRefusal = text => {
+  assert.match(norm(text), /refused whole/i);
+  assert.match(norm(text), /`CLAUDE_BOARD_REF_ROOTS`/);
+  assert.doesNotMatch(norm(text), /still lands|still returns 200|nothing in the return value/i);
+};
+check('an unresolvable reference is described as a refused post, and the boundary with it', () => describesRefusal(prose));
 check('the section-slug rule is stated with a worked example', () => {
   assert.match(prose, /slug/i);
   assert.match(prose, /open-questions/);
@@ -122,20 +117,17 @@ const COMMENTABLE_RULE = norm(
   "appear, including inside a question's `context` and inside a `compare` side. " +
   "`markdown` and `code` are not, anywhere. The rule is drawn on kind, never on position",
 );
-check('the manual states the narrowed commenting rule', () => {
-  assert.ok(norm(prose).includes(COMMENTABLE_RULE), 'manual is missing the narrowed commenting rule');
-});
-check('PROTOCOL.md states the narrowed commenting rule', () => {
-  assert.ok(norm(protocol).includes(COMMENTABLE_RULE), 'PROTOCOL.md is missing the narrowed commenting rule');
-});
-check('the manual does not promise the wider "anything rendered" commenting rule', () => {
-  assert.doesNotMatch(prose, /comments? on any element/i);
-  assert.doesNotMatch(prose, /regardless of kind/i);
-});
-check('PROTOCOL.md does not promise the wider "anything rendered" commenting rule', () => {
-  assert.doesNotMatch(protocol, /comments? on any element/i);
-  assert.doesNotMatch(protocol, /regardless of kind/i);
-});
+const statesCommentableRule = text => {
+  assert.ok(norm(text).includes(COMMENTABLE_RULE), 'missing the narrowed commenting rule');
+};
+const promisesNoWiderRule = text => {
+  assert.doesNotMatch(text, /comments? on any element/i);
+  assert.doesNotMatch(text, /regardless of kind/i);
+};
+check('the manual states the narrowed commenting rule', () => statesCommentableRule(prose));
+check('PROTOCOL.md states the narrowed commenting rule', () => statesCommentableRule(protocol));
+check('the manual does not promise the wider "anything rendered" commenting rule', () => promisesNoWiderRule(prose));
+check('PROTOCOL.md does not promise the wider "anything rendered" commenting rule', () => promisesNoWiderRule(protocol));
 
 // --- what an artifact must be -----------------------------------------------------
 // The two rules the manual is the single home for: `/visualize`, `/explain` and `/gamify`
@@ -151,51 +143,57 @@ check('PROTOCOL.md does not promise the wider "anything rendered" commenting rul
 // The self-contained rule now carries one exception, and the manual has to state its exact
 // width or a renderer will read it as licence to reference anything: mermaid is provided by
 // the board (ADR 108), fonts, images and styles stay inline.
-const ARTIFACT_RULES = {
-  'an artifact is one self-contained file': [
-    /self-contained/i, /`data:`/, /opaque-origin/i, /relative reference/i,
-    /mermaid/i, /fonts, images and styles stay inline/i,
-  ],
-  'a stage is sized from its own content': [
-    /sizes itself from its own content, never from the viewport/i,
-    /the frame's height is derived from what the stage reports/i,
-  ],
-  'one `html` block and nothing else is a page board': [
-    /page board/i, /one `html` block and nothing else/i,
-  ],
+//
+// Each rule names the fact "the other direction" removes to prove its check can fail.
+const statesAll = patterns => text => {
+  for (const p of patterns) assert.match(norm(text), p, `manual is missing: ${p}`);
 };
-const statesRule = (text, patterns) => patterns.every(p => p.test(norm(text)));
-for (const [rule, patterns] of Object.entries(ARTIFACT_RULES)) {
-  check(`the manual states that ${rule}`, () => {
-    for (const p of patterns) assert.match(norm(prose), p, `manual is missing: ${p}`);
-  });
+const ARTIFACT_RULES = {
+  'an artifact is one self-contained file': {
+    patterns: [
+      /self-contained/i, /`data:`/, /opaque-origin/i, /relative reference/i,
+      /mermaid/i, /fonts, images and styles stay inline/i,
+    ],
+    lost: ['the self-contained rule', /self-contained/g],
+  },
+  'a stage is sized from its own content': {
+    patterns: [
+      /sizes itself from its own content, never from the viewport/i,
+      /the frame's height is derived from what the stage reports/i,
+    ],
+    lost: ['the sizing rule', /never from the viewport/g],
+  },
+  'one `html` block and nothing else is a page board': {
+    patterns: [/page board/i, /one `html` block and nothing else/i],
+    lost: ['the page-board shape rule', /one `html` block and nothing else/g],
+  },
+};
+for (const [rule, { patterns }] of Object.entries(ARTIFACT_RULES)) {
+  check(`the manual states that ${rule}`, () => statesAll(patterns)(prose));
 }
-check('the manual states the fallback a rendered artifact takes when the board is down', () => {
-  // `/visualize`, `/explain` and `/gamify` used to each carry their own version of this,
-  // and each one was really a note about the deleted `/file/` link. They now cite the
-  // manual instead, which makes this sentence the only place the fallback exists: an
-  // artifact survives the board being down because it is already a file, so the agent
-  // opens it and says where. Lose the sentence and three skills fall silent at exactly
-  // the moment the reviewer has nothing else to look at.
-  assert.match(norm(prose), /it is a file on disk, so `open` it and say where it is/i);
-  assert.match(norm(prose), /nothing else points at it/i);
-});
-check('the fallback check fails on prose that lost the open-it-and-say-where rule', () => {
-  // Normalized first: the sentence wraps across two source lines, so the drift has to be
-  // applied to the same whitespace-normalized text the check above matches against.
-  assert.doesNotMatch(norm(prose).replace(/`open` it and say where it is/g, ''),
-    /it is a file on disk, so `open` it and say where it is/i);
-});
-check('the manual points at no served file, now that the route is gone', () => {
+// `/visualize`, `/explain` and `/gamify` used to each carry their own version of this,
+// and each one was really a note about the deleted `/file/` link. They now cite the
+// manual instead, which makes this sentence the only place the fallback exists: an
+// artifact survives the board being down because it is already a file, so the agent
+// opens it and says where. Lose the sentence and three skills fall silent at exactly
+// the moment the reviewer has nothing else to look at.
+const statesFallback = text => {
+  assert.match(norm(text), /it is a file on disk, so `open` it and say where it is/i);
+  assert.match(norm(text), /nothing else points at it/i);
+};
+check('the manual states the fallback a rendered artifact takes when the board is down', () => statesFallback(prose));
+const pointsAtNoServedFile = text => {
+  assert.doesNotMatch(text, /\/file\//, 'the manual still documents the deleted /file/ route');
+};
+check('the manual points at no served file, and reinstating the old /file/ section fails that check', () => {
   // ADR.md entry 38 deleted `GET /file/`; the drift this guards against is the manual's
   // pointer section outliving the route it documented, so reinstating one line of that
   // section must trip the check.
-  assert.doesNotMatch(prose, /\/file\//, 'the manual still documents the deleted /file/ route');
-  const reverted = prose.replace(
+  pointsAtNoServedFile(prose);
+  fails(pointsAtNoServedFile, prose.replace(
     '## Posting a rendered artifact',
     '## Pointing at a rendered file\n\nlink to `http://127.0.0.1:<port>/file/<basename>`\n\n## Posting a rendered artifact',
-  );
-  assert.match(reverted, /\/file\//, 'the section being reverted no longer exists in the manual');
+  ));
 });
 
 // --- what one round holds --------------------------------------------------------
@@ -204,75 +202,26 @@ check('the manual points at no served file, now that the route is gone', () => {
 // its mock rather than a description of one, and no option hands the decision back, since a
 // "your call" option makes every recommended pick read as either agreement or delegation.
 const ROUND_RULES = {
-  'a round is capped, and a branch too big for one splits': [
-    /at most 6 questions or about 4,000 characters of prompts, explainers and options/i,
-    /split a branch too big for one round across rounds/i,
-  ],
-  'a question about a screen carries its mock in the same round': [
-    /a question about a screen or control carries its mock in its own `context`, in the same round/i,
-  ],
-  'no option delegates the decision': [
-    /never offer a "your call" or "you decide" option/i,
-    /ambiguous between agreement and delegation/i,
-  ],
+  'a round is capped, and a branch too big for one splits': {
+    patterns: [
+      /at most 6 questions or about 4,000 characters of prompts, explainers and options/i,
+      /split a branch too big for one round across rounds/i,
+    ],
+    lost: ['the cap', /at most 6 questions/g],
+  },
+  'a question about a screen carries its mock in the same round': {
+    patterns: [/a question about a screen or control carries its mock in its own `context`, in the same round/i],
+    lost: ['the mock rule', /carries its mock/g],
+  },
+  'no option delegates the decision': {
+    patterns: [/never offer a "your call" or "you decide" option/i, /ambiguous between agreement and delegation/i],
+    lost: ['the no-delegation rule', /never offer a "your call"/g],
+  },
 };
-for (const [rule, patterns] of Object.entries(ROUND_RULES)) {
-  check(`the manual states that ${rule}`, () => {
-    for (const p of patterns) assert.match(norm(prose), p, `manual is missing: ${p}`);
-  });
+for (const [rule, { patterns }] of Object.entries(ROUND_RULES)) {
+  check(`the manual states that ${rule}`, () => statesAll(patterns)(prose));
 }
-check('the round-rule checks fail on prose that lost the cap', () => {
-  assert.ok(!statesRule(drifted(/at most 6 questions/g), ROUND_RULES['a round is capped, and a branch too big for one splits']),
-    'dropping the round cap from the manual did not fail its check');
-});
-check('the round-rule checks fail on prose that lost the mock rule', () => {
-  assert.ok(!statesRule(drifted(/carries its mock/g), ROUND_RULES['a question about a screen carries its mock in the same round']),
-    'dropping the mock rule from the manual did not fail its check');
-});
-check('the round-rule checks fail on prose that lost the no-delegation rule', () => {
-  assert.ok(!statesRule(drifted(/never offer a "your call"/g), ROUND_RULES['no option delegates the decision']),
-    'dropping the no-delegation rule from the manual did not fail its check');
-});
 
-// --- the other direction --------------------------------------------------------
-// A check that only ever passes is worth nothing (test/check-prose-check.mjs's own
-// rule, applied here). The absence checks above are the ones at risk of being vacuous —
-// they search a 150-line document for short strings — so each is re-run against a copy
-// with that one fact deleted, and must fail there.
-function drifted(pattern) {
-  return prose.replace(pattern, '');
-}
-check('the vocabulary checks fail on prose that lost a widget', () => {
-  const text = drifted(/choose-between-rendered-variants/g);
-  const missing = widgets.filter(w => !text.includes(w));
-  assert.deepEqual(missing, ['choose-between-rendered-variants'],
-    'dropping a widget from the manual did not fail the widget check');
-});
-check('the vocabulary checks fail on prose that lost a packet status', () => {
-  const text = drifted(/discuss/g);
-  const missing = parsePacketStatuses(protocol).filter(s => !text.includes(s));
-  assert.deepEqual(missing, ['discuss'],
-    'dropping a status from the manual did not fail the status check');
-});
-check('the trap checks fail on prose that lost the status-not-choice rule', () => {
-  assert.doesNotMatch(drifted(/never on `choice`/g), /never on `choice`/i);
-});
-check('the commenting-rule check fails on prose that lost the narrowed rule', () => {
-  const text = norm(prose).replace(COMMENTABLE_RULE, '');
-  assert.ok(!text.includes(COMMENTABLE_RULE), 'removing the rule did not fail the rule check');
-});
-check('the artifact-rule checks fail on prose that lost the self-contained rule', () => {
-  assert.ok(!statesRule(drifted(/self-contained/g), ARTIFACT_RULES['an artifact is one self-contained file']),
-    'dropping the self-contained rule from the manual did not fail its check');
-});
-check('the artifact-rule checks fail on prose that lost the sizing rule', () => {
-  assert.ok(!statesRule(drifted(/never from the viewport/g), ARTIFACT_RULES['a stage is sized from its own content']),
-    'dropping the sizing rule from the manual did not fail its check');
-});
-check('the artifact-rule checks fail on prose that lost the page-board shape rule', () => {
-  assert.ok(!statesRule(drifted(/one `html` block and nothing else/g), ARTIFACT_RULES['one `html` block and nothing else is a page board']),
-    'dropping the page-board shape rule from the manual did not fail its check');
-});
 // --- the boundary, and the one rule guarding it -----------------------------------
 // ADR 69: `fresh` is checked by the generic battery above (it is a real schema argument,
 // so the manual has to name it), but WHEN to pass it cannot be. Nothing can detect a
@@ -284,23 +233,82 @@ check('the manual tells the agent when a boundary is declared', () => {
   assert.match(norm(prose), /you have posted no board in this conversation/i);
   assert.match(norm(prose), /after a `\/clear`/i);
 });
-check('the manual tells the agent to state the board URL in chat every round', () => {
-  assert.match(norm(prose), /say the board's URL in chat after every round/i);
-  assert.match(norm(prose), /`\/compact` rebuilds your context from the conversation/i);
-});
-check('the URL-in-chat check fails on prose that lost the rule', () => {
-  assert.doesNotMatch(norm(drifted(/Say the board's URL in chat after every round/)),
-    /say the board's URL in chat after every round/i);
+const statesUrlInChat = text => {
+  assert.match(norm(text), /say the board's URL in chat after every round/i);
+  assert.match(norm(text), /`\/compact` rebuilds your context from the conversation/i);
+};
+check('the manual tells the agent to state the board URL in chat every round', () => statesUrlInChat(prose));
+
+// --- README agreement -------------------------------------------------------------
+// README.md is a second, separately-maintained doc that also shows the call shape, and
+// the fresh-eyes audit (2026-08-11, N2) caught it stale — a name and an argument (`fresh`)
+// behind the live shim. Nothing above touches README.md at all (`checkProseFile` was run
+// against SKILL_PATH only), so pin the same live-schema facts against README's own worked
+// example, the same way SKILL.md is pinned above it in this file. The pattern names the
+// tool by its MCP-qualified name, so a short or invented form fails here too.
+const README_CALL_RE = /mcp__claude-board__ask\(\{([^}]*)\}\)/;
+const readmeCallMatchesSchema = text => {
+  const m = text.match(README_CALL_RE);
+  assert.ok(m, 'README must show a worked `mcp__claude-board__ask({ ... })` call, by the tool\'s MCP-qualified name');
+  const shown = m[1].split(',').map(s => s.trim()).filter(Boolean).sort();
+  const real = [...result.schemaProps].sort();
+  assert.deepEqual(shown, real, `README's call shows [${shown.join(', ')}], the live schema has [${real.join(', ')}]`);
+};
+check('README\'s worked call names the tool as mcp__claude-board__ask with exactly the live schema\'s arguments -- none missing, none invented', () => {
+  readmeCallMatchesSchema(readme);
 });
 
+// --- README discloses the menu bar + pomodoro -----------------------------------------
+// N3: a menu-bar status item and a pomodoro timer install alongside the daemon, and the
+// audit's fresh-eyes pass found neither word anywhere in the README. Pinned here rather
+// than left to review, since a doc pass rewriting the top of the file is exactly the kind
+// of edit that could silently drop a disclosure paragraph.
+const disclosesMenuBar = text => {
+  assert.match(text, /menu[- ]bar/i, 'README must mention the menu-bar status item that installs alongside the daemon');
+};
+const namesMenuBarOptOut = text => {
+  assert.match(text, /pomodoro settings/i, 'README must point at the pomodoro settings as where the status item is hidden from');
+  assert.match(text, /survives? logout and reinstall/i, 'README must state the hide choice survives logout and reinstall');
+};
+check('README discloses the menu-bar status item', () => disclosesMenuBar(readme));
+check('README discloses the pomodoro timer', () => {
+  assert.match(readme, /pomodoro/i, 'README must mention the pomodoro timer that installs alongside the daemon');
+});
+check('README names the menu-bar opt-out and that it survives reinstall', () => namesMenuBarOptOut(readme));
+
+// --- the other direction --------------------------------------------------------
+// A check that only ever passes is worth nothing (test/check-prose-check.mjs's own
+// rule, applied here). The presence checks above are the ones at risk of being vacuous --
+// they search a 150-line document for short strings -- and the absence checks are at risk
+// of a pattern that no longer matches the claim it was written against. So each one is run
+// again, as the same function, against a copy with that one fact removed (or the old claim
+// restored), and must fail there.
+function drifted(pattern) {
+  return prose.replace(pattern, '');
+}
+check('the widget check fails on prose that lost a widget, naming exactly that widget', () => {
+  fails(documentsEveryWidget, drifted(/choose-between-rendered-variants/g),
+    /^undocumented widgets: choose-between-rendered-variants\n/);
+});
+check('the packet-status check fails on prose that lost a status, naming exactly that status', () => {
+  fails(documentsEveryStatus, drifted(/discuss/g), /^undocumented packet statuses: discuss\n/);
+});
+check('the status-not-choice check fails on prose that lost the rule', () => {
+  fails(branchesOnStatus, drifted(/never on `choice`/g));
+});
+check('the refusal check fails on prose that regains the landed-block claim', () => {
+  fails(describesRefusal, `${prose}\nThe block still lands and the post still returns 200.\n`);
+});
+check('the commenting-rule check fails on prose that lost the narrowed rule', () => {
+  fails(statesCommentableRule, norm(prose).replace(COMMENTABLE_RULE, ''));
+});
 check('the commenting-rule absence check fails if the manual regains the old claim', () => {
   // The exact sentence SKILL.md carried before this pass:
   // "The reviewer answers in any order, comments on any element by clicking it, and
   // submits once." Reintroducing it must trip the absence check.
   const marker = 'comments on a rendered stage or diagram by clicking it';
   assert.ok(prose.includes(marker), 'the sentence being reverted no longer exists in the manual');
-  const reverted = prose.replace(marker, 'comments on any element by clicking it');
-  assert.match(reverted, /comments? on any element/i);
+  fails(promisesNoWiderRule, prose.replace(marker, 'comments on any element by clicking it'));
 });
 check('the commenting-rule absence check fails if PROTOCOL.md regains the old claim', () => {
   // PROTOCOL.md's choose-between-rendered-variants section used to close on:
@@ -309,58 +317,32 @@ check('the commenting-rule absence check fails if PROTOCOL.md regains the old cl
   // claim anywhere must trip the absence check.
   const marker = /so an `html` or `mermaid`\s*\noption still carries one regardless of the iframe\./;
   assert.match(protocol, marker, 'the sentence being reverted no longer exists in PROTOCOL.md');
-  const reverted = protocol.replace(marker,
-    "so every option's whole-block comment button still works regardless of kind (it\nrenders in the parent document, not the iframe).");
-  assert.match(reverted, /regardless of kind/i);
+  fails(promisesNoWiderRule, protocol.replace(marker,
+    "so every option's whole-block comment button still works regardless of kind (it\nrenders in the parent document, not the iframe)."));
 });
-
-// --- README agreement -------------------------------------------------------------
-// README.md is a second, separately-maintained doc that also shows the call shape, and
-// the fresh-eyes audit (2026-08-11, N2) caught it stale — a name and an argument (`fresh`)
-// behind the live shim. Nothing above touches README.md at all (`checkProseFile` was run
-// against SKILL_PATH only), so pin the same live-schema facts against README's own worked
-// example, the same way SKILL.md is pinned above it in this file.
-const README_CALL_RE = /mcp__claude-board__ask\(\{([^}]*)\}\)/;
-check('README calls the tool by its real MCP-qualified name, mcp__claude-board__ask', () => {
-  assert.match(readme, /mcp__claude-board__ask/, 'README must name the tool as mcp__claude-board__ask, not a short or invented form');
+for (const [kind, rules] of [['artifact', ARTIFACT_RULES], ['round', ROUND_RULES]]) {
+  for (const { patterns, lost: [what, pattern] } of Object.values(rules)) {
+    check(`the ${kind}-rule checks fail on prose that lost ${what}`, () => {
+      fails(statesAll(patterns), drifted(pattern));
+    });
+  }
+}
+check('the fallback check fails on prose that lost the open-it-and-say-where rule', () => {
+  // Normalized first: the sentence wraps across two source lines, so the drift has to be
+  // applied to the same whitespace-normalized text the check matches against.
+  fails(statesFallback, norm(prose).replace(/`open` it and say where it is/g, ''));
 });
-check('README\'s worked call names exactly the live schema\'s arguments -- none missing, none invented', () => {
-  const m = readme.match(README_CALL_RE);
-  assert.ok(m, 'README must show a worked `mcp__claude-board__ask({ ... })` call to pin the argument list against');
-  const shown = m[1].split(',').map(s => s.trim()).filter(Boolean).sort();
-  const real = [...result.schemaProps].sort();
-  assert.deepEqual(shown, real, `README's call shows [${shown.join(', ')}], the live schema has [${real.join(', ')}]`);
+check('the URL-in-chat check fails on prose that lost the rule', () => {
+  fails(statesUrlInChat, drifted(/Say the board's URL in chat after every round/));
 });
 check('the README call-shape check fails on prose that lost the `fresh` argument', () => {
-  const dropped = readme.replace(README_CALL_RE, m => m.replace(/,\s*fresh/, ''));
-  const m = dropped.match(README_CALL_RE);
-  const shown = m[1].split(',').map(s => s.trim()).filter(Boolean).sort();
-  assert.notDeepEqual(shown, [...result.schemaProps].sort(), 'dropping `fresh` from README\'s worked call did not change what the check compares');
-});
-
-// --- README discloses the menu bar + pomodoro -----------------------------------------
-// N3: a menu-bar status item and a pomodoro timer install alongside the daemon, and the
-// audit's fresh-eyes pass found neither word anywhere in the README. Pinned here rather
-// than left to review, since a doc pass rewriting the top of the file is exactly the kind
-// of edit that could silently drop a disclosure paragraph.
-check('README discloses the menu-bar status item', () => {
-  assert.match(readme, /menu[- ]bar/i, 'README must mention the menu-bar status item that installs alongside the daemon');
-});
-check('README discloses the pomodoro timer', () => {
-  assert.match(readme, /pomodoro/i, 'README must mention the pomodoro timer that installs alongside the daemon');
-});
-check('README names the menu-bar opt-out and that it survives reinstall', () => {
-  assert.match(readme, /pomodoro settings/i, 'README must point at the pomodoro settings as where the status item is hidden from');
-  assert.match(readme, /survives? logout and reinstall/i, 'README must state the hide choice survives logout and reinstall');
+  fails(readmeCallMatchesSchema, readme.replace(README_CALL_RE, m => m.replace(/,\s*fresh/, '')));
 });
 check('the disclosure checks fail on a README that lost the menu-bar paragraph', () => {
   const stripped = readme.replace(/### The menu bar item and the timer[\s\S]*?survives logout and reinstall\.\n/, '');
-  assert.doesNotMatch(stripped, /menu[- ]bar/i, 'stripping the disclosure paragraph did not remove every menu-bar mention -- the absence check would not have caught its loss');
-  assert.doesNotMatch(stripped, /pomodoro settings/i);
+  fails(disclosesMenuBar, stripped);
+  fails(namesMenuBarOptOut, stripped);
 });
 
-if (failed) {
-  console.error(`\n${failed} failure(s)`);
-  process.exit(1);
-}
+await finish(null, { failText: n => `${n} failure(s)` });
 console.log('check-skill-prose ok');

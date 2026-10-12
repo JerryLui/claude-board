@@ -24,11 +24,19 @@
 //   6 (this chunk's half): the guard never engages in a read-only (file://)
 //      archive -- a click on Send there posts nothing, arms nothing, rings
 //      nothing.
+//   Discuss in chat posts the body Send would, differing only in its action.
 //   a rank question is answered by the order it shows: neither the guard nor
 //      the pill ever counts an untouched rank list, Send posts it as
 //      'answered' with the rendered order as its choice, and Defer is the one
 //      way to leave it open -- on a freshly loaded page, on a round pushed
 //      over SSE, and never on a round already sent.
+//   a sent round is never offered for sending again: a Send that lands keeps
+//      the send bar disabled and only a failed one hands it back; the body
+//      names the open round, and the daemon's 409 for a round already sent
+//      reads as already sent, not as an error to retry.
+//   what a re-render must keep: a Defer on a question an amend re-renders
+//      unchanged, and the fold's safety valve re-measuring a pushed round
+//      once it is attached.
 //
 // What this file deliberately does NOT do: re-litigate the Cmd+Enter
 // traversal itself (advance-to-next-question, plain Enter, Discuss's dead
@@ -38,22 +46,15 @@
 // same checks.
 
 import assert from 'node:assert/strict';
-import { createBoard, addRound, applySubmit } from '../src/board.mjs';
+import { createBoard, addRound, amendRound, applySubmit } from '../src/board.mjs';
 import { renderBoardPage, renderRoundSection, groupCommentsByBlock } from '../src/render.mjs';
-import { ui } from '../src/ui.mjs';
-import { parseHTML, StandInEvent, StandInEventSource } from './dom-stand-in.mjs';
+// The daemon's own push builder, as test/check-amend-integrity.mjs imports it: an
+// amend payload rebuilt here would assert a local copy of the rule.
+import { buildRoundPushPayload } from '../src/server.mjs';
+import { StandInEvent } from './dom-stand-in.mjs';
+import { check, checkAsync, finish, flush, pageHarness } from './support.mjs';
 
-let failures = 0;
-function check(name, fn) {
-  try {
-    fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
+const { loadBoard, loadBoardWithEventSource, openBlocks, answerSingle, deferBlock, withFetchCapture } = await pageHarness();
 
 // Three question blocks -- same shape as check-enter.mjs's own fixture, so
 // "the first outstanding one" and "deferred vs. unanswered" are meaningfully
@@ -67,65 +68,13 @@ const BLOCK_SPEC = [
 const board = createBoard({ title: 'Send guard', blocks: BLOCK_SPEC });
 const pageHtml = renderBoardPage(board);
 
-/** Parse the page and run the real `ui` client script against it -- identical
- * idiom to test/check-enter.mjs's loadBoard -- a fresh document every call,
- * so checks never share mutated state. */
-function loadBoard(protocol) {
-  const document = parseHTML(pageHtml);
-  const window = document.defaultView;
-  const location = { protocol: protocol || 'http:' };
-  // 'EventSource' declared, never passed -- see QUIRKS.md "A `new Function` harness
-  // inherits the host's globals".
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
-  return document;
-}
-
-/** The three question blocks in round order -- the exact set collectAnswers,
- * outstandingBlocks, and the guard itself all walk. */
-function openBlocks(document) {
-  return document.querySelectorAll('.round-open .question-block');
-}
-
-/** Answer a single-choice question by clicking the option carrying `label`,
- * through the real widget -- never by writing into board state directly. */
-function answerSingle(block, label) {
-  const opt = block.querySelectorAll('.choice-single').find(el => el.textContent.trim() === label);
-  assert.ok(opt, `setup failure: no "${label}" option rendered in this block`);
-  opt.dispatchEvent(new StandInEvent('click'));
-}
-
-/** Defer a question through its real Defer button. */
-function deferBlock(block) {
-  const btn = block.querySelector('.btn-defer');
-  assert.ok(btn, 'setup failure: no Defer button rendered in this block');
-  btn.dispatchEvent(new StandInEvent('click'));
-}
-
-/** Stub globalThis.fetch for the duration of `fn()`, capturing every posted
- * (url, method, JSON body) -- same idiom as check-enter.mjs's own
- * withFetchCapture. Restores the original fetch even if `fn` throws. */
-function withFetchCapture(fn) {
-  const original = globalThis.fetch;
-  const calls = [];
-  globalThis.fetch = (url, opts) => {
-    calls.push({ url, method: opts.method, body: JSON.parse(opts.body) });
-    return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
-  };
-  try {
-    fn();
-  } finally {
-    globalThis.fetch = original;
-  }
-  return calls;
-}
-
 // "A question is complete when it carries any status, answered or deferred
 // alike; only unanswered counts as outstanding." The decision most likely to
 // regress: a deferred question must never be the one Send arms on, and must
 // never count toward the outstanding total.
 
 check('a deferred question does not count as outstanding -- Send arms on the still-unanswered one instead, skipping the deferred one', () => {
-  const document = loadBoard();
+  const document = loadBoard(pageHtml);
   const blocks = openBlocks(document);
   answerSingle(blocks[0], 'Yes');       // Q1: answered
   deferBlock(blocks[1]);                // Q2: deferred, left blank -- must NOT count as outstanding
@@ -145,19 +94,8 @@ check('a deferred question does not count as outstanding -- Send arms on the sti
 // it scrolls to the first question with no status, rings it, and relabels
 // the button. It does not submit."
 
-check('a click on Send with outstanding questions posts nothing and arms the button', () => {
-  const document = loadBoard();
-  const sendBtn = document.getElementById('send-btn');
-  assert.equal(sendBtn.textContent, 'Send', 'setup failure: Send must start with its ordinary label');
-
-  const calls = withFetchCapture(() => sendBtn.dispatchEvent(new StandInEvent('click')));
-
-  assert.equal(calls.length, 0, 'the first click on an incomplete round must not submit anything');
-  assert.notEqual(sendBtn.textContent, 'Send', 'the first click must visibly relabel Send to show it is armed');
-});
-
 check('the flagged question is the FIRST one with no status, not merely any outstanding one', () => {
-  const document = loadBoard();
+  const document = loadBoard(pageHtml);
   const blocks = openBlocks(document);
   answerSingle(blocks[0], 'Yes'); // Q1: answered -- must never be flagged
   // Q2 and Q3 both left outstanding -- Q2 must be the one flagged, not Q3
@@ -181,7 +119,7 @@ check('the flagged question is the FIRST one with no status, not merely any outs
 check('a second click on the armed button submits, posting exactly what the Cmd+Enter arm/send route posts for the same partial state', () => {
   // Path A: the click guard. Answer Q1, defer Q2, leave Q3 outstanding,
   // click Send twice -- arm, then confirm.
-  const docA = loadBoard();
+  const docA = loadBoard(pageHtml);
   const blocksA = openBlocks(docA);
   answerSingle(blocksA[0], 'Yes');
   deferBlock(blocksA[1]);
@@ -198,7 +136,7 @@ check('a second click on the armed button submits, posting exactly what the Cmd+
   // "exactly the same" (test/check-enter.mjs pins this route's own
   // contract). Proves the guard reuses submitBoard/collectAnswers rather
   // than posting its own, potentially divergent, body.
-  const docB = loadBoard();
+  const docB = loadBoard(pageHtml);
   const blocksB = openBlocks(docB);
   answerSingle(blocksB[0], 'Yes');
   deferBlock(blocksB[1]);
@@ -209,8 +147,10 @@ check('a second click on the armed button submits, posting exactly what the Cmd+
   const callsB = withFetchCapture(() => sendBtnB.dispatchEvent(new StandInEvent('keydown', { key: 'Enter', metaKey: true }))); // sends
   assert.equal(callsB.length, 1, 'setup failure: the Cmd+Enter route must still submit exactly once');
 
-  assert.equal(callsA[0].method, 'POST');
-  assert.match(callsA[0].url, /\/api\/board\/.+\/submit$/, `expected the submit route, got ${JSON.stringify(callsA[0].url)}`);
+  for (const [calls, path] of [[callsA, 'click'], [callsB, 'Cmd+Enter']]) {
+    assert.equal(calls[0].method, 'POST', `the ${path} route must POST`);
+    assert.match(calls[0].url, /\/api\/board\/.+\/submit$/, `expected the ${path} route to hit the submit route, got ${JSON.stringify(calls[0].url)}`);
+  }
   assert.deepEqual(callsA[0].body, callsB[0].body,
     'the click guard\'s second press must post the identical body the Cmd+Enter arm/send route posts for the same partial state');
   assert.deepEqual(callsA[0].body.answers.map(a => a.status), ['answered', 'deferred', 'unanswered'],
@@ -218,7 +158,7 @@ check('a second click on the armed button submits, posting exactly what the Cmd+
 });
 
 check('Escape disarms the click-armed Send, restoring its label, color, and the ring, without submitting', () => {
-  const document = loadBoard();
+  const document = loadBoard(pageHtml);
   const blocks = openBlocks(document);
   const sendBtn = document.getElementById('send-btn');
   sendBtn.dispatchEvent(new StandInEvent('click')); // arm
@@ -236,7 +176,7 @@ check('Escape disarms the click-armed Send, restoring its label, color, and the 
 });
 
 check('a third state is not reachable: after Escape disarms, Send behaves exactly like an unarmed board again (arms, does not send)', () => {
-  const document = loadBoard();
+  const document = loadBoard(pageHtml);
   const sendBtn = document.getElementById('send-btn');
   sendBtn.dispatchEvent(new StandInEvent('click')); // arm
   document.body.dispatchEvent(new StandInEvent('keydown', { key: 'Escape' })); // disarm
@@ -253,7 +193,7 @@ check('a third state is not reachable: after Escape disarms, Send behaves exactl
 // either path must be visible to the other."
 
 check('one shared armed state: arming by click, then confirming with Cmd+Enter, sends -- it does not re-arm a second, independent state', () => {
-  const document = loadBoard();
+  const document = loadBoard(pageHtml);
   const sendBtn = document.getElementById('send-btn');
   sendBtn.dispatchEvent(new StandInEvent('click')); // click-arms (outstanding questions present)
   assert.equal(sendBtn.classList.contains('warn'), true, 'setup failure: click must arm the guard state');
@@ -264,7 +204,7 @@ check('one shared armed state: arming by click, then confirming with Cmd+Enter, 
 });
 
 check('one shared armed state: arming by Cmd+Enter, then a plain click on Send, sends -- it does not re-arm a second, independent state', () => {
-  const document = loadBoard();
+  const document = loadBoard(pageHtml);
   const blocks = openBlocks(document);
   const lastNote = blocks[blocks.length - 1].querySelector('[data-note-for]');
   const sendBtn = document.getElementById('send-btn');
@@ -289,7 +229,7 @@ check('one shared armed state: arming by Cmd+Enter, then a plain click on Send, 
 // each still individually satisfy.
 
 check('the questions-left pill and the send guard read the identical outstanding set at every step, and the pill reaches zero at the EXACT point a click on Send stops arming and submits instead', () => {
-  const document = loadBoard();
+  const document = loadBoard(pageHtml);
   const blocks = openBlocks(document);
   const pill = document.getElementById('questions-left-pill');
   const sendBtn = document.getElementById('send-btn');
@@ -336,7 +276,7 @@ check('the questions-left pill and the send guard read the identical outstanding
 // "None of this appears in a read-only archive opened from disk."
 
 check('the send guard never engages in a read-only (file://) archive', () => {
-  const document = loadBoard('file:');
+  const document = loadBoard(pageHtml, { protocol: 'file:' });
   const blocks = openBlocks(document);
   const sendBtn = document.getElementById('send-btn');
 
@@ -346,6 +286,46 @@ check('the send guard never engages in a read-only (file://) archive', () => {
   assert.equal(sendBtn.textContent, 'Send', 'a read-only archive must never arm Send');
   assert.equal(sendBtn.classList.contains('warn'), false, 'a read-only archive must never apply the warning treatment');
   assert.equal(blocks.some(b => b.classList.contains('flagged')), false, 'a read-only archive must never ring any question');
+});
+
+// === Discuss in chat: the other way out, through the same submit ================
+// Discuss returns "whatever is filled in", partial answers being the point, so a
+// second, hand-copied submit path is how it would quietly come to carry less than
+// Send. Two boards filled identically, one sent and one discussed: the bodies
+// must differ in `action` alone.
+
+check('Discuss posts exactly the body Send posts for the same filled-in board, queued comment included, differing only in action -- and posts nothing in a read-only archive', () => {
+  const board = createBoard({
+    title: 'Two ways out',
+    blocks: [singleSpec(), { kind: 'html', html: '<p id="mock">the artifact</p>' }],
+  });
+  const htmlId = board.blocks[1].id;
+  const html = renderBoardPage(board);
+  function fillAndPress(buttonId, protocol = 'http:') {
+    const document = loadBoard(html, { protocol });
+    answerSingle(openBlocks(document)[0], 'Yes');
+    document.querySelector(`.comment-btn[data-block-id="${htmlId}"]`).dispatchEvent(new StandInEvent('click'));
+    const form = document.getElementById('comment-form-' + htmlId);
+    if (form) {
+      form.querySelector('input[type=text]').value = 'a queued remark';
+      form.dispatchEvent(new StandInEvent('submit'));
+    }
+    return withFetchCapture(() => document.getElementById(buttonId).dispatchEvent(new StandInEvent('click')));
+  }
+  const sent = fillAndPress('send-btn');
+  const discussed = fillAndPress('discuss-btn');
+  assert.equal(sent.length, 1, 'setup failure: a complete round must send on the first press');
+  assert.equal(discussed.length, 1, 'Discuss must post once');
+  assert.equal(sent[0].body.action, 'send');
+  assert.equal(discussed[0].body.action, 'discuss', 'the posted body must carry the action the reviewer chose');
+  assert.equal(discussed[0].method, sent[0].method);
+  assert.equal(discussed[0].url, sent[0].url, 'both go to the one submit route');
+  const { action: sentAction, ...sentRest } = sent[0].body;
+  const { action: discussedAction, ...discussedRest } = discussed[0].body;
+  assert.deepEqual(discussedRest, sentRest, 'everything but the action must be identical: answers, round and queued comments');
+  assert.equal(discussedRest.comments.length, 1, 'setup failure: the queued comment must ride both');
+
+  assert.deepEqual(fillAndPress('discuss-btn', 'file:'), [], 'Discuss must post nothing in a read-only archive');
 });
 
 // === a rank question is answered by the order it shows =========================
@@ -370,23 +350,12 @@ function singleSpec() {
   return { kind: 'question', prompt: 'Pick one', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] };
 }
 
-/** loadBoard's twin for a page that is not the shared three-question fixture.
- * 'EventSourceClass' is left undefined by default, exactly as loadBoard leaves
- * it, so the client subscribes to nothing unless a check wants a live push. */
-function loadPage(html, EventSourceClass) {
-  const document = parseHTML(html);
-  const window = document.defaultView;
-  const location = { protocol: 'http:' };
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location, EventSourceClass);
-  return document;
-}
-
 /** A rank question and a single-choice one, in that order: the rank is never
  * what the guard counts or rings, and the single-choice one is the question
  * that legitimately is. */
 function loadRankAndSingle() {
   const board = createBoard({ title: 'Rank default', blocks: [rankSpec(['A', 'B', 'C']), singleSpec()] });
-  return loadPage(renderBoardPage(board));
+  return loadBoard(renderBoardPage(board));
 }
 
 check('an untouched rank list is answered by the order it shows: Send posts it as answered with the rendered order as its choice, and the guard neither counts nor rings it', () => {
@@ -415,7 +384,7 @@ check('an untouched rank list is answered by the order it shows: Send posts it a
 
 check('a round whose only question is a rank leaves nothing outstanding: the pill reads zero and the first press of Send submits', () => {
   const board = createBoard({ title: 'Rank only', blocks: [rankSpec(['A', 'B', 'C'])] });
-  const document = loadPage(renderBoardPage(board));
+  const document = loadBoard(renderBoardPage(board));
   const pill = document.getElementById('questions-left-pill');
 
   assert.equal(pill.textContent, '0 questions left', 'a rank question is never outstanding');
@@ -445,12 +414,7 @@ check('Defer is the one way to leave a rank open: a deferred untouched rank post
 
 check('a rank arriving in a round pushed over SSE is answered by the order it shows too', () => {
   const board = createBoard({ title: 'Rank over SSE', blocks: [singleSpec()] });
-  let captured = null;
-  class CapturingEventSource extends StandInEventSource {
-    constructor(url) { super(url); captured = this; }
-  }
-  const document = loadPage(renderBoardPage(board), CapturingEventSource);
-  assert.ok(captured, 'setup failure: the client never constructed an EventSource');
+  const { document, es: captured } = loadBoardWithEventSource(renderBoardPage(board));
   answerSingle(openBlocks(document)[0], 'Yes');
 
   const round2 = addRound(board, { blocks: [rankSpec(['D', 'E'])] });
@@ -480,7 +444,7 @@ check('a rank on a round already sent is never re-collected by a later Send', ()
   const sentRank = board.blocks[0].id;
   applySubmit(board, { action: 'send', answers: [{ id: sentRank, status: 'deferred', choice: null, note: '' }], comments: [] }, 1);
   addRound(board, { blocks: [singleSpec()] });
-  const document = loadPage(renderBoardPage(board));
+  const document = loadBoard(renderBoardPage(board));
 
   answerSingle(openBlocks(document)[0], 'Yes');
   const calls = withFetchCapture(() => document.getElementById('send-btn').dispatchEvent(new StandInEvent('click')));
@@ -506,12 +470,7 @@ check('the fold\'s Show more control stays live on a round that has just gone to
     title: 'Fold on a sent round',
     blocks: [{ ...singleSpec(), context: [{ kind: 'markdown', text: longProse }] }],
   });
-  let captured = null;
-  class CapturingEventSource extends StandInEventSource {
-    constructor(url) { super(url); captured = this; }
-  }
-  const document = loadPage(renderBoardPage(board), CapturingEventSource);
-  assert.ok(captured, 'setup failure: the client never constructed an EventSource');
+  const { document, es: captured } = loadBoardWithEventSource(renderBoardPage(board));
   const round1 = document.querySelector('.round[data-round="1"]');
   const control = round1.querySelector('.fold-toggle');
   assert.ok(control, 'setup failure: the context item must be long enough to fold');
@@ -542,8 +501,116 @@ check('the fold\'s Show more control stays live on a round that has just gone to
   assert.equal(control.getAttribute('aria-expanded'), 'true');
 });
 
-if (failures) {
-  console.error(`\n${failures} check(s) failed`);
-  process.exit(1);
+// === a sent round is never offered for sending again ============================
+//
+// #send-btn lives in .send-bar, OUTSIDE any round section, so markRoundHistory
+// (which disables everything inside the round it collapses) never reaches it and
+// no CSS hides it. With the old unconditional re-enable in .finally(), a plain
+// double-click posted twice: the second landed on an already-sent round, and its
+// comments were appended again with fresh numbers -- duplicate pins for one
+// comment.
+
+/** Press Send on a complete round with fetch answering `respond()`, and let the
+ * submit's .then chain land. Returns what was posted. */
+async function pressSendAndLand(document, respond) {
+  const original = globalThis.fetch;
+  const posted = [];
+  globalThis.fetch = (url, opts) => { posted.push(JSON.parse(opts.body)); return respond(); };
+  try {
+    document.getElementById('send-btn').dispatchEvent(new StandInEvent('click'));
+    await flush(1); // a macrotask drains the whole .then chain
+  } finally {
+    globalThis.fetch = original;
+  }
+  return posted;
 }
-console.log('\nall send-guard checks ok');
+
+await checkAsync('a Send that lands leaves the send bar disabled, and only a failed one hands it back for a retry', async () => {
+  for (const [outcome, respond, disabledAfter, statusText] of [
+    ['landed', () => Promise.resolve({ ok: true, status: 200, json: async () => ({}) }), true, 'Sent.'],
+    ['refused with a 500', () => Promise.resolve({ ok: false, status: 500, json: async () => ({}) }), false, 'Error: submit failed: 500'],
+    ['lost on the wire', () => Promise.reject(new Error('network down')), false, 'Error: network down'],
+  ]) {
+    const document = loadBoard(renderBoardPage(createBoard({ title: 'Send once', blocks: [singleSpec()] })));
+    answerSingle(openBlocks(document)[0], 'Yes');
+    const posted = await pressSendAndLand(document, respond);
+    assert.equal(posted.length, 1, `setup failure (${outcome}): a complete round must submit on the first press`);
+    assert.equal(document.getElementById('send-btn').disabled, disabledAfter,
+      disabledAfter
+        ? 'a Send that landed must leave Send disabled: the round is out, and a second press would post it again'
+        : `a Send ${outcome} sent nothing, so Send must come back for a retry`);
+    assert.equal(document.getElementById('discuss-btn').disabled, disabledAfter, `Discuss follows Send (${outcome})`);
+    assert.equal(document.getElementById('send-status').textContent, statusText);
+  }
+});
+
+await checkAsync('Send names the open round in its body, and a 409 for a round already sent reads as already sent: no error, and no Send offering it again', async () => {
+  const board = createBoard({ title: 'Already sent', blocks: [singleSpec()] });
+  applySubmit(board, { action: 'send', answers: [], comments: [] }, 1);
+  addRound(board, { blocks: [singleSpec()] });
+  const document = loadBoard(renderBoardPage(board));
+  answerSingle(openBlocks(document)[0], 'Yes');
+
+  const posted = await pressSendAndLand(document, () => Promise.resolve({ ok: false, status: 409, json: async () => ({}) }));
+  assert.equal(posted.length, 1, 'setup failure: the open round must submit on the first press');
+  assert.equal(posted[0].round, 2, 'the body must name the round it is for, or the daemon cannot refuse a stale submit');
+  assert.equal(document.getElementById('send-status').textContent, 'Already sent.',
+    'a 409 means the round already went out -- not a red error the reviewer clears by pressing Send again');
+  assert.equal(document.getElementById('send-btn').disabled, true, 'and Send stays disabled, as on a Send that landed');
+});
+
+// === what a re-render must keep ================================================
+
+check('a Defer survives an amend that re-renders its question unchanged: the fresh button shows it, matching what Send posts', () => {
+  const q = prompt => ({ kind: 'question', prompt, widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] });
+  const board = createBoard({ title: 'Defer across an amend', blocks: [q('Q1: ship it?'), q('Q2: rename it?')] });
+  const [q1, q2] = board.blocks.map(b => b.id);
+  const { document, es: captured } = loadBoardWithEventSource(renderBoardPage(board));
+  const block = id => document.querySelector(`.question-block[data-block-id="${id}"]`);
+  const before = block(q1).querySelector('.btn-defer');
+  deferBlock(block(q1));
+  assert.equal(before.classList.contains('active'), true, 'setup failure: the Defer press must show on the button');
+
+  // The agent re-posts the round with Q1 as it was and Q2 reworded: both are
+  // re-rendered, but only Q2 changed, so only Q2's field state is cleared.
+  amendRound(board, { blocks: [{ id: q1, ...q('Q1: ship it?') }, { id: q2, ...q('Q2: rename it to what?') }] });
+  captured.dispatch('round', JSON.stringify(buildRoundPushPayload(board, 1, 'amend', [q1, q2])));
+  const after = block(q1).querySelector('.btn-defer');
+  assert.notEqual(after, before, 'setup failure: the amend must have re-rendered Q1');
+  assert.equal(after.classList.contains('active'), true,
+    'the re-rendered Defer button must show the Defer the tab still holds, or the reviewer sees an open question Send reports deferred');
+
+  answerSingle(block(q2), 'Yes');
+  const calls = withFetchCapture(() => document.getElementById('send-btn').dispatchEvent(new StandInEvent('click')));
+  assert.equal(calls.length, 1, 'setup failure: Q1 deferred and Q2 answered, so the first press must submit');
+  assert.equal(calls[0].body.answers.find(a => a.id === q1).status, 'deferred', 'and Send posts it deferred, as the button says');
+});
+
+check('a fold that settles once a pushed round is attached is dropped then, while one that still overflows stays folded', () => {
+  // The push wires its fragment DETACHED, where the safety valve measures 0/0 and
+  // keeps the server's marking (QUIRKS.md: "`scrollHeight` and `clientHeight`
+  // model exactly one fact"), so only the re-measure after attaching can drop a
+  // fold that turns out to fit. The heights are declared on the pushed markup,
+  // read only once it is in the document.
+  const longProse = n => Array.from({ length: 20 }, (_, i) => `- point ${n}.${i + 1}`).join('\n');
+  const board = createBoard({ title: 'Fold valve on a push', blocks: [singleSpec()] });
+  const { document, es: captured } = loadBoardWithEventSource(renderBoardPage(board));
+  applySubmit(board, { action: 'send', answers: [], comments: [] }, 1);
+  const round2 = addRound(board, { blocks: [{ kind: 'markdown', text: longProse(1) }, { kind: 'markdown', text: longProse(2) }, singleSpec()] });
+  const [fits, overflows] = [board.blocks[1].id, board.blocks[2].id];
+  const declare = (html, id, client, scroll) => html.replace(`id="fold-${id}"`,
+    `id="fold-${id}" data-standin-client-height="${client}" data-standin-scroll-height="${scroll}"`);
+  let html = renderRoundSection(board, round2, groupCommentsByBlock([]));
+  html = declare(declare(html, fits, 300, 300), overflows, 300, 900);
+  assert.ok(html.includes('data-standin-scroll-height="900"') && html.includes('data-standin-scroll-height="300"'),
+    'setup failure: both pushed blocks must fold');
+  captured.dispatch('round', JSON.stringify({ round: round2, mode: 'new-round', blockIds: board.blocks.slice(1).map(b => b.id), html, board }));
+
+  const item = id => document.querySelector(`.block[data-block-id="${id}"]`);
+  assert.equal(item(fits).classList.contains('folded'), false, 'a fold whose body fits once attached must be dropped by the push path');
+  assert.equal(item(fits).querySelector('.fold-toggle'), null, 'taking its Show more control with it');
+  assert.equal(item(overflows).classList.contains('folded'), true, 'a body that still overflows keeps its fold');
+  assert.ok(item(overflows).querySelector('.fold-toggle'), 'and its control');
+});
+
+finish('send-guard');

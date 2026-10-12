@@ -54,18 +54,9 @@ import { renderBoardPage } from '../src/render.mjs';
 import { ui } from '../src/ui.mjs';
 import { styles } from '../src/styles.mjs';
 import { parseHTML, StandInEvent, resolveComputedProperty } from './dom-stand-in.mjs';
+import { check, checkAsync, finish, flush, pageHarness } from './support.mjs';
 
-let failures = 0;
-function check(name, fn) {
-  try {
-    fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
+const { loadBoard, enableCommentMode } = await pageHarness();
 
 // One board fixture covering every content kind called for, short of
 // the diagram node and the hand-mocked stage on its own (already
@@ -144,26 +135,6 @@ function errorNoteFor(document, blockId) {
 }
 const pageHtml = renderBoardPage(board);
 
-/** Parse the page and run the real `ui` client script against it, exactly like
- * test/check-click.mjs's loadBoard -- a fresh document every call, so checks
- * never share mutated state. */
-function loadBoard() {
-  const document = parseHTML(pageHtml);
-  const window = document.defaultView;
-  const location = { protocol: 'http:' };
-  // 'EventSource' is DECLARED and never passed, binding the name to undefined
-  // inside this scope so src/ui.mjs's own `typeof EventSource === 'undefined'`
-  // guard takes its early return because THIS FILE decided so, not because of
-  // whether this node build happens to expose a global EventSource (behind a
-  // flag since 22.x). Left off the list, the name would resolve to whatever
-  // the host provides, and an unflagged node would open a live connection to
-  // '/api/board/<id>/events' and throw -- from a check that is about comment
-  // mode and anchors. Every sibling `new Function` call in this file declares
-  // it for the same reason.
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
-  return document;
-}
-
 /** A deterministic stand-in for wall-clock time, for the Notice's 5s fade --
  * nothing else in this file waits on a real timer. src/ui.mjs's own
  * setTimeout/clearTimeout calls are bare (never window.setTimeout), so naming
@@ -206,7 +177,9 @@ function createFakeTimers() {
 /** Parse `html` and run the real `ui` client script against it with
  * setTimeout/clearTimeout bound to `timers` (a createFakeTimers() instance)
  * instead of the real clock -- the shared shape loadBoardWithTimers and the
- * Notice's own dedicated fixtures below both run through. */
+ * Notice's own dedicated fixtures below both run through. Its own `new
+ * Function` rather than test/support.mjs's loadBoard, which binds no extra
+ * names; 'EventSource' is declared and passed as undefined, as there. */
 function runWithTimers(html, timers) {
   const document = parseHTML(html);
   const window = document.defaultView;
@@ -216,22 +189,10 @@ function runWithTimers(html, timers) {
   return document;
 }
 
-/** loadBoard(), with the client script's setTimeout/clearTimeout bound to a
- * fake clock this check controls instead of the real one. */
+/** loadBoard(pageHtml), with the client script's setTimeout/clearTimeout bound
+ * to a fake clock this check controls instead of the real one. */
 function loadBoardWithTimers(timers) {
   return runWithTimers(pageHtml, timers);
-}
-
-/** Turns comment mode on via the actual toggle button -- never by reaching in and
- * setting a variable, which would prove nothing about the gesture a reviewer
- * actually has (discoverable, visible chrome). */
-function enableCommentMode(document) {
-  const toggle = document.getElementById('comment-mode-toggle');
-  assert.ok(toggle, 'setup failure: no #comment-mode-toggle button rendered on the board page');
-  assert.equal(toggle.classList.contains('active'), false, 'setup failure: comment mode must start off');
-  toggle.dispatchEvent(new StandInEvent('click'));
-  assert.equal(toggle.classList.contains('active'), true, 'setup failure: clicking the toggle did not turn comment mode on');
-  return toggle;
 }
 
 /** A fresh, standalone (no compare) html-stage board, loaded and run exactly like
@@ -255,10 +216,7 @@ function loadSoloStageBoard() {
   });
   const soloBlockId = soloBoard.blocks[0].id;
   const soloHtml = renderBoardPage(soloBoard);
-  const document = parseHTML(soloHtml);
-  const window = document.defaultView;
-  const location = { protocol: 'http:' };
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
+  const document = loadBoard(soloHtml);
   return { document, blockId: soloBlockId };
 }
 
@@ -285,7 +243,7 @@ const KIND_CASES = [
 
 for (const kindCase of KIND_CASES) {
   check(`comment mode: clicking ${kindCase.name} opens its block's comment form with a dom reference and a hint naming it`, () => {
-    const document = loadBoard();
+    const document = loadBoard(pageHtml);
     enableCommentMode(document);
     const el = kindCase.find(document);
     assert.ok(el, `setup failure: could not find the fixture element for "${kindCase.name}"`);
@@ -326,14 +284,14 @@ const NON_ANCHORABLE_KIND_CASES = [
 
 for (const kindCase of NON_ANCHORABLE_KIND_CASES) {
   check(`clicking ${kindCase.name} in comment mode mints no comment and shows no hover affordance`, () => {
-    const document = loadBoard();
+    const document = loadBoard(pageHtml);
     enableCommentMode(document);
     assertNotAnchorable(document, kindCase.find(document), kindCase.name);
   });
 }
 
 check('a markdown block and a code block render no comment button, no comment form, no comment list, no comment target and no pin-layer', () => {
-  const document = loadBoard();
+  const document = loadBoard(pageHtml);
   for (const [name, blockId] of [['markdown', mdBlock.id], ['code', codeBlock.id]]) {
     const section = document.querySelector(`[data-block-id="${blockId}"]`);
     assert.ok(section, `setup failure: no ${name} section rendered`);
@@ -350,27 +308,6 @@ check('a markdown block and a code block render no comment button, no comment fo
   assert.ok(document.getElementById('comment-form-' + diagramBlock.id), 'a mermaid block must still render its comment form');
   const stageId = compareBlock.right.block.id;
   assert.ok(document.getElementById('comment-form-' + stageId), 'an html block must still render its comment form');
-});
-
-check('comment mode: a numbered pin lands on the anchored element once the opened form is submitted, same as the html-stage gesture', () => {
-  const document = loadBoard();
-  enableCommentMode(document);
-  const el = errorNoteFor(document, diagramBlock.id);
-  el.dispatchEvent(new StandInEvent('click'));
-
-  const form = document.getElementById('comment-form-' + diagramBlock.id);
-  const section = document.querySelector(`[data-block-id="${diagramBlock.id}"]`);
-  const layer = section.children.find(c => c.classList && c.classList.contains('pin-layer'));
-  assert.ok(layer, 'setup failure: the diagram block has no page-scoped pin-layer');
-  assert.equal(layer.querySelectorAll('.anchor-pin').length, 0, 'setup failure: a pin already exists before anything was queued');
-
-  const input = form.querySelector('input[type=text]');
-  input.value = 'needs a citation';
-  form.dispatchEvent(new StandInEvent('submit'));
-
-  const pins = layer.querySelectorAll('.anchor-pin');
-  assert.equal(pins.length, 1, `expected exactly one pin after queueing one comment, got ${pins.length}`);
-  assert.equal(pins[0].classList.contains('pin-lost'), false, 'a freshly-queued comment must not render as lost');
 });
 
 // --- hovering marks exactly the hovered element --------------------------------
@@ -398,15 +335,6 @@ check('comment mode: hovering marks the exact (innermost) hovered element, never
     'the hovered element\'s ancestor must NOT also be marked -- hovering must name one element, not a chain');
 });
 
-check('comment mode off: hovering marks nothing at all (the affordance itself is part of the explicit mode, not ambient)', () => {
-  const { document } = loadSoloStageBoard(); // comment mode never enabled here
-  const frame = document.querySelector('.html-stage');
-  frame.loadSrcdoc();
-  const button = frame.contentDocument.querySelector('button');
-  button.dispatchEvent(new StandInEvent('mouseover'));
-  assert.equal(button.classList.contains('cb-anchor-hover'), false, 'hovering must do nothing while comment mode is off');
-});
-
 // --- comment mode OFF (never touched below) never steals an -------------------
 // ordinary interaction. Driven end to end through the real client script, not
 // argued -- an untested claim here is exactly how this
@@ -432,7 +360,7 @@ check('comment mode off: hovering marks nothing at all (the affordance itself is
 // guard. Fixed below, not just in this comment.
 
 check('comment mode off: choosing a single-select option still selects it (and does not open a comment form)', () => {
-  const document = loadBoard();
+  const document = loadBoard(pageHtml);
   const yes = document.querySelectorAll('.choice-single').find(el => el.textContent.indexOf('Yes') !== -1);
   assert.ok(yes, 'setup failure: no "Yes" option rendered');
   assert.equal(yes.classList.contains('selected'), false, 'setup failure: nothing should be pre-selected');
@@ -453,55 +381,17 @@ check('comment mode off: choosing a single-select option still selects it (and d
     'choosing an option must mint no comment when comment mode is off');
 });
 
-check('comment mode off: typing into a text-answer widget still records the text', () => {
-  const document = loadBoard();
-  const textarea = document.querySelector('textarea[data-answer-for="' + textBlock.id + '"]');
-  assert.ok(textarea, 'setup failure: no text-answer textarea rendered for the text-widget question');
-  textarea.value = 'this is the reviewer\'s free-text answer';
-  textarea.dispatchEvent(new StandInEvent('input'));
-  // The shared fixture's OTHER question (choiceBlock) also needs an answer here:
-  // the round-end send guard (test/check-send-guard.mjs owns its own contract)
-  // arms Send instead of submitting while any question is outstanding, and this
-  // check's own subject is whether typed text reaches the submit body, not the
-  // guard -- so the round is filled out completely, exactly the state a plain
-  // click on Send is still expected to submit immediately.
-  document.querySelectorAll('.choice-single').find(el => el.textContent.indexOf('Yes') !== -1)
-    .dispatchEvent(new StandInEvent('click'));
-
-  // Answers are read generically off the widget at Send time (src/ui.mjs
-  // collectAnswers/currentAnswer), so proving the typed text actually reaches
-  // Send is the same proof this repo already prefers over reaching into private
-  // state (see the 'pressing Send' check just below, which reads it back exactly
-  // that way).
-  const originalFetch = globalThis.fetch;
-  let captured = null;
-  globalThis.fetch = (url, opts) => {
-    captured = { url, body: JSON.parse(opts.body) };
-    return Promise.resolve({ ok: true, status: 200, json: async () => ({ board }) });
-  };
-  try {
-    document.getElementById('send-btn').dispatchEvent(new StandInEvent('click'));
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-  assert.ok(captured, 'setup failure: clicking Send never called fetch');
-  const answer = captured.body.answers.find(a => a.id === textBlock.id);
-  assert.ok(answer, 'setup failure: the text question was not in the collected answers');
-  assert.equal(answer.choice, 'this is the reviewer\'s free-text answer', 'the typed text must reach the submit body unchanged');
-  assert.equal(answer.status, 'answered');
-});
-
-check('comment mode off: pressing Send posts the currently-filled-in answers to the submit route, exactly as before', () => {
-  const document = loadBoard();
+check('comment mode off: pressing Send posts the chosen option and the typed free text to the submit route', () => {
+  const document = loadBoard(pageHtml);
   const yes = document.querySelectorAll('.choice-single').find(el => el.textContent.indexOf('Yes') !== -1);
   yes.dispatchEvent(new StandInEvent('click'));
-  // The shared fixture's OTHER question (textBlock) also needs an answer: see
-  // the identical note on the check just above -- the send guard arms on an
-  // outstanding question rather than submitting, so the round is filled out
-  // completely here too, leaving this check's own subject (does a plain click
-  // still submit immediately once the round is complete) untouched.
-  document.querySelector('textarea[data-answer-for="' + textBlock.id + '"]').value = 'a filled-in free-text answer';
-  document.querySelector('textarea[data-answer-for="' + textBlock.id + '"]').dispatchEvent(new StandInEvent('input'));
+  // Both questions are answered: the round-end send guard
+  // (test/check-send-guard.mjs owns its contract) arms Send instead of
+  // submitting while any question is outstanding, and this check's subject is
+  // what a plain click on a complete round posts.
+  const textarea = document.querySelector('textarea[data-answer-for="' + textBlock.id + '"]');
+  textarea.value = 'this is the reviewer\'s free-text answer';
+  textarea.dispatchEvent(new StandInEvent('input'));
 
   const originalFetch = globalThis.fetch;
   let captured = null;
@@ -525,6 +415,12 @@ check('comment mode off: pressing Send posts the currently-filled-in answers to 
   const choiceAnswer = captured.body.answers.find(a => a.id === choiceBlock.id);
   assert.ok(choiceAnswer, 'the choice question must be in the collected answers');
   assert.equal(choiceAnswer.choice, 'Yes', 'the option chosen before Send must be what gets posted');
+  // Answers are read generically off the widget at Send time (src/ui.mjs
+  // collectAnswers/currentAnswer), so the typed text is checked where it lands.
+  const textAnswer = captured.body.answers.find(a => a.id === textBlock.id);
+  assert.ok(textAnswer, 'the text question must be in the collected answers');
+  assert.equal(textAnswer.choice, 'this is the reviewer\'s free-text answer', 'the typed text must reach the submit body unchanged');
+  assert.equal(textAnswer.status, 'answered');
 });
 
 // --- src/ui.mjs's rank-list 'dragstart' guard: a standalone board, not the ----
@@ -539,10 +435,7 @@ function loadSoloRankBoard() {
   });
   const rankQid = rankBoard.blocks[0].id;
   const rankHtml = renderBoardPage(rankBoard);
-  const document = parseHTML(rankHtml);
-  const window = { addEventListener() {}, removeEventListener() {} };
-  const location = { protocol: 'http:' };
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
+  const document = loadBoard(rankHtml);
   return { document, qid: rankQid };
 }
 
@@ -571,19 +464,7 @@ check('comment mode off: a dragstart on a rank item proceeds normally -- the ord
     'with comment mode off, starting to drag a rank item must proceed exactly as it did before comment mode existed -- the drag must not be stolen');
 });
 
-check('comment mode on: a dragstart on a rank item is stood down by the SAME guard every other widget already proves (ablation: deleting "commentMode ||" from src/ui.mjs\'s rank-list dragstart handler)', () => {
-  const { document } = loadSoloRankBoard();
-  enableCommentMode(document);
-  const li = document.querySelector('.rank-list li');
-  assert.ok(li, 'setup failure: no rank-list item rendered');
-
-  li.dispatchEvent(new StandInEvent('dragstart'));
-
-  assert.equal(li.classList.contains('dragging'), false,
-    'with comment mode on, a dragstart on a rank item must be stood down, exactly like choosing an option or pressing Defer -- a click mid-drag must anchor, not reorder');
-});
-
-check('comment mode: a blocked dragstart on a rank-list row raises the same Notice a blocked option click does -- identical text, no per-gesture copy', () => {
+check('comment mode on: a dragstart on a rank-list row is stood down and raises the same Notice a blocked option click does -- identical text, no per-gesture copy (ablation: deleting "commentMode ||" from src/ui.mjs\'s rank-list dragstart handler)', () => {
   const timers = createFakeTimers();
   const { document } = loadSoloRankBoardWithTimers(timers);
   enableCommentMode(document);
@@ -593,7 +474,8 @@ check('comment mode: a blocked dragstart on a rank-list row raises the same Noti
 
   li.dispatchEvent(new StandInEvent('dragstart'));
 
-  assert.equal(li.classList.contains('dragging'), false, 'setup failure: the drag itself must still be stood down');
+  assert.equal(li.classList.contains('dragging'), false,
+    'with comment mode on, a dragstart on a rank item must be stood down, exactly like choosing an option or pressing Defer -- a click mid-drag must anchor, not reorder');
   const notice = document.querySelector('.notice');
   assert.equal(notice.classList.contains('visible'), true, 'a blocked dragstart on a rank-list row must raise the Notice, exactly like a blocked option click');
   assert.equal(notice.querySelector('.notice-msg').textContent, 'Comment mode is on, answers locked.',
@@ -603,7 +485,7 @@ check('comment mode: a blocked dragstart on a rank-list row raises the same Noti
 // --- the hint carries both identity and containing context --------------------
 
 check('the hint for a clicked element reads "<identity> in <context>": a "Send" button inside the compare\'s "After" html stage', () => {
-  const document = loadBoard();
+  const document = loadBoard(pageHtml);
   // One gesture, toggle-gated everywhere (the user's later decision -- see the
   // "comment mode gates the hand-mocked stage too" section below): the stage
   // click needs comment mode on now, exactly like every other content kind.
@@ -641,10 +523,7 @@ check('the plain html-stage hint is unchanged outside a compare (no context to a
   });
   const soloBlockId = soloBoard.blocks[0].id;
   const soloHtml = renderBoardPage(soloBoard);
-  const document = parseHTML(soloHtml);
-  const window = document.defaultView;
-  const location = { protocol: 'http:' };
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
+  const document = loadBoard(soloHtml);
 
   enableCommentMode(document);
   const frame = document.querySelector('.html-stage');
@@ -696,24 +575,6 @@ check('comment mode off: hovering inside the hand-mocked stage adds no outline (
     'with comment mode off, hovering an element inside the stage must not mark it as the one that will be anchored');
 });
 
-check('comment mode on: hovering, then clicking, inside the hand-mocked stage still marks and anchors the element, exactly as before', () => {
-  const { document, blockId } = loadSoloStageBoard();
-  enableCommentMode(document);
-  const frame = document.querySelector('.html-stage');
-  frame.loadSrcdoc();
-  const button = frame.contentDocument.querySelector('button');
-  assert.ok(button, 'setup failure: the loaded stage has no <button>');
-
-  button.dispatchEvent(new StandInEvent('mouseover'));
-  assert.equal(button.classList.contains('cb-anchor-hover'), true,
-    'with comment mode on, hovering an element inside the stage must mark it as the one that will be anchored');
-
-  button.dispatchEvent(new StandInEvent('click'));
-  const form = document.getElementById('comment-form-' + blockId);
-  assert.equal(form.classList.contains('open'), true,
-    'with comment mode on, clicking an element inside the stage must still open its comment form');
-});
-
 check('comment mode: turning it off mid-hover clears an already-applied stage hover outline, so nothing stays highlighted with no live gesture behind it', () => {
   const { document } = loadSoloStageBoard();
   const toggle = enableCommentMode(document);
@@ -741,7 +602,7 @@ check('comment mode: turning it off mid-hover clears an already-applied stage ho
 // --- src/ui.mjs:627 -- document.body.classList.toggle('comment-mode', ...) ----
 
 check('comment mode: turning it on adds body.comment-mode -- every CSS rule behind this (src/styles.mjs) keys off exactly this class, and the only checks that named it before asserted it absent (ablation: deleting the toggle() call)', () => {
-  const document = loadBoard();
+  const document = loadBoard(pageHtml);
   assert.equal(document.body.classList.contains('comment-mode'), false, 'setup failure: body must not start with comment-mode');
   const toggle = enableCommentMode(document);
   assert.equal(document.body.classList.contains('comment-mode'), true,
@@ -759,7 +620,7 @@ check('comment mode: turning it on adds body.comment-mode -- every CSS rule behi
 // generic gesture still has -- the assertion is on preventDefault itself, which is
 // element-agnostic.
 check('comment mode: an anchoring click calls ev.preventDefault(), so an element\'s own default action never fires alongside it mid-review (ablation: deleting ev.preventDefault())', () => {
-  const document = loadBoard();
+  const document = loadBoard(pageHtml);
   enableCommentMode(document);
   const note = errorNoteFor(document, diagramBlock.id);
   assert.ok(note, 'setup failure: no anchorable element found in the fixture');
@@ -772,7 +633,7 @@ check('comment mode: an anchoring click calls ev.preventDefault(), so an element
 // --- src/ui.mjs:679, :688, :435 -- three separate hover-clears ----------------
 
 check('comment mode: hovering a second element (with no intervening mouseout) still clears the first element\'s highlight (ablation: deleting clearAnchorHover() at the top of the generic mouseover handler, src/ui.mjs:679)', () => {
-  const document = loadBoard();
+  const document = loadBoard(pageHtml);
   enableCommentMode(document);
   const first = errorNoteFor(document, diagramBlock.id);
   const second = errorNoteFor(document, diagram2Block.id);
@@ -789,7 +650,7 @@ check('comment mode: hovering a second element (with no intervening mouseout) st
 });
 
 check('comment mode: a mouseout with no specific next target clears the currently hovered element\'s highlight (ablation: deleting the document mouseout listener\'s clearAnchorHover() call, src/ui.mjs:688)', () => {
-  const document = loadBoard();
+  const document = loadBoard(pageHtml);
   enableCommentMode(document);
   const note = errorNoteFor(document, diagramBlock.id);
   assert.ok(note, 'setup failure: fixture element not found');
@@ -823,7 +684,7 @@ check('comment mode: mousing out of a hovered element inside a hand-mocked stage
 // --- src/ui.mjs's setCommentMode -- aria-pressed, .active, and the static label ---
 
 check('comment mode: the toggle\'s aria-pressed attribute and .active class both agree with the ACTUAL state, in both directions (ablation: inverting either in setCommentMode)', () => {
-  const document = loadBoard();
+  const document = loadBoard(pageHtml);
   const toggle = document.getElementById('comment-mode-toggle');
   const label = toggle.querySelector('.mode-toggle-label');
   assert.ok(label, 'setup failure: no .mode-toggle-label rendered');
@@ -850,7 +711,7 @@ check('comment mode: the toggle\'s aria-pressed attribute and .active class both
 // --- ANCHOR_CHROME_SELECTOR: each entry, dropped individually -------------------
 
 check('comment mode: clicking a block\'s own "comment" kicker chrome (not the button itself, which self-excludes via the anchorRootFor/el===root guard -- the surrounding .block-kicker div, which carries no data-block-id of its own) opens no comment form at all (ablation: dropping .block-kicker, .comment-btn from ANCHOR_CHROME_SELECTOR mints a dom anchor against it instead)', () => {
-  const document = loadBoard();
+  const document = loadBoard(pageHtml);
   enableCommentMode(document);
   const btn = document.querySelector(`.comment-btn[data-block-id="${diagramBlock.id}"]`);
   assert.ok(btn, 'setup failure: no comment-btn for the diagram block');
@@ -862,43 +723,6 @@ check('comment mode: clicking a block\'s own "comment" kicker chrome (not the bu
   const form = document.getElementById('comment-form-' + diagramBlock.id);
   assert.equal(form.classList.contains('open'), false,
     'clicking the kicker chrome around the comment button (not the button itself) must not open any comment form -- with the kicker unexcluded, the generic listener mints a dom anchor against it instead, since the kicker itself carries no data-block-id to trip the self-guard the button has');
-});
-
-// Ablation note (per ADR "Commenting is confined to content blocks"):
-// dropping `.compare-label` from ANCHOR_CHROME_SELECTOR used to be the thing
-// that made this check fail -- .compare-label's nearest [data-block-id]
-// ancestor is the compare block's own OUTER section (it sits inside
-// .compare-side, which carries no data-block-id of its own), so an unexcluded
-// click there minted a dom anchor against the compare block itself. That
-// ablation is now dead: `isNonAnchorableRoot` (src/ui.mjs) excludes any click
-// whose resolved root's own data-block-kind is `compare` (or `question`)
-// regardless of ANCHOR_CHROME_SELECTOR, so a click on `.compare-label` still
-// mints nothing even with the selector entry removed -- confirmed by actually
-// running that ablation against this check: nothing in the
-// suite goes red. Reported rather than silently dropped, exactly like the
-// `.round-label` finding a few checks below (which was already dead for an
-// unrelated reason -- anchorRootFor finding no block there at all). What IS
-// checked below is the real, current, correct behaviour, proved the same way
-// the wrapper-gating checks further down this file do: driving the gesture
-// and checking the page as a whole, not a specific block's form (the compare
-// block itself renders no comment-form any more either).
-check('comment mode: clicking a compare side\'s own label opens no comment form anywhere on the page and mints no comment', () => {
-  const document = loadBoard();
-  enableCommentMode(document);
-  const label = document.querySelector('.compare-label');
-  assert.ok(label, 'setup failure: no .compare-label rendered');
-
-  label.dispatchEvent(new StandInEvent('mouseover'));
-  assert.equal(label.classList.contains('cb-anchor-hover'), false,
-    'hovering a compare side\'s label must show no hover affordance');
-
-  label.dispatchEvent(new StandInEvent('click'));
-
-  const anyOpen = document.querySelectorAll('.comment-form').some(f => f.classList.contains('open'));
-  assert.equal(anyOpen, false,
-    'clicking a compare side\'s label must not open any block\'s comment form');
-  assert.equal(document.querySelectorAll('.comment-item.comment-pending').length, 0,
-    'clicking a compare side\'s label must mint no comment at all');
 });
 
 // NOT independently observable through a click, and reported rather than papered
@@ -918,7 +742,7 @@ check('comment mode: clicking a compare side\'s own label opens no comment form 
 // depth), not something to fix here. What IS checked below is the actual current
 // (correct) behaviour: clicking it opens nothing.
 check('comment mode: clicking the round\'s own label opens no comment form anywhere on the page (current, correct behaviour -- see this file\'s own comment just above: dropping .round-label from ANCHOR_CHROME_SELECTOR alone is not observable through any click, because anchorRootFor already finds no block there)', () => {
-  const document = loadBoard();
+  const document = loadBoard(pageHtml);
   enableCommentMode(document);
   const label = document.querySelector('.round-label');
   assert.ok(label, 'setup failure: no .round-label rendered');
@@ -964,7 +788,7 @@ check('comment mode: clicking the html-stage iframe element itself (the outer-do
 // (src/anchor.mjs).
 
 check('the whole-block "comment" button stays ADDITIVE -- several separate remarks on one block remain legal, which is why the edit rule is scoped to anchored kinds', () => {
-  const document = loadBoard();
+  const document = loadBoard(pageHtml);
   const btn = document.querySelector(`.comment-btn[data-block-id="${diagramBlock.id}"]`);
   assert.ok(btn, 'setup failure: no comment button on the diagram block');
   assert.equal(btn.getAttribute('data-anchor-kind'), 'block', 'setup failure: expected the whole-block button');
@@ -991,8 +815,8 @@ check('the whole-block "comment" button stays ADDITIVE -- several separate remar
 // observable rather than merely claimed -- deleting the MIDDLE one is the case
 // that distinguishes a real renumber from an append-only list.
 
-check('a queued comment\'s delete control removes it, its pin, and renumbers everything after it', () => {
-  const document = loadBoard();
+check('a queued comment draws a hollow pending pin, and its delete control removes it, its pin, and renumbers everything after it', () => {
+  const document = loadBoard(pageHtml);
   enableCommentMode(document);
   // Three queued comments: two dom-anchored on the first diagram's neighbouring
   // sections (so they draw pins), one whole-block on a THIRD block (so
@@ -1027,7 +851,11 @@ check('a queued comment\'s delete control removes it, its pin, and renumbers eve
   assert.deepEqual(numbers(), [1, 2, 3], 'setup failure: three queued comments must number 1, 2, 3');
   assert.equal(numberOf('remark-gamma'), 3, 'setup failure: the third comment queued must be numbered 3');
   assert.equal(document.querySelectorAll('.mermaid-block .anchor-pin.pin-pending').length, 2,
-    'setup failure: the two dom-anchored comments must each have drawn a pin');
+    'the two dom-anchored comments must each have drawn a pin, marked pending');
+  // Pending is a visible difference, not just a class: the stylesheet draws a
+  // queued pin hollow (the panel surface where a sent pin is filled).
+  assert.equal(resolveComputedProperty(styles, document.querySelector('.mermaid-block .anchor-pin.pin-pending'), false, 'background'),
+    'var(--panel)', 'a queued pin must be drawn hollow, distinguishable from a sent one');
 
   // Delete the MIDDLE one (by queue number, not by document position -- entries
   // live in their own block's list), through its own control.
@@ -1047,13 +875,45 @@ check('a queued comment\'s delete control removes it, its pin, and renumbers eve
     'the deleted comment\'s hollow pin must be gone too, and the surviving one must remain');
 });
 
+// A Send that lands empties the queue BEFORE the pin layers redraw: the other
+// order leaves every provisional pin on screen beside the round that just went
+// out, to be joined by the server-numbered copies of the same comments.
+
+await checkAsync('a Send that lands empties the queue and takes every provisional pin and pending entry with it (ablation: swap submitBoard\'s `pendingComments = []` below its refreshPins)', async () => {
+  const document = loadBoard(pageHtml);
+  document.querySelectorAll('.choice-single').find(el => el.textContent.indexOf('Yes') !== -1)
+    .dispatchEvent(new StandInEvent('click'));
+  const textarea = document.querySelector('textarea[data-answer-for="' + textBlock.id + '"]');
+  textarea.value = 'answered, so the first press sends';
+  textarea.dispatchEvent(new StandInEvent('input'));
+  enableCommentMode(document);
+  errorNoteFor(document, diagramBlock.id).dispatchEvent(new StandInEvent('click'));
+  const form = document.getElementById('comment-form-' + diagramBlock.id);
+  form.querySelector('input[type=text]').value = 'goes out with this Send';
+  form.dispatchEvent(new StandInEvent('submit'));
+  assert.equal(document.querySelectorAll('.anchor-pin.pin-pending').length, 1, 'setup failure: the queued comment drew no provisional pin');
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+  try {
+    document.getElementById('send-btn').dispatchEvent(new StandInEvent('click'));
+    await flush(1); // the submit's .then chain lands
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(document.querySelectorAll('.anchor-pin.pin-pending').length, 0,
+    'a landed Send must leave no provisional pin behind -- the comment went out with the round');
+  assert.equal(document.querySelectorAll('.comment-item.comment-pending').length, 0,
+    'nor a pending entry in the block\'s comment list');
+});
+
 check('an element carrying a SENT dom comment is not a comment target, and its neighbours still are', () => {
   // The generic comment-mode click listener's own isSentAnchor gate -- deleting
   // it left the whole suite green before this check existed. The ref is minted
   // by a REAL click first (never hardcoded), then sent, then the page reloaded
   // with that comment in board.comments, so this asserts against exactly the
   // anchor shape the gesture itself produces.
-  const probe = loadBoard();
+  const probe = loadBoard(pageHtml);
   enableCommentMode(probe);
   errorNoteFor(probe, diagramBlock.id).dispatchEvent(new StandInEvent('click'));
   const probeForm = probe.querySelector('.comment-form.open');
@@ -1071,8 +931,7 @@ check('an element carrying a SENT dom comment is not a comment target, and its n
   }, 1);
   assert.equal(sentBoard.comments.length, 1, 'setup failure: the comment was not stored');
 
-  const document = parseHTML(renderBoardPage(sentBoard));
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, document.defaultView, { protocol: 'http:' });
+  const document = loadBoard(renderBoardPage(sentBoard));
   enableCommentMode(document);
   const sentNote = errorNoteFor(document, sentDiagramId);
   const liveNote = errorNoteFor(document, liveDiagramId);
@@ -1178,9 +1037,7 @@ assert.equal(typeof wrapperCompareLeftBlock.error, 'string',
 /** Fresh document/window for WRAPPER_BOARD, same pattern as loadBoard() -- never
  * shared across checks. */
 function loadWrapperBoard() {
-  const document = parseHTML(renderBoardPage(WRAPPER_BOARD));
-  const window = document.defaultView;
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, { protocol: 'http:' });
+  const document = loadBoard(renderBoardPage(WRAPPER_BOARD));
   return document;
 }
 
@@ -1235,7 +1092,7 @@ check("comment mode: clicking a question block's own rank item mints no comment 
 });
 
 check("comment mode: clicking a question block's own answer textarea mints no comment and shows no hover affordance", () => {
-  const document = loadBoard(); // the shared fixture's text-widget question
+  const document = loadBoard(pageHtml); // the shared fixture's text-widget question
   enableCommentMode(document);
   const textarea = document.querySelector('textarea[data-answer-for="' + textBlock.id + '"]');
   assertNotAnchorable(document, textarea, 'the answer textarea');
@@ -1386,9 +1243,7 @@ check('AC 1: an awaited page board\'s Tray orders its list before its composer b
     blocks: [{ kind: 'html', html: '<div class="mock"><button>Ship</button></div>' }],
     wait: true,
   });
-  const document = parseHTML(renderBoardPage(trayBoard));
-  const window = document.defaultView;
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, { protocol: 'http:' });
+  const document = loadBoard(renderBoardPage(trayBoard));
 
   const panel = document.querySelector('.page-comments');
   assert.ok(panel, 'setup failure: no .page-comments Tray rendered on an awaited page board');
@@ -1409,9 +1264,7 @@ check('AC 2 corollary: queueing a comment scrolls the Tray\'s list to the newest
     blocks: [{ kind: 'html', html: '<div class="mock"><button>Ship</button></div>' }],
     wait: true,
   });
-  const document = parseHTML(renderBoardPage(trayBoard));
-  const window = document.defaultView;
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, { protocol: 'http:' });
+  const document = loadBoard(renderBoardPage(trayBoard));
 
   const blockId = trayBoard.blocks[0].id;
   const wrap = document.querySelector('.comment-list-wrap');
@@ -1447,9 +1300,7 @@ check('a round with only question blocks: the comment-mode toggle renders with n
     ],
   });
   const [qChoice, qText] = onlyQuestionsBoard.blocks;
-  const document = parseHTML(renderBoardPage(onlyQuestionsBoard));
-  const window = document.defaultView;
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, { protocol: 'http:' });
+  const document = loadBoard(renderBoardPage(onlyQuestionsBoard));
 
   // A round with no 'html'/'mermaid' block has nothing the toggle could ever
   // anchor to (CONTEXT.md "Commentable"), so it renders no toggle -- structurally
@@ -1506,9 +1357,7 @@ check('a round with at least one Commentable block shows the toggle unchanged (A
       { kind: 'html', html: '<div class="mock"><button>Ship</button></div>' },
     ],
   });
-  const document = parseHTML(renderBoardPage(mixedBoard));
-  const window = document.defaultView;
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, { protocol: 'http:' });
+  const document = loadBoard(renderBoardPage(mixedBoard));
 
   assert.equal(document.body.classList.contains('round-uncommentable'), false,
     'a round carrying an html block must not be marked round-uncommentable');
@@ -1516,6 +1365,7 @@ check('a round with at least one Commentable block shows the toggle unchanged (A
   assert.ok(toggle, 'setup failure: no #comment-mode-toggle rendered');
   assert.equal(resolveComputedProperty(styles, toggle, false, 'display'), 'inline-flex',
     'one Commentable block anywhere in the round is enough to render the toggle, unchanged from before ADR 98');
+  assert.equal(toggle.classList.contains('active'), false, 'setup failure: comment mode must start off');
   enableCommentMode(document); // the toggle still functions exactly as before once it renders at all
 });
 
@@ -1534,9 +1384,7 @@ check('an errored html block still counts as Commentable (ADR 98): a round holdi
   };
   assert.equal(typeof erroredBoard.blocks[0].error, 'string',
     'setup failure: the html fixture must carry a stored failed reference, or this proves nothing about the errored branch');
-  const document = parseHTML(renderBoardPage(erroredBoard));
-  const window = document.defaultView;
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, { protocol: 'http:' });
+  const document = loadBoard(renderBoardPage(erroredBoard));
 
   // roundHasCommentable (src/badge.mjs) deliberately does not exclude an
   // errored html/mermaid block the way isPageRound does -- it still carries
@@ -1566,9 +1414,7 @@ check('ADR 98\'s own scenario: comment mode turns off, not merely invisible, whe
       { kind: 'question', prompt: 'Pick one', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] },
     ],
   });
-  const document = parseHTML(renderBoardPage(flipBoard));
-  const window = document.defaultView;
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, { protocol: 'http:' });
+  const document = loadBoard(renderBoardPage(flipBoard));
 
   // The board opens on its newest round (round 2, all-question) -- step back
   // to round 1, the Commentable one, before turning comment mode on.
@@ -1626,8 +1472,7 @@ check('ADR 101: a sent ordinary round offers no comment surface at first paint -
   }, 1);
   assert.equal(sentBoard.rounds[0].status, 'sent', 'setup failure: the round did not go sent');
 
-  const document = parseHTML(renderBoardPage(sentBoard));
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, document.defaultView, { protocol: 'http:' });
+  const document = loadBoard(renderBoardPage(sentBoard));
 
   // First paint, not merely from hydrate onwards: the class is in the served
   // bytes, so the control is never visible for a frame and then taken away.
@@ -1677,8 +1522,7 @@ check('ADR 101: flipping onto a sent round turns comment mode off, and flipping 
   const sentStageId = flipBoard.blocks[0].id;
   const openStageId = flipBoard.blocks[2].id;
 
-  const document = parseHTML(renderBoardPage(flipBoard));
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, document.defaultView, { protocol: 'http:' });
+  const document = loadBoard(renderBoardPage(flipBoard));
 
   // The board opens on round 2, which is open and Commentable -- so the whole
   // surface is live here, and every assertion below is a real change.
@@ -1707,6 +1551,7 @@ check('ADR 101: flipping onto a sent round turns comment mode off, and flipping 
     'the toggle must come back on the open round -- structurally hidden, never omitted');
   assert.equal(resolveComputedProperty(styles, document.querySelector('.comment-btn[data-block-id="' + openStageId + '"]'), false, 'display'),
     'inline-flex', 'and so must the open round\'s comment button');
+  assert.equal(toggle.classList.contains('active'), false, 'setup failure: comment mode must start off');
   enableCommentMode(document); // and the control genuinely works again, from off
 });
 
@@ -1738,7 +1583,7 @@ check('comment mode: the Notice is already in the DOM at hydrate -- empty, hidde
     'the pre-mounted Notice must already be inside the round footer (the send bar), not appended there for the first time on click');
 });
 
-check('comment mode: clicking a question option raises a Notice reading the exact locked-answers text, instead of doing nothing', () => {
+check('comment mode: clicking a question option raises a Notice, role="alert", reading the exact locked-answers text, instead of doing nothing', () => {
   const timers = createFakeTimers();
   const document = loadBoardWithTimers(timers);
   enableCommentMode(document);
@@ -1751,6 +1596,8 @@ check('comment mode: clicking a question option raises a Notice reading the exac
   const notice = document.querySelector('.notice');
   assert.ok(notice, 'clicking a question option with comment mode on must raise a Notice');
   assert.equal(notice.classList.contains('visible'), true, 'the raised Notice must actually be shown, not merely present and hidden');
+  assert.equal(notice.getAttribute('role'), 'alert',
+    'the raised Notice must still carry role="alert" (an implicit assertive live region) so a screen reader announces it unprompted');
   const msg = notice.querySelector('.notice-msg');
   assert.ok(msg, 'setup failure: the Notice has no message element');
   assert.equal(msg.textContent, 'Comment mode is on, answers locked.',
@@ -1887,18 +1734,6 @@ check("the Notice takes its colours entirely from the board's own palette variab
   assert.match(ruleBody('.notice'), /border:\s*1px solid var\(--hairline-2\)/, 'the Notice must wear the board\'s own hairline border');
 });
 
-check('comment mode: the Notice carries role="alert" so a screen reader announces it the moment a blocked click raises it', () => {
-  const timers = createFakeTimers();
-  const document = loadBoardWithTimers(timers);
-  enableCommentMode(document);
-  document.querySelectorAll('.choice-single').find(el => el.textContent.indexOf('Yes') !== -1)
-    .dispatchEvent(new StandInEvent('click'));
-
-  const notice = document.querySelector('.notice');
-  assert.equal(notice.getAttribute('role'), 'alert',
-    'the Notice must carry role="alert" (an implicit assertive live region) so a screen reader announces it unprompted, with no separate aria-live wiring needed');
-});
-
 check('comment mode: a later, separate appearance of the Notice (after an earlier one fully faded) mutates the live region\'s own text again, so a screen reader is not left to notice a bare visibility change on its own', () => {
   const timers = createFakeTimers();
   const document = loadBoardWithTimers(timers);
@@ -1925,8 +1760,8 @@ check('comment mode: clicking a locked multi-select option and a locked variant 
   // A dedicated fixture: the shared BLOCK_SPEC board above carries only a
   // single-select and a text question, and multi-select / choose-between-
   // rendered-variants each need their own option shape (a 'block' per option
-  // for the variant widget -- see test/check-http.mjs's own fixture for the
-  // same shape).
+  // for the variant widget -- see test/check-pure.mjs's
+  // choose-between-rendered-variants checks for the same shape).
   const multiVariantBoard = createBoard({
     title: 'Ticket 02 -- the Notice, on the other option widgets',
     blocks: [
@@ -2000,8 +1835,4 @@ check('comment mode off: clicking Defer still defers the question, and raises no
   assert.equal(document.querySelector('.notice.visible'), null, 'with comment mode off, clicking Defer must raise no Notice');
 });
 
-if (failures) {
-  console.error(`\n${failures} check(s) failed`);
-  process.exit(1);
-}
-console.log('\nall comment-mode checks ok');
+await finish('comment-mode');

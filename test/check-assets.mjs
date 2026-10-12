@@ -25,10 +25,8 @@
 // write -- rather than by editing src/ui.mjs mid-run, which is why both take an argument.
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { rmSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
-import { SECRET_HEADER } from '../src/secret.mjs';
 import { startServer } from '../src/server.mjs';
 import { readBoard, writeSharedAssets } from '../src/store.mjs';
 import { renderBoardPage } from '../src/render.mjs';
@@ -36,32 +34,13 @@ import { sharedAssets, assetsNamedBy, SCRIPT_ASSET, STYLE_ASSET, MERMAID_ASSET, 
 import { ui } from '../src/ui.mjs';
 import { styles } from '../src/styles.mjs';
 import { parseHTML } from './dom-stand-in.mjs';
+import { check, postBoard, runMain, secretFetch, secretHome } from './support.mjs';
 
-let failures = 0;
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
-
-const home = mkdtempSync(path.join(tmpdir(), 'claude-board-assets-'));
-process.env.CLAUDE_BOARD_HOME = home;
-const SECRET_FILE = path.join(home, 'secret');
-const SECRET = 'c'.repeat(64);
-writeFileSync(SECRET_FILE, `${SECRET}\n`, { mode: 0o600 });
-process.env.CLAUDE_BOARD_SECRET_FILE = SECRET_FILE;
+const { home, secret: SECRET } = secretHome('claude-board-assets-', { secret: 'c'.repeat(64) });
 
 // Every request here holds the secret, exactly as test/check-http.mjs's own shadowed
 // `fetch` does: nothing in this file is about the credential.
-const rawFetch = globalThis.fetch;
-function fetch(input, init = {}) {
-  return rawFetch(input, { ...init, headers: { [SECRET_HEADER]: SECRET, ...(init.headers || {}) } });
-}
+const fetch = secretFetch(SECRET);
 
 const pagesDir = path.join(home, 'pages');
 const pagePath = id => path.join(pagesDir, `${id}.html`);
@@ -109,25 +88,18 @@ async function main() {
   ({ server, port } = await startServer({ home, port: 0 }));
   base = `http://127.0.0.1:${port}`;
 
-  const post = async (title, blocks) => {
-    const r = await fetch(`${base}/api/board`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ title, blocks }),
-    });
-    assert.equal(r.status, 200, `setup failure: posting "${title}" answered ${r.status}`);
-    return (await r.json()).boardId;
-  };
-
-  const boardId = await post('Shared assets', [
-    { kind: 'markdown', text: '# Notes\n\n- alpha\n- beta' },
-    { kind: 'question', prompt: 'Proceed?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] },
-  ]);
+  const { boardId } = await postBoard(port, SECRET, {
+    title: 'Shared assets',
+    blocks: [
+      { kind: 'markdown', text: '# Notes\n\n- alpha\n- beta' },
+      { kind: 'question', prompt: 'Proceed?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] },
+    ],
+  });
   const page = readFileSync(pagePath(boardId), 'utf8');
 
   // --- AC 8: names them, does not carry them, and weighs correspondingly less -----
 
-  await check('AC 8: a newly written page names the shared script and stylesheet instead of carrying them', () => {
+  await check('AC 8: a newly written page names the shared script (deferred, never a module) and stylesheet instead of carrying them, and inlines only its board JSON and data: favicon', () => {
     assert.ok(!page.includes(ui), 'the page still carries the client script');
     assert.ok(!page.includes(styles), 'the page still carries the stylesheet');
     const refs = referencesIn(page).map(r => r.ref);
@@ -137,9 +109,24 @@ async function main() {
       assert.ok(ASSET_NAME.test(ref) && !ref.includes('/') && !ref.includes(':') && !ref.startsWith('.'),
         `"${ref}" is not a bare content-addressed sibling filename -- the one form that resolves from both surfaces`);
     }
+    // The one subresource `referencesIn` skips is a `data:` URL, which carries its own
+    // bytes and so resolves anywhere: that is the favicon (src/styles.mjs's faviconLink),
+    // and it must be the only one, or a skipped ref could be hiding a real load.
+    const inline = [...page.matchAll(/<(link|script|img|iframe)\b[^>]*\s(?:src|href)="data:[^"]*"[^>]*>/g)].map(m => m[0]);
+    assert.equal(inline.length, 1, `the favicon must be the page's one data: subresource, got ${inline.length}`);
+    assert.ok(inline[0].startsWith('<link rel="icon" '), `the data: subresource must be the favicon, got ${inline[0].slice(0, 60)}`);
+    // The exact tags, not just the names: a deferred CLASSIC script, never a module --
+    // Chrome CORS-blocks a module script over `file:`, so `type="module"` silently kills
+    // the Finder surface, and `defer` keeps the after-parse timing two
+    // `document.readyState === 'complete'` branches in src/ui.mjs read.
+    assert.ok(page.includes(`<link rel="stylesheet" href="${STYLE_ASSET}">`), 'the page must name the current stylesheet asset');
+    assert.ok(page.includes(`<script defer src="${SCRIPT_ASSET}"></script>`), 'the page must load the current script asset deferred');
+    assert.ok(!/<script[^>]*\btype="module"[^>]*\bsrc=/.test(page), 'the shared script must not be referenced as a module');
+    // The board JSON is per-board, so it has nothing to share and stays inlined.
+    assert.ok(page.includes('<script id="board-data" type="application/json">'), 'the page must still inline its own board JSON');
   });
 
-  await check('AC 8: and weighs correspondingly less -- the payloads are the bulk of what a page used to be', () => {
+  await check('AC 8: a newly written page weighs under a quarter of its inlined self -- the payloads were the bulk of it', () => {
     const pageBytes = Buffer.byteLength(page);
     const payloadBytes = Buffer.byteLength(ui) + Buffer.byteLength(styles);
     // What this page would have weighed before ADR 70, near enough: its own markup plus
@@ -151,12 +138,6 @@ async function main() {
   });
 
   // --- AC 9 (half one): both surfaces resolve the same reference to the same bytes -
-
-  await check('both surfaces resolve the same reference: the served page and the file on disk name the same assets', async () => {
-    const served = await (await fetch(`${base}/b/${boardId}`)).text();
-    assert.equal(served, page, 'the served page and the pages/ file must still be the same bytes');
-    assert.deepEqual(referencesIn(served), referencesIn(page));
-  });
 
   await check('the daemon serves each named asset from disk, byte-identical to the sibling a Finder reader would open', async () => {
     for (const { ref } of referencesIn(page)) {
@@ -209,18 +190,12 @@ async function main() {
     }
   });
 
-  await check('AC 11: writing the new generation leaves every already-written asset exactly as it was', () => {
+  await check('AC 11: writing a new generation leaves every already-written asset and page exactly as it was, and the daemon serves both generations side by side', async () => {
     const before = referencesIn(page).map(({ ref }) => [ref, readFileSync(path.join(pagesDir, ref))]);
     writeSharedAssets(home, nextGeneration);
     for (const [ref, bytes] of before) {
       assert.ok(readFileSync(path.join(pagesDir, ref)).equals(bytes), `${ref} was rewritten -- a page written against it now loads different bytes`);
     }
-    for (const asset of nextGeneration) {
-      assert.equal(readFileSync(path.join(pagesDir, asset.name), 'utf8'), asset.contents, `${asset.name} was not written`);
-    }
-  });
-
-  await check('AC 11: the page written before the change still names its original, and the daemon still serves those exact bytes', async () => {
     assert.equal(readFileSync(pagePath(boardId), 'utf8'), page, 'the page on disk was rewritten by a payload change');
     for (const { ref } of referencesIn(page)) {
       const r = await fetch(new URL(ref, `${base}/b/${boardId}`));
@@ -228,9 +203,10 @@ async function main() {
       assert.equal(await r.text(), ref.endsWith('.css') ? styles : ui,
         `${ref} now serves something other than the bytes the page was written against`);
     }
-    // And a page written AFTER the change would name the new generation -- proving the
-    // two really do coexist, which is what "never deleted or rewritten" buys.
+    // ...and a page written AFTER the change names the new generation, so it must be
+    // servable too -- the two coexist, which is what "never deleted or rewritten" buys.
     for (const asset of nextGeneration) {
+      assert.equal(readFileSync(path.join(pagesDir, asset.name), 'utf8'), asset.contents, `${asset.name} was not written`);
       const r = await fetch(`${base}/b/${asset.name}`);
       assert.equal(r.status, 200, `the new generation's ${asset.name} must be servable too`);
       assert.equal(await r.text(), asset.contents);
@@ -252,16 +228,28 @@ async function main() {
   // Stand in for a page written by a daemon that predates ADR 70: fully self-contained,
   // both payloads inlined, naming no sibling at all. Built by putting the payloads back
   // into a real render rather than hand-writing markup, so it is exactly the shape every
-  // archive already on disk has -- and written straight to pages/, bypassing writePage,
-  // the same way test/check-http.mjs stands in a frozen pre-theme archive.
-  const legacyId = await post('Already on disk', [{ kind: 'markdown', text: '# Older\n\nwritten before the split' }]);
+  // archive already on disk has -- and written straight to pages/, bypassing writePage.
+  // This is also the store's one proof that a GET never serves or rewrites a frozen
+  // archive: the page it serves is a fresh render of the board JSON.
+  const legacyId = (await postBoard(port, SECRET, { title: 'Already on disk', blocks: [{ kind: 'markdown', text: '# Older\n\nwritten before the split' }] })).boardId;
   const legacyPath = pagePath(legacyId);
   const legacyHtml = renderBoardPage(readBoard(legacyId, home))
     .replace(`<link rel="stylesheet" href="${STYLE_ASSET}">`, `<style>${styles}</style>`)
     .replace(`<script defer src="${SCRIPT_ASSET}"></script>`, `<script type="module">${ui}</script>`);
   writeFileSync(legacyPath, legacyHtml, 'utf8');
 
-  await check('AC 10: setup -- the stand-in really is an old-shaped page, carrying both payloads and naming no sibling FILE', () => {
+  await check('AC 10: a page already on disk is never rewritten -- not by a read, not by another board being posted', async () => {
+    const r = await fetch(`${base}/b/${legacyId}`);
+    assert.equal(r.status, 200);
+    assert.notEqual(await r.text(), legacyHtml, 'setup failure: GET must re-render from JSON, so the served page cannot be the frozen bytes');
+    await postBoard(port, SECRET, { title: 'Something else entirely', blocks: [{ kind: 'markdown', text: '# unrelated' }] });
+    assert.equal(readFileSync(legacyPath, 'utf8'), legacyHtml,
+      'an archive already on disk was rewritten -- this change slims only pages written from now on');
+  });
+
+  await check('AC 10: a page already on disk still opens correctly from Finder afterwards, with no sibling files at all', () => {
+    // Setup: the stand-in really is an old-shaped page, carrying both payloads and
+    // naming no sibling FILE.
     assert.ok(legacyHtml.includes(ui) && legacyHtml.includes(styles), 'setup failure: the stand-in does not carry the payloads');
     assert.deepEqual(referencesIn(legacyHtml), [], 'setup failure: the stand-in still references something');
     // NOT an empty array any more: this page inlines the whole `ui` string
@@ -273,18 +261,6 @@ async function main() {
     // still the one that proves "no sibling FILE reference" -- that stays [].
     assert.deepEqual(assetsNamedBy(legacyHtml), [MERMAID_ASSET],
       'setup failure: the stand-in must name exactly the mermaid engine (transitively, via its inlined ui string) and nothing else');
-  });
-
-  await check('AC 10: a page already on disk is never rewritten -- not by a read, not by another board being posted', async () => {
-    const r = await fetch(`${base}/b/${legacyId}`);
-    assert.equal(r.status, 200);
-    assert.notEqual(await r.text(), legacyHtml, 'setup failure: GET must re-render from JSON, so the served page cannot be the frozen bytes');
-    await post('Something else entirely', [{ kind: 'markdown', text: '# unrelated' }]);
-    assert.equal(readFileSync(legacyPath, 'utf8'), legacyHtml,
-      'an archive already on disk was rewritten -- this change slims only pages written from now on');
-  });
-
-  await check('AC 10: and it still opens correctly from Finder afterwards, with no sibling files at all', () => {
     // Its own inlined script, out of its own bytes -- an old archive is a single file and
     // has nothing beside it to resolve.
     const m = legacyHtml.match(/<script type="module">([\s\S]*?)<\/script>\n<\/body>/);
@@ -328,8 +304,8 @@ async function main() {
     // set would otherwise be just [SCRIPT_ASSET, STYLE_ASSET]. It carries MERMAID_ASSET
     // too here only because the AC 10 fixture above inlines the whole `ui` string
     // verbatim into a page, and `ui` itself names mermaid's filename as a literal (the
-    // same over-report `assetsNamedBy` is designed to produce, pinned by name at AC 10's
-    // own setup check). test/check-prune.mjs is where mermaid's transitive survival
+    // same over-report `assetsNamedBy` is designed to produce, pinned by name in the setup of
+    // AC 10's Finder check). test/check-prune.mjs is where mermaid's transitive survival
     // through an ORDINARY page (naming only ui.js, which in turn names mermaid.js) is
     // pinned end to end, including a sweep that must not collect it.
     assert.deepEqual([...referenced].sort(), [SCRIPT_ASSET, STYLE_ASSET, MERMAID_ASSET].sort(),
@@ -337,18 +313,9 @@ async function main() {
   });
 }
 
-main()
-  .catch(err => {
-    failures++;
-    console.error('FAIL - unexpected error');
-    console.error(err);
-  })
-  .finally(() => {
+runMain('shared-asset', main, {
+  cleanup: () => {
     if (server) server.close();
     rmSync(home, { recursive: true, force: true });
-    if (failures) {
-      console.error(`\n${failures} check(s) failed`);
-      process.exit(1);
-    }
-    console.log('\nall shared-asset checks ok');
-  });
+  },
+});

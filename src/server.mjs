@@ -118,14 +118,6 @@ function attendedWindowMs() {
 export function createSseHub() {
   const subs = new Map(); // boardId -> Map<watcherId, { res, attended, seq, focusedAt }>
 
-  /** Is this Watcher inside its look-away window -- did it have focus recently enough
-   * that the board still counts as Attended (ADR.md entry 73)? `focusedAt` is the last
-   * instant this tab is known to have had focus, so a tab that has never reported focus
-   * at all (0) is never inside a window, however long it has been connected. */
-  function withinLookAway(watcher) {
-    return watcher.focusedAt > 0 && Date.now() - watcher.focusedAt < attendedWindowMs();
-  }
-
   /** How much longer this board counts as Attended. See the `attendedRemainingMs` entry
    * on the returned object for what the three answers mean. A plain function rather than
    * a `this.` call between two methods, so a caller that pulls one method off the hub does
@@ -151,9 +143,9 @@ export function createSseHub() {
       // reports the tab's real state the moment it learns this id -- so the unknown
       // state lasts milliseconds, but it is a distinct state and the difference is
       // load-bearing twice over. It is not evidence the reviewer is there, so it can
-      // neither end an absence nor hold a banner back (`isConfirmedAttended` below is
-      // what the stranded rule asks); and it is not evidence they are gone either, so
-      // `isAttended` still counts it for anything merely asking whether a tab is open.
+      // neither end an absence nor hold a banner back (`attendedRemainingMs` below, which
+      // the stranded rule asks, answers 0 for it); and it is not evidence they are gone
+      // either, so `anyWatcher` and `clientCount` still count it as an open tab.
       board.set(watcherId, { res, attended: null, seq: -1, focusedAt: 0 });
       return watcherId;
     },
@@ -183,7 +175,7 @@ export function createSseHub() {
      * one question no other process can answer: the shim sees one thread in one project
      * directory, and the daemon is where every board on this machine is visible.
      *
-     * Deliberately NOT `isAttended`/`attendedRemainingMs`: a tab left open behind the
+     * Deliberately NOT `attendedRemainingMs`: a tab left open behind the
      * terminal is still a reviewer's place in a browser window, and yanking a new tab in
      * front of it is the focus theft entry 91 is about, whether or not that tab happens
      * to be looked at right now.
@@ -228,7 +220,7 @@ export function createSseHub() {
      * what keeps two reports in flight at once from landing in the wrong order: a focus
      * and a blur ~100ms apart are two POSTs on two connections, so the network decides
      * which arrives first. Applied in arrival order they can leave a Watcher marked
-     * attended with the reviewer gone -- `isConfirmedAttended` then true forever, every
+     * attended with the reviewer gone -- `attendedRemainingMs` then Infinity forever, every
      * evaluate resolving to `returned`, no grace ever armed and no banner for the rest
      * of that wait, with no further DOM edge coming to correct it -- or, reversed, fire
      * a banner at a reviewer who is looking at the board. A report carrying no `seq` is
@@ -269,48 +261,13 @@ export function createSseHub() {
       watcher.attended = !!attended;
       return true;
     },
-    /** CONTEXT.md "Attended", OR-across-Watchers: true unless every Watcher of this
-     * board has REPORTED itself hidden or unfocused AND is past its look-away window.
-     * Three clauses the branches turn on, because none survives the summary above: a
-     * board with no Watchers at all is NOT Attended (`if (!board) return false`, rather
-     * than the vacuous "every one of zero Watchers has reported hidden"), a Watcher that
-     * has not reported yet counts as looking (`attended !== false`, not `=== true`) --
-     * which is the entire reason `isConfirmedAttended` below exists -- and one that
-     * reported itself hidden within the last two minutes still counts (ADR.md entry 73).
-     * No production reader -- kept for test/check-attended.mjs, which pins this rule
-     * directly since nothing over HTTP surfaces it. Nor has `isConfirmedAttended` below
-     * one any more: since ADR.md entry 73 the only accessor production reads is
-     * `attendedRemainingMs`, because the stranded rule needs to know WHEN a board stops
-     * being attended, not just whether it is. Both booleans are test-only now, and
-     * saying so here is not bookkeeping: a stand-in that had drifted from this hub is
-     * what hid a defect that made a stranded board silent forever. */
-    isAttended(boardId) {
-      const board = subs.get(boardId);
-      if (!board) return false;
-      for (const watcher of board.values()) if (watcher.attended !== false || withinLookAway(watcher)) return true;
-      return false;
-    },
-    /** The stricter question, and the one a caller deciding whether the reviewer has
-     * COME BACK has to ask: has any Watcher actually SAID it is looking, now or recently
-     * enough to still be inside its look-away window? A freshly subscribed one has not,
-     * so this is false through the reconnect and true again a round trip later if the tab
-     * really is in front of the reviewer -- which is what keeps a hidden tab's reconnect
-     * (a dropped socket, a laptop wake, a daemon restart) from reading as the reviewer
-     * returning (PROTOCOL.md, `POST /api/board/:id/attended`: "unknown, not attended").
-     *
-     * The window (ADR.md entry 73) is why a tab buried behind the terminal -- the ordinary
-     * working posture -- does not strand its board the moment focus moves: it goes on
-     * answering true for two minutes after that tab last had focus. A tab that IS focused
-     * answers true with no clock involved at all, however long it sits there.
-     *
-     * Test-only, like `isAttended` above: the rule this was written for now asks
-     * `attendedRemainingMs` instead, needing the moment the window ends and not just
-     * whether it is still running. See `createStrandedWatch.evaluate` (src/stranded.mjs). */
-    isConfirmedAttended(boardId) {
-      return remainingMs(boardId) > 0;
-    },
-    /** The same question with its answer in milliseconds, which is what the stranded rule
-     * needs to know WHEN to ask again (ADR.md entry 73).
+    /** CONTEXT.md "Attended", OR-across-Watchers, with its answer in milliseconds: how
+     * much longer this board counts as Attended, which is what the stranded rule needs to
+     * know WHEN to ask again (ADR.md entry 73). A board with no Watchers at all answers 0,
+     * and so does one whose Watchers have not reported yet -- what keeps a hidden tab's
+     * reconnect (a dropped socket, a laptop wake, a daemon restart) from reading as the
+     * reviewer returning (PROTOCOL.md, `POST /api/board/:id/attended`: "unknown, not
+     * attended").
      *
      * `Infinity` means a tab is focused right now -- the reviewer is here, and no clock is
      * running on them. A finite number is how much of the look-away window is left on the
@@ -1364,10 +1321,9 @@ function handleAuthHandoff(req, res, token, handoffs, secret, pathname) {
 /** `threadBoards` is every board of `thread` in the store, oldest first, with `board`'s
  * own entry substituted for the copy `listBoards` just re-read off disk -- same file, but
  * it keeps the caller's `pending` entries pointing at the very objects the packet was
- * built from. A caller that has ALREADY parsed the store passes it as `prebuilt` (the
- * option `searchBoards` in src/store.mjs takes, for the same reason); `board` is appended
- * when that list predates it, so a list taken before a create still describes the thread
- * the create just joined.
+ * built from. A caller that has ALREADY parsed the store passes it as `prebuilt`;
+ * `board` is appended when that list predates it, so a list taken before a create still
+ * describes the thread the create just joined.
  *
  * A thread's rounds can span more than one board (`boundCwdForThread` above does the same
  * walk for the same reason), so both drains below are thread-wide and neither can be

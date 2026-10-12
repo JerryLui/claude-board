@@ -275,16 +275,11 @@ export function listBoards(home = boardHome()) {
  *
  * Returns one result per match (a board can contribute several), newest first:
  * `{ boardId, thread, cwd, title, kind, text, at }`, `kind` one of
- * `'title' | 'question' | 'option' | 'answer' | 'note'`.
- *
- * `boards` is an optional already-read store walk: a caller that has just called
- * `listBoards` itself (the index page, which renders the thread list and the search
- * results from the same request) passes it in rather than making this single-threaded
- * daemon read and JSON.parse every board file a second time. */
-export function searchBoards(query, home = boardHome(), boards = null) {
+ * `'title' | 'question' | 'option' | 'answer' | 'note'`. */
+export function searchBoards(query, home = boardHome()) {
   const q = (query || '').toLowerCase().trim();
   if (!q) return [];
-  if (!boards) boards = listBoards(home);
+  const boards = listBoards(home);
   const results = [];
 
   const roundStamp = (board, roundN, fallback) => {

@@ -9,14 +9,14 @@
 //     does not expose AND the widget that does not exist — not just "something failed"
 //
 // Plus unit coverage of the pure pieces (parseBlockShapes, parsePacketStatuses,
-// extractClaims) and the resolution story (resolveInstalledRoot / loadInstalledChecker),
-// which the two fixture runs above exercise only indirectly.
+// extractClaims), the resolution story (resolveInstalledRoot / loadInstalledChecker),
+// which the two fixture runs above exercise only indirectly, and the shim boundary
+// (getLiveTools failing a missing, broken or silent shim by name instead of hanging).
 
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import {
   parseBlockShapes,
   parsePacketStatuses,
@@ -26,23 +26,12 @@ import {
   formatFailures,
   resolveInstalledRoot,
   loadInstalledChecker,
+  getLiveTools,
   REPO_ROOT,
 } from '../src/prose-check.mjs';
+import { check, repoRoot, runMain, withTimeout } from './support.mjs';
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const fixturesDir = path.join(repoRoot, 'test', 'fixtures');
-
-let failures = 0;
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
 
 async function main() {
   // --- pure parsing, unit-level -------------------------------------------------------
@@ -82,7 +71,7 @@ Anchor  = { kind: 'block' }
     assert.ok(!blockKinds.includes('md'), 'Anchor kind "md" leaked into block kinds');
   });
 
-  await check('parseBlockShapes against the REAL PROTOCOL.md in this repo', () => {
+  await check('parseBlockShapes finds every block kind and widget in the REAL PROTOCOL.md in this repo', () => {
     const protocolText = readRepoFile('PROTOCOL.md');
     const { blockKinds, widgets } = parseBlockShapes(protocolText);
     for (const k of ['markdown', 'mermaid', 'code', 'html', 'compare', 'question']) {
@@ -290,11 +279,61 @@ Anchor  = { kind: 'block' }
     assert.ok(result.failures.some(f => /block kind/.test(f.name)));
   });
 
-  if (failures) {
-    console.error(`${failures} check(s) failed`);
-    process.exit(1);
-  }
-  console.log('all prose-check checks ok');
+  // --- getLiveTools: a partial install fails the caller instead of hanging it ---------
+  // The product's own spawn of the shim, which any installed clone can be asked for. A
+  // shim that is missing or cannot run answers nothing, and a client that waits for an
+  // answer with no deadline and no exit listener waits forever -- no output, no exit code,
+  // nothing to read. That hang is what stranded a load test of test/check-mcp.mjs. Each
+  // call below runs under `withTimeout`, so none of them can hang this file: the hang is
+  // the regression under test.
+
+  await check('getLiveTools fails a missing or broken shim by name instead of hanging', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'claude-board-partial-install-'));
+    try {
+      const absent = path.join(dir, 'bin', 'mcp.mjs');
+      await assert.rejects(
+        withTimeout(getLiveTools({ mcpPath: absent }), 6000, 'timed out after 6000ms: a missing shim must fail, not hang'),
+        /no claude-board shim at .*mcp\.mjs/,
+        'name the path that is not there and the install that is incomplete'
+      );
+
+      // Present but unrunnable -- the other half of a partial install. `node` itself exists,
+      // so the spawn succeeds and the failure is an exit code with a stack on stderr.
+      const broken = path.join(dir, 'broken-mcp.mjs');
+      writeFileSync(broken, "throw new Error('half-installed shim');\n");
+      await assert.rejects(
+        withTimeout(getLiveTools({ mcpPath: broken }), 8000, 'timed out after 8000ms: a broken shim must fail, not hang'),
+        err => {
+          assert.match(err.message, /exited/, 'a child that dies without answering must reject the call it left pending');
+          assert.match(err.message, /half-installed shim/, 'and carry its stderr: that is the only statement of the cause');
+          return true;
+        }
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  await check('getLiveTools fails a shim that starts but never answers on its deadline', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'claude-board-silent-shim-'));
+    try {
+      const silent = path.join(dir, 'silent-mcp.mjs');
+      // Starts, holds stdin open, answers nothing: a wedged shim is the one failure no exit
+      // code reports, so only a deadline can end it.
+      writeFileSync(silent, 'process.stdin.resume();\n');
+
+      const started = Date.now();
+      await assert.rejects(
+        withTimeout(getLiveTools({ mcpPath: silent, timeoutMs: 400 }), 6000, 'timed out after 6000ms: a silent shim must fail on its deadline'),
+        /did not answer initialize within 400ms/,
+        'the deadline must name the call it gave up on'
+      );
+      assert.ok(Date.now() - started < 5000, `the deadline must actually fire, took ${Date.now() - started}ms`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
 }
 
 function readRepoFile(rel) {
@@ -315,7 +354,4 @@ function plistNaming(workingDirectory) {
 `;
 }
 
-main().catch(err => {
-  console.error((err && err.stack) || err);
-  process.exit(1);
-});
+await runMain('prose-check', main, { lead: '' });

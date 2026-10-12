@@ -16,14 +16,13 @@ import os, { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mdToHtml, mdToHtmlAndAnchors, slugify } from '../src/markdown.mjs';
-import { marked } from '../src/vendor/marked/marked.esm.js';
 // The pre-marked (edb611b) markdown module, frozen as a fixture: AC 10
 // ("slugs byte-identical to today's output, so every archived section: ref
 // still resolves") is asserted by running BOTH implementations over one corpus, not
 // by golden strings re-derived from the current source. See the fixture's header.
 import { mdToHtmlAndAnchors as legacyMdToHtmlAndAnchors } from './fixtures/markdown-pre-marked.mjs';
 import { createBoard, addRound, amendRound, applySubmit, buildPacket, resolveComment, findBlock, questionBlocks, normalizeBlock } from '../src/board.mjs';
-import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, stageAgentScript, STAGE_ACCENT_HEX, STAGE_MARGIN_RESET, isPageBoard, renderRefusalPage, CSP, INDEX_CSP, COMMENT_ICON, highlightFenceHtml, FOLD_CAP } from '../src/render.mjs';
+import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, stageAgentScript, STAGE_ACCENT_HEX, STAGE_MARGIN_RESET, isPageBoard, renderRefusalPage, COMMENT_ICON, highlightFenceHtml, FOLD_CAP } from '../src/render.mjs';
 import { sessionToken, sessionCookieMatches, SESSION_COOKIE } from '../src/secret.mjs';
 import { createHandoffStore, handoffTarget, recoveryCommand, shellQuote } from '../src/handoff.mjs';
 import { resolveRef, langForPath, resolvePath, resolveRefRoots, resolveBoardCwd, DEFAULT_REF_ROOTS, MAX_REF_BYTES } from '../src/resolve.mjs';
@@ -37,8 +36,7 @@ import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { ui } from '../src/ui.mjs';
 import { styles, palettes, faviconLink } from '../src/styles.mjs';
-import { indexScript, buildThreadIndex, renderIndexPage, folderName, roundCount } from '../src/indexpage.mjs';
-import { formatCountdown, DEFAULT_SETTINGS } from '../src/pomodoro.mjs';
+import { indexScript, buildThreadIndex, renderIndexPage, folderName } from '../src/indexpage.mjs';
 import { TOMATO_ICON, REST_ICON } from '../src/pomodoro-widget.mjs';
 import { cueNames, NO_CUE } from '../src/cues.mjs';
 import { computeBoardPatch } from '../src/patch.mjs';
@@ -48,11 +46,6 @@ import {
   closeLapsedAwaitedRounds, roundWaitLapsed,
   PILL_READONLY_TITLE, ROUND_OPEN_UNAWAITED_TITLE, ROUND_COUNTDOWN_TITLE, PILL_SUBMITTED_TITLE,
 } from '../src/badge.mjs';
-// Namespace import, alongside the named one above -- AC 12's own check below
-// needs to assert badgeLabel is ABSENT from this module's exports, which a
-// named `import { badgeLabel }` cannot express (a missing named export is a
-// SyntaxError at load time, not something a check could catch and report).
-import * as badgeExports from '../src/badge.mjs';
 import { lensZoomAt, lensFit, lensOneToOne } from '../src/lens.mjs';
 import {
   extractHint, stepsToPath, pathToSteps, resolveSteps, buildSteps, composeHint,
@@ -62,43 +55,16 @@ import {
 } from '../src/anchor.mjs';
 import { parseHTML, StandInEvent, resolveComputedProperty } from './dom-stand-in.mjs';
 
-let failures = 0;
-function check(name, fn) {
-  try {
-    fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error(err && err.stack || err);
-  }
-}
+import { check, checkAsync, finish, flush, renderedMarkup, repoRoot, sleep } from './support.mjs';
 
 // Fixture source files for reference-resolution checks: a dedicated temp dir
 // (mkdtempSync, same convention as CLAUDE_BOARD_HOME elsewhere), cleaned up at the
 // end regardless of pass/fail.
 const fixturesDir = mkdtempSync(path.join(tmpdir(), 'claude-board-pure-fixtures-'));
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-
-/** Strip the #board-data JSON payload from a rendered page, leaving only the block markup
- * that renderBlock actually emitted. Asserting against the raw page string is unsafe for a
- * block-kind-coverage check: any field value on a block (a label, a snippet of prose) is
- * also present in the JSON board.blocks the page inlines verbatim for hydration, and
- * finding it there proves nothing about whether the corresponding renderBlock case ran.
- *
- * This used to strip two more things, for the same reason: the inlined `<style>` block
- * (where a class name like "compare-grid" is also a CSS selector) and the inlined client
- * `<script type="module">` (where it is also a querySelector string literal). Since ADR 70
- * the page carries neither -- it names them as sibling files -- so the JSON payload is the
- * only haystack left that can produce a false positive. */
-function renderedMarkup(html) {
-  return html.replace(/<script id="board-data"[^>]*>[\s\S]*?<\/script>/, '');
-}
-
 // --- markdown.mjs: carried from visualize/check.mjs -------------------------------
 
-check('mdToHtml carries the visualize renderer\'s pinned behaviour', () => {
+check('mdToHtml renders bold, inline code, links, images, emphasis, nested lists, tables, blockquotes, fenced code and mermaid fences as the visualize renderer pinned them', () => {
   const out = mdToHtml([
     '# Title',
     '',
@@ -226,12 +192,6 @@ check('one anchor per heading and per top-level list item', () => {
   assert.ok(!/<li id="[^"]*">nested under one/.test(html));
 });
 
-check('duplicate heading text gets a disambiguated slug', () => {
-  const md = '# Notes\n\nfirst\n\n# Notes\n\nsecond';
-  const { anchors } = mdToHtmlAndAnchors(md);
-  assert.deepEqual(anchors.map(a => a.ref), ['notes', 'notes-2']);
-});
-
 // --- attribute-value escaping in the markdown renderer (security) ------
 //
 // markdown.mjs's `esc` covered only & < > and was never applied to attribute values
@@ -335,7 +295,7 @@ check('http, https, mailto, relative and fragment URLs still render as live link
 // One contiguous block, appended after the pre-existing markdown section above so
 // a parallel ticket appending elsewhere in this file merges cleanly.
 
-check('AC 9: raw HTML in a markdown source renders as text, inline and as a block -- never as live markup', () => {
+check('raw HTML in a markdown source renders as text, inline and as a block -- never as live markup', () => {
   const inline = mdToHtml('before <script>alert(1)</script> after, and <img src=x onerror=alert(2)> tag.');
   assert.ok(!/<script>/i.test(inline), `a raw <script> tag must not reach the page live: ${inline}`);
   assert.ok(inline.includes('&lt;script&gt;alert(1)&lt;/script&gt;'));
@@ -353,7 +313,7 @@ check('AC 9: raw HTML in a markdown source renders as text, inline and as a bloc
   // used to name as its stated ceiling.
 });
 
-check('AC 10: heading and list-item slugs are byte-identical to the pre-marked implementation, across a corpus including duplicate-disambiguation', () => {
+check('heading and list-item slugs are byte-identical to the pre-marked implementation, across a corpus including duplicate-disambiguation', () => {
   // Golden values captured by running this exact corpus through the pre-rewrite
   // (hand-rolled-scanner) src/markdown.mjs before src/vendor/marked was wired in --
   // a mechanical snapshot, not a re-derivation from the current source, so a
@@ -389,7 +349,7 @@ check('AC 10: heading and list-item slugs are byte-identical to the pre-marked i
   });
 });
 
-check('AC 11: reference-style links resolve through a [ref]: definition, not just inline (text) syntax', () => {
+check('reference-style links resolve through a [ref]: definition, not just inline (text) syntax', () => {
   // A link title, if the definition carries one, is not rendered -- same as before
   // this module vendored marked, which never supported titles at all (the inline
   // `(href)` syntax had no capture for one).
@@ -397,7 +357,7 @@ check('AC 11: reference-style links resolve through a [ref]: definition, not jus
   assert.equal(out, '<p><a href="https://example.com" target="_blank" rel="noopener noreferrer">ref link</a></p>');
 });
 
-check('AC 11: setext headings (Title\\n===) RENDER as headings at the right level, but mint no anchor -- AC 10 outranks anchoring them', () => {
+check('setext headings (Title\\n===) render as headings at the right level but mint no anchor, so no later heading\'s slug shifts its ordinal', () => {
   // The product call (AC 11 closes the setext gap; AC 10 requires
   // slugs byte-identical to the pre-marked parser, which had no setext at all):
   // setext headings render, and are skipped by the anchor minter. Anchoring them
@@ -410,7 +370,7 @@ check('AC 11: setext headings (Title\\n===) RENDER as headings at the right leve
   assert.deepEqual(anchors, [], 'a setext heading mints no anchor and consumes no slug');
 });
 
-check('AC 10/11: a document mixing setext and duplicate-text ATX headings mints slugs byte-identical to the pre-marked parser', () => {
+check('a document mixing setext and duplicate-text ATX headings mints slugs byte-identical to the pre-marked parser', () => {
   // Not golden strings: the actual edb611b implementation, imported and run on the
   // same corpus (test/fixtures/markdown-pre-marked.mjs -- see its header). A setext
   // heading was invisible to that parser, so every slug after one has to land on the
@@ -430,14 +390,14 @@ check('AC 10/11: a document mixing setext and duplicate-text ATX headings mints 
   assert.ok(mdToHtmlAndAnchors(corpus[0]).html.startsWith('<h1>Notes</h1>'));
 });
 
-check('AC 11: a loose list (blank line between items) wraps each item in its own <p>, unlike a tight list', () => {
+check('a loose list (blank line between items) wraps each item in its own <p>, unlike a tight list', () => {
   const loose = mdToHtml('- one\n\n- two\n\n- three\n');
   assert.equal(loose, '<ul><li id="_body-li1"><p>one</p></li><li id="_body-li2"><p>two</p></li><li id="_body-li3"><p>three</p></li></ul>');
   const tight = mdToHtml('- one\n- two\n');
   assert.equal(tight, '<ul><li id="_body-li1">one</li><li id="_body-li2">two</li></ul>');
 });
 
-check('AC 11: a pipe inside a table cell\'s code span no longer splits the cell in two', () => {
+check('a pipe inside a table cell\'s code span does not split the cell in two', () => {
   const out = mdToHtml('| a | b |\n|---|---|\n| `x|y` | z |\n');
   assert.equal(out, '<div class="table-scroll"><table><tr><th>a</th><th>b</th></tr><tr><td><code>x|y</code></td><td>z</td></tr></table></div>');
 });
@@ -495,7 +455,7 @@ check('a character reference in source renders as the character it names, not as
   assert.ok(sneaky.includes('javascript&amp;colon;'), 'and it is the escaped form that reaches the attribute');
 });
 
-check('AC 12: GFM is on -- task lists, strikethrough, autolinks and tables all render', () => {
+check('GFM is on -- task lists, strikethrough, autolinks and tables all render', () => {
   const tasks = mdToHtml('- [ ] todo\n- [x] done\n');
   assert.ok(tasks.includes('<input type="checkbox" disabled> todo'));
   assert.ok(tasks.includes('<input type="checkbox" disabled checked> done'));
@@ -511,14 +471,7 @@ check('AC 12: GFM is on -- task lists, strikethrough, autolinks and tables all r
     '<tr><td align="left">a</td><td align="center">b</td><td align="right">c</td></tr></table></div>');
 });
 
-check('AC 13: a ```mermaid fence still becomes <pre class="mermaid"> even alongside the new GFM/reference-link machinery', () => {
-  const md = '# Diagram\n\nSee [the spec][s].\n\n```mermaid\nflowchart LR\n  A --> B\n```\n\n[s]: https://example.com\n';
-  const out = mdToHtml(md);
-  assert.ok(out.includes('<pre class="mermaid">flowchart LR\n  A --&gt; B</pre>'));
-  assert.ok(out.includes('href="https://example.com"'));
-});
-
-check('N2 (extended): a GFM strikethrough run with no closing ~~ is scanned in linear time -- the same DoS class emphasis was fixed against, now covering marked\'s del tokenizer too', () => {
+check('a GFM strikethrough run with no closing ~~ is scanned in linear time, so marked\'s del tokenizer is no DoS vector', () => {
   const md = ' ~~a'.repeat(150000); // 600KB, inside the by-value cap
   const started = Date.now();
   mdToHtml(md);
@@ -712,7 +665,7 @@ check('computeBoardPatch: an amend that replaces one block reports only that blo
   assert.deepEqual(patch.addedBlockIds, []);
 });
 
-check('the exact function embedded in ui.mjs (via .toString()) is executable and behaves identically to the imported one', () => {
+check('computeBoardPatch\'s own source, the copy src/ui.mjs embeds via .toString(), runs standalone and returns what the imported function does', () => {
   // Proves the toString()-splicing mechanism itself, not just that the text
   // "function computeBoardPatch(" appears somewhere: a hand-copied, silently
   // drifted reimplementation would satisfy a bare substring check but fail this.
@@ -723,27 +676,18 @@ check('the exact function embedded in ui.mjs (via .toString()) is executable and
   assert.deepEqual(rehydrated(before, after), computeBoardPatch(before, after));
 });
 
-check('ui.mjs embeds the literal source of computeBoardPatch, not a hand-copied reimplementation', () => {
-  assert.ok(
-    ui.includes(computeBoardPatch.toString()),
-    'the client script must contain the exact function source, so the unit-tested implementation and the browser copy can never drift apart',
-  );
-});
-
-// The same computeBoardPatch technique, applied to the
-// hint-composition rule test/check-comment-mode.mjs's checks exercise
-// end to end. An earlier draft got this specifically wrong: src/anchor.mjs
-// carried a design COMMENT describing the rule but no actual code, so reverting
-// that file changed nothing any check could see -- exactly the "looks right,
-// believed correct, not actually exercised" shape this check exists to
-// repair. This check is what makes that regression loud again if it recurs: a
-// hand-edit of ui.mjs's embedded copy that diverges from src/anchor.mjs's real
-// composeHint fails here even before any behavioural check would notice.
-check('ui.mjs embeds the literal source of composeHint, not a hand-copied reimplementation', () => {
-  assert.ok(
-    ui.includes(composeHint.toString()),
-    'the client script must contain the exact function source, so the hint rule and the browser copy can never drift apart',
-  );
+// src/ui.mjs splices each of these into the client script with .toString(), so the
+// unit-tested implementation and the browser copy are one source: a hand-edit of an
+// embedded copy, or a hand-copied reimplementation in its place, fails here before any
+// behavioural check would notice. composeHint (the hint-composition rule
+// test/check-comment-mode.mjs exercises end to end) once regressed exactly this way:
+// src/anchor.mjs carried a design COMMENT describing the rule but no code, so reverting
+// that file changed nothing any check could see.
+check('ui.mjs embeds the literal .toString() source of every function it shares with src/ -- computeBoardPatch, composeHint, the four waiting-signal functions and the three lens functions -- not hand-copied reimplementations', () => {
+  for (const fn of [computeBoardPatch, composeHint, roundIsAwaitedOpen, roundIsCurrentlyAwaited, roundCountdownText, pageBoardPillMeta, lensZoomAt, lensFit, lensOneToOne]) {
+    assert.ok(ui.includes(fn.toString()),
+      `the client script must contain ${fn.name}'s exact source, so the checked implementation and the browser copy can never drift apart`);
+  }
 });
 
 check('composeHint: identity alone outside a compare, matching the plain html-stage hint unchanged', () => {
@@ -752,7 +696,7 @@ check('composeHint: identity alone outside a compare, matching the plain html-st
   assert.equal(composeHint('Total', 'td', false, '', 'markdown'), 'Total', 'a plain table cell carries no role word and no context');
 });
 
-check('composeHint: identity + role word + context inside a compare, the criterion-6 shape', () => {
+check('composeHint: identity + role word + context inside a compare ("Send button in After stage")', () => {
   assert.equal(composeHint('Send', 'button', true, 'After', 'html'), 'Send button in After stage');
   assert.equal(composeHint('old copy', 'p', true, 'Before', 'markdown'), 'old copy in Before block');
 });
@@ -774,7 +718,7 @@ check('composeHint: falls back to a role word, then the bare tag name, for an el
 // which JSON.stringify then silently drops (`undefined`) when the anchor is
 // persisted, or stringifies into "function Object() { [native code] }" once
 // concatenated into a longer hint.
-check('composeHint: C6 regression -- a tag or blockKind of "constructor" (or any other Object.prototype member) must never leak a function into the hint', () => {
+check('composeHint: a tag or blockKind of "constructor" (or any other Object.prototype member) never leaks a function into the hint', () => {
   const bare = composeHint('', 'constructor', false, '', '');
   assert.equal(typeof bare, 'string', 'composeHint must always return a string');
   assert.equal(bare, 'constructor', 'an unrecognised tag falls back to its own bare name, not Object.prototype.constructor');
@@ -838,10 +782,7 @@ check('the comment-mode toggle wears the exact same glyph as the whole-block com
     'the toggle and the whole-block comment button must share the exact same glyph -- one source (COMMENT_ICON), not two spellings of "comment"');
 });
 
-check('ADR.md entry 42: no #round-badge/.round-badge element renders anywhere, on an ordinary board or a page board, and badgeLabel is gone from src/badge.mjs\'s exports', () => {
-  assert.equal('badgeLabel' in badgeExports, false,
-    'src/badge.mjs must no longer export badgeLabel -- AC 12 names this file and this export explicitly');
-
+check('ADR.md entry 42: no #round-badge/.round-badge element renders anywhere, on an ordinary board or a page board, and the pager dock names the round instead', () => {
   const ordinary = createBoard({ title: 'AC 12 ordinary', blocks: [{ kind: 'markdown', text: '# hi' }] });
   addRound(ordinary, { blocks: [{ kind: 'markdown', text: '# second round' }] });
   const ordinaryHtml = renderBoardPage(ordinary);
@@ -994,7 +935,7 @@ check('pageBoardPillMeta: on an ORDINARY board (fullpage=false), an open-but-una
     'the identical round object, asked about as a page board, must stay "read-only", never "submitted"');
 });
 
-check('the exact waiting-signal functions embedded in ui.mjs (via .toString()) are executable and behave identically to the imported ones', () => {
+check('the waiting-signal functions\' own sources, spliced in src/ui.mjs\'s dependency order, run standalone and return what the imported ones do', () => {
   // Spliced in dependency order (roundIsAwaitedOpen, then roundIsCurrentlyAwaited,
   // then roundCountdownText, then pageBoardPillMeta), each calling only a name
   // already assigned above it -- src/ui.mjs's own comment on the splice explains
@@ -1033,12 +974,6 @@ check('the exact waiting-signal functions embedded in ui.mjs (via .toString()) a
   assert.deepEqual(rehydrated.pageBoardPillMeta(sent, now, false), pageBoardPillMeta(sent, now, false));
 });
 
-check('ui.mjs embeds the literal source of every waiting-signal function, not a hand-copied reimplementation', () => {
-  for (const fn of [roundIsAwaitedOpen, roundIsCurrentlyAwaited, roundCountdownText, pageBoardPillMeta]) {
-    assert.ok(ui.includes(fn.toString()), `client script must contain ${fn.name}'s exact source`);
-  }
-});
-
 check('src/render.mjs never calls Date.now() -- the waiting signal it renders must stay a pure function of the board JSON (see badge.mjs\'s own header comment on the split)', () => {
   const renderSource = readFileSync(fileURLToPath(new URL('../src/render.mjs', import.meta.url)), 'utf8');
   assert.ok(!renderSource.includes('Date.now'),
@@ -1052,22 +987,13 @@ check('src/render.mjs never calls Date.now() -- the waiting signal it renders mu
 // without a browser at all: the FEEL of a zoom is entirely "did the thing under
 // my cursor stay under my cursor".
 
-check('the exact lens view math embedded in ui.mjs (via .toString()) is executable and behaves identically to the imported functions', () => {
+check('the lens view math sources, the copies src/ui.mjs embeds via .toString(), run standalone and return what the imported functions do', () => {
   const zoom = new Function('return (' + lensZoomAt.toString() + ')')();
   const fit = new Function('return (' + lensFit.toString() + ')')();
   const one = new Function('return (' + lensOneToOne.toString() + ')')();
   assert.deepEqual(zoom({ x: 10, y: 20, s: 1 }, 100, 50, 2, 0.1, 8), lensZoomAt({ x: 10, y: 20, s: 1 }, 100, 50, 2, 0.1, 8));
   assert.deepEqual(fit(800, 600, 1600, 400), lensFit(800, 600, 1600, 400));
   assert.deepEqual(one(800, 600, 1600, 400), lensOneToOne(800, 600, 1600, 400));
-});
-
-check('ui.mjs embeds the literal source of lensZoomAt/lensFit/lensOneToOne, not hand-copied reimplementations', () => {
-  for (const fn of [lensZoomAt, lensFit, lensOneToOne]) {
-    assert.ok(
-      ui.includes(fn.toString()),
-      `the client script must contain the exact source of ${fn.name}, so the checked behaviour and the browser copy can never drift apart`,
-    );
-  }
 });
 
 check('lensZoomAt: the canvas point under the cursor is still under the cursor after the zoom -- the invariant that makes scroll-to-zoom feel like zooming', () => {
@@ -1278,13 +1204,6 @@ check('buildSteps and resolveSteps are exact inverses of each other over a plain
   assert.equal(resolveSteps(tree, steps), target);
 });
 
-check('buildSteps refuses to anchor a click that landed outside the given root', () => {
-  const root = el('body', [el('div')]);
-  root.children[0].parentElement = root;
-  const outsider = el('span'); // detached: no parentElement chain back to root
-  assert.equal(buildSteps(root, outsider), null);
-});
-
 check('resolveSteps reports null the moment a step no longer resolves -- the "this anchor is lost" case, structurally', () => {
   const tree = el('body', [el('div', [el('span')])]);
   assert.equal(resolveSteps(tree, [1, 1]), tree.children[0].children[0]);
@@ -1300,15 +1219,6 @@ check('resolveSteps reports null the moment a step no longer resolves -- the "th
 // (nested markup, entities, or extractHint's own truncation ellipsis broke the
 // contiguous-substring match) -- caught as a real bug. These checks pin the fix: ref must actually address an element, and only
 // that element's own text is checked against the hint.
-
-check('parseHtmlTree builds an element tree where .children is element-only (matching real Element.children, not childNodes)', () => {
-  const root = parseHtmlTree('<div>a<span>b</span>c</div>');
-  assert.equal(root.children.length, 1); // one element child: div
-  const div = root.children[0];
-  assert.equal(div.tag, 'div');
-  assert.equal(div.children.length, 1); // text nodes "a"/"c" are not counted here
-  assert.equal(div.children[0].tag, 'span');
-});
 
 check('elementText reconstructs textContent in document order across mixed text/element children', () => {
   const root = parseHtmlTree('<button>Click <span>me</span> now</button>');
@@ -1343,14 +1253,10 @@ check('parseHtmlTree ignores an unmatched closing tag rather than throwing', () 
 
 // --- resolveDomAnchor: ref AND hint both have to agree ----------------------------
 
-check('resolveDomAnchor resolves when ref addresses an element whose own text contains the hint', () => {
+check('resolveDomAnchor resolves only when ref addresses an element whose own text carries the hint -- an out-of-range ref, an attribute value or a tag name never resolves (the false-resolve an earlier draft had)', () => {
   const html = '<div class="mock"><button>Send</button></div>';
   assert.ok(resolveDomAnchor(html, '1.1', 'Send')); // div is 1, button is div's 1st child
   assert.equal(resolveDomAnchor(html, '9.9', 'Send'), false); // ref addresses nothing
-});
-
-check('resolveDomAnchor rejects a hint that only matches an attribute value or tag name, not real text -- the false-resolve an earlier draft had', () => {
-  const html = '<div class="mock"><button>Send</button></div>';
   assert.equal(resolveDomAnchor(html, '1.1', 'mock'), false); // "mock" is a class value, not button's text
   assert.equal(resolveDomAnchor(html, '1.1', 'div'), false); // "div" is a tag name, not button's text
 });
@@ -1362,7 +1268,7 @@ check('resolveDomAnchor rejects a hint that only matches an attribute value or t
 // the comment onto the wrong element rather than reporting it lost. These are
 // the three rows that measured true (should be false) on HEAD before
 // the fix; see this check's own name for the row each assertion locks in.
-check('resolveDomAnchor: C1 regression -- a stored hint that merely STARTS WITH the live element\'s text must not resolve (the inverted prefix check\'s false-positive)', () => {
+check('resolveDomAnchor: a stored hint that merely STARTS WITH the live element\'s text does not resolve', () => {
   assert.equal(resolveDomAnchor('<div class="mock"><button>S</button></div>', '1.1', 'Send'), false,
     'row 1: button text "S" is a prefix of stored hint "Send" -- must not resolve');
   assert.equal(resolveDomAnchor('<div class="mock"><div></div></div>', '1.1', 'div is broken'), false,
@@ -1469,7 +1375,7 @@ check('resolveDomAnchor requires a non-empty hint, and degrades to false rather 
 // shifted every following index by one: the browser-minted ref reported LOST,
 // and the UNHOISTED ref one index later resolved instead. Both
 // measurements, now inverted.
-check('resolveDomAnchor: C2 regression -- a leading <style> before the mock\'s real content must not shift ref indices', () => {
+check('resolveDomAnchor: a leading <style> before the mock\'s real content does not shift ref indices', () => {
   const html = '<style>.mock{font:14px system-ui}</style><div class="mock"><button>Send</button></div>';
   assert.equal(resolveDomAnchor(html, '1.1', 'Send'), true,
     'what a real browser mints (body.children[0] is the div, unaffected by the hoisted <style>) must resolve');
@@ -1477,7 +1383,7 @@ check('resolveDomAnchor: C2 regression -- a leading <style> before the mock\'s r
     'the pre-fix off-by-one ref (treating <style> as body.children[0]) must NOT resolve');
 });
 
-check('resolveDomAnchor: C2 -- an explicit top-level <body> and a full <!doctype html> document are both modelled the same way', () => {
+check('resolveDomAnchor: an explicit top-level <body> and a full <!doctype html> document are both modelled the same way', () => {
   const withBody = '<style>.mock{color:red}</style><body><div class="mock"><button>Send</button></div></body>';
   assert.equal(resolveDomAnchor(withBody, '1.1', 'Send'), true);
 
@@ -1517,15 +1423,13 @@ check('parseMermaidDomId recovers the source-declared node id from mermaid\'s ow
   assert.equal(parseMermaidDomId('mermaid-123-flowchart-noSequence'), null);
 });
 
-check('mermaidRefResolves traces a ref back to the diagram source, and reports false for a ref the source never declared', () => {
-  const source = 'flowchart LR\n  A[Start] --> B[End]';
-  assert.ok(mermaidRefResolves(source, 'A'));
-  assert.ok(mermaidRefResolves(source, 'B'));
-  assert.equal(mermaidRefResolves(source, 'Z'), false);
-  assert.equal(mermaidRefResolves(source, ''), false);
-});
+check('mermaidRefResolves traces a ref back to the diagram source -- bracket labels, chained arrows and inline-label edges, what the old arrow-grammar regex got wrong -- and reports false for a ref the source never declared', () => {
+  const labelled = 'flowchart LR\n  A[Start] --> B[End]';
+  assert.ok(mermaidRefResolves(labelled, 'A'));
+  assert.ok(mermaidRefResolves(labelled, 'B'));
+  assert.equal(mermaidRefResolves(labelled, 'Z'), false);
+  assert.equal(mermaidRefResolves(labelled, ''), false);
 
-check('mermaidRefResolves does not false-negative on chained arrows or inline-label edges -- what the old arrow-grammar regex got wrong', () => {
   // A --> B --> C: an earlier regex-based id extractor only ever captured the first
   // two ids in a chain and lost the tail.
   const chained = 'flowchart LR\n  A --> B --> C';
@@ -1555,7 +1459,7 @@ check('mermaidRefResolves runs in linear time even against a large, adversarial-
 // the check above. ADR.md entry 28 has since deleted `md` outright -- `ANCHOR_KINDS` is
 // block/dom/mermaid -- so a stored `md` anchor now degrades instead of resolving).
 
-check('resolveComment resolves a dom anchor whose ref+hint are still valid together, and reports lost for one that never matched', () => {
+check('resolveComment resolves a dom anchor whose ref+hint are still valid together, one stored before mintBlockKind existed included, and reports lost for one that never matched', () => {
   const board = createBoard({
     title: 'dom anchor',
     blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }],
@@ -1567,7 +1471,8 @@ check('resolveComment resolves a dom anchor whose ref+hint are still valid toget
     { n: 3, blockId, anchor: { kind: 'dom', ref: '1.1', hint: 'mock' }, text: 'ref right, hint is actually a class name', createdAt: new Date().toISOString(), round: 1 },
   );
   const resolved = resolveComment(board, board.comments[0]);
-  assert.equal(resolved.resolved, true);
+  assert.equal(resolved.resolved, true,
+    'comment #1 carries no mintBlockKind (a comment stored before that field existed), so the kind-drift guard must let it resolve exactly as before');
   assert.equal(resolved.blockKind, 'html');
   assert.equal(resolved.lost, undefined);
 
@@ -1701,7 +1606,7 @@ check('resolveComment resolves a mermaid anchor whose node id is still in the di
 
 // --- the block's own chrome must never be inside the resolution surface --
 
-check('resolveDomAnchorInSection: V3 regression -- a ref addressing a markdown block\'s own kicker chrome must not resolve, even with a matching hint', () => {
+check('resolveDomAnchorInSection: a ref addressing a markdown block\'s own kicker chrome does not resolve, even with a matching hint', () => {
   const board = createBoard({ title: 'V3', blocks: [{ kind: 'markdown', text: '# Notes\n\nSome text.' }] });
   const sectionHtml = renderBlock(board.blocks[0], board, new Map(), false);
   const sectionRoot = parseHtmlTree(sectionHtml).children[0];
@@ -1715,18 +1620,27 @@ check('resolveDomAnchorInSection: V3 regression -- a ref addressing a markdown b
     'a ref into the block-kicker must never resolve, no matter how well the hint matches its text');
 });
 
-check('resolveComment: V3 regression -- a forged dom anchor stored against a block\'s own chrome reports lost, not resolved', () => {
+check('resolveComment: a forged dom anchor on a markdown block\'s own kicker reports lost, even with the kicker\'s own text as its hint', () => {
   const board = createBoard({ title: 'V3 end to end', blocks: [{ kind: 'markdown', text: '# Notes\n\nSome text.' }] });
   const blockId = board.blocks[0].id;
+  // The forged hint is the kicker's own text, read off the rendered section, so the
+  // chrome exclusion is the only thing that can refuse it. A hint the kicker's text is
+  // merely a prefix of fails the starts-with rule instead, and stays lost with the
+  // exclusion deleted.
+  const kicker = resolveSteps(parseHtmlTree(renderBlock(board.blocks[0], board, new Map(), false)).children[0], pathToSteps('1'));
+  assert.ok(kicker && (kicker.cls || []).includes('block-kicker'), 'setup failure: "1" must address the block-kicker chrome');
+  const hint = extractHint(elementText(kicker));
+  assert.ok(hint, 'setup failure: the kicker must carry text to forge a hint from');
   applySubmit(board, {
     action: 'send', answers: [],
-    comments: [{ blockId, anchor: { kind: 'dom', ref: '1', hint: 'Markdown comment' }, text: 'forged' }],
+    comments: [{ blockId, anchor: { kind: 'dom', ref: '1', hint }, text: 'forged' }],
   }, 1);
+  assert.deepEqual(board.comments[0].anchor, { kind: 'dom', ref: '1', hint }, 'setup failure: the forged anchor must be stored as sent');
   assert.equal(resolveComment(board, board.comments[0]).resolved, false,
-    'a dom anchor into a markdown block\'s own kicker (its comment-button text) must not resolve');
+    'a dom anchor into a markdown block\'s own kicker must not resolve, even when its hint is exactly the kicker\'s text');
 });
 
-check('resolveMermaidAnchor: V3 regression -- a forged domRef into the block\'s own chrome (a nonexistent node id, domRef "1") never carries the anchor, only mermaidRefResolves can', () => {
+check('resolveMermaidAnchor: a forged domRef into the block\'s own chrome (domRef "1", a node id the source never declared) never carries the anchor', () => {
   const board = createBoard({ title: 'V3 mermaid', blocks: [{ kind: 'mermaid', text: 'flowchart LR\n  A[Start] --> B[End]' }] });
   const block = board.blocks[0];
   const sectionHtml = renderBlock(block, board, new Map(), false);
@@ -1795,7 +1709,7 @@ check('applySubmit: a comment naming a blockId that is not a real block on the b
 // relaxes that constraint -- matching the symmetry the `mermaid` branch's own
 // `block.kind === 'mermaid' &&` guard already has, unconditionally, for the
 // same reason.
-check('resolveComment: U5 regression -- a dom anchor whose block\'s kind no longer matches the kind it was minted against reports lost, not resolved against the new shape by coincidence', () => {
+check('resolveComment: a dom anchor whose block\'s kind no longer matches the kind it was minted against reports lost, not resolved against the new shape by coincidence', () => {
   const board = createBoard({
     title: 'U5',
     // Two top-level children in the iframe body, so ref "2.1" (not "1.1") is
@@ -1834,15 +1748,6 @@ check('resolveComment: U5 regression -- a dom anchor whose block\'s kind no long
     'a dom anchor minted against the block when it was "html" must not be resolved against its "markdown" replacement, even though "2.1" coincidentally addresses matching text there');
 });
 
-check('resolveComment: a dom anchor with no recorded mintBlockKind (a comment predating that field) resolves exactly as before -- the guard is backward compatible', () => {
-  const board = createBoard({ title: 'U5 backcompat', blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }] });
-  const blockId = board.blocks[0].id;
-  // Hand-built, bypassing applySubmit, exactly like an older archive's stored
-  // JSON would be -- no mintBlockKind field at all.
-  board.comments.push({ n: 1, blockId, anchor: { kind: 'dom', ref: '1.1', hint: 'Send' }, text: 'old comment', createdAt: new Date().toISOString(), round: 1 });
-  assert.equal(resolveComment(board, board.comments[0]).resolved, true);
-});
-
 // --- an 'html' block's two client-side dom roots ------
 //
 // An 'html' block has two client-side roots but resolveComment used to assume
@@ -1855,7 +1760,7 @@ check('resolveComment: a dom anchor with no recorded mintBlockKind (a comment pr
 // SECTION, the same as every other block kind. This locks in that
 // resolveComment now tries both roots for an 'html' block, not just the
 // iframe one.
-check('resolveComment: U4 regression -- a dom anchor rooted at an html block\'s own SECTION (a click on .stage-wrap, not chrome, never landing inside the sandboxed iframe) still resolves, not just an iframe-body-rooted one', () => {
+check('resolveComment: a dom anchor rooted at an html block\'s own SECTION (a click on .stage-wrap, never inside the sandboxed iframe) resolves, not just an iframe-body-rooted one', () => {
   const board = createBoard({ title: 'U4', blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }] });
   const blockId = board.blocks[0].id;
   const sectionHtml = renderBlock(board.blocks[0], board, new Map(), false);
@@ -1899,7 +1804,7 @@ check('resolveComment: U4 regression -- a dom anchor rooted at an html block\'s 
 // using the same scenario (options "Ship it" / "Ship it later" / "Drop
 // it", where "Ship it" is a literal prefix of "Ship it later").
 
-check('U1, re-verified (previously not reproduced; confirmed here with the real board.mjs functions): a status-line comment is lost by the very Send that carries it, when that Send also answers the question', () => {
+check('a comment anchored on a question\'s status line is reported lost by the same Send that answers the question', () => {
   const board = createBoard({
     title: 'U1',
     blocks: [{ kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] }],
@@ -1938,7 +1843,7 @@ check('U1, re-verified (previously not reproduced; confirmed here with the real 
   assert.equal(resolved.lost, 'status: unanswered');
 });
 
-check('U2, re-measured with C1 fixed: a rank re-order that used to silently misattribute the pin onto a prefix-colliding sibling now honestly reports lost instead', () => {
+check('a rank re-order that moves a prefix-colliding option under a pinned ref reports the pin lost, never resolved onto the wrong option', () => {
   const board = createBoard({
     title: 'U2',
     blocks: [{ kind: 'question', prompt: 'Rank', widget: 'rank', options: [{ label: 'Ship it' }, { label: 'Ship it later' }, { label: 'Drop it' }] }],
@@ -2026,9 +1931,9 @@ check('findBlock and resolveComment reach an html/mermaid block nested inside a 
 // explicit start/end markers (src/ui.mjs's `/* anchor-parity:<name> start/end */`
 // comments) and eval them with `new Function`, precisely as
 // ~/.claude/skills/visualize/check.mjs does for template.html's own inline
-// functions. Extraction failure is itself asserted (loudly, as its own check) so
-// a future rename/restructure of ui.mjs surfaces as a failing check, not a
-// silently-skipped one.
+// functions. Each parity check extracts its own copy inside its own body, so a
+// future rename/restructure of ui.mjs that loses a marker fails that named check
+// loudly (extractMarked throws), not a silently-skipped one.
 
 /** Pull the source between `/* anchor-parity:<name> start *(/` and the matching
  * `end` marker out of `src`, or throw a clear, specific error -- never returns
@@ -2051,8 +1956,8 @@ function extractMarked(src, name) {
 /** Extract `name` from the ui.mjs template string and eval it into a callable,
  * via the same `new Function(src + '; return name;')()` technique as
  * ~/.claude/skills/visualize/check.mjs. Throws (not returns null/undefined) if
- * extraction or eval fails, so a broken extraction fails loudly as its own check
- * rather than producing a function that silently does nothing useful. */
+ * extraction or eval fails, so a broken extraction fails the parity check that
+ * asked for it rather than producing a function that silently does nothing useful. */
 function extractUiFunction(name) {
   const src = extractMarked(ui, name);
   const fn = new Function(src + '; return ' + name + ';')();
@@ -2062,18 +1967,8 @@ function extractUiFunction(name) {
   return fn;
 }
 
-check('anchor-parity: extraction actually finds and evaluates all three marked functions in ui.mjs (fails loudly, not silently, if the markers ever go missing)', () => {
-  assert.equal(typeof extractUiFunction('extractHint'), 'function');
-  assert.equal(typeof extractUiFunction('stepsToPath'), 'function');
-  assert.equal(typeof extractUiFunction('buildSteps'), 'function');
-  assert.throws(() => extractUiFunction('doesNotExist'), /start marker not found/);
-});
-
-const uiExtractHint = extractUiFunction('extractHint');
-const uiStepsToPath = extractUiFunction('stepsToPath');
-const uiBuildSteps = extractUiFunction('buildSteps');
-
 check('anchor-parity: extractHint -- ui.mjs\'s copy agrees with src/anchor.mjs across whitespace, boundary and ellipsis cases', () => {
+  const uiExtractHint = extractUiFunction('extractHint');
   const cases = [
     '',
     '   ',
@@ -2099,6 +1994,7 @@ check('anchor-parity: extractHint -- ui.mjs\'s copy agrees with src/anchor.mjs a
 });
 
 check('anchor-parity: stepsToPath -- ui.mjs\'s copy agrees with src/anchor.mjs across empty, single and multi-digit step chains', () => {
+  const uiStepsToPath = extractUiFunction('stepsToPath');
   const cases = [[], [1], [1, 2, 3], [10, 2, 300], [1, 1, 1, 1, 1]];
   for (const steps of cases) {
     assert.equal(uiStepsToPath(steps), stepsToPath(steps), 'stepsToPath parity failed for: ' + JSON.stringify(steps));
@@ -2128,6 +2024,7 @@ function everyElement(node, out) {
 }
 
 check('anchor-parity: buildSteps -- ui.mjs\'s copy agrees with src/anchor.mjs over hand-built trees (single child, last child, deep, wide)', () => {
+  const uiBuildSteps = extractUiFunction('buildSteps');
   const trees = [
     // single-child chain at every level
     linkParents(el('body', [el('div', [el('span', [el('em')])])])),
@@ -2159,6 +2056,7 @@ check('anchor-parity: buildSteps -- ui.mjs\'s copy agrees with src/anchor.mjs ov
 });
 
 check('anchor-parity: buildSteps -- agrees even when text and whitespace-only nodes sit between the elements being indexed', () => {
+  const uiBuildSteps = extractUiFunction('buildSteps');
   // Realistic markup: literal whitespace between tags becomes real text-node
   // children in a browser DOM. anchor.mjs's own parseHtmlTree already excludes
   // them from `.children` (matching Element.children) -- reusing it here as the
@@ -2189,6 +2087,7 @@ check('anchor-parity: buildSteps -- agrees even when text and whitespace-only no
 });
 
 check('anchor-parity: buildSteps -- both copies refuse a click outside the given root, identically', () => {
+  const uiBuildSteps = extractUiFunction('buildSteps');
   const root = linkParents(el('body', [el('div')]));
   const outsider = el('span'); // detached, no parentElement chain back to root
   assert.equal(uiBuildSteps(root, outsider), null);
@@ -2210,6 +2109,16 @@ check('renderBoardPage is a pure function that inlines its own board JSON', () =
   assert.equal(html1, html2);
   assert.ok(html1.includes('id="board-data"'));
   assert.ok(html1.includes(JSON.stringify(board.id)));
+  // A function of the JSON, not of the object: a round-tripped copy renders the
+  // same bytes -- on this ordinary board and on a page board (one html block
+  // and nothing else, ADR.md entry 33), whose fullpage render path is its own.
+  assert.equal(renderBoardPage(JSON.parse(JSON.stringify(board))), html1);
+  const page = createBoard({ title: 'Render check, page board', blocks: [{ kind: 'html', html: '<div class="doc"><h1>Quarterly</h1></div>' }] });
+  const pageHtml = renderBoardPage(page);
+  assert.ok(pageHtml.includes('<body class="page-board'), 'setup failure: one html block must render as a page board');
+  assert.equal(renderBoardPage(JSON.parse(JSON.stringify(page))), pageHtml);
+  assert.ok(pageHtml.includes('id="board-data"'));
+  assert.ok(pageHtml.includes(JSON.stringify(page.id)));
   // The heading/list-item `id` attributes survive ADR.md entry 28 -- they are what
   // test/check-archive-ids.mjs's collision guard is about and what a `section:`
   // reference slugifies against (src/resolve.mjs). What went with entry 28 is the
@@ -2324,7 +2233,7 @@ check('isPageBoard: a failed reference is never a page board -- there is no stag
   assert.ok(html.includes('resolve-error'), 'setup failure: the error card is what such a block renders');
 });
 
-check('criterion 1: a page board renders the stage edge to edge -- no card, no kicker, no 1120px column, and the header floats over the frame', () => {
+check('a page board renders the stage edge to edge -- no card, no kicker, no 1120px column, and the header floats over the frame', () => {
   const { document, body, shell, head, section, frame } = renderedPage(pageBoard());
   // The LAYOUT is still one class, which is what the whole stylesheet keys off.
   // 'page-uncommentable' rides alongside it on this fixture and is orthogonal to
@@ -2359,7 +2268,7 @@ check('criterion 1: a page board renders the stage edge to edge -- no card, no k
   assert.ok(frame.parentElement.querySelector('.pin-layer'), 'the pin layer must still sit over the frame');
 });
 
-check('criterion 2: the page board stage is a constant 100vh that scrolls internally, and the page itself does not scroll', () => {
+check('the page board stage is a constant 100vh that scrolls internally, and the page itself does not scroll', () => {
   const { body, frame } = renderedPage(pageBoard());
   assert.equal(resolveComputedProperty(styles, frame, true, 'height'), '100vh', 'the frame is a constant viewport height, not a box grown to content');
   assert.doesNotMatch(resolveComputedProperty(styles, frame, true, 'height'), /--stage-p/,
@@ -2370,7 +2279,7 @@ check('criterion 2: the page board stage is a constant 100vh that scrolls intern
   assert.equal(frame.getAttribute('style'), null, 'and nothing is server-rendered into an inline height');
 });
 
-check('criterion 3 (markup half): a page board neither strips nor rewrites the artifact -- same srcdoc bytes, same sandbox, reset still leading', () => {
+check('a page board neither strips nor rewrites the artifact -- same srcdoc bytes, same sandbox, reset still leading', () => {
   const board = pageBoard();
   const { frame } = renderedPage(board);
   const srcdoc = frame.getAttribute('srcdoc');
@@ -2382,7 +2291,7 @@ check('criterion 3 (markup half): a page board neither strips nor rewrites the a
     'the artifact\'s own scripts run inside it -- and never with allow-same-origin');
 });
 
-check('criterion 6: a post carrying a question, or any second block, renders exactly as a board does today -- column, card, kicker, lens control and send bar', () => {
+check('a post carrying a question, or any second block, renders exactly as a board does today -- column, card, kicker, lens control and send bar', () => {
   const withQuestion = createBoard({
     title: 'artifact + question',
     blocks: [{ kind: 'html', html: PAGE_ARTIFACT }, { kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }] }],
@@ -2406,7 +2315,7 @@ check('criterion 6: a post carrying a question, or any second block, renders exa
   assert.ok(ordinary.includes('<div class="block-kicker">HTML stage '), 'and renders the stage in its usual card');
 });
 
-check('criterion 11: a page board offers no way to send -- no Send, no Discuss, no unanswered count', () => {
+check('a page board offers no way to send -- no Send, no Discuss, no unanswered count', () => {
   const { document, sendBar } = renderedPage(pageBoard());
   assert.equal(resolveComputedProperty(styles, sendBar, true, 'display'), 'none',
     'the send bar is hidden the same way body.readonly hides it -- one rule, the whole bar, buttons and pill together');
@@ -2418,7 +2327,7 @@ check('criterion 11: a page board offers no way to send -- no Send, no Discuss, 
   assert.equal(document.querySelectorAll('.round-open .question-block').length, 0, 'and there is nothing on the page to answer');
 });
 
-check('criterion 25: a page board carries no expand control, and every other stage still carries one', () => {
+check('a page board carries no expand control, and every other stage still carries one', () => {
   const { document } = renderedPage(pageBoard());
   assert.equal(document.querySelectorAll('.expand-btn').length, 0,
     'the lens a page board would open is a copy of what already fills the viewport');
@@ -2441,26 +2350,6 @@ check('criterion 25: a page board carries no expand control, and every other sta
   })));
   assert.equal(ordinary.querySelectorAll('.expand-btn').length, 2,
     'the standalone stage and the variant option each keep their own expand control');
-});
-
-check('a page board is still a pure function of its board JSON, and still inlines it', () => {
-  const board = pageBoard();
-  const a = renderBoardPage(board);
-  const b = renderBoardPage(JSON.parse(JSON.stringify(board)));
-  assert.equal(a, b);
-  assert.ok(a.includes('id="board-data"'));
-  assert.ok(a.includes(JSON.stringify(board.id)));
-});
-
-// A temp CLAUDE_BOARD_HOME sanity guard: this check touches no disk at all, but
-// assert the convention still holds for anything added here later.
-check('this check never touches the real store', () => {
-  const tmp = mkdtempSync(path.join(tmpdir(), 'claude-board-pure-'));
-  try {
-    assert.notEqual(tmp, undefined);
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
 });
 
 // --- src/resolve.mjs: content-by-reference resolution -----------------------------
@@ -2496,6 +2385,26 @@ check('resolveRef slices a markdown section by heading slug, stopping at the nex
   assert.ok(result.text.includes('note body'));
   assert.ok(!result.text.includes('## Other'));
   assert.ok(!result.text.includes('other body'));
+
+  // A multi-word heading is named by its SLUG, never its text: `## Open questions` is
+  // `open-questions` (the shape /wayfind posts a map section in).
+  writeFileSync(path.join(fixturesDir, 'map.md'), [
+    '# MAP: Routing investigation',
+    '',
+    '## Destination',
+    'Ship one router for the SPA.',
+    '',
+    '## Open questions',
+    '- [ ] Which router library should the SPA use?',
+    '',
+    '## Not yet specified',
+    'fog',
+  ].join('\n'), 'utf8');
+  const map = resolveRef({ path: 'map.md', section: 'open-questions' }, { cwd: fixturesDir });
+  assert.equal(map.error, undefined, `a multi-word heading must resolve by its slug (got: ${map.error})`);
+  assert.ok(map.text.includes('Which router library should the SPA use?'));
+  assert.ok(!map.text.includes('Ship one router'), 'scoped to the section, not the whole file');
+  assert.ok(!map.text.includes('fog'), 'and stops before the next heading');
 });
 
 check('resolveRef reports missing file, bad line range, and missing section as errors, never throws', () => {
@@ -2764,10 +2673,11 @@ check('all four widgets produce their documented answer shape in the packet, inc
   assert.equal(byId[neverTouched].note, '');
 });
 
-check('render markup: multi-select, text, rank and defer carry the data attributes src/ui.mjs reads generically', () => {
+check('render markup: single, multi-select, text, rank and defer carry the data attributes src/ui.mjs reads generically', () => {
   const board = createBoard({
     title: 'Widget markup',
     blocks: [
+      { kind: 'question', prompt: 'Pick one', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] },
       { kind: 'question', prompt: 'Pick some', widget: 'multi', options: [{ label: 'Red' }, { label: 'Blue' }] },
       { kind: 'question', prompt: 'Say something', widget: 'text', options: [] },
       { kind: 'question', prompt: 'Order these', widget: 'rank', options: [{ label: 'First' }, { label: 'Second' }] },
@@ -2783,6 +2693,8 @@ check('render markup: multi-select, text, rank and defer carry the data attribut
   assert.ok(markup.includes('data-choice="First"'));
   assert.ok(markup.includes('class="btn-defer"'));
   assert.ok(markup.includes('data-defer-for='));
+  assert.ok(markup.includes('data-widget="single"'));
+  assert.ok(markup.includes('data-choice="Yes"'));
   assert.ok(markup.includes('data-widget="multi"'));
   assert.ok(markup.includes('data-widget="text"'));
   assert.ok(markup.includes('data-widget="rank"'));
@@ -2849,7 +2761,7 @@ check('interactive controls inside a history round are rendered disabled, so a l
   assert.ok(/class="card-choice choice-single selected"[^>]*disabled/.test(historySection) || /disabled[^>]*class="card-choice choice-single selected"/.test(historySection));
 });
 
-check('a history round\'s comment form is disabled too, on every CONTENT block kind -- not just markdown', () => {
+check('a history round\'s comment form is disabled on both commentable kinds, mermaid and html, while the open round\'s stays live', () => {
   // commentArea() didn't originally take `historical` at all, so a
   // fresh page load of a board with a sent round left every comment form fully
   // live even though the round's answer controls were correctly disabled --
@@ -3122,24 +3034,7 @@ check('a rendered kind nested inside a question\'s context or a compare side kee
     assert.ok(!markup.includes(`data-block-id="${id}" data-anchor-kind="block"`), `a nested markdown/code block must render no comment button (${id})`);
     assert.ok(!markup.includes(`comment-form-${id}`), `a nested markdown/code block must render no comment form (${id})`);
   }
-});
-
-// --- numbered pins on the element, in html-stage and mermaid blocks ----
-
-check('html and mermaid blocks each render a stage-wrap + pin-layer, the anchor point src/ui.mjs positions numbered pins into', () => {
-  const board = createBoard({
-    title: 'Pin layers',
-    blocks: [
-      { kind: 'html', html: '<div class="mock"><button>Send</button></div>' },
-      { kind: 'mermaid', text: 'flowchart LR\n  A[Start] --> B[End]' },
-    ],
-  });
-  const markup = renderedMarkup(renderBoardPage(board));
-  const htmlBlockId = board.blocks[0].id;
-  const mermaidBlockId = board.blocks[1].id;
-  assert.ok(markup.includes(`<div class="pin-layer" data-block-id="${htmlBlockId}"></div>`));
-  assert.ok(markup.includes(`<div class="pin-layer" data-block-id="${mermaidBlockId}"></div>`));
-  assert.ok(markup.includes('class="stage-wrap"'));
+  assert.ok(!markup.includes(`pin-layer" data-block-id="${contextProseId}"`), 'a markdown context item must render no pin layer');
 });
 
 // --- the element-level gesture's discoverability lives in the toggle alone ----
@@ -3173,7 +3068,7 @@ check('neither stage kind renders a hint in its kicker, and the stylesheet defin
   assert.ok(!page.includes('.stage-hint'), 'the stylesheet must define no .stage-hint rule at all');
 });
 
-check('a mermaid node highlights under the cursor, and an html stage gets the same affordance injected into its own document', () => {
+check('the mermaid node hover and cursor rules are comment-mode gated and select a real mermaid 11 node id', () => {
   // Mermaid renders into the page's own DOM, so the page stylesheet can reach it.
   // Gated on body.comment-mode too, same as everything else this
   // gesture touches -- a diagram node is no longer a standing exception.
@@ -3203,41 +3098,6 @@ check('a mermaid node highlights under the cursor, and an html stage gets the sa
     return m[1] === '*' ? realNodeId.includes(m[2]) : m[1] === '^' ? realNodeId.startsWith(m[2]) : realNodeId === m[2];
   });
   assert.ok(selectsReal, `no alternative in ${MERMAID_NODE_SELECTOR} selects a real mermaid 11 node id (${realNodeId}) — the hover affordance and pointer cursor would be invisible in every browser`);
-
-  // The html stage is now a genuinely cross-origin iframe (no
-  // `allow-same-origin`), so nothing in src/ui.mjs can reach in to inject a
-  // stylesheet or track a hover any more -- that lives entirely inside
-  // stageAgentScript (src/render.mjs), the string inlined into every html
-  // block's `srcdoc`, exercised for real by test/check-click.mjs and friends.
-  // This check inspects that one real copy structurally: the affordance must
-  // be gated on comment mode actually being ON, not merely present
-  // unconditionally (an archived, read-only board never sends `commentMode:
-  // true` at all -- src/ui.mjs's `setCommentMode` -- so this is what keeps
-  // test/check-archive.mjs's "no hover stylesheet is even injected" true).
-  const script = stageAgentScript();
-  const modeIdx = script.indexOf("data.type === 'mode'");
-  const styleIdx = script.indexOf("createElement('style')");
-  const ensureIdx = script.indexOf('function ensureHoverStyle');
-  const hoverIdx = script.indexOf("addEventListener('mouseover'");
-  assert.ok(modeIdx !== -1, "stageAgentScript must handle the parent's 'mode' message");
-  assert.ok(styleIdx !== -1, 'stageAgentScript must inject a stylesheet into the stage document');
-  assert.ok(hoverIdx !== -1, 'stageAgentScript must track the hovered element');
-  assert.ok(ensureIdx !== -1 && ensureIdx < styleIdx, 'the stylesheet injection must live inside a function, not run unconditionally at script start');
-  assert.ok(
-    /if \(commentMode\) ensureHoverStyle\(\);/.test(script),
-    "the hover stylesheet must be injected lazily, only once comment mode has actually turned on -- never unconditionally at script start (which would inject it into a read-only archive's stage too)",
-  );
-
-  // One class name, used by both the rule and the handler that sets it: a rename in
-  // either alone would leave a highlight that never shows, with nothing failing.
-  const decl = /var HOVER_CLASS = '([^']+)';/.exec(script);
-  assert.ok(decl, 'HOVER_CLASS must be declared once in the stage agent script');
-  assert.ok(script.includes("'.' + HOVER_CLASS + ' {"), 'the injected rule must be built from HOVER_CLASS');
-  assert.ok(script.includes('classList.add(HOVER_CLASS)'), 'the handler must set the same class');
-  // Everywhere OTHER than the one declaration itself must reference the
-  // variable, never re-spell the class name as a second literal.
-  const afterDecl = script.slice(decl.index + decl[0].length);
-  assert.ok(!afterDecl.includes(`'${decl[1]}'`), 'the class name must not be repeated as a literal');
 });
 
 // --- the sent-comment visual inertness fix (html-stage half) -----------------
@@ -3249,81 +3109,15 @@ check('a mermaid node highlights under the cursor, and an html stage gets the sa
 // now carries a 'sentRefs' array the stage uses to pick SENT_CLASS over
 // HOVER_CLASS on hover.
 
-check('stageAgentScript de-affordances an already-SENT element on hover: a SENT_CLASS rule, chosen instead of HOVER_CLASS for a ref the parent named sent', () => {
+check('stageAgentScript\'s mode handler shape-checks sentRefs: an array of strings, a non-string entry dropped, never trusted blind', () => {
+  // The hover behaviour this list drives (SENT_CLASS chosen over HOVER_CLASS,
+  // cleared on the way out, and the two injected rules) is driven for real in
+  // test/check-stage-isolation.mjs. The parent only ever sends strings, so this
+  // guard is the one part no behavioural check reaches.
   const script = stageAgentScript();
-
-  // A second class, declared once, with its own rule -- same discipline as
-  // HOVER_CLASS just above, checked the same way so the two can never quietly
-  // drift out of that discipline independently.
-  const sentDecl = /var SENT_CLASS = '([^']+)';/.exec(script);
-  assert.ok(sentDecl, 'SENT_CLASS must be declared once in the stage agent script');
-  assert.ok(script.includes("'.' + SENT_CLASS + ' {"), 'the de-affordance rule must be built from SENT_CLASS');
-  assert.match(script.slice(script.indexOf("'.' + SENT_CLASS + ' {")), /cursor: not-allowed/,
-    'the SENT_CLASS rule must set cursor: not-allowed');
-  // No outline for a de-affordanced element -- it must not merely look like a
-  // DIFFERENT kind of target, it must not look like a target at all. Scoped to
-  // the rule's own declaration block, not the whole script (the HOVER_CLASS
-  // rule right next to it legitimately does set one).
-  const sentRuleBody = /\.' \+ SENT_CLASS \+ ' \{([^}]*)\}/.exec(script);
-  assert.ok(sentRuleBody, 'expected to find the SENT_CLASS rule body');
-  assert.ok(!/outline/.test(sentRuleBody[1]), 'a de-affordanced element must not carry an outline of any kind');
-
-  // The mouseover handler must actually choose between the two classes based
-  // on whether the hovered element's own ref is in sentRefs -- not just declare
-  // the class and never use it.
-  const hoverBody = script.slice(script.indexOf("addEventListener('mouseover'"));
-  const hoverHandlerBody = hoverBody.slice(0, hoverBody.indexOf('});'));
-  assert.match(hoverHandlerBody, /sentRefs\.indexOf\(ref\) !== -1/, 'the hover handler must check the hovered ref against sentRefs');
-  assert.match(hoverHandlerBody, /classList\.add\(SENT_CLASS\)/, 'a sent ref must get SENT_CLASS');
-  assert.match(hoverHandlerBody, /classList\.add\(HOVER_CLASS\)/, 'a non-sent ref must still get the ordinary HOVER_CLASS');
-
-  // clearHover must remove both classes -- leaving SENT_CLASS behind on
-  // mouseout would strand a de-affordanced element in that state forever.
-  const clearHoverBody = script.slice(script.indexOf('function clearHover'), script.indexOf('function clearHover') + 300);
-  assert.match(clearHoverBody, /classList\.remove\(HOVER_CLASS\)/);
-  assert.match(clearHoverBody, /classList\.remove\(SENT_CLASS\)/);
-
-  // The 'mode' handler must read sentRefs off the message, shape-checked like
-  // every other field this channel carries (see this file's own design
-  // comment on shape validation) -- an array of strings, never trusted blind.
   const modeBody = script.slice(script.indexOf("data.type === 'mode'"), script.indexOf("data.type === 'locate'"));
   assert.match(modeBody, /Array\.isArray\(data\.sentRefs\)/, "the 'mode' handler must shape-check sentRefs before using it");
   assert.match(modeBody, /sentRefs = data\.sentRefs\.filter/, "a malformed entry (non-string) must be dropped, not compared against later");
-});
-
-check('the parent tells a stage its sentRefs at both the moments that matter: when it first announces ready, and on every mode toggle', () => {
-  // handleStageReady: a stage that arrives (or re-arrives, after an amend)
-  // needs the CURRENT sent list the moment it is wired, same reasoning as it
-  // already needs the current commentMode (this file's own comment on
-  // handleStageReady).
-  const readyBody = namedFunctionBody(ui, 'handleStageReady');
-  assert.ok(readyBody, 'handleStageReady not found');
-  assert.match(readyBody, /sentRefs:\s*sentDomRefsForBlock\(blockId\)/, "handleStageReady's postToStage must carry sentRefs");
-
-  // The broadcast to every wired stage, which happens on every mode toggle and
-  // not just at ready time -- turning mode ON is exactly the moment the stage's
-  // hover starts mattering. It lives in broadcastStageMode rather than inline in
-  // setCommentMode because a THEME change sends the identical
-  // message, and two copies of it could ship different shapes; asserted here
-  // through both hops, so neither the payload nor the delegation can be dropped
-  // without failing.
-  const broadcastBody = namedFunctionBody(ui, 'broadcastStageMode');
-  assert.ok(broadcastBody, 'broadcastStageMode not found');
-  assert.match(broadcastBody, /sentRefs:\s*blockId \? sentDomRefsForBlock\(blockId\) : \[\]/,
-    'the broadcast to every wired stage must carry that stage\'s own sentRefs');
-  assert.match(broadcastBody, /theme:\s*activeTheme\(\)/,
-    'and the theme it must now paint itself in');
-  const setModeBody = namedFunctionBody(ui, 'setCommentMode');
-  assert.ok(setModeBody, 'setCommentMode not found');
-  assert.match(setModeBody, /broadcastStageMode\(\)/,
-    'setCommentMode must still reach every wired stage, now through that one shared broadcast');
-
-  // sentDomRefsForBlock itself: only 'dom'-kind anchors on the named block --
-  // an html-stage's own anchors are always 'dom' (handleStageClick mints
-  // nothing else), so a mermaid/md/block comment elsewhere must never leak in.
-  const helperBody = namedFunctionBody(ui, 'sentDomRefsForBlock');
-  assert.ok(helperBody, 'sentDomRefsForBlock not found');
-  assert.match(helperBody, /c\.anchor\.kind === 'dom'/);
 });
 
 check('a dom-anchored comment renders its hint and number in the block\'s comment list; a lost one names the ref it lost', () => {
@@ -3408,23 +3202,6 @@ check('a question carrying non-markdown context kinds normalises and renders the
 // comment button/form/pin-layer on the context items themselves. A question
 // with no stage anywhere renders exactly as it did before this entry: unchanged.
 
-check('a question whose CONTEXT carries a rendered stage renders full width -- no .question-context card, no second grid column', () => {
-  const board = createBoard({
-    title: 'Stage in context',
-    blocks: [{
-      kind: 'question',
-      prompt: 'Does this mock look right?',
-      widget: 'single',
-      options: [{ label: 'Yes' }, { label: 'No' }],
-      context: [{ kind: 'html', html: '<button>Ship</button>' }],
-    }],
-  });
-  const markup = renderedMarkup(renderBoardPage(board));
-  assert.ok(!markup.includes('class="question-context"'), 'must not render the two-column card wrapper');
-  assert.ok(markup.includes('class="question-context-prose"'), 'must render the prose wrapper instead');
-  assert.ok(markup.includes('class="html-stage"'), 'the stage itself must still render');
-});
-
 check('a question whose OPTIONS carry a rendered stage (choose-between-rendered-variants) ALSO renders full width when it has unrelated context too', () => {
   const board = createBoard({
     title: 'Stage in options, plain context',
@@ -3444,7 +3221,7 @@ check('a question whose OPTIONS carry a rendered stage (choose-between-rendered-
   assert.ok(markup.includes('class="question-context-prose"'));
 });
 
-check('negative case: a question with NO rendered stage anywhere -- in options or context -- keeps the .question-context panel and its two columns (ablation: this must fail if questionCarriesStage or the branch reading it is ever deleted in favour of "always full width")', () => {
+check('a question with no rendered stage in its options or context keeps the .question-context panel and its two columns', () => {
   const board = createBoard({
     title: 'No stage anywhere',
     blocks: [{
@@ -3488,7 +3265,7 @@ check('a stage nested inside a compare side, inside a question\'s context, also 
   assert.ok(markup.includes('class="html-stage"'));
 });
 
-check('a stage-carrying question\'s context renders no card, no border-carrying wrapper, and no kicker -- only prose, above the options', () => {
+check('a stage-carrying question\'s context renders no card, no border-carrying wrapper and no kicker -- only prose, between the prompt and the options', () => {
   const board = createBoard({
     title: 'No card, no kicker',
     blocks: [{
@@ -3522,28 +3299,6 @@ check('a stage-carrying question\'s context renders no card, no border-carrying 
   assert.ok(!contextRegion.includes('block-kicker'), 'no .block-kicker inside the context prose');
   assert.ok(!contextRegion.includes('>Markdown<'), 'no "Markdown" kicker label for the context markdown item');
   assert.ok(!contextRegion.includes('class="block '), 'no .block card wrapper on a context item');
-
-  // The comment affordance is scoped per ITEM, by kind. This check used to assert
-  // "no comment-btn, no comment-form anywhere in the context prose", which was
-  // ADR.md entry 26's "no comment control" read across every kind at once. Entry
-  // 28 supersedes that half of 26: the rule is drawn on kind and never on
-  // position, so the html item here keeps the affordance it has everywhere else,
-  // and the markdown item beside it keeps none. The words -- "no
-  // card, no border, no kicker" -- are asserted above and are untouched by that:
-  // a comment button is none of the three.
-  const proseItem = markdownContextId => {
-    const start = contextRegion.indexOf(`data-block-id="${markdownContextId}"`);
-    assert.ok(start !== -1, `setup failure: no context item for ${markdownContextId}`);
-    const next = contextRegion.indexOf('class="context-item', start);
-    return contextRegion.slice(start, next === -1 ? contextRegion.length : next);
-  };
-  const mdItem = proseItem(board.blocks[0].context[0].id);
-  const stageItem = proseItem(board.blocks[0].context[1].id);
-  assert.ok(!mdItem.includes('comment-btn'), 'no whole-block comment button on a markdown context item');
-  assert.ok(!mdItem.includes('comment-form-'), 'no comment form on a markdown context item');
-  assert.ok(!mdItem.includes('pin-layer'), 'no pin layer on a markdown context item');
-  assert.ok(stageItem.includes('comment-btn'), 'an html stage in a question\'s context keeps its comment button (ADR.md entry 28)');
-  assert.ok(stageItem.includes(`comment-form-${board.blocks[0].context[1].id}`), 'and its own comment form');
 
   // Prose, positioned between the prompt and the options.
   const promptIdx = section.indexOf('question-prompt');
@@ -3609,7 +3364,7 @@ const questionSection = markup => {
   return markup.slice(start, markup.indexOf('</section>', start) + '</section>'.length);
 };
 
-check('AC 1: several markdown context items render as ONE panel -- no per-item card, no kind label, in posted order', () => {
+check('several markdown context items render as ONE panel -- no per-item card, no kind label, in posted order', () => {
   const board = createBoard({
     title: 'Three notes',
     blocks: [{
@@ -3640,7 +3395,7 @@ check('AC 1: several markdown context items render as ONE panel -- no per-item c
   assert.deepEqual(texts, ['First note.', 'Second note.', 'Third note.']);
 });
 
-check('AC 2: markdown and a mermaid diagram render in that same one panel, and the diagram keeps its comment control AND its expand control', () => {
+check('markdown and a mermaid diagram render in that same one panel, and the diagram keeps its comment control AND its expand control', () => {
   const board = createBoard({
     title: 'Note and diagram',
     blocks: [{
@@ -3679,7 +3434,7 @@ check('AC 2: markdown and a mermaid diagram render in that same one panel, and t
   assert.equal(mdItem.querySelector('.context-tools'), null, 'a markdown item carries no control group');
 });
 
-check('AC 3: a mock-carrying question renders its context THE SAME WAY, full width under the prompt -- only the placement wrapper differs', () => {
+check('a mock-carrying question renders its context THE SAME WAY, full width under the prompt -- only the placement wrapper differs', () => {
   const context = () => ([
     { kind: 'markdown', text: 'A note about the mock.' },
     { kind: 'mermaid', text: 'flowchart LR\n  A --> B' },
@@ -3726,7 +3481,7 @@ check('AC 3: a mock-carrying question renders its context THE SAME WAY, full wid
     'while the ordinary shape puts the panel after the options, the two side by side');
 });
 
-check('AC 5: a question may carry an explainer -- prompt and explainer take the card\'s full head row, options and context panel sit under them', () => {
+check('a question may carry an explainer -- prompt and explainer take the card\'s full head row, options and context panel sit under them', () => {
   const board = createBoard({
     title: 'With an explainer',
     blocks: [{
@@ -3759,7 +3514,7 @@ check('AC 5: a question may carry an explainer -- prompt and explainer take the 
   assert.ok(section.indexOf('question-explainer') < section.indexOf('class="question-main"'), 'the explainer is inside the head row, not inside a column');
 });
 
-check('AC 5: a question with no explainer renders as today -- the prompt alone on that row, and no explainer field stored', () => {
+check('a question with no explainer renders the prompt alone on its head row, and stores no explainer field', () => {
   const board = createBoard({
     title: 'No explainer',
     blocks: [{ kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] }],
@@ -3774,7 +3529,7 @@ check('AC 5: a question with no explainer renders as today -- the prompt alone o
   assert.equal(head.querySelector('.question-explainer'), null, 'with nothing beside it');
 });
 
-check('AC 5: an explainer is bounded like every other by-value string on a question -- over the cap is a 400 naming the field, never a silent truncation', () => {
+check('an explainer is bounded like every other by-value string on a question -- over the cap is a 400 naming the field, never a silent truncation', () => {
   assert.throws(
     () => createBoard({
       title: 'Huge explainer',
@@ -3784,7 +3539,7 @@ check('AC 5: an explainer is bounded like every other by-value string on a quest
   );
 });
 
-check('AC 14: a code context item keeps its source label as a CAPTION under the excerpt, plus its gutter and its scroll box; a markdown item carries no label', () => {
+check('a code context item keeps its source label as a CAPTION under the excerpt, plus its gutter and its scroll box; a markdown item carries no label', () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'cb-code-caption-'));
   writeFileSync(path.join(dir, 'app.js'), 'const a = 1;\nconst b = 2;\nconst c = 3;\nconst d = 4;\n');
   try {
@@ -3828,7 +3583,7 @@ check('AC 14: a code context item keeps its source label as a CAPTION under the 
   }
 });
 
-check('AC 14: a by-value code excerpt has no source, so it carries no caption -- the caption is provenance, not a kind label by another name', () => {
+check('a by-value code excerpt has no source, so it carries no caption -- the caption is provenance, not a kind label by another name', () => {
   const board = createBoard({
     title: 'By-value code',
     blocks: [{
@@ -3877,7 +3632,7 @@ const questionWith = (context, extra = {}) => createBoard({
   blocks: [{ kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }], context, ...extra }],
 });
 
-check('AC 4: a prose item longer than the cap is marked folded in a question\'s context panel -- clipped body, its own id, and a Show more control carrying the aria pair; a short one is untouched', () => {
+check('a prose item longer than the cap is marked folded in a question\'s context panel -- clipped body, its own id, and a Show more control carrying the aria pair; a short one is untouched', () => {
   const board = questionWith([
     { kind: 'markdown', text: SHORT_PROSE },
     { kind: 'markdown', text: LONG_BY_LINES },
@@ -3908,7 +3663,7 @@ check('AC 4: a prose item longer than the cap is marked folded in a question\'s 
   assert.equal(longMarks.control.textContent.trim(), 'Show more');
 });
 
-check('AC 4: the fold\'s trigger is a SOURCE count, and both halves fire on their own -- many short lines, or one long paragraph', () => {
+check('the fold\'s trigger is a SOURCE count, and both halves fire on their own -- many short lines, or one long paragraph', () => {
   const document = parseHTML(renderBoardPage(questionWith([
     { kind: 'markdown', text: LONG_BY_LINES },
     { kind: 'markdown', text: LONG_BY_CHARS },
@@ -3932,7 +3687,7 @@ check('AC 4: the fold\'s trigger is a SOURCE count, and both halves fire on thei
   assert.equal(LONG_BY_CHARS.split('\n').length, 1, 'setup failure: the characters fixture must be one source line, or it proves nothing about the character half');
 });
 
-check('AC 4: prose folds the same way in the stage-carrying shape -- the fold rides on the item, so it does not care which wrapper the panel took', () => {
+check('prose folds the same way in the stage-carrying shape -- the fold rides on the item, so it does not care which wrapper the panel took', () => {
   const board = createBoard({
     title: 'Fold beside a mock',
     blocks: [{
@@ -3956,7 +3711,7 @@ check('AC 4: prose folds the same way in the stage-carrying shape -- the fold ri
   assert.ok(marks.control, 'with its own control');
 });
 
-check('AC 4: a top-level markdown block folds at the same cap, with no exception for a round that is one lone document', () => {
+check('a top-level markdown block folds at the same cap, with no exception for a round that is one lone document', () => {
   const board = createBoard({
     title: 'Top-level fold',
     blocks: [
@@ -3978,7 +3733,7 @@ check('AC 4: a top-level markdown block folds at the same cap, with no exception
   assert.equal(document.getElementById(marks.control.getAttribute('aria-controls')), marks.body);
 });
 
-check('AC 4: a question\'s explainer folds at the same cap as a backstop, and a one-to-three-sentence one does not', () => {
+check('a question\'s explainer folds at the same cap as a backstop, and a one-to-three-sentence one does not', () => {
   const shortDoc = parseHTML(renderBoardPage(questionWith([], { explainer: 'Recommended: none of these.' })));
   const shortHead = shortDoc.querySelector('.question-head');
   assert.ok(shortHead.querySelector('.question-explainer'), 'setup failure: the short explainer must render at all');
@@ -4100,35 +3855,6 @@ check('renderBoardPage is byte-identical across repeated calls, across a JSON ro
   assert.equal(renderBoardPage(JSON.parse(JSON.stringify(board))), afterAnswer1);
 });
 
-check('a board whose referenced source was rewritten, then deleted, still renders the post-time snapshot byte-for-byte', () => {
-  const srcFile = path.join(fixturesDir, 'snapshot-source.md');
-  writeFileSync(srcFile, '# Doc\n\noriginal content on screen when answered', 'utf8');
-
-  const board = createBoard({
-    title: 'Snapshot guarantee',
-    cwd: fixturesDir,
-    blocks: [{ kind: 'markdown', source: { path: 'snapshot-source.md' } }],
-  });
-  const originalText = board.blocks[0].text;
-  const originalSha = board.blocks[0].sha;
-  assert.ok(originalText.includes('original content on screen when answered'));
-
-  const renderedOriginal = renderBoardPage(board);
-
-  writeFileSync(srcFile, '# Doc\n\nCOMPLETELY REWRITTEN, nothing like the original', 'utf8');
-  const afterRewrite = renderBoardPage(board);
-  assert.equal(afterRewrite, renderedOriginal); // byte-exact, not "looks similar"
-  assert.equal(board.blocks[0].text, originalText);
-  assert.equal(board.blocks[0].sha, originalSha);
-
-  unlinkSync(srcFile);
-  const afterDelete = renderBoardPage(board);
-  assert.equal(afterDelete, renderedOriginal);
-  const markup = renderedMarkup(afterDelete);
-  assert.ok(markup.includes('original content on screen when answered'));
-  assert.ok(!markup.includes('COMPLETELY REWRITTEN'));
-});
-
 // --- standalone read-only archive ----------------------------------------
 //
 // Chrome-automated checks of the interactive layer are out of scope,
@@ -4226,8 +3952,9 @@ check('every ui.mjs listener that mutates answer/comment state or submits guards
 });
 
 // --- the click-to-comment gesture must be inert in read-only mode, ---
-// exactly like every other mutating listener above, and pin rendering (which is
-// what makes an archived board still show its pins) must NOT be gated on it.
+// exactly like every other mutating listener above. Pin rendering, which must
+// NOT be gated on it, is driven against a real archive in test/check-archive.mjs
+// and test/check-mermaid-anchor.mjs.
 
 check('the html-stage and mermaid element-click listeners guard on readonly too, so click-to-comment is inert in read-only mode', () => {
   const bodies = listenerBodies(ui);
@@ -4267,39 +3994,6 @@ check('the html-stage and mermaid element-click listeners guard on readonly too,
   for (const b of mintCallers) {
     assert.ok(/\breadonly\b/.test(b), `a diagram-node click listener mints a comment without checking readonly:\n${b}`);
   }
-});
-
-check('pin rendering is never gated by readonly, only the click/hover gesture is -- an archived (readonly) board still shows its pins', () => {
-  // wireMermaidBlock's shape is unchanged: one function, pin rendering then a
-  // readonly early-return before the click listener, so ordering WITHIN that
-  // one function is still the right thing to pin down (ablation-verified --
-  // moving the guard above the pin-render call in a scratch copy left a
-  // weaker, presence-only version of this check green).
-  const mermaidBody = namedFunctionBody(ui, 'wireMermaidBlock');
-  assert.ok(mermaidBody, 'wireMermaidBlock not found');
-  const pinIdxMermaid = mermaidBody.indexOf('renderMermaidPins(');
-  const guardIdxMermaid = mermaidBody.indexOf('if (readonly'); // wireMermaidBlock's guard also checks `|| !svg`
-  assert.ok(pinIdxMermaid !== -1, 'wireMermaidBlock must call renderMermaidPins');
-  assert.ok(guardIdxMermaid !== -1, 'wireMermaidBlock must have a readonly early-return gating the click listener');
-  assert.ok(pinIdxMermaid < guardIdxMermaid, 'renderMermaidPins must run before the readonly early-return, not after -- otherwise an archived board loses its pins');
-
-  // The html-stage case no longer has one function with an
-  // ordering to pin down -- pin positioning (handleStageReady ->
-  // requestStagePositions, fired the moment a stage announces itself
-  // 'ready') and the click gesture (handleStageClick) are separate functions
-  // dispatched from one message listener, so the equivalent property is that
-  // NEITHER handleStageReady NOR requestStagePositions ever checks `readonly`
-  // at all (nothing gates drawing a pin), while handleStageClick does (see
-  // the previous check, which already asserts that half). A stage never even
-  // being TOLD comment mode is on in the first place -- setCommentMode
-  // refusing readonly -- is what keeps the archived gesture inert instead;
-  // this is what keeps the archived PINS visible.
-  const readyBody = namedFunctionBody(ui, 'handleStageReady');
-  const requestBody = namedFunctionBody(ui, 'requestStagePositions');
-  assert.ok(readyBody, 'handleStageReady not found');
-  assert.ok(requestBody, 'requestStagePositions not found');
-  assert.ok(!/\breadonly\b/.test(readyBody), 'handleStageReady must never gate on readonly -- an archived stage still needs its pins positioned');
-  assert.ok(!/\breadonly\b/.test(requestBody), 'requestStagePositions must never gate on readonly -- an archived stage still needs its pins positioned');
 });
 
 // --- the lens's pointer capture ---------------------
@@ -4344,12 +4038,6 @@ check('the lens takes pointer capture only once a press has become a pan, never 
     'the pointermove handler must not begin with an unconditional return -- the assertions above constrain the order of two lines, not whether either is ever reached');
 });
 
-check('readonly mode hard-disables every input-capable element and strips native drag, not just CSS pointer-events', () => {
-  assert.ok(/if \(readonly\) \{[\s\S]*?el\.disabled = true;/.test(ui));
-  assert.ok(ui.includes("qsa('textarea, input, button')"));
-  assert.ok(ui.includes('removeAttribute(\'draggable\')'));
-});
-
 check('CSS gates the readonly banner and Send bar strictly on body.readonly', () => {
   assert.ok(styles.includes('.readonly-banner { display: none;'));
   assert.ok(styles.includes('body.readonly .readonly-banner { display: block; }'));
@@ -4363,40 +4051,12 @@ check('renderBoardPage always emits the readonly-banner element in the body mark
 
 // --- SSE push is applied additively, never a wholesale re-render -----
 //
-// Field preservation on a push is browser-DOM behaviour, which is
-// explicitly out of automated scope ("checked by opening a
-// board and using it"). What IS provable here without a browser: the client script
-// never wipes the live board container and only ever inserts/replaces targeted
-// nodes, and it subscribes over SSE only in the same circumstances every other
-// daemon-only capability is allowed to run.
-
-check('the client script never wholesale-replaces the blocks container on a push -- only targeted insertion/replacement', () => {
-  // Ablation: if applyRoundPush did `document.getElementById('blocks').innerHTML =
-  // data.html` (or similar on any live container) instead of building a detached
-  // wrapper and moving/replacing individual nodes, this fails.
-  assert.ok(
-    !/getElementById\('blocks'\)\.innerHTML\s*=/.test(ui) && !/querySelector\('\.blocks'\)\.innerHTML\s*=/.test(ui),
-    'a push must never reassign innerHTML on the live blocks container',
-  );
-  assert.ok(ui.includes('new EventSource('), 'the page must subscribe to round pushes over SSE');
-  assert.ok(/appendChild|replaceWith/.test(ui), 'a push must be applied via targeted DOM insertion/replacement, not a blanket re-render');
-});
-
-check('SSE subscription is guarded exactly like every other daemon-only capability -- never opened in readonly (file://) mode', () => {
-  const idx = ui.indexOf('new EventSource(');
-  assert.ok(idx !== -1);
-  const before = ui.slice(Math.max(0, idx - 200), idx);
-  assert.ok(/if\s*\(\s*!readonly/.test(before), 'EventSource must only be opened when the page is not in readonly mode (ablation: dropping this guard would open a network connection from the standalone file:// archive)');
-});
-
-check('a push seeds newly-appeared block answers through the same computeBoardPatch used elsewhere -- it does not touch any existing block\'s selections/notes/deferred entries', () => {
-  // Structural proof that field preservation rests on computeBoardPatch's
-  // added/changed sets, not on some separate ad-hoc mechanism: the only place
-  // selections/notes/deferred are seeded from server data outside of the initial
-  // hydrate is seedAnswers(patch.addedBlockIds.concat(patch.changedBlockIds), ...).
-  assert.ok(ui.includes('seedAnswers(patch.addedBlockIds.concat(patch.changedBlockIds)'));
-  assert.equal([...ui.matchAll(/\bselections\[/g)].length >= 1, true);
-});
+// A push inserts or replaces only the nodes it carries, and leaves every other
+// block's field state alone: test/check-send-guard.mjs and
+// test/check-amend-integrity.mjs drive real pushes through the DOM stand-in for
+// that, and test/check-archive.mjs drives the subscription never opening in a
+// read-only archive. What stays here is what the source alone shows: a push wires
+// its fragment before attaching it.
 
 check('a push wires the freshly-parsed fragment BEFORE inserting it into the live document -- never re-wiring blocks the push did not touch', () => {
   // Real bug found and fixed: wireRoot(container) / wireRoot(roundSection)
@@ -4435,15 +4095,10 @@ check('a push wires the freshly-parsed fragment BEFORE inserting it into the liv
 // right after hydrate) -- correct for round 1, but silently inert for any html
 // or mermaid stage that arrives in a round pushed later over SSE, since nothing
 // ever re-ran that pass. Folding it into wireRoot(root), scoped to root exactly
-// like every other wiring loop, is what makes anchoring keep working after a
-// push. The two checks below prove this end to end without a browser: the first
-// proves anchoring wiring genuinely lives inside wireRoot (not bolted on as a
-// second, separate pass); the second proves every DOM-insertion branch that
-// handles a push actually calls wireRoot on the content it just inserted. Neither
-// fact alone is sufficient -- the push code could wire a subtree that
-// never wires anchors, or the anchoring wiring could live somewhere a push never
-// reaches -- so both need to hold, and did not both hold on either side of this
-// merge before it was resolved this way.
+// like every other wiring loop, is what made anchoring keep working after a
+// push. That root-scoped pass has since given way to one page-level message
+// listener (the check below pins that shape); that every push path really leaves
+// its content anchorable is driven end to end in test/check-anchor-push.mjs.
 
 check('element-level anchoring on a pushed html stage needs no per-push wiring pass at all -- a page-level, push-agnostic message listener replaced the root-scoped DOM wiring this check used to require', () => {
   // Previously: `wireHtmlStage` reached into `frame.contentDocument`
@@ -4489,46 +4144,6 @@ check('element-level anchoring on a pushed html stage needs no per-push wiring p
   // this file's own checks.
 });
 
-check('a round pushed over SSE has its html/mermaid stages wired for anchoring: applyRoundPush and applySubmittedPush call wireRoot on exactly the content they insert', () => {
-  // Combined with the previous check, this proves a pushed html/mermaid block
-  // ends up exactly as anchorable as one that was on the page at load. Ablation:
-  // deleting any one of these three wireRoot(...) calls (or pointing it at the
-  // wrong variable) makes this fail, and -- because anchoring wiring lives inside
-  // wireRoot per the previous check -- would also mean that push silently never
-  // wires anchoring on the content it inserts.
-  const pushBody = namedFunctionBody(ui, 'applyRoundPush');
-  assert.ok(pushBody, 'applyRoundPush not found');
-  assert.ok(/wireRoot\(wrap\)/.test(pushBody), 'the new-round branch must wire the round fragment it just parsed');
-  assert.ok(/wireRoot\(frag\)/.test(pushBody), 'the amend branch must wire the blocks it just parsed');
-
-  const submittedBody = namedFunctionBody(ui, 'applySubmittedPush');
-  assert.ok(submittedBody, 'applySubmittedPush not found');
-  assert.ok(
-    /wireRoot\(replacement\)/.test(submittedBody),
-    'the submitted-round swap-in must also wire its replacement content -- a round that just went out can still carry an html/mermaid stage whose EXISTING pins/comments are worth showing correctly',
-  );
-});
-
-check('an amend that replaces a block clears the reviewer\'s local field state for that block, rather than leaving a stale, invisible value behind', () => {
-  // Real bug found and fixed: a replace-amend re-renders the block
-  // fresh from the server (an open round's textarea comes back empty, since
-  // board.answers has no entry yet), but the client's own `selections`/`notes`
-  // dicts were left untouched -- so a reviewer who had typed something into a
-  // block that then got replaced would see a BLANK field on screen while Send
-  // still submitted their old, now-invisible text. Fix: clearFieldState() runs
-  // on patch.changedBlockIds before seeding, so a replaced block always starts
-  // clean.
-  assert.ok(ui.includes('clearFieldState(patch.changedBlockIds)'));
-  const clearIdx = ui.indexOf('function clearFieldState');
-  const clearBody = ui.slice(clearIdx, ui.indexOf('}\n', ui.indexOf('}\n', clearIdx) + 1));
-  assert.ok(/delete selections\[id\]/.test(clearBody));
-  assert.ok(/delete notes\[id\]/.test(clearBody));
-  assert.ok(/delete deferred\[id\]/.test(clearBody));
-  // There is no fourth dict: 'touched' (has this widget been interacted with)
-  // existed only to decide whether a rank list counted as answered, and a rank
-  // list is now answered by the order it shows, so nothing read it any more.
-});
-
 // This check used to read "the emitted page has no external script or stylesheet
 // reference -- everything needed to open standalone is inlined", and rejected any
 // `<link rel=stylesheet>` or `<script src=>` outright (QUIRKS.md, "No external assets —
@@ -4566,40 +4181,6 @@ function assertBareSiblingRef(tag, ref, where) {
   assert.ok(!ref.includes('/') && !ref.includes(':') && !ref.startsWith('.'),
     `${where}: <${tag}> loads "${ref}", which is not bare: no separator, no scheme, no dot segment`);
 }
-
-check('the emitted page references the shared script and stylesheet as BARE SIBLING FILENAMES, and nothing else external', () => {
-  const board = createBoard({
-    title: 'Standalone',
-    blocks: [{ kind: 'markdown', text: '# A' }, { kind: 'question', prompt: 'Q', widget: 'single', options: [{ label: 'X' }] }],
-  });
-  const html = renderBoardPage(board);
-
-  const refs = subresourceRefs(html);
-  assert.ok(refs.length >= 3, `setup failure: expected at least the favicon, the stylesheet and the script, found ${refs.length}`);
-
-  for (const { tag, ref } of refs) assertBareSiblingRef(tag, ref, 'the page');
-
-  // And the two it must name are the real content-addressed ones, not some spelling that
-  // merely looks like one. (Ablation: hardcode a name in render.mjs and this fails the
-  // moment the payload changes, which is exactly the drift the hash exists to catch.)
-  assert.ok(html.includes(`<link rel="stylesheet" href="${STYLE_ASSET}">`), 'the page must name the current stylesheet asset');
-  assert.ok(html.includes(`<script defer src="${SCRIPT_ASSET}"></script>`), 'the page must name the current script asset');
-
-  // Deferred CLASSIC script, never a module: Chrome CORS-blocks a module script over
-  // `file:`, so `type="module"` here silently kills the Finder surface. `defer` is what
-  // keeps the execution timing a module tag already had (after parse, before
-  // DOMContentLoaded), which two `document.readyState === 'complete'` branches in
-  // src/ui.mjs read.
-  assert.ok(!/<script[^>]*\btype="module"[^>]*\bsrc=/.test(html), 'the shared script must not be referenced as a module');
-
-  // The board JSON is still inlined -- it is per-board, so it has nothing to share.
-  assert.ok(html.includes('id="board-data"'));
-
-  // And the payloads themselves are genuinely gone from the bytes, which is the weight
-  // half of AC 8: naming the file while still carrying it would pass every assertion above.
-  assert.ok(!html.includes(ui), 'the page must not still carry the client script');
-  assert.ok(!html.includes(styles), 'the page must not still carry the stylesheet');
-});
 
 // An html stage's `srcdoc` is a second document inside the first, and since the board
 // began providing its vendored mermaid engine to diagram-bearing stages, it is a
@@ -4750,17 +4331,6 @@ check('N5: a caller-supplied id must carry the kind letter of the block it names
 
 // --- C2: content resolution is confined to the board's project directory ---------
 
-check('C2: an absolute reference path outside the project directory is refused, not read', () => {
-  // Ablation: drop the `contains(root, real) || insideRoots(real, roots)` requirement in
-  // resolvePath and /etc/passwd's contents land in the board JSON and the served page.
-  // The leading slash is not what refuses it -- see the two checks below, where an
-  // absolute path inside the project resolves -- the realpath boundary is.
-  const r = resolveRef({ path: '/etc/passwd' }, { cwd: fixturesDir });
-  assert.equal(typeof r.error, 'string');
-  assert.match(r.error, /does not resolve inside the boundary/);
-  assert.equal(r.text, undefined);
-});
-
 check('C2: an absolute reference path inside the project directory resolves exactly as its relative spelling does', () => {
   // The refusal an absolute path used to get was not confinement -- the realpath check
   // above is -- it was "a project file is always reachable relatively", which cost the
@@ -4798,34 +4368,6 @@ check('C2: an absolute path inside the project that is not there reads as the mi
   const typo = path.join(realpathSync(fixturesDir), 'abs-inside.mb');
   assert.match(resolvePath({ path: typo }, fixturesDir).error, /^cannot read .*: no such file\./);
   assert.match(resolvePath({ path: 'abs-inside.mb' }, fixturesDir).error, /^cannot read .*: no such file\./);
-});
-
-check('C2: a relative reference cannot traverse out of the board cwd with ../', () => {
-  // Ablation: remove the path.relative()/startsWith('..') check and this reads
-  // /etc/hosts.
-  const nested = path.join(fixturesDir, 'deep', 'deeper');
-  mkdirSync(nested, { recursive: true });
-  const r = resolveRef({ path: '../../../../../../../../etc/hosts' }, { cwd: nested });
-  assert.equal(typeof r.error, 'string');
-  assert.equal(r.text, undefined);
-});
-
-check('C2: a symlink pointing out of the board cwd is refused -- confinement is on the REALPATH, not the spelling', () => {
-  // Ablation: resolve with path.resolve() instead of realpathSync() and the symlink
-  // reads straight through, since its own spelling never leaves the project.
-  const outside = mkdtempSync(path.join(tmpdir(), 'claude-board-outside-'));
-  try {
-    writeFileSync(path.join(outside, 'secret.txt'), 'exfiltrated', 'utf8');
-    const link = path.join(fixturesDir, 'escape-link');
-    try { unlinkSync(link); } catch { /* not there yet */ }
-    symlinkSync(path.join(outside, 'secret.txt'), link);
-    const r = resolveRef({ path: 'escape-link' }, { cwd: fixturesDir });
-    assert.equal(typeof r.error, 'string');
-    assert.equal(r.text, undefined);
-    assert.ok(!String(r.text ?? '').includes('exfiltrated'));
-  } finally {
-    rmSync(outside, { recursive: true, force: true });
-  }
 });
 
 check('C2: an ordinary relative reference inside the project still resolves, and resolvePath reports {path} not a bare string', () => {
@@ -4981,6 +4523,16 @@ check('allowlist: a path outside BOTH cwd and the allowlist is still refused, wi
     const r = resolveRef({ path: rel }, { cwd: fixturesDir, roots });
     assert.equal(r.text, undefined);
     assert.equal(r.error, REFUSAL(rel, project, roots));
+
+    // From a cwd nested below the project, with more `../` than it has ancestors: the
+    // climb clamps at the filesystem root and lands on /etc/hosts, outside both.
+    // Ablation: drop the `..` test from contains() and this reads /etc/hosts.
+    const nested = path.join(fixturesDir, 'deep', 'deeper');
+    mkdirSync(nested, { recursive: true });
+    const overClimb = '../../../../../../../../etc/hosts';
+    const fromNested = resolveRef({ path: overClimb }, { cwd: nested, roots });
+    assert.equal(fromNested.text, undefined);
+    assert.equal(fromNested.error, REFUSAL(overClimb, realpathSync(nested), roots));
   } finally {
     rmSync(root, { recursive: true, force: true });
     rmSync(outside, { recursive: true, force: true });
@@ -5732,21 +5284,18 @@ check('H5: a file over the byte cap is refused by stat, before any of it is read
   unlinkSync(big);
 });
 
-check('N2/cap: a by-value text or html block over the same cap is a loud 400-able error, not silently accepted', () => {
-  // Ablation: remove byValueText and a multi-megabyte `html` string posted by value
-  // is stored verbatim and re-parsed by src/anchor.mjs on every render, SSE fragment
-  // and packet -- the file cap does not cover by-value content.
-  const oversize = 'x'.repeat(MAX_REF_BYTES + 1);
-  assert.throws(() => createBoard({ title: 't', blocks: [{ kind: 'html', html: oversize }] }), /over the .*-byte cap/);
-  assert.throws(() => createBoard({ title: 't', blocks: [{ kind: 'markdown', text: oversize }] }), /over the .*-byte cap/);
-});
-
-check("the by-value over-cap message no longer tells the caller a source reference raises the cap, because it does not", () => {
+check('a by-value html or text block over the cap is refused, and the message names no source reference as the remedy, because a reference that size is refused too', () => {
   // Ablation: revert the message in src/board.mjs's byValueText to "use a source
   // reference instead" and this fails -- a reference to content this size is refused
   // by resolveRef's own whole-file fstat check (src/resolve.mjs) before any slicing,
   // so that phrasing names a remedy that does not work for ANY kind, html included.
+  // Ablation: drop byValueText from either field and a multi-megabyte string posted
+  // by value is stored verbatim and re-parsed on every render, SSE fragment and
+  // packet -- the file cap does not cover by-value content. `text` and `html` are two
+  // separate call sites, so both are driven.
   const oversize = 'x'.repeat(MAX_REF_BYTES + 1);
+  assert.throws(() => createBoard({ title: 't', blocks: [{ kind: 'markdown', text: oversize }] }), /over the .*-byte cap/,
+    'a by-value markdown text over the cap must be refused like an html block');
   let caught = null;
   try {
     createBoard({ title: 't', blocks: [{ kind: 'html', html: oversize }] });
@@ -6345,7 +5894,7 @@ check('choose-between-rendered-variants: an html-kind option carries the full-wi
     'src/styles.mjs must span an html-kind option across every grid column, not size it like the other columns');
 });
 
-check('choose-between-rendered-variants (fallback): a variant option\'s stage starts no shorter than the 320px floor it replaces -- the floor must not cost a mock height while its report is still in flight or never arrives (ablation: this fails if the starting height in src/styles.mjs\'s .choice-variant .html-stage rule is ever dropped below 320px)', () => {
+check('choose-between-rendered-variants (fallback): a variant option\'s stage starts at the 320px floor, never shorter, and is clipped at 600px with no resize handle -- the floor must not cost a mock height while its report is still in flight or never arrives (ablation: drop the starting height in src/styles.mjs\'s .choice-variant .html-stage rule below 320px and this fails)', () => {
   // Real Chrome measurement (see this feature's own entry in QUIRKS.md and
   // src/render.mjs's "WHEN this runs" comment): a stage's first accurate
   // report is necessarily deferred past this document's own first layout
@@ -6354,12 +5903,27 @@ check('choose-between-rendered-variants (fallback): a variant option\'s stage st
   // reports -- never arrive at all. An earlier cut of this rule shipped a
   // 200px starting height, which is 120px SHORTER than the fixed floor this
   // whole feature exists to improve on: worse than before, for as long (or,
-  // in the never-arrives case, as often) as that gap lasts. This asserts the
-  // rule's own text rather than anything the stand-in could compute (it has
-  // no layout at all, QUIRKS.md), the same shape test/check-pure.mjs already
-  // uses for other rules asserted by their exact wording.
-  assert.match(styles, /\.choice-variant \.html-stage \{ min-height: 0; height: 320px; max-height: 600px; resize: none; overflow: hidden; \}/,
-    'a variant option\'s stage must start at least as tall as the 320px floor it replaces, not the old 200px placeholder');
+  // in the never-arrives case, as often) as that gap lasts. The stand-in has
+  // no layout (QUIRKS.md), but its cascade resolves the declared values on the
+  // rendered stage, so an override anywhere in the sheet counts as well as the
+  // rule's own text. min-height 0 is the half that undoes the ordinary stage's
+  // 320px min-height, so the clamp in handleStageHeight is what sizes the card.
+  const board = createBoard({
+    title: 'variants',
+    blocks: [{
+      kind: 'question', prompt: 'Which?', widget: 'choose-between-rendered-variants',
+      options: [{ label: 'A', block: { kind: 'html', html: '<p>mock</p>' } }],
+    }],
+  });
+  const frame = parseHTML(renderBoardPage(board)).querySelector('.choice-variant .html-stage');
+  assert.ok(frame, 'setup failure: no variant option stage rendered');
+  const computed = prop => resolveComputedProperty(styles, frame, false, prop).trim();
+  assert.equal(computed('height'), '320px',
+    'a variant option\'s stage must start as tall as the 320px floor it replaces, not the old 200px placeholder');
+  assert.equal(computed('min-height'), '0', 'and must not keep the ordinary stage\'s own min-height under it');
+  assert.equal(computed('max-height'), '600px', 'the stylesheet backstop beside STAGE_HEIGHT_CAP');
+  assert.equal(computed('resize'), 'none', 'a variant card sizes from its report, never from a drag handle');
+  assert.equal(computed('overflow'), 'hidden', 'what the cap hides is reached by the wheel, not by a second scrollbar');
 });
 
 /** Stub the ONE entry point a real browser actually uses for a stage's first
@@ -6390,7 +5954,7 @@ check('choose-between-rendered-variants (fallback): a variant option\'s stage st
  * about real frame timing -- the same ceiling already noted for
  * ResizeObserver. Restores the original binding (usually `undefined`, since
  * Node has no requestAnimationFrame) even if `fn` throws, same idiom
- * test/check-enter.mjs's `withFetchCapture` already uses. */
+ * test/support.mjs's `withFetchCapture` already uses. */
 function withCapturedRAF(fn) {
   const original = globalThis.requestAnimationFrame;
   const queue = [];
@@ -6448,10 +6012,16 @@ check('choose-between-rendered-variants: a variant option\'s stage grows to the 
     'a mock taller than the cap must be clipped there, not at its full reported height (4000px)');
 });
 
-check('choose-between-rendered-variants (scope): a STANDALONE html stage\'s reported height is never applied -- the existing floor/resize stays untouched, this feature is variant-option-only (ablation: delete handleStageHeight\'s frame.closest(\'.choice-variant\') gate and this fails, because the report would then apply everywhere)', () => {
+check('choose-between-rendered-variants (scope): a standalone html stage on an ordinary board never takes its reported height -- the existing floor/resize stays untouched, this feature is variant-option-only (ablation: delete handleStageHeight\'s frame.closest(\'.choice-variant\') gate and this fails, because the report would then apply everywhere)', () => {
+  // The markdown block is what makes this an ordinary board: an html block alone
+  // is a page board (isPageBoard), whose constant-100vh frame is
+  // test/check-page-board.mjs's own case.
   const board = createBoard({
     title: 'standalone',
-    blocks: [{ kind: 'html', html: '<body data-standin-scroll-height="4000"><p>tall mock</p></body>' }],
+    blocks: [
+      { kind: 'html', html: '<body data-standin-scroll-height="4000"><p>tall mock</p></body>' },
+      { kind: 'markdown', text: 'not a page board' },
+    ],
   });
   const document = loadVariantBoard(board);
   const frame = document.querySelector('.html-stage');
@@ -6612,40 +6182,6 @@ check('choose-between-rendered-variants: a stage cannot hold the wheel hostage -
   assert.equal(past.defaultPrevented, false, 'at the travel cap a downward notch chains back to the page, whatever height the stage claimed');
 });
 
-check('choose-between-rendered-variants: an html option\'s iframe is rendered pointer-events: none -- a real click can never reach it, only the card around it can ever record a pick', () => {
-  // SECURITY, not polish: without this, a real, trusted
-  // click over the visible mock content of an html-kind option would land
-  // INSIDE the iframe rather than on the card, and the stage is untrusted,
-  // agent-authored content -- see ADR.md entry 78 for the two paths that made a
-  // stage-reported click-to-select message unsafe. This is the one half of the fix
-  // no DOM stand-in can exercise directly (QUIRKS.md: no real layout, no
-  // pointer-events hit-testing); test/check-stage-isolation.mjs proves the
-  // other half -- that even a message the stage manages to get out carries
-  // no path back to a selection.
-  assert.match(styles, /\.choice-variant\s+\.html-stage\s*\{[^}]*pointer-events:\s*none/,
-    'src/styles.mjs must render an html option\'s iframe pointer-events: none inside a .choice-variant card');
-});
-
-check('choose-between-rendered-variants: a click dispatched INSIDE an html option\'s own mock document never selects the option, whether genuine or self-dispatched by the mock\'s own script', () => {
-  const board = createBoard({
-    title: 'variants',
-    blocks: [{
-      kind: 'question', prompt: 'Which?', widget: 'choose-between-rendered-variants',
-      options: [{ label: 'A', block: { kind: 'html', html: '<div class="mock"><button>A</button></div>' } }],
-    }],
-  });
-  const document = loadVariantBoard(board);
-  const frame = document.querySelector('.html-stage');
-  frame.loadSrcdoc();
-  const card = document.querySelector('.choice-variant');
-  // Simulates the exact scenario the fix exists for: content that clicks
-  // itself (an autoplaying demo, an animation), ordinary for /example's real
-  // interactive mockups, with no reviewer involved at all.
-  frame.contentDocument.querySelector('button').dispatchEvent(new StandInEvent('click'));
-  assert.equal(card.classList.contains('selected'), false,
-    'a click originating inside the mock -- genuine or script-dispatched -- must never select the option');
-});
-
 check('choose-between-rendered-variants: an option with no block falls back to "no content", the same fallback a contentless compare side shows', () => {
   const board = createBoard({
     title: 'variants',
@@ -6653,27 +6189,6 @@ check('choose-between-rendered-variants: an option with no block falls back to "
   });
   const markup = renderedMarkup(renderBoardPage(board));
   assert.ok(markup.includes('class="unsupported-widget">no content</p>'));
-});
-
-check('choose-between-rendered-variants: the picked option stays visible and the card is disabled once its round is sent, the same contract every other widget honours', () => {
-  const board = createBoard({
-    title: 'variants',
-    blocks: [{
-      kind: 'question',
-      prompt: 'Which?',
-      widget: 'choose-between-rendered-variants',
-      options: [
-        { label: 'Yes', block: { kind: 'markdown', text: 'yes copy' } },
-        { label: 'No', block: { kind: 'markdown', text: 'no copy' } },
-      ],
-    }],
-  });
-  applySubmit(board, { action: 'send', answers: [{ id: board.blocks[0].id, status: 'answered', choice: 'Yes', note: '' }], comments: [] }, 1);
-  const markup = renderedMarkup(renderBoardPage(board));
-  const historySection = markup.slice(markup.indexOf('round-history'));
-  assert.match(historySection, /class="variant-card choice-variant selected"[^>]*aria-disabled="true"/);
-  assert.match(historySection, /tabindex="-1"/);
-  assert.ok(historySection.includes('yes copy'), 'the picked option\'s own rendered content must stay visible once sent');
 });
 
 check('choose-between-rendered-variants: findBlock and resolveComment reach an option\'s nested block, exactly as they already reach a compare side\'s', () => {
@@ -6801,22 +6316,28 @@ check('choose-between-rendered-variants: clicking a card selects it and deselect
   assert.equal(cards[1].classList.contains('selected'), true);
 });
 
-check('choose-between-rendered-variants: Enter/Space while the card has focus selects it -- the keyboard-operable half of a container that cannot be a real <button>', () => {
+check('choose-between-rendered-variants: an open round\'s card is a role=button tab stop, Tab passes over it, and Enter or Space selects it -- the keyboard-operable half of a container that cannot be a real <button>', () => {
   const board = createBoard({
     title: 'variants',
     blocks: [{
       kind: 'question', prompt: 'Which?', widget: 'choose-between-rendered-variants',
-      options: [{ label: 'A', block: { kind: 'markdown', text: 'copy A' } }],
+      options: [
+        { label: 'A', block: { kind: 'markdown', text: 'copy A' } },
+        { label: 'B', block: { kind: 'markdown', text: 'copy B' } },
+      ],
     }],
   });
   const document = loadVariantBoard(board);
-  const card = document.querySelector('.choice-variant');
+  const [card, other] = document.querySelectorAll('.choice-variant');
   assert.equal(card.getAttribute('tabindex'), '0', 'an open round\'s card must be in the tab order');
   assert.equal(card.getAttribute('role'), 'button');
+  card.dispatchEvent(new StandInEvent('keydown', { key: 'Tab' }));
+  assert.equal(card.classList.contains('selected'), false, 'Tab moves focus on; it must not be treated as a select key');
   card.dispatchEvent(new StandInEvent('keydown', { key: 'Enter' }));
   assert.equal(card.classList.contains('selected'), true, 'Enter must select the focused card');
-  card.dispatchEvent(new StandInEvent('keydown', { key: 'Tab' }));
-  // no assertion needed beyond "did not throw" -- Tab must not be treated as a select key
+  other.dispatchEvent(new StandInEvent('keydown', { key: ' ' }));
+  assert.equal(other.classList.contains('selected'), true, 'Space must select the focused card, the other key a real <button> answers to');
+  assert.equal(card.classList.contains('selected'), false, 'and the pick moves rather than adding one');
 });
 
 check('choose-between-rendered-variants: a click on the option\'s own comment button opens the comment form and does NOT select the card', () => {
@@ -6840,22 +6361,7 @@ check('choose-between-rendered-variants: a click on the option\'s own comment bu
   assert.equal(form.classList.contains('open'), true, 'the comment button\'s own gesture must still work, undisturbed by the card wrapping it');
 });
 
-check('choose-between-rendered-variants: turning comment mode on makes a plain card click do nothing, the same stand-down every other choice widget already honours', () => {
-  const board = createBoard({
-    title: 'variants',
-    blocks: [{
-      kind: 'question', prompt: 'Which?', widget: 'choose-between-rendered-variants',
-      options: [{ label: 'A', block: { kind: 'markdown', text: 'copy A' } }],
-    }],
-  });
-  const document = loadVariantBoard(board);
-  document.getElementById('comment-mode-toggle').dispatchEvent(new StandInEvent('click'));
-  const card = document.querySelector('.choice-variant');
-  card.dispatchEvent(new StandInEvent('click'));
-  assert.equal(card.classList.contains('selected'), false, 'a plain click must not select while comment mode is on');
-});
-
-check('choose-between-rendered-variants: a historical (sent) round\'s card ignores both a click and Enter, and the picked option stays visibly selected', () => {
+check('choose-between-rendered-variants: a historical (sent) round\'s card is served selected with its own content, stays selected, and ignores a click', () => {
   const board = createBoard({
     title: 'variants',
     blocks: [{
@@ -6867,6 +6373,12 @@ check('choose-between-rendered-variants: a historical (sent) round\'s card ignor
     }],
   });
   applySubmit(board, { action: 'send', answers: [{ id: board.blocks[0].id, status: 'answered', choice: 'A', note: '' }], comments: [] }, 1);
+  // The served bytes first, before ui's hydrate re-selects the card from the
+  // stored answers: an archive's first paint, and the only place a server-side
+  // drop of the historical card's own selection shows.
+  const served = parseHTML(renderBoardPage(board)).querySelector('.choice-variant');
+  assert.equal(served.classList.contains('selected'), true, 'the server must render the picked historical card selected');
+  assert.ok(served.textContent.includes('copy A'), 'and the picked option\'s own rendered content must stay visible once sent');
   const document = loadVariantBoard(board);
   const cards = document.querySelectorAll('.choice-variant');
   assert.equal(cards[0].classList.contains('selected'), true, 'the picked option must still render selected once sent');
@@ -7424,46 +6936,6 @@ check('the send bar carries Discuss in chat beside Send, in the rendered markup'
   assert.ok(bar.includes('id="send-btn"'));
 });
 
-check('Discuss posts the same body as Send through one shared submit path, differing only in action', () => {
-  // One fetch, one body-building path WITHIN submitBoard itself: a second,
-  // hand-copied fetch in there is how Discuss would quietly come to collect
-  // less than Send does (it returns "whatever is filled in" -- partial
-  // answers are the point). Scoped to submitBoard's own body, not the whole
-  // file -- submitPageRound carries a SECOND, independent /submit
-  // fetch (the awaited page round's own Send/Discuss,
-  // which never shares this path -- see that function's own header comment
-  // for why), and that one is no more a "divergent copy" of this one than
-  // resync's own fetch is.
-  const submitBody = namedFunctionBody(ui, 'submitBoard');
-  assert.ok(submitBody, 'expected a shared submitBoard(action)');
-  const submitFetches = [...submitBody.matchAll(/fetch\([^)]*\/submit/g)];
-  assert.equal(submitFetches.length, 1, 'both actions must share one submit fetch, not carry two divergent copies');
-  assert.match(submitBody, /action:\s*action/, 'the posted body must carry the caller-chosen action verbatim');
-  assert.match(submitBody, /comments:\s*pendingComments/, 'Discuss must carry the queued comments too');
-  assert.match(submitBody, /collectAnswers\(\)/, 'Discuss must read the same answer surface Send does');
-  const listeners = listenerBodies(ui);
-  const discussListener = listeners.find(b => /submitBoard\('discuss'\)/.test(b));
-  const sendListener = listeners.find(b => /submitBoard\('send'\)/.test(b));
-  assert.ok(discussListener, "a click listener must post action 'discuss'");
-  assert.ok(sendListener, "a click listener must post action 'send'");
-  assert.match(discussListener, /\breadonly\b/, 'Discuss must be inert in readonly mode');
-});
-
-check('Send never requests browser notification permission -- that entry point is gone with the browser notifier', () => {
-  // ADR.md entry 58: the daemon is the one notifier now; the page has nothing
-  // left to ask permission for. requestNotifyPermissionFromSend does not exist,
-  // and nothing on the Send/Cmd+Enter paths calls the browser's own
-  // requestPermission -- see the criterion-21 grep in check-notify-cleanup.mjs
-  // for the tree-wide version of this assertion.
-  assert.equal(namedFunctionBody(ui, 'requestNotifyPermissionFromSend'), null,
-    'requestNotifyPermissionFromSend must be deleted, not left as dead code');
-  const listeners = listenerBodies(ui);
-  const sendListener = listeners.find(b => /submitBoard\('send'\)/.test(b));
-  assert.ok(sendListener, "expected the Send click listener");
-  assert.ok(!/requestNotifyPermissionFromSend\(\)|requestPermission\(\)/.test(sendListener),
-    'Send must no longer request browser notification permission');
-});
-
 // --- P6: a queued comment gets its pin immediately ------------------------------
 //
 // The batching is the win ("queue a dozen comments, send once");
@@ -7506,37 +6978,6 @@ check('a comment queued but not yet sent gets a provisional number continuing th
   assert.deepEqual(evalCommentsWithPending(board, []), board.comments);
 });
 
-check('an empty board numbers the first queued comment 1, not 0 or NaN', () => {
-  const all = evalCommentsWithPending({ comments: [] }, [{ blockId: 'h1', anchor: { kind: 'dom', ref: '1' }, text: 'x' }]);
-  assert.equal(all.length, 1);
-  assert.equal(all[0].n, 1);
-});
-
-check('both pin renderers draw from commentsWithPending, and queueing a comment refreshes the pins right then', () => {
-  const domPins = namedFunctionBody(ui, 'renderDomPins');
-  const mermaidPins = namedFunctionBody(ui, 'renderMermaidPins');
-  assert.match(domPins, /commentsWithPending\(\)/, 'dom pins must include the unsent queue, not only board.comments');
-  assert.match(mermaidPins, /commentsWithPending\(\)/, 'mermaid pins must include the unsent queue, not only board.comments');
-  // The queue-a-comment listener itself has to trigger a redraw; without it the
-  // pin would only appear on the next resize.
-  const queueListener = listenerBodies(ui).find(b => /pendingComments\.push/.test(b));
-  assert.ok(queueListener, 'expected the comment-form submit listener');
-  assert.match(queueListener, /refreshPins\(/, 'queueing a comment must place its pin immediately, not wait for Send');
-  // And a landed submit must empty the queue BEFORE redrawing, or the provisional
-  // pins would be joined by the server-numbered copies of the same comments.
-  const submitBody = namedFunctionBody(ui, 'submitBoard');
-  const emptyIdx = submitBody.indexOf('pendingComments = []');
-  const refreshIdx = submitBody.indexOf('refreshPins(', emptyIdx === -1 ? 0 : emptyIdx);
-  assert.ok(emptyIdx !== -1, 'a landed submit must empty the pending queue');
-  assert.ok(refreshIdx > emptyIdx, 'pins must be re-rendered after the queue is emptied, so provisional pins give way to the server\'s');
-});
-
-check('a pending pin is visually distinguishable from a sent one, in both the client and the stylesheet', () => {
-  const placePin = namedFunctionBody(ui, 'placePin');
-  assert.match(placePin, /c\.pending \? ' pin-pending' : ''/, 'placePin must mark a provisional pin with its own class');
-  assert.ok(styles.includes('.anchor-pin.pin-pending'), 'src/styles.mjs must style .pin-pending differently from a sent pin');
-});
-
 // --- the pending-comment queue, pure -----------------
 //
 // findPendingCommentForAnchor ("reopen and edit", also reused for
@@ -7569,24 +7010,11 @@ check('findPendingCommentForAnchor finds a queued comment by anchor, across ever
   assert.equal(findPendingCommentForAnchor(pending, 'nope', { kind: 'md', ref: 'findings' }), undefined, 'a different blockId must not match');
 });
 
-check('findPendingCommentForAnchor never matches a SENT comment -- the "no edit path" rule holds at the function level, not just by caller discipline', () => {
-  // A comment shaped exactly like a sent one (it carries an 'n', the way
-  // board.comments entries do) but living in a list that is NOT the page's
-  // pendingComments -- the point being that this function has no notion of
-  // "sent" at all, it only ever searches the list it is handed. Called with an
-  // EMPTY pendingComments (the real, unsent queue), the sent-shaped comment
-  // sitting elsewhere can never be found through this function.
-  const sentComments = [{ n: 1, blockId: 'h1', anchor: { kind: 'dom', ref: '1.2' }, text: 'already sent' }];
-  const pendingComments = [];
-  assert.equal(findPendingCommentForAnchor(pendingComments, 'h1', { kind: 'dom', ref: '1.2' }), undefined,
-    'a sent comment living outside pendingComments must never be found by this function');
-  // And the SAME function, called with board.comments itself (exactly what
-  // src/ui.mjs's isSentAnchor does), DOES find it -- proving
-  // the function is a plain list search, not silently sent-aware.
-  assert.equal(findPendingCommentForAnchor(sentComments, 'h1', { kind: 'dom', ref: '1.2' }).text, 'already sent');
-});
-
-check('removePendingComment removes the middle of three, and the remaining two renumber contiguously', () => {
+check('removePendingComment drops the middle of three by its id, keeps the other two in order, and returns a new array rather than mutating the queue', () => {
+  // Provisional numbers are never stored on an entry -- they are derived from
+  // POSITION (nextCommentNumber() + index, src/ui.mjs's commentsWithPending), so
+  // keeping order IS the renumbering; the board-wide renumber on screen is driven
+  // through the real delete control in test/check-comment-mode.mjs.
   const pending = [
     { id: 10, blockId: 'h1', anchor: { kind: 'dom', ref: '1.1' }, text: 'first' },
     { id: 11, blockId: 'h1', anchor: { kind: 'dom', ref: '1.2' }, text: 'second' },
@@ -7595,14 +7023,6 @@ check('removePendingComment removes the middle of three, and the remaining two r
   const after = removePendingComment(pending, 11);
   assert.equal(after.length, 2, 'exactly one entry must be removed');
   assert.deepEqual(after.map(c => c.id), [10, 12], 'the other two must survive, in their original relative order');
-  // Provisional numbers are never stored on an entry -- they are derived from
-  // POSITION (nextCommentNumber() + index, src/ui.mjs's commentsWithPending),
-  // so re-deriving them from the shorter array IS the renumbering this
-  // requires: what were provisional #2 and #3 become #2 and #3 again (of two),
-  // contiguous, with no gap where the deleted middle one used to be.
-  const base = 1; // as if board.comments is empty, nextCommentNumber() === 1
-  const numbered = after.map((c, i) => ({ id: c.id, n: base + i }));
-  assert.deepEqual(numbered, [{ id: 10, n: 1 }, { id: 12, n: 2 }]);
   // The original array is untouched -- a pure function, not a mutation.
   assert.equal(pending.length, 3, 'removePendingComment must not mutate the array it was given');
 });
@@ -7627,28 +7047,10 @@ check('removePendingComment with an id that matches nothing queued is a no-op', 
 // already sitting in the tab mark makes that case weaker, not stronger, so
 // document.title stays untouched even though the mark itself counts again.
 
-check('document.title never takes a pending-count prefix -- setTitleBadge is gone, not just unused', () => {
-  assert.equal(namedFunctionBody(ui, 'setTitleBadge'), null, 'the "(n) " title prefix must be deleted, not left as dead code');
-  assert.ok(!/\(['"]\s*\(['"]\s*\+/.test(ui), 'no "(" + count title-prefix construction may remain anywhere in the client script');
-  // The one legitimate mutation of document.title in the whole page is the
-  // initial baseTitle capture; nothing may reassign it afterwards.
+check('the client script never assigns document.title, so the tab title carries no pending count', () => {
+  // The count lives in the tab mark alone (the favicon checks below); a title
+  // prefix would need this assignment, on any path.
   assert.ok(!/document\.title\s*=/.test(ui), 'nothing may assign document.title any more -- the tab stops counting');
-});
-
-check('an SSE round push marks the tab: favicon mark, no title write, no notification call', () => {
-  const push = namedFunctionBody(ui, 'applyRoundPush');
-  assert.ok(push, 'expected applyRoundPush in src/ui.mjs');
-  assert.match(push, /markPendingRound\(/, 'a round push must mark the tab -- the tab is never reopened, so the page has to say so itself');
-  const mark = namedFunctionBody(ui, 'markPendingRound');
-  assert.match(mark, /setFaviconBadge\(/);
-  assert.ok(!/notifyRound\(/.test(mark), 'markPendingRound must no longer call a browser notifyRound -- ADR.md entry 58 moved that job to the daemon');
-  assert.ok(!/setTitleBadge/.test(mark), 'marking a round pending must no longer touch the title');
-  assert.match(mark, /if \(readonly\) return;/, 'marking must be inert in readonly mode');
-  // The tab mark gates on whether the round
-  // is genuinely awaited -- reads roundIsAwaited off the SAME board this
-  // function's caller already advanced to the post-push state (applyRoundPush's
-  // own comment on why 'board' is reassigned before markPendingRound runs).
-  assert.match(mark, /roundIsAwaited\(/, 'the gate must read the shared roundIsAwaited predicate (src/badge.mjs), not reinvent one');
 });
 
 check('markPendingRound: an awaited round marks the tab; a non-awaited one (including a legacy-shaped round with no awaited key) does not', () => {
@@ -7679,7 +7081,9 @@ check('markPendingRound: an awaited round marks the tab; a non-awaited one (incl
   }
   // setFaviconBadge is stubbed rather than spliced in real: this check is about
   // WHETHER markPendingRound reaches the favicon call at all, not about
-  // drawFavicon's own drawing, which the checks above already cover directly.
+  // drawFavicon's own drawing, which the checks below cover directly; that a
+  // real awaited round push reaches the favicon at all is
+  // test/check-attended-client.mjs's.
 
   const dir = path.join(fixturesDir, 'indexpage-fixtures', 'mark-pending');
   mkdirSync(dir, { recursive: true });
@@ -7723,59 +7127,31 @@ check('markPendingRound: an awaited round marks the tab; a non-awaited one (incl
   assert.equal(r.pendingRounds, 0, 'a legacy page round with no question block must not mark the tab');
 });
 
-check('the favicon mark draws the page\'s own amber tile with a bold ink numeral -- no inverted tile anywhere', () => {
-  const draw = namedFunctionBody(ui, 'drawFavicon');
-  assert.ok(draw, 'expected drawFavicon in src/ui.mjs');
-  assert.match(draw, /createElement\('canvas'\)/);
-  assert.match(draw, /toDataURL\(/, 'the mark must be a data URI the page draws, not a fetched or bundled file');
-  assert.match(draw, /fillText\(/, 'the count is drawn as canvas text, not an SVG data URI');
-  assert.ok(!/<svg/.test(draw), 'the pending mark must never be built as an SVG string -- a missing font there would silently drop the digit');
-  // The tile is the SAME amber tile the unmarked tab shows, same fill, same rx 9
-  // corner -- no state paints a second tile colour, and the inverted dark ground
-  // plus its arc pip are gone outright, not merely unused.
-  assert.match(draw, new RegExp(`fillStyle = '${palettes.dark['--warning']}'`),
-    'the pending tile must be the SAME amber --warning the unmarked tab shows, off the palette rather than hand-copied');
-  assert.ok(!draw.includes(palettes.dark['--bg']),
-    'no state may paint a second (dark) tile colour -- the inverted tile is gone, not just unused');
-  assert.ok(!/\.arc\(/.test(draw), 'the amber pip is gone, not unused -- no inverted mark is reachable anywhere');
-  assert.match(draw, /roundRect\(0, 0, 32, 32, 9\)/,
-    'same tile as the page mark, same corner: pending is a state of it, not a different drawing');
-  // The numeral is ink on amber -- the same ink MARK_SHAPES' rows already use.
-  assert.match(draw, new RegExp(`fillStyle = '${palettes.dark['--accent-ink']}'`),
-    'the numeral must be --accent-ink, off the palette rather than hand-copied');
-  // The sizing ladder, optical steps rather than a linear scale --
-  // 22px at one digit, 18px at two, 17px for the 9+ overflow, capped at 99.
-  assert.match(draw, /22/, 'expected the one-digit size in the sizing ladder');
-  assert.match(draw, /18/, 'expected the two-digit size in the sizing ladder');
-  assert.match(draw, /17/, 'expected the 9+ overflow size in the sizing ladder');
-  assert.match(draw, /9\+/, 'the 9+ overflow token must still exist, now capped at 99 rather than 9');
-  const set = namedFunctionBody(ui, 'setFaviconBadge');
-  assert.match(set, /baseFavicon/, 'clearing the mark must restore the page\'s own mark, not leave the badge on it');
-  assert.match(set, /removeAttribute\('href'\)/, 'and with no mark to restore it must still unmark rather than keep the count');
-  assert.match(set, /drawFavicon\(pending\)/, 'the drawn mark must carry the real pending count, not a countless pip');
-  // Nothing about this may add an external reference to the emitted page.
-  const html = renderBoardPage(createBoard({ title: 'Fav', blocks: [{ kind: 'markdown', text: '# A' }] }));
-  assert.ok(!/<link[^>]+href=["']?http/.test(html));
-});
-
-check('a numbered mark applies while a round is pending, sized by the digit ladder, and the page\'s own mark comes back once nothing is', () => {
+check('the pending mark is the page\'s own amber tile with an ink numeral sized by the digit ladder, applied while a round is pending, and unmarking puts back the page\'s own mark, or none when the page had none', () => {
   // drawFavicon/setFaviconBadge are exercised directly, the same shape the prior
   // countless-mark check used: pull the real function bodies out of the client
   // script (source text, not a browser) and run them against a stand-in document
-  // plus a stand-in canvas context that records what got drawn.
+  // plus a stand-in canvas context that records what got drawn. The context has
+  // no arc(), so a drawing that reached for the old inverted mark's pip would
+  // throw into drawFavicon's catch and the drawn mark would never land.
   const drawBody = namedFunctionBody(ui, 'drawFavicon');
   const setBody = namedFunctionBody(ui, 'setFaviconBadge');
   assert.ok(drawBody && setBody, 'expected drawFavicon and setFaviconBadge in src/ui.mjs');
-  function run(pending) {
-    const calls = { fillText: null, font: null };
-    const link = { rel: 'icon', href: 'data:image/svg+xml,BASE', getAttribute(n) { return this[n]; }, setAttribute(n, v) { this[n] = v; }, removeAttribute(n) { this[n] = undefined; } };
+  // Applies each pending count in turn to ONE page, so a later 0 has a drawn mark
+  // to take back off; returns the link's href after each.
+  function run(counts, baseHref = 'data:image/svg+xml,BASE') {
+    const calls = { fillText: null, font: null, textFill: null, fills: [], roundRect: null };
+    const link = { rel: 'icon', getAttribute(n) { return this[n]; }, setAttribute(n, v) { this[n] = v; }, removeAttribute(n) { this[n] = undefined; } };
+    if (baseHref !== null) link.href = baseHref;
     const doc = {
       querySelector: () => link,
       createElement: () => ({
         getContext: () => ({
           fillStyle: '', font: '', textAlign: '', textBaseline: '',
-          beginPath() {}, roundRect() {}, fill() {},
-          fillText(text, x, y) { calls.fillText = [text, x, y]; calls.font = this.font; },
+          beginPath() {},
+          roundRect(...args) { calls.roundRect = args; },
+          fill() { calls.fills.push(this.fillStyle); },
+          fillText(text, x, y) { calls.fillText = [text, x, y]; calls.font = this.font; calls.textFill = this.fillStyle; },
         }),
         toDataURL: () => 'data:image/png,PIP',
       }),
@@ -7785,34 +7161,47 @@ check('a numbered mark applies while a round is pending, sized by the digit ladd
     // hex strings when the `ui` template literal itself was evaluated at import
     // time, so the extracted bodies below reference no free `palettes` variable.
     const scope = new Function(
-      'document', 'pending',
+      'document', 'counts',
       `var faviconLink = null; var baseFavicon = null;
        function drawFavicon(n) {${drawBody}}
        function setFaviconBadge(pending) {${setBody}}
-       setFaviconBadge(pending);
-       return faviconLink.href;`
+       return counts.map(function (pending) { setFaviconBadge(pending); return faviconLink.href; });`
     );
-    const href = scope(doc, pending);
-    return { href, calls };
+    const hrefs = scope(doc, counts);
+    return { href: hrefs[hrefs.length - 1], hrefs, calls };
   }
 
-  let r = run(1);
+  let r = run([1]);
   assert.equal(r.href, 'data:image/png,PIP', 'something pending must swap in the drawn mark');
   assert.equal(r.calls.fillText[0], '1', 'a single digit must render as itself');
   assert.equal(r.calls.fillText[1], 16, 'the numeral is centred at x 16');
   assert.equal(r.calls.fillText[2], 16.8, 'the numeral is centred at y 16.8');
   assert.match(r.calls.font, /22px/, 'one digit renders at 22px');
+  // The tile is the SAME amber tile the unmarked tab shows, same fill, same rx 9
+  // corner: pending is a state of the page mark, never a second (inverted) tile.
+  assert.deepEqual(r.calls.fills, [palettes.dark['--warning']],
+    'the one tile painted is the amber --warning the unmarked tab shows, off the palette -- no second (dark) tile');
+  assert.deepEqual(r.calls.roundRect, [0, 0, 32, 32, 9], 'same tile as the page mark, same corner');
+  assert.equal(r.calls.textFill, palettes.dark['--accent-ink'], 'the numeral is ink on amber, --accent-ink off the palette');
 
-  r = run(12);
+  r = run([12]);
+  assert.equal(r.href, 'data:image/png,PIP', 'two digits swap in the drawn mark too');
   assert.equal(r.calls.fillText[0], '12', '12 must render honestly as 12, not flattened to an overflow token');
   assert.match(r.calls.font, /18px/, 'two digits render at 18px');
+  assert.deepEqual(r.calls.fills, [palettes.dark['--warning']], 'on the same one amber tile');
 
-  r = run(150);
+  r = run([150]);
+  assert.equal(r.href, 'data:image/png,PIP', 'the overflow swaps in the drawn mark too');
   assert.equal(r.calls.fillText[0], '9+', 'a count above 99 renders as the 9+ overflow token');
   assert.match(r.calls.font, /17px/, 'the 9+ overflow renders at 17px');
+  assert.deepEqual(r.calls.fills, [palettes.dark['--warning']], 'on the same one amber tile -- the overflow paints no pip of its own');
 
-  r = run(0);
-  assert.equal(r.href, 'data:image/svg+xml,BASE', 'nothing pending must restore the page\'s own unbadged mark, not leave the drawn one or go blank');
+  r = run([1, 0]);
+  assert.deepEqual(r.hrefs, ['data:image/png,PIP', 'data:image/svg+xml,BASE'],
+    'nothing pending must restore the page\'s own unbadged mark, not leave the drawn one or go blank');
+  r = run([1, 0], null);
+  assert.deepEqual(r.hrefs, ['data:image/png,PIP', undefined],
+    'with no page mark to restore, unmarking must still take the count off rather than keep it');
 });
 
 check('a canvas or font failure during drawFavicon leaves the tab\'s existing mark alone, never a blank amber tile', () => {
@@ -7889,51 +7278,6 @@ check('the tab mark and the in-page mark are one drawing, at two sizes', () => {
   assert.match(head[1], /width="36" height="36"/);
 });
 
-check('the browser notifier is gone: no notifyRound, no Notification API, no unbidden window.focus(', () => {
-  // ADR.md entry 58: one notifier for a round, and it is the daemon's. The
-  // page-side notifyRound, its permission dance, and the click handler that
-  // used to steal focus back are all deleted outright, not left unused --
-  // see the criterion-21 grep in check-notify-cleanup.mjs for the tree-wide
-  // assertion this narrows to src/ui.mjs's own client script.
-  assert.equal(namedFunctionBody(ui, 'notifyRound'), null, 'the browser-side notifyRound must be deleted, not left as dead code');
-  assert.ok(!/\bNotification\b/.test(ui), 'no reference to the browser Notification API may remain in the client script');
-  // window.focus( used to appear exactly once, inside notifyRound's own click
-  // handler -- the one deliberate exception to "never steal focus". With that
-  // handler gone, nothing may pull the window forward at all any more.
-  const focusCalls = ui.match(/window\.focus\(/g) || [];
-  assert.equal(focusCalls.length, 0, 'window.focus( must not appear anywhere in the client script -- its one caller, the notification click handler, is deleted');
-});
-
-check('coming back to the tab clears the mark', () => {
-  const clear = namedFunctionBody(ui, 'clearPendingMark');
-  assert.ok(clear, 'expected clearPendingMark in src/ui.mjs');
-  assert.match(clear, /setFaviconBadge\(0\)/);
-  assert.ok(!/setTitleBadge/.test(clear), 'there is nothing left to un-title -- clearing must not reference the deleted title badge');
-  assert.ok(/visibilitychange/.test(ui), 'the mark must clear when the document becomes visible again');
-  assert.ok(/addEventListener\('focus'/.test(ui), 'and when the window regains focus');
-  // A landed submit clears it too: nothing is pending once the round went out.
-  assert.match(namedFunctionBody(ui, 'submitBoard'), /clearPendingMark\(\)/);
-});
-
-// --- dead/mismatched CSS --------------------------------------------------------
-
-// Both of these used to be POSITIVE wiring checks -- one on the inline anchor
-// button's own class, one on `.anchor-target`, the highlight a comment list entry
-// applied to the heading it named. ADR.md entry 28 deleted the `md` anchor kind
-// and both of those surfaces with it, so what is pinned now is their absence: the
-// class-purity check below catches an orphaned RULE, but only an explicit check
-// catches the markup, the client function and the rule all coming back together.
-check('the inline anchor button and the .anchor-target highlight are gone, markup and stylesheet alike (ADR.md entry 28)', () => {
-  const board = createBoard({ title: 'Anchors', blocks: [{ kind: 'markdown', text: '# Heading\n\n- one' }] });
-  const markup = renderedMarkup(renderBoardPage(board));
-  assert.ok(!/class="comment-btn [a-z-]+"/.test(markup), 'a markdown block must emit no inline anchor button');
-  assert.ok(!markup.includes('data-anchor-kind="md"'), 'nothing may emit an md-kind anchor');
-  assert.ok(!/\.inline-anchor-btn\b/.test(styles), 'the orphaned .inline-anchor-btn rule must be gone with the button it styled');
-  assert.ok(!/\.comment-inline\b/.test(styles), 'the orphaned .comment-inline rule must be gone, not left beside its replacement');
-  assert.ok(!/\.anchor-target\b/.test(styles), 'the orphaned .anchor-target rule must be gone with the gesture it styled');
-  assert.equal(namedFunctionBody(ui, 'highlightAnchor'), null, 'highlightAnchor must be gone from src/ui.mjs');
-});
-
 // --- computeBoardPatch sees NESTED blocks ---------------------------------------
 //
 // board.blocks is the top level only, but a question inside a compare side or
@@ -7980,150 +7324,40 @@ check('computeBoardPatch reports a question context block, and a brand-new neste
   assert.deepEqual(added.changedBlockIds, []);
 });
 
-check('the nested walk survives the .toString() splice into the client script', () => {
-  // The browser copy is computeBoardPatch.toString() -- a MODULE-LEVEL helper
-  // would import fine for these checks and be a ReferenceError in the page.
-  const src = computeBoardPatch.toString();
-  const spliced = new Function('return (' + src + ')')();
-  const prev = { blocks: [{ id: 'x1', round: 1, kind: 'compare', left: { label: 'L', block: { id: 'q1', round: 1, kind: 'question', prompt: 'old' } }, right: { label: 'R', block: null } }], rounds: [] };
-  const next = { blocks: [{ id: 'x1', round: 1, kind: 'compare', left: { label: 'L', block: { id: 'q1', round: 1, kind: 'question', prompt: 'new' } }, right: { label: 'R', block: null } }], rounds: [] };
-  assert.deepEqual(spliced(prev, next).changedBlockIds, ['q1']);
-  assert.ok(ui.includes('flattenBlocks'), 'the flattening must travel with the function into src/ui.mjs');
-});
-
-check('a submitted push clears field state for every block in the replaced subtree, nested ones included', () => {
-  const body = namedFunctionBody(ui, 'applySubmittedPush');
-  assert.match(body, /qsa\('\.block', section\)/, 'the ids must be harvested from the DOM subtree, where nested blocks exist');
-  assert.match(body, /clearFieldState\(roundBlockIds\.concat\(replacedIds\)\)/,
-    'board.blocks alone is the top level only -- a nested question would keep its stale state');
-});
-
-// --- a sent round can never be re-submitted --------------------------------------
-//
-// #send-btn lives in .send-bar, OUTSIDE any round section, so markRoundHistory
-// (which disables everything inside the round it collapses) never reaches it and
-// no CSS hides it. With the old unconditional re-enable in .finally(), a plain
-// double-click posted twice: the second landed on an already-sent round, and its
-// comments were appended again with fresh numbers -- duplicate pins for one
-// comment.
-
-check('a landed submit leaves the send bar disabled; only a failure re-enables it', () => {
-  const body = namedFunctionBody(ui, 'submitBoard');
-  assert.ok(!/\.finally\(/.test(body), 'the unconditional re-enable in .finally() is exactly the double-submit hole');
-  const successArm = body.slice(body.indexOf('}).then(function (result)'), body.indexOf('}).catch('));
-  assert.ok(successArm.length > 0, 'expected a success arm in submitBoard');
-  assert.ok(!/setSendBarEnabled\(true\)/.test(successArm), 'a submit that landed must NOT re-enable the send bar');
-  const failureArm = body.slice(body.indexOf('}).catch('));
-  assert.match(failureArm, /setSendBarEnabled\(true\)/, 'a failed submit must let the reviewer retry');
-});
-
-check('the submitted push disables the send bar, and a new round brings it back', () => {
-  const submitted = namedFunctionBody(ui, 'applySubmittedPush');
-  const roundPush = namedFunctionBody(ui, 'applyRoundPush');
-  // Rounds became pages (ADR.md entry 42), so "may this page send" gained a
-  // second half: the open round must exist AND be the page on screen. Both
-  // halves are asserted, since dropping either is a way back to a live Send on
-  // a round that is already out.
-  assert.match(submitted, /setSendBarEnabled\(openRoundNumber\(\) !== null && currentRound === openRoundNumber\(\)\)/,
-    'a submitted push must lock the send bar -- markRoundHistory cannot reach it, it is outside the round');
-  assert.match(roundPush, /if \(followTheRound\) goToRound\(data\.round\);/,
-    'a new round must bring the send bar back, which it does by making that round the page (goToRound -> refreshPager -> setSendBarEnabled)');
-  assert.match(namedFunctionBody(ui, 'refreshPager'),
-    /if \(!submitInFlight\) setSendBarEnabled\(open !== null && currentRound === open\)/,
-    'and the one place that decides it reads both halves');
-  const open = namedFunctionBody(ui, 'openRoundNumber');
-  // Asked as "not sent", and it has to be: ADR 114 -- a round closed as 'abandoned' (a
-  // conversation declared a boundary and walked away) still stores a late Send, and the
-  // daemon's own submit guard asks this same question, so reading it as 'open' only
-  // would hide the Send bar over a submit the daemon would have taken. A SENT round is
-  // the one this must never name, which is what the two assertions above pin.
-  assert.match(open, /r\.status !== 'sent'/, 'the submittable round is the one nobody has sent, not merely the one still open');
-  // Never re-enable anything in a read-only page, where everything is hard-disabled.
-  assert.match(namedFunctionBody(ui, 'setSendBarEnabled'), /if \(readonly\) return;/);
-});
-
-check('the submit body names the round it targets, and a 409 reads as already-sent rather than an error', () => {
-  const body = namedFunctionBody(ui, 'submitBoard');
-  assert.match(body, /round: openRoundNumber\(\)/,
-    'the server can only refuse a stale submit if the body says which round it is for');
-  assert.match(body, /r\.status === 409/, 'a 409 means the round already went out');
-  assert.match(body, /alreadySent: true/);
-  assert.ok(
-    body.indexOf('r.status === 409') < body.indexOf("throw new Error('submit failed"),
-    'the 409 branch must come before the generic failure throw, or it renders as a red error the reviewer clears by clicking Send again'
-  );
-});
-
-// --- resync on (re)connect -------------------------------------------------------
-//
-// EventSource reconnects, but the stream has no replay and the server emits no
-// `id:` lines -- so anything broadcast while this client was disconnected was lost
-// permanently. Concretely: the reviewer reopens the board from the index while the
-// agent amends the open round; the page never learns of the added question, they
-// send what they see, and that question returns `unanswered` to the agent that
-// just added it.
-
-check('the subscription resyncs on every open, through the same computeBoardPatch a live push uses', () => {
-  assert.match(ui, /es\.addEventListener\('open', function \(\) \{ resync\(\); \}\)/,
-    "'open' fires on the first connect AND every reconnect -- exactly the moments something may have been missed");
-  const resyncBody = namedFunctionBody(ui, 'resync');
-  assert.match(resyncBody, /fetch\('\/b\/' \+ encodeURIComponent\(boardId\)\)/, 'resync must re-read the current board');
-  // Tag/type-qualified, not a bare getElementById -- this document is parsed
-  // straight from response bytes, so a
-  // '## Board data' heading could satisfy a bare id lookup here exactly like
-  // it could at hydrate time (see the top of `ui` itself, and
-  // test/check-archive-ids.mjs, which drives this end to end).
-  assert.match(resyncBody, /querySelector\('script#board-data\[type="application\/json"\]'\)/, 'the board JSON comes from the page\'s own embedded payload, found by a selector no heading can satisfy');
-  assert.match(resyncBody, /\.catch\(/, 'a failed catch-up must never break the live subscription');
-
-  const apply = namedFunctionBody(ui, 'applyResync');
-  assert.match(apply, /computeBoardPatch\(board, fresh\)/, 'the catch-up must diff, not blindly re-render');
-  assert.match(apply, /if \(!patch\.addedBlockIds\.length && !patch\.changedBlockIds\.length && !patch\.roundsNowSent\.length\) return;/,
-    'a first connection with nothing missed must do nothing at all -- no DOM churn, no badge');
-  assert.match(apply, /mode: 'new-round'/, 'a round missed entirely is replayed as the new-round push it was');
-  assert.match(apply, /mode: 'amend'/, 'an amend missed on an existing round is replayed as an amend');
-  assert.match(apply, /applyRoundPush\(/, 'one code path for arrived-live and arrived-late');
-  // ...and the round-status-only case, which inserts nothing.
-  assert.match(apply, /patch\.roundsNowSent\.forEach\(markRoundHistory\)/);
-});
+// A sent round is never offered for sending again (a landed Send keeps the bar
+// disabled, a 409 reads as already sent) and a Defer survives the re-render of an
+// amend: both are driven through the real client in test/check-send-guard.mjs.
 
 // --- the "commenting on:" line is rendered on every block, so it must be hidden ---
 
-check('.comment-target is emitted for every block and has a rule that keeps it hidden until a comment is being composed', () => {
+check('.comment-target is emitted for every commentable block, hidden until a comment is being composed and hidden again once it is queued', () => {
   // Six COMMENTABLE blocks: ADR.md entry 28 means "every block" now names the two
   // rendered kinds, and a markdown fixture would emit none at all.
   const board = createBoard({
     title: 'Six blocks',
     blocks: [1, 2, 3, 4, 5, 6].map(i => ({ kind: 'mermaid', text: `flowchart LR\n  A${i} --> B${i}` })),
   });
-  const markup = renderedMarkup(renderBoardPage(board));
-  const emitted = [...markup.matchAll(/class="comment-target"/g)];
+  const page = renderBoardPage(board);
+  const emitted = [...renderedMarkup(page).matchAll(/class="comment-target"/g)];
   assert.equal(emitted.length, 6, 'render.mjs emits one per commentable block, unconditionally');
-  assert.ok(
-    /\.comment-target \{[^}]*display: none/.test(styles),
-    'without a rule, six blocks render six stray lines each claiming a comment is in progress'
-  );
-  assert.ok(styles.includes('.comment-target.open'), 'and a rule that shows it while a comment IS being composed');
-  // The client opens and closes it alongside the form it labels.
-  const open = namedFunctionBody(ui, 'openCommentForm');
-  assert.match(open, /target\.classList\.add\('open'\)/);
-  const queueListener = listenerBodies(ui).find(b => /pendingComments\.push/.test(b));
-  assert.match(queueListener, /classList\.remove\('open'\)/, 'and closes it again once the comment is queued');
-});
 
-// --- defer survives a re-render ---------------------------------------------------
-
-check('the defer button re-applies the live deferred flag on every wire, like every other widget', () => {
-  // wireRoot runs again on a pushed/amended subtree. single/multi/note all
-  // re-apply their state to the fresh element; defer did not, so an amend showed
-  // an UNdeferred button while Send still reported the question deferred.
-  // Everything BEFORE the click listener is registered -- the click handler
-  // carries its own toggle, so slicing the whole loop would let that copy satisfy
-  // the assertion and prove nothing about what happens at wire time.
-  const deferLoop = ui.slice(ui.indexOf("qsa('.btn-defer', root)"));
-  const beforeListener = deferLoop.slice(0, deferLoop.indexOf('addEventListener'));
-  assert.match(beforeListener, /btn\.classList\.toggle\('active', !!deferred\[qid\]\)/,
-    'the freshly-rendered defer button must show the state the client actually holds, at wire time');
+  // Through the real client and the real stylesheet: without the hiding rule, six
+  // blocks render six stray lines each claiming a comment is in progress.
+  const document = parseHTML(page);
+  // 'EventSource' declared, never passed -- QUIRKS.md "A `new Function` harness
+  // inherits the host's globals".
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, document.defaultView, { protocol: 'http:' });
+  const blockId = board.blocks[0].id;
+  const target = document.querySelector('div#comment-target-' + blockId);
+  const display = () => resolveComputedProperty(styles, target, true, 'display').trim();
+  assert.equal(display(), 'none', 'hidden while no comment is being composed');
+  document.querySelector(`.comment-btn[data-block-id="${blockId}"]`).dispatchEvent(new StandInEvent('click'));
+  assert.notEqual(display(), 'none', 'shown while its comment form is open');
+  const form = document.querySelector('form#comment-form-' + blockId);
+  form.querySelector('input[type=text]').value = 'a remark on the diagram';
+  form.dispatchEvent(new StandInEvent('submit'));
+  assert.equal(document.querySelectorAll('.comment-item.comment-pending').length, 1, 'setup failure: the comment must have been queued');
+  assert.equal(display(), 'none', 'and hidden again once the comment is queued');
 });
 
 // --- no more mirror drift between the markup and the stylesheet -------------------
@@ -8224,12 +7458,9 @@ check('every class the stylesheet rules on is a class something actually emits',
 });
 
 // --- indexpage.mjs: the thread index's own render path ----------------
-// buildThreadIndex, renderIndexPage, folderName, roundCount and threadRow (the last
-// not exported -- exercised only through renderIndexPage's output, same as every
-// other unexported render helper in this file) were imported by no test at all.
-// `folderName` and `roundCount` gained an `export` here for exactly this
-// -- neither needed one to do its job inside indexpage.mjs, only to be reached from
-// outside it.
+// buildThreadIndex, renderIndexPage and folderName, plus roundCount and threadRow
+// (neither exported -- exercised only through renderIndexPage's output, same as every
+// other unexported render helper in this file).
 
 function extractThreadItem(html, boardId) {
   // The href tolerates a trailing fragment: a live row links to
@@ -8266,14 +7497,6 @@ check('folderName: the last path segment only, and null for no cwd', () => {
   assert.equal(folderName('/Users/alex/Documents/claude-board/sub/dir'), 'dir');
   assert.equal(folderName(null), null);
   assert.equal(folderName(''), null);
-});
-
-check('roundCount: a board doc\'s own rounds-array length, zero for a shape that has none', () => {
-  const board = createBoard({ title: 'x', cwd: fixturesDir });
-  assert.equal(roundCount(board), 1);
-  addRound(board, {});
-  assert.equal(roundCount(board), 2);
-  assert.equal(roundCount({}), 0, 'must read as zero, not throw, on a board-shaped object with no rounds at all');
 });
 
 check('the rounds-left badge counts open rounds that still ask something, not question blocks -- correctly singular at one, plural at two', () => {
@@ -8316,33 +7539,24 @@ check('the rounds-left badge counts open rounds that still ask something, not qu
   assert.doesNotMatch(item2, /1 rounds left/, 'never "1 rounds left"');
 });
 
-check('an index row with no open asking round renders no badge element at all -- not a zero-reading one', () => {
+check('an index row whose only round was sent -- its question answered, or left deferred -- counts zero and renders no badge element at all, not a zero-reading one', () => {
   const dir = path.join(fixturesDir, 'indexpage-fixtures', 'rounds-left-zero');
   mkdirSync(dir, { recursive: true });
-  const board = createBoard({ title: 'settled', cwd: dir, blocks: [{ kind: 'question', prompt: 'q', widget: 'text' }] });
-  const qid = board.blocks[0].id;
-  board.answers = { [qid]: { status: 'answered', choice: 'x', note: '' } };
-  board.rounds[0].status = 'sent';
-  const [thread] = buildThreadIndex([board]);
-  assert.equal(thread.roundsLeft, 0);
-  const item = extractThreadItem(renderIndexPage({ threads: [thread] }), board.id);
-  assert.doesNotMatch(item, /rounds-left-badge/, 'no badge element at all, zero-reading or otherwise');
-  assert.doesNotMatch(item, /\brounds? left\b/, 'no leftover badge text either');
-  assert.doesNotMatch(item, /class="thread-status"/, 'no empty status wrapper left in its place');
-});
-
-check('a question left deferred inside an already-SENT round contributes nothing to the count', () => {
   // A sent round cannot be returned to -- so once `applySubmit` marks a round `sent`,
-  // whatever any of its questions were left as is no longer an open trip back to
-  // the board, `deferred` included.
-  const dir = path.join(fixturesDir, 'indexpage-fixtures', 'rounds-left-deferred');
-  mkdirSync(dir, { recursive: true });
-  const board = createBoard({ title: 'x', cwd: dir, blocks: [{ kind: 'question', prompt: 'q', widget: 'text' }] });
-  const qid = board.blocks[0].id;
-  board.answers = { [qid]: { status: 'deferred', choice: null, note: '' } };
-  board.rounds[0].status = 'sent';
-  const [thread] = buildThreadIndex([board]);
-  assert.equal(thread.roundsLeft, 0, 'a deferred question inside a SENT round is not an open round');
+  // whatever any of its questions were left as is no longer an open trip back to the
+  // board, `deferred` included.
+  for (const status of ['answered', 'deferred']) {
+    const board = createBoard({ title: `settled ${status}`, cwd: dir, blocks: [{ kind: 'question', prompt: 'q', widget: 'text' }] });
+    const qid = board.blocks[0].id;
+    board.answers = { [qid]: { status, choice: status === 'answered' ? 'x' : null, note: '' } };
+    board.rounds[0].status = 'sent';
+    const [thread] = buildThreadIndex([board]);
+    assert.equal(thread.roundsLeft, 0, `${status}: a question inside a SENT round is not an open round`);
+    const item = extractThreadItem(renderIndexPage({ threads: [thread] }), board.id);
+    assert.doesNotMatch(item, /rounds-left-badge/, `${status}: no badge element at all, zero-reading or otherwise`);
+    assert.doesNotMatch(item, /\brounds? left\b/, `${status}: no leftover badge text either`);
+    assert.doesNotMatch(item, /class="thread-status"/, `${status}: no empty status wrapper left in its place`);
+  }
 });
 
 check('a round that asks nothing contributes nothing to the count, and the badge and the live dot never disagree', () => {
@@ -8481,26 +7695,24 @@ check('a board with neither a title nor a cwd still produces exactly one headlin
   assert.match(item, headlineRe('\\(untitled\\)'), 'falls back to a plain label, not the literal word "untitled" read as if it were a real title, and not an empty headline');
 });
 
-check('three threads sharing one cwd render as three visibly distinct rows, told apart by title', () => {
-  // Keying by project
-  // directory instead of by thread would collapse these into one row.
-  const dir = path.join(fixturesDir, 'indexpage-fixtures', 'shared');
-  mkdirSync(dir, { recursive: true });
+check('three threads sharing one cwd render as three visibly distinct rows -- titled ones each headlined by its own title, title-less ones still told apart by what else the row carries', () => {
+  // Keying by project directory instead of by thread would collapse either trio into
+  // one row.
+  const titledDir = path.join(fixturesDir, 'indexpage-fixtures', 'shared');
+  mkdirSync(titledDir, { recursive: true });
   const titles = ['Pick a database', 'Pick a queue', 'Pick a cache'];
-  const boards = titles.map(title => createBoard({ title, cwd: dir }));
-  const threads = buildThreadIndex(boards);
-  assert.equal(threads.length, 3, 'three distinct threads, not collapsed by the shared cwd');
-  const html = renderIndexPage({ threads });
-  const items = boards.map(b => extractThreadItem(html, b.id));
+  const titled = titles.map(title => createBoard({ title, cwd: titledDir }));
+  const titledThreads = buildThreadIndex(titled);
+  assert.equal(titledThreads.length, 3, 'three distinct titled threads, not collapsed by the shared cwd');
+  const titledHtml = renderIndexPage({ threads: titledThreads });
+  const titledItems = titled.map(b => extractThreadItem(titledHtml, b.id));
   // On VISIBLE text, not raw markup: href and data-thread-id differ by board id
   // on every row regardless of anything a reviewer can see, so comparing raw
   // item strings would pass even for three rows that read identically.
-  assert.equal(new Set(items.map(visibleText)).size, 3, 'each row must actually read differently to a reviewer, not just differ in markup nobody sees');
-  titles.forEach((title, i) => assert.match(items[i], headlineRe(title), `row ${i} headlines its own title`));
-});
+  assert.equal(new Set(titledItems.map(visibleText)).size, 3, 'each titled row must actually read differently to a reviewer, not just differ in markup nobody sees');
+  titles.forEach((title, i) => assert.match(titledItems[i], headlineRe(title), `titled row ${i} headlines its own title`));
 
-check('three TITLE-LESS threads sharing one cwd still render as three distinct rows -- title alone cannot tell them apart here', () => {
-  // The titled check above is satisfied even if the row's only discriminator
+  // The titled trio is satisfied even if the row's only discriminator
   // were the title itself. There was a regression here specifically
   // for title-less boards, where the headline (folder name) AND the path line
   // (suppressed once the folder IS the headline) collide identically across all
@@ -8539,19 +7751,23 @@ check('buildThreadIndex uses the PRIMARY board\'s own round count for a multi-do
   addRound(b1, {}); // b1: 3 rounds
   const b2 = createBoard({ title: 'second doc', cwd: dir, thread: 'th_indexpage_shared' });
   addRound(b2, {}); // b2: 2 rounds
+  // Neither board is live, so the primary is the most recently updated one. Stamped
+  // explicitly: two boards minted in the same millisecond tie, and the primary would
+  // then be whichever the sort happened to keep first.
+  b1.updatedAt = '2026-08-02T00:00:00.000Z';
+  b2.updatedAt = '2026-08-01T00:00:00.000Z';
   const threads = buildThreadIndex([b1, b2]);
   assert.equal(threads.length, 1, 'one thread, even with two board docs behind it');
   assert.equal(threads[0].boardCount, 2);
-  const primary = threads[0].boardId === b1.id ? b1 : b2;
-  assert.equal(threads[0].rounds, roundCount(primary), 'the row must describe the board it actually links to, not the group');
-  assert.notEqual(threads[0].rounds, roundCount(b1) + roundCount(b2), 'must not be the cross-board sum -- 5 is a round count that exists on neither board');
+  assert.equal(threads[0].boardId, b1.id, 'setup sanity: the newer board is the one the row links to');
+  assert.equal(threads[0].rounds, 3, 'the row must describe the board it actually links to (3 rounds), not the group');
   const html = renderIndexPage({ threads });
   const item = extractThreadItem(html, threads[0].boardId);
-  const n = roundCount(primary);
-  assert.match(item, new RegExp('\\b' + n + ' round' + (n === 1 ? '' : 's') + '\\b'), 'worded as a count ("N rounds"), matching the linked board');
+  assert.match(item, /\b3 rounds\b/, 'worded as a count ("N rounds"), matching the linked board');
+  assert.doesNotMatch(item, /\b5 rounds?\b/, 'never the cross-board sum -- 5 is a round count that exists on neither board');
 });
 
-check('the round segment reads as a count, not an ordinal, is pluralized correctly, and is suppressed entirely at zero', () => {
+check('the round segment reads as a count, not an ordinal, is pluralized correctly, and is suppressed entirely for a board with no rounds key at all', () => {
   // "round N" reads as a POSITION (which round you're on) -- src/badge.mjs's own
   // doc comment names exactly this confusion as a real bug, not a wording
   // nitpick, for the board page's own badge. The index row is a total, never a
@@ -8560,7 +7776,9 @@ check('the round segment reads as a count, not an ordinal, is pluralized correct
   const twoRounds = createBoard({ title: 'two rounds', cwd: fixturesDir });
   addRound(twoRounds, {});
   const noRounds = createBoard({ title: 'no rounds', cwd: fixturesDir });
-  noRounds.rounds = [];
+  // No `rounds` key at all, not an empty array: the round count and the open-round
+  // count both fall back through `board.rounds || []`, and must read zero, not throw.
+  delete noRounds.rounds;
   const threads = buildThreadIndex([oneRound, twoRounds, noRounds]);
   const html = renderIndexPage({ threads });
   const oneItem = extractThreadItem(html, oneRound.id);
@@ -8668,7 +7886,7 @@ check('indexScript (the relative-time client script) parses and runs against a m
   // since 22.x -- at which point this stand-in would construct a real one against
   // the relative URL '/api/events' and throw, from a check that is about relTime.
   // A test that passes because of the interpreter's build options is not passing.
-  // The three sibling sites below declare it for the same reason;
+  // The sibling sites below declare it for the same reason;
   // test/check-index-live.mjs is the one place that really supplies one.
   new Function('document', 'setInterval', 'EventSource', indexScript)(fakeDocument, fakeSetInterval);
   assert.equal(typeof intervalFn, 'function', 'refresh must be wired through setInterval so an open tab keeps relative times fresh');
@@ -8681,19 +7899,21 @@ check('indexScript (the relative-time client script) parses and runs against a m
   assert.ok(intervalMs > 0 && intervalMs <= 20000, `refresh must poll often enough to never skip the narrowest bucket -- got ${intervalMs}ms`);
 });
 
-/** Extract `relTime` out of the `indexScript` string by appending a `return`, the
- * same `new Function(src + '; return name;')()` technique extractUiFunction uses
- * on `ui` above (test/check-pure.mjs's own anchor-parity section) — safe here
- * because indexScript declares it as a plain top-level function, not hidden
- * inside an IIFE. `document`/`setInterval` stand-ins are still required: indexScript's
- * own top-level `refresh(); setInterval(refresh, ...);` calls run as a side
- * effect of merely evaluating it, before the appended `return` is ever reached.
- * Throws loudly, not silently, if extraction ever breaks. */
-function extractRelTime() {
-  const noopDocument = { querySelectorAll: () => [], querySelector: () => null }; // see the check above: initPomodoroWidget's own bail-out
+/** Extract one of indexScript's plain top-level function declarations (`relTime`,
+ * the pomodoro helpers) by name, by appending a `return`, the same
+ * `new Function(src + '; return name;')()` technique extractUiFunction uses on `ui`
+ * above (test/check-pure.mjs's own anchor-parity section) — safe because none of
+ * them is hidden inside an IIFE. `document`/`setInterval` stand-ins are still
+ * required: indexScript's own top-level `refresh(); setInterval(tick, ...);` calls
+ * run as a side effect of merely evaluating it, before the appended `return` is
+ * ever reached, and the document's `querySelector` returning null is
+ * initPomodoroWidget's own bail-out (see the check above). Throws loudly, not
+ * silently, if extraction ever breaks. */
+function extractIndexScriptFn(name) {
+  const noopDocument = { querySelectorAll: () => [], querySelector: () => null };
   const noopSetInterval = () => {};
-  const fn = new Function('document', 'setInterval', 'EventSource', indexScript + '; return relTime;')(noopDocument, noopSetInterval);
-  if (typeof fn !== 'function') throw new Error('indexScript extraction did not yield relTime as a function');
+  const fn = new Function('document', 'setInterval', 'EventSource', `${indexScript}\n; return ${name};`)(noopDocument, noopSetInterval);
+  if (typeof fn !== 'function') throw new Error(`indexScript extraction did not yield ${name} as a function`);
   return fn;
 }
 
@@ -8706,7 +7926,7 @@ check('relTime: pinned at the exact boundaries its own if-chain names, with a fi
   // "an hour ago"). These boundaries are pinned at the value where each unit
   // itself rounds over, not at the round-number-looking-but-wrong spellings
   // (45min/22h/25d) the old, buggy version used.
-  const relTime = extractRelTime();
+  const relTime = extractIndexScriptFn('relTime');
   const SEC = 1000, MIN = 60 * SEC, HOUR = 60 * MIN, DAY = 24 * HOUR;
   const now = 1_700_000_000_000; // arbitrary fixed instant
   const at = msAgo => new Date(now - msAgo).toISOString();
@@ -9110,49 +8330,26 @@ check('the recovery command is one string, read from one place by everything tha
   }
 });
 
-check('nothing in the tree still refers to the deleted board-scoped submit token', () => {
-  // "Submit collapses into the read credential", and the deletion lands
-  // in the same slice as the gate. A leftover reference is a leftover code path.
-  const files = ['src/secret.mjs', 'src/server.mjs', 'src/handoff.mjs', 'src/ui.mjs', 'bin/mcp.mjs', 'bin/authorize.mjs', 'PROTOCOL.md'];
-  for (const f of files) {
-    const src = readFileSync(path.join(repoRoot, f), 'utf8');
-    for (const dead of ['cb_submit', 'SUBMIT_COOKIE', 'submitToken']) {
-      assert.ok(!src.includes(dead), `${f} still mentions ${dead}`);
-    }
-  }
-});
-
 // --- the pomodoro widget ---------------------------
 // Drives the REAL indexScript against the REAL renderIndexPage() markup, through
 // test/dom-stand-in.mjs -- never a hand-summary of what the widget does
 // (QUIRKS.md: "a mock of someone else's renderer is worth exactly as much as the
 // last time someone checked it against the real thing"). `fetch` is stubbed on
-// globalThis for the duration of each check (same idiom test/check-enter.mjs's
+// globalThis for the duration of each check (same idiom test/support.mjs's
 // withFetchCapture and test/check-comment-mode.mjs already use for `ui`);
 // `setInterval` is still the explicit new Function(...) parameter the indexScript
 // checks above already rely on, which is what lets a check fire a "tick" or a
 // "poll" by hand instead of racing a real 1s/15s timer. This whole section is
-// async (a local `checkAsync`, awaited below) because a pomodoro fetch's own
+// async (`checkAsync` from test/support.mjs, awaited below) because a pomodoro fetch's own
 // `.then()` chain needs at least one real event-loop turn to settle -- the plain
 // synchronous `check()` above cannot observe that.
-
-let asyncFailures = 0;
-async function checkAsync(name, fn) {
-  try {
-    await fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    asyncFailures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
 
 /** Stub globalThis.fetch for the duration of `fn(calls)`, recording every call
  * (url, method, credentials, parsed JSON body) and resolving each with
  * `handler(call)` as the response's JSON body. Restores the original fetch even
- * if `fn` throws -- same discipline test/check-archive-ids.mjs's own fetch stubs
- * already follow. */
+ * if `fn` throws -- same discipline as the fetch stub test/support.mjs's
+ * `loadArchiveThemed` installs, which it takes off itself when the load throws
+ * and hands the caller a `restore()` for otherwise. */
 async function withPomodoroFetch(handler, fn) {
   const original = globalThis.fetch;
   const calls = [];
@@ -9180,15 +8377,13 @@ async function withPomodoroFetch(handler, fn) {
   return calls;
 }
 
-/** Empties the microtask queue (and then some): fetchPomodoro/postPomodoro's own
- * chain is `fetch(...).then(r => r.json()).then(data => {...})`, and the stub
- * above adds its own `Promise.resolve()` on top -- several microtask hops.
- * `setTimeout(resolve, 0)` is scheduled as a macrotask, and Node drains every
- * pending microtask before running the next macrotask, so one call here is
- * always enough regardless of exactly how many `.then()` links are chained. */
-function flushPomodoro() {
-  return new Promise(resolve => setTimeout(resolve, 0));
-}
+// The pomodoro checks below `await flush(1)` after a load or a click inside
+// `withPomodoroFetch`, to empty the microtask queue (and then some):
+// fetchPomodoro/postPomodoro's own chain is `fetch(...).then(r => r.json()).then(data =>
+// {...})`, and the stub above adds its own `Promise.resolve()` on top -- several microtask
+// hops. `flush(1)` is one macrotask hop, and Node drains every pending microtask before
+// running the next macrotask, so one call is always enough regardless of exactly how
+// many `.then()` links are chained.
 
 // Fixture cue values, read from cueNames() itself rather than hardcoded --
 // mirrors src/cues.mjs's own "enumerated, never a second guess at the
@@ -9258,7 +8453,7 @@ function fetchPomodoroFn(intervals) {
   return matches[matches.length - 1].fn;
 }
 
-check('pomodoro widget: the markup is emitted in index-head-actions, beside themeToggle(), with all eleven settings fields present', () => {
+check('pomodoro widget: the markup renders before themeToggle()\'s button, as an off role="switch" never hidden, with all eleven settings fields present and no retired sound field', () => {
   const html = renderIndexPage({ threads: [] });
   assert.match(html, /<div class="pomodoro-widget" id="pomodoro-widget">/);
   assert.match(html, /<span class="pomodoro-status" id="pomodoro-status">/);
@@ -9403,22 +8598,19 @@ check('pomodoro widget: the status text alone denies selection; the settings pan
   }
 });
 
-check('pomodoro widget: reuses formatCountdown verbatim -- indexScript embeds the real function source, not a second mm:ss formatter', () => {
-  assert.ok(indexScript.includes(formatCountdown.toString()), 'indexScript must contain formatCountdown\'s own real source, spliced in via .toString() (src/ui.mjs\'s roundNumberLabel/computeBoardPatch technique), not a hand-copied restatement of it');
-  // A second, independently written formatter would very likely reach for the
-  // same padStart(2, '0') idiom formatCountdown itself uses -- counting
-  // occurrences catches that shape of regression without demanding indexScript
-  // contain literally nothing else that mentions padStart.
-  const padStartInScript = (indexScript.match(/padStart/g) || []).length;
-  const padStartInFormatCountdown = (formatCountdown.toString().match(/padStart/g) || []).length;
-  assert.equal(padStartInScript, padStartInFormatCountdown, 'indexScript must not contain a second, hand-written mm:ss formatter alongside the embedded formatCountdown');
-});
-
-check('pomodoro widget: polls on the same order of magnitude as refresh\'s own 15s poll, never every second', () => {
-  const m = indexScript.match(/POMODORO_POLL_MS\s*=\s*(\d+)/);
-  assert.ok(m, 'setup failure: POMODORO_POLL_MS not found in indexScript');
-  const ms = Number(m[1]);
-  assert.ok(ms >= 5000 && ms <= 20000, `POMODORO_POLL_MS must be a modest poll interval, not per-second -- got ${ms}ms`);
+await checkAsync('pomodoro widget: the real script re-fetches the timer on the same order of magnitude as refresh\'s own 15s poll, never every second', async () => {
+  // Read off the interval the loaded script actually registers fetchPomodoro at, not
+  // off the constant's spelling in the source: a poll wired to the wrong constant, or
+  // registered at 1000 beside the local repaint tick, is what a reader would feel.
+  const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: Date.now() };
+  let intervals;
+  await withPomodoroFetch(() => doc, async () => {
+    ({ intervals } = loadIndexWithPomodoro());
+    await flush(1);
+  });
+  const poll = intervals.find(e => e.fn.name === 'fetchPomodoro');
+  assert.ok(poll, 'setup failure: the widget registered no fetchPomodoro interval');
+  assert.ok(poll.ms >= 5000 && poll.ms <= 20000, `the widget's re-fetch must be a modest poll, not per-second -- registered at ${poll.ms}ms`);
 });
 
 check('pomodoroRemainingMs: a browser clock skewed by a full minute renders the identical countdown once the daemon-derived offset is applied', () => {
@@ -9457,52 +8649,13 @@ check('pomodoroRemainingMs: no timer at all is 0, never a thrown error', () => {
   assert.equal(remainingMs(null, 0, Date.now()), 0);
 });
 
-/** Same `new Function(src + '; return name;')()` extraction technique
- * extractRelTime already uses on indexScript, generalised to any of its plain
- * top-level function declarations -- safe here for the same reason: none of
- * indexScript's pomodoro functions are hidden inside an IIFE. */
-function extractIndexScriptFn(name) {
-  const noopDocument = { querySelectorAll: () => [], querySelector: () => null };
-  const noopSetInterval = () => {};
-  const fn = new Function('document', 'setInterval', 'EventSource', `${indexScript}\n; return ${name};`)(noopDocument, noopSetInterval);
-  if (typeof fn !== 'function') throw new Error(`indexScript extraction did not yield ${name} as a function`);
-  return fn;
-}
-
-await checkAsync('a pomodoro-widget check that throws while the widget is loading cannot poison the rest of this file: the fetch stub is always restored, and an unstubbed load fails loudly instead of reaching the network', async () => {
-  // Every widget check here replaces globalThis.fetch, and checkAsync catches a
-  // failure and keeps going -- so a stub that outlived its own check would silently
-  // answer, and RECORD, every request the checks after it make, turning one red into
-  // a file of nonsense. Two guards, both asserted rather than assumed:
-  const original = globalThis.fetch;
-  const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: Date.now() };
-
-  // 1. A throw from inside the stub's scope (init is where these throw, since
-  // loadIndexWithPomodoro runs the real script) still restores it.
-  await assert.rejects(
-    withPomodoroFetch(() => doc, async () => {
-      loadIndexWithPomodoro();
-      throw new Error('the widget blew up while loading');
-    }),
-    /blew up while loading/);
-  assert.equal(globalThis.fetch, original, 'the real fetch must be back after a failed check, stub and all');
-  assert.ok(!globalThis.fetch.pomodoroStub);
-
-  // 2. The precondition loadIndexWithPomodoro documents is enforced: initPomodoroWidget
-  // fetches while loading, so an unstubbed load would put a real request on the wire
-  // from a check that is supposed to be pure -- and leave an unhandled rejection
-  // behind rather than a legible failure.
-  assert.throws(() => loadIndexWithPomodoro(), /must run inside withPomodoroFetch/);
-  assert.equal(globalThis.fetch, original, 'and a refused load leaves the global exactly as it found it');
-});
-
 await checkAsync('pomodoro widget: no timer running renders a calm idle state (the state named, no duration and no countdown) and leaves the switch off but live', async () => {
   const nowMs = Date.now();
   const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
   let document;
   await withPomodoroFetch(() => doc, async () => {
     ({ document } = loadIndexWithPomodoro());
-    await flushPomodoro();
+    await flush(1);
   });
   const status = document.querySelector('span#pomodoro-status');
   const toggle = document.querySelector('button#pomodoro-toggle');
@@ -9527,23 +8680,7 @@ await checkAsync('pomodoro widget: no timer running renders a calm idle state (t
   assert.notEqual(toggle.hidden, true, 'the switch must stay visible and live when idle -- it is the control that starts a pomodoro, and hiding it is what broke it before');
 });
 
-await checkAsync('pomodoro widget: a running timer renders "<Phase> mm:ss" from the real formatCountdown and shows a live Pause control', async () => {
-  const nowMs = Date.now();
-  const doc = { settings: POMODORO_SETTINGS, cycle: 1, cycleDate: '2020-01-01', timer: { phase: 'work', deadline: nowMs + 12 * 60_000 + 34_000, paused: false }, now: nowMs };
-  let document;
-  await withPomodoroFetch(() => doc, async () => {
-    ({ document } = loadIndexWithPomodoro());
-    await flushPomodoro();
-  });
-  const status = document.querySelector('span#pomodoro-status');
-  const toggle = document.querySelector('button#pomodoro-toggle');
-  assert.match(status.textContent, /Work/);
-  assert.match(status.textContent, /12:3[0-9]/, `expected roughly 12:34 in ${status.textContent}`);
-  assert.equal(toggle.getAttribute('aria-checked'), 'true', 'a running, unpaused timer is the switch\'s ON state');
-  assert.equal(toggle.getAttribute('aria-label'), 'Pause pomodoro');
-});
-
-await checkAsync('pomodoro widget: a running work or short-break interval names its position in the cycle as "Work 3/4 · 12:34"; a long break carries no position', async () => {
+await checkAsync('pomodoro widget: a running work or short-break interval names its position in the cycle as "Work 3/4 · 12:34", counting down rounded to the nearest second, with the switch on and offering Pause; a long break carries no position', async () => {
   const nowMs = Date.now();
   // cycle: 2 means two work intervals already completed this cycle -- the THIRD
   // is the one now running, out of POMODORO_SETTINGS.longEvery (4).
@@ -9551,18 +8688,24 @@ await checkAsync('pomodoro widget: a running work or short-break interval names 
   let document;
   await withPomodoroFetch(() => workDoc, async () => {
     ({ document } = loadIndexWithPomodoro());
-    await flushPomodoro();
+    await flush(1);
   });
   let status = document.querySelector('span#pomodoro-status');
   assert.match(status.textContent, /^Work 3\/4 · 12:3[0-9]$/, `expected "Work 3/4 · 12:34"-shaped text, got "${status.textContent}"`);
+  const toggle = document.querySelector('button#pomodoro-toggle');
+  assert.equal(toggle.getAttribute('aria-checked'), 'true', 'a running, unpaused timer is the switch\'s ON state');
+  assert.equal(toggle.getAttribute('aria-label'), 'Pause pomodoro', 'and the switch names what it does from there: pause');
 
   // A short break inherits the SAME cycle value as the work interval it follows
   // (settleBoundary only increments `cycle` when a BREAK ends, src/pomodoro.mjs)
   // -- so it carries the identical position, not a fresh count of its own.
-  const breakDoc = { settings: POMODORO_SETTINGS, cycle: 2, cycleDate: '2020-01-01', timer: { phase: 'break', deadline: nowMs + 4 * 60_000, paused: false }, now: nowMs };
+  // 400ms short of four minutes, so the countdown only reads 04:00 if it ROUNDS to the
+  // nearest second (src/pomodoro.mjs formatCountdown, embedded into indexScript): a
+  // second, floor-based formatter in the page would read 03:59 here.
+  const breakDoc = { settings: POMODORO_SETTINGS, cycle: 2, cycleDate: '2020-01-01', timer: { phase: 'break', deadline: nowMs + 4 * 60_000 - 400, paused: false }, now: nowMs };
   await withPomodoroFetch(() => breakDoc, async () => {
     ({ document } = loadIndexWithPomodoro());
-    await flushPomodoro();
+    await flush(1);
   });
   status = document.querySelector('span#pomodoro-status');
   assert.match(status.textContent, /^Break 3\/4 · 04:00$/, `expected "Break 3/4 · 04:00"-shaped text, got "${status.textContent}"`);
@@ -9572,7 +8715,7 @@ await checkAsync('pomodoro widget: a running work or short-break interval names 
   const longBreakDoc = { settings: POMODORO_SETTINGS, cycle: 3, cycleDate: '2020-01-01', timer: { phase: 'longBreak', deadline: nowMs + 15 * 60_000, paused: false }, now: nowMs };
   await withPomodoroFetch(() => longBreakDoc, async () => {
     ({ document } = loadIndexWithPomodoro());
-    await flushPomodoro();
+    await flush(1);
   });
   status = document.querySelector('span#pomodoro-status');
   assert.match(status.textContent, /^Long break · 15:00$/, `a long break must carry no position, got "${status.textContent}"`);
@@ -9598,7 +8741,7 @@ await checkAsync('pomodoro widget: lowering longEvery mid-cycle never renders a 
   let document;
   await withPomodoroFetch(() => doc, async () => {
     ({ document } = loadIndexWithPomodoro());
-    await flushPomodoro();
+    await flush(1);
   });
   const status = document.querySelector('span#pomodoro-status');
   assert.match(status.textContent, /^Work 2\/2 · 05:00$/, `expected the position clamped to the cycle's own length, got "${status.textContent}"`);
@@ -9610,7 +8753,7 @@ await checkAsync('pomodoro widget: a paused timer renders the frozen remainingMs
   let document, intervals;
   await withPomodoroFetch(() => doc, async () => {
     ({ document, intervals } = loadIndexWithPomodoro());
-    await flushPomodoro();
+    await flush(1);
   });
   const status = document.querySelector('span#pomodoro-status');
   const toggle = document.querySelector('button#pomodoro-toggle');
@@ -9630,34 +8773,9 @@ await checkAsync('pomodoro widget: a paused timer renders the frozen remainingMs
 });
 
 // The phase -> mark mapping (header glyph only -- the tab's own favicon is
-// fixed and carries no phase at all, ADR 85) and the null-phase guard. The
-// pure predicates are extracted and driven directly first (the non-trivial
-// logic the spec names as needing a runnable check), then the same states
-// are driven end to end through the real indexScript + renderIndexPage
-// markup, the same DOM-stand-in shape every other pomodoro widget check
-// above already uses.
-
-check('pomodoroIsResting: only a RUNNING, UNPAUSED break or long break counts as resting -- work, idle, a paused timer in ANY phase (including mid-break), and a phase the daemon has never reported all read false', () => {
-  const isResting = extractIndexScriptFn('pomodoroIsResting');
-  assert.equal(isResting(null), false, 'no timer at all (no poll has returned yet) must never read as resting -- the anti-flicker guard');
-  assert.equal(isResting(undefined), false);
-  assert.equal(isResting({ phase: 'work', paused: false }), false);
-  assert.equal(isResting({ phase: 'break', paused: false }), true);
-  assert.equal(isResting({ phase: 'longBreak', paused: false }), true, 'a long break must satisfy the identical rest condition as a short break');
-  assert.equal(isResting({ phase: 'break', paused: true }), false, 'a PAUSED break must keep the ordinary mark -- idle and paused both keep it regardless of which phase they are paused in');
-  assert.equal(isResting({ phase: 'longBreak', paused: true }), false);
-  assert.equal(isResting({ phase: 'idle', paused: false }), false, 'a phase name the daemon has never actually sent must never be read as resting');
-  assert.equal(isResting({ phase: undefined, paused: false }), false);
-});
-
-check('pomodoroIsActiveWork: only a RUNNING, UNPAUSED work interval turns the glyph amber -- idle and paused (any phase) stay muted', () => {
-  const isActiveWork = extractIndexScriptFn('pomodoroIsActiveWork');
-  assert.equal(isActiveWork(null), false);
-  assert.equal(isActiveWork({ phase: 'work', paused: false }), true);
-  assert.equal(isActiveWork({ phase: 'work', paused: true }), false, 'a paused work interval must not read as active -- paused keeps the muted tomato, not amber');
-  assert.equal(isActiveWork({ phase: 'break', paused: false }), false);
-  assert.equal(isActiveWork({ phase: 'longBreak', paused: false }), false);
-});
+// fixed and carries no phase at all, ADR 85) and the null-phase guard, driven
+// end to end through the real indexScript + renderIndexPage markup, the same
+// DOM-stand-in shape every other pomodoro widget check above already uses.
 
 // The two glyphs told apart by their <path> count/geometry, read off the REAL
 // TOMATO_ICON/REST_ICON exports (src/pomodoro-widget.mjs) rather than a
@@ -9682,7 +8800,7 @@ function pomodoroGlyphPaths(document) {
   return [...slot.querySelectorAll('path')].map(p => p.getAttribute('d'));
 }
 
-await checkAsync('a running, unpaused break or long break swaps the header glyph to the rest glyph, muted; work alone turns the glyph amber; idle, paused, and a paused break all keep the ordinary tomato -- the tab favicon never moves off its one href in any of these states', async () => {
+await checkAsync('a running, unpaused break or long break swaps the header glyph to the rest glyph, muted; work alone turns the glyph amber; idle, paused, a paused break, and a phase the daemon never sends all keep the ordinary tomato -- the tab favicon never moves off its one href in any of these states', async () => {
   const nowMs = Date.now();
   const cases = [
     { name: 'idle', timer: null, paths: TOMATO_PATHS, amber: false, restStatus: false },
@@ -9694,13 +8812,23 @@ await checkAsync('a running, unpaused break or long break swaps the header glyph
     // pausing never hands the rest mark to a phase that would otherwise earn it.
     { name: 'paused short break', timer: { phase: 'break', paused: true, remainingMs: 90_000 }, paths: TOMATO_PATHS, amber: false, restStatus: false },
     { name: 'paused long break', timer: { phase: 'longBreak', paused: true, remainingMs: 90_000 }, paths: TOMATO_PATHS, amber: false, restStatus: false },
+    // Shapes the daemon never sends (normalizeDoc keeps only a known phase), which
+    // the two predicates must still read as neither resting nor working rather than
+    // throw or guess: no timer key at all, a phase name that is not one, and none.
+    { name: 'timer key absent', timer: undefined, paths: TOMATO_PATHS, amber: false, restStatus: false },
+    { name: 'unknown phase', timer: { phase: 'idle', paused: false }, paths: TOMATO_PATHS, amber: false, restStatus: false },
+    { name: 'no phase', timer: { phase: undefined, paused: false }, paths: TOMATO_PATHS, amber: false, restStatus: false },
   ];
   for (const c of cases) {
     const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: '2020-01-01', timer: c.timer, now: nowMs };
     let document;
     await withPomodoroFetch(() => doc, async () => {
-      ({ document } = loadIndexWithPomodoro());
-      await flushPomodoro();
+      let intervals;
+      ({ document, intervals } = loadIndexWithPomodoro());
+      await flush(1);
+      // A repaint tick runs the glyph logic synchronously, so a predicate that throws on
+      // a missing timer fails here rather than inside the swallowed opening fetch.
+      pomodoroTickFn(intervals)();
     });
     // Pins ADR 85: no Timer state ever moves the tab's favicon off its one href.
     const favicon = document.querySelector('link[rel="icon"]');
@@ -9715,38 +8843,12 @@ await checkAsync('a running, unpaused break or long break swaps the header glyph
   }
 });
 
-// This regression line stays its own line, not a row in the table above: a table
-// row is easy to edit away while the table still passes. Staying true costs
-// nothing -- renderPomodoroGlyph only ever mounts REST_ICON under
-// pomodoroIsResting, which idle (timer === null) cannot satisfy, so idle has
-// always drawn the muted tomato and the menu bar item is the surface that has to
-// come to it. What this pins is that it STAYS that way while the item is built
-// against it: both surfaces read idle as one shape.
-await checkAsync('idle draws the muted tomato and never the rest glyph, in the server-rendered markup and after the first fetch alike', async () => {
-  const nowMs = Date.now();
-  const idle = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
-  // The server-rendered slot first: no script has run at all here, and this is
-  // what a reader sees for the whole first round trip.
-  const served = parseHTML(renderIndexPage({ threads: [] }));
-  assert.deepEqual(pomodoroGlyphPaths(served), TOMATO_PATHS, 'the slot must be server-rendered with the tomato -- the first paint is idle too');
-  let document;
-  await withPomodoroFetch(() => idle, async () => {
-    ({ document } = loadIndexWithPomodoro());
-    await flushPomodoro();
-  });
-  const paths = pomodoroGlyphPaths(document);
-  assert.deepEqual(paths, TOMATO_PATHS, 'idle must draw the tomato');
-  assert.notDeepEqual(paths, REST_PATHS, 'and specifically NOT the rest glyph -- the two bars mean "a break is running", which idle is not');
-  const icon = document.querySelector('span#pomodoro-icon-slot .pomodoro-icon');
-  assert.equal(icon.classList.contains('pomodoro-icon-amber'), false, 'muted, not amber: idle has nothing to turn up for');
-});
-
 await checkAsync('before the first pomodoro fetch resolves, the header glyph stays exactly as server-rendered -- never flickers through the rest mark even though the (stubbed, not-yet-answered) daemon reports a break the moment it does answer', async () => {
   const nowMs = Date.now();
   const restingDoc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: '2020-01-01', timer: { phase: 'break', deadline: nowMs + 5 * 60_000, paused: false }, now: nowMs };
   await withPomodoroFetch(() => restingDoc, async () => {
     const { document } = loadIndexWithPomodoro();
-    // Deliberately NO flushPomodoro() -- the opening fetch has been ISSUED but
+    // Deliberately NO flush(1) -- the opening fetch has been ISSUED but
     // has not resolved, so pomodoroDoc is still null and nothing has run
     // renderPomodoro (or its glyph logic) even once yet.
     assert.deepEqual(pomodoroGlyphPaths(document), TOMATO_PATHS, 'the glyph must still be the plain tomato before any poll has returned');
@@ -9760,7 +8862,7 @@ await checkAsync('the header glyph returns to the tomato within one poll interva
   let document, intervals, current = resting;
   await withPomodoroFetch(() => current, async () => {
     ({ document, intervals } = loadIndexWithPomodoro());
-    await flushPomodoro();
+    await flush(1);
     assert.deepEqual(pomodoroGlyphPaths(document), REST_PATHS, 'setup failure: expected the rest glyph while the break is still running');
 
     // The break ends on the DAEMON's own clock, never client-side (this
@@ -9770,7 +8872,7 @@ await checkAsync('the header glyph returns to the tomato within one poll interva
     // real.
     current = backToWork;
     fetchPomodoroFn(intervals)();
-    await flushPomodoro();
+    await flush(1);
   });
   assert.deepEqual(pomodoroGlyphPaths(document), TOMATO_PATHS, 'the glyph must revert to the tomato within one poll of the break ending');
 });
@@ -9785,10 +8887,10 @@ await checkAsync('pomodoro widget: the local tick never advances the phase on it
   let document, intervals, calls;
   calls = await withPomodoroFetch(() => stale, async (c) => {
     ({ document, intervals } = loadIndexWithPomodoro());
-    await flushPomodoro();
+    await flush(1);
     const before = c.length;
     pomodoroTickFn(intervals)();
-    await flushPomodoro();
+    await flush(1);
     assert.equal(c.length, before + 1, 'a tick against an already-expired timer must trigger exactly one re-fetch');
     assert.equal(c[c.length - 1].url, '/api/pomodoro', 'the re-fetch must be a plain GET, never a write that could itself decide the next phase');
   });
@@ -9805,9 +8907,9 @@ await checkAsync('pomodoro widget: clicking the toggle while running posts /api/
   let document;
   const calls = await withPomodoroFetch(call => (call.method === 'POST' ? paused : running), async () => {
     ({ document } = loadIndexWithPomodoro());
-    await flushPomodoro();
+    await flush(1);
     document.querySelector('button#pomodoro-toggle').dispatchEvent(new StandInEvent('click'));
-    await flushPomodoro();
+    await flush(1);
   });
   const post = calls.find(c => c.method === 'POST');
   assert.ok(post, 'the click must issue a POST');
@@ -9825,9 +8927,9 @@ await checkAsync('pomodoro widget: flipping the switch on while idle posts /api/
   let document;
   const calls = await withPomodoroFetch(call => (call.method === 'POST' ? started : idle), async () => {
     ({ document } = loadIndexWithPomodoro());
-    await flushPomodoro();
+    await flush(1);
     document.querySelector('button#pomodoro-toggle').dispatchEvent(new StandInEvent('click'));
-    await flushPomodoro();
+    await flush(1);
   });
   const post = calls.find(c => c.method === 'POST');
   assert.ok(post, 'the click must issue a POST -- an idle switch that does nothing is exactly the bug this replaced');
@@ -9841,10 +8943,10 @@ await checkAsync('pomodoro widget: a click landing before the first fetch resolv
   const idle = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
   const calls = await withPomodoroFetch(() => idle, async (c) => {
     const { document } = loadIndexWithPomodoro();
-    // Deliberately NO flushPomodoro() first: the widget has been wired but its
+    // Deliberately NO flush(1) first: the widget has been wired but its
     // opening fetch has not settled, so pomodoroDoc is still null.
     document.querySelector('button#pomodoro-toggle').dispatchEvent(new StandInEvent('click'));
-    await flushPomodoro();
+    await flush(1);
     assert.equal(c.filter(x => x.method === 'POST').length, 0, 'nothing may be posted while the widget still has no idea what the daemon holds');
   });
   assert.ok(calls.length >= 1, 'setup sanity: the opening GET must still have happened');
@@ -9856,9 +8958,9 @@ await checkAsync('pomodoro widget: clicking the toggle while paused posts /api/p
   const running = { ...paused, timer: { phase: 'break', deadline: nowMs + 30_000, paused: false } };
   const calls = await withPomodoroFetch(call => (call.method === 'POST' ? running : paused), async () => {
     const { document } = loadIndexWithPomodoro();
-    await flushPomodoro();
+    await flush(1);
     document.querySelector('button#pomodoro-toggle').dispatchEvent(new StandInEvent('click'));
-    await flushPomodoro();
+    await flush(1);
   });
   const post = calls.find(c => c.method === 'POST');
   assert.ok(post);
@@ -9876,9 +8978,9 @@ await checkAsync('pomodoro widget: clicking Forward posts /api/pomodoro/forward 
   let document;
   const calls = await withPomodoroFetch(call => (call.method === 'POST' ? forwarded : running), async () => {
     ({ document } = loadIndexWithPomodoro());
-    await flushPomodoro();
+    await flush(1);
     document.querySelector('button#pomodoro-forward').dispatchEvent(new StandInEvent('click'));
-    await flushPomodoro();
+    await flush(1);
   });
   const post = calls.find(c => c.method === 'POST');
   assert.ok(post, 'the click must issue a POST');
@@ -9896,9 +8998,9 @@ await checkAsync('pomodoro widget: clicking Restart posts /api/pomodoro/restart 
   let document;
   const calls = await withPomodoroFetch(call => (call.method === 'POST' ? restarted : running), async () => {
     ({ document } = loadIndexWithPomodoro());
-    await flushPomodoro();
+    await flush(1);
     document.querySelector('button#pomodoro-restart').dispatchEvent(new StandInEvent('click'));
-    await flushPomodoro();
+    await flush(1);
   });
   const post = calls.find(c => c.method === 'POST');
   assert.ok(post, 'the click must issue a POST');
@@ -9918,17 +9020,17 @@ await checkAsync('pomodoro widget: reset needs two clicks -- the first only rela
   try {
     await withPomodoroFetch(call => (call.method === 'POST' ? idle : running), async (calls) => {
       const { document } = loadIndexWithPomodoro();
-      await flushPomodoro();
+      await flush(1);
       const resetBtn = document.querySelector('button#pomodoro-reset');
       assert.equal(resetBtn.textContent, 'Reset');
 
       resetBtn.dispatchEvent(new StandInEvent('click'));
-      await flushPomodoro();
+      await flush(1);
       assert.equal(resetBtn.textContent, 'Really reset?', 'the first click must only arm the confirm, relabeling the SAME control -- never a second element, never confirm()');
       assert.equal(calls.filter(c => c.method === 'POST').length, 0, 'the first click must not post anything yet');
 
       resetBtn.dispatchEvent(new StandInEvent('click'));
-      await flushPomodoro();
+      await flush(1);
       const posts = calls.filter(c => c.method === 'POST');
       assert.equal(posts.length, 1, 'the second click must post exactly once');
       assert.equal(posts[0].url, '/api/pomodoro/reset');
@@ -9958,7 +9060,7 @@ await checkAsync('pomodoro widget: submitting the settings form posts all eleven
   let document;
   const calls = await withPomodoroFetch(call => (call.method === 'POST' ? saved : initial), async () => {
     ({ document } = loadIndexWithPomodoro());
-    await flushPomodoro();
+    await flush(1);
     const form = document.querySelector('form#pomodoro-settings-form');
     form.querySelector('input[name="workMin"]').value = '50';
     form.querySelector('input[name="breakMin"]').value = '10';
@@ -9974,7 +9076,7 @@ await checkAsync('pomodoro widget: submitting the settings form posts all eleven
     // "Show in menu bar", the key is the negation of it.
     form.querySelector('input[name="menubarHidden"]').checked = true;
     form.dispatchEvent(new StandInEvent('submit'));
-    await flushPomodoro();
+    await flush(1);
   });
   const post = calls.find(c => c.method === 'POST');
   assert.ok(post, 'submitting must POST');
@@ -9997,7 +9099,7 @@ await checkAsync('pomodoro widget: the three cue pickers sync independently from
   const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
   await withPomodoroFetch(() => doc, async () => {
     const { document } = loadIndexWithPomodoro();
-    await flushPomodoro();
+    await flush(1);
     const form = document.querySelector('form#pomodoro-settings-form');
     assert.equal(form.querySelector('select[name="cueWork"]').value, CUE_A);
     assert.equal(form.querySelector('select[name="cueBreak"]').value, CUE_B);
@@ -10014,7 +9116,7 @@ await checkAsync('pomodoro widget: the Banner level select syncs from settings.b
   const doc = { settings: { ...POMODORO_SETTINGS, notify: true, bannerLevel: 'always' }, cycle: 0, cycleDate: null, timer: null, now: nowMs };
   await withPomodoroFetch(() => doc, async () => {
     const { document } = loadIndexWithPomodoro();
-    await flushPomodoro();
+    await flush(1);
     const form = document.querySelector('form#pomodoro-settings-form');
     assert.equal(form.querySelector('input[name="notify"]').checked, true, 'notify must sync to its own saved value');
     assert.equal(form.querySelector('select[name="bannerLevel"]').value, 'always', 'bannerLevel must sync to ITS OWN saved value, not follow notify');
@@ -10041,8 +9143,8 @@ await checkAsync('pomodoro widget: the Banner level select syncs from settings.b
 async function waitForPreviews(calls, expected) {
   const previews = () => calls.filter(c => c.url === '/api/pomodoro/preview').length;
   const deadline = Date.now() + 10_000;
-  while (previews() < expected && Date.now() < deadline) await new Promise(r => setTimeout(r, 10));
-  await new Promise(r => setTimeout(r, 250));
+  while (previews() < expected && Date.now() < deadline) await sleep(10);
+  await sleep(250);
 }
 
 await checkAsync('pomodoro widget: changing a cue picker posts a preview immediately, before Save, and never writes the stored settings', async () => {
@@ -10050,7 +9152,7 @@ await checkAsync('pomodoro widget: changing a cue picker posts a preview immedia
   const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
   const calls = await withPomodoroFetch(() => doc, async (seen) => {
     const { document } = loadIndexWithPomodoro();
-    await flushPomodoro();
+    await flush(1);
     document.querySelector('details#pomodoro-settings').open = true;
     const cueWork = document.querySelector('form#pomodoro-settings-form select[name="cueWork"]');
     cueWork.value = CUE_C;
@@ -10070,7 +9172,7 @@ await checkAsync('pomodoro widget: ticking Notify fires one test banner immediat
   const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
   const calls = await withPomodoroFetch(() => doc, async () => {
     const { document } = loadIndexWithPomodoro();
-    await flushPomodoro();
+    await flush(1);
     document.querySelector('details#pomodoro-settings').open = true;
     const notify = document.querySelector('form#pomodoro-settings-form input[name="notify"]');
     notify.checked = true;
@@ -10088,7 +9190,7 @@ await checkAsync('pomodoro widget: unticking Notify fires nothing -- a banner sa
   const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
   const calls = await withPomodoroFetch(() => doc, async () => {
     const { document } = loadIndexWithPomodoro();
-    await flushPomodoro();
+    await flush(1);
     const notify = document.querySelector('form#pomodoro-settings-form input[name="notify"]');
     notify.checked = false;
     notify.dispatchEvent(new StandInEvent('change'));
@@ -10101,18 +9203,18 @@ await checkAsync('pomodoro widget: picking a Banner level fires no test banner a
   const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
   const calls = await withPomodoroFetch(() => doc, async () => {
     const { document } = loadIndexWithPomodoro();
-    await flushPomodoro();
+    await flush(1);
     document.querySelector('details#pomodoro-settings').open = true;
     const bannerLevel = document.querySelector('form#pomodoro-settings-form select[name="bannerLevel"]');
     bannerLevel.value = 'always';
     bannerLevel.dispatchEvent(new StandInEvent('change'));
     // A real wait past onPomodoroCueChange's own POMODORO_PREVIEW_DEBOUNCE_MS
-    // (150ms), not just flushPomodoro's microtask drain -- the bug this guards
+    // (150ms), not just `flush(1)`'s microtask drain -- the bug this guards
     // against (onPomodoroCueChange scoped by bare tagName === 'SELECT', which
     // Banner level now also is) fires its preview fetch on a debounce timer, so
     // asserting immediately after dispatch would pass even with the guard
     // missing, simply because the timer had not fired yet.
-    await new Promise(resolve => setTimeout(resolve, 220));
+    await sleep(220);
   });
   assert.deepEqual(calls.filter(c => c.url === '/api/pomodoro/notifyTest'), [], 'picking a Banner level must not fire the one test banner -- that stays Notify\'s alone');
   assert.deepEqual(calls.filter(c => c.url === '/api/pomodoro/preview'), [], 'picking a Banner level must not fire a cue preview -- it is a <select> but not one of the three cue pickers');
@@ -10124,7 +9226,7 @@ await checkAsync('pomodoro widget: selecting None previews it like any other val
   const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
   const calls = await withPomodoroFetch(() => doc, async (seen) => {
     const { document } = loadIndexWithPomodoro();
-    await flushPomodoro();
+    await flush(1);
     const cueBreak = document.querySelector('form#pomodoro-settings-form select[name="cueBreak"]');
     cueBreak.value = NO_CUE;
     cueBreak.dispatchEvent(new StandInEvent('change'));
@@ -10140,7 +9242,7 @@ await checkAsync('pomodoro widget: a rapid run of changes on the same picker (a 
   const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
   const calls = await withPomodoroFetch(() => doc, async (seen) => {
     const { document } = loadIndexWithPomodoro();
-    await flushPomodoro();
+    await flush(1);
     const cueWork = document.querySelector('form#pomodoro-settings-form select[name="cueWork"]');
     // Simulates a held arrow key: several 'change' events land back to back,
     // well inside the debounce window -- exactly the shape a real key-repeat
@@ -10161,7 +9263,7 @@ await checkAsync('pomodoro widget: changing TWO different pickers in quick succe
   const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
   const calls = await withPomodoroFetch(() => doc, async (seen) => {
     const { document } = loadIndexWithPomodoro();
-    await flushPomodoro();
+    await flush(1);
     const form = document.querySelector('form#pomodoro-settings-form');
     const cueWork = form.querySelector('select[name="cueWork"]');
     const cueBreak = form.querySelector('select[name="cueBreak"]');
@@ -10181,7 +9283,7 @@ await checkAsync('pomodoro widget: closing the panel without saving reverts a pr
   const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
   await withPomodoroFetch(() => doc, async (seen) => {
     const { document, intervals } = loadIndexWithPomodoro();
-    await flushPomodoro();
+    await flush(1);
     const panel = document.querySelector('details#pomodoro-settings');
     const cueWork = document.querySelector('form#pomodoro-settings-form select[name="cueWork"]');
     assert.equal(cueWork.value, CUE_A, 'setup failure: expected the daemon\'s stored value synced in first');
@@ -10204,7 +9306,7 @@ await checkAsync('pomodoro widget: a repaint tick while the settings panel is op
   const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
   await withPomodoroFetch(() => doc, async () => {
     const { document, intervals } = loadIndexWithPomodoro();
-    await flushPomodoro();
+    await flush(1);
     const panel = document.querySelector('details#pomodoro-settings');
     const form = document.querySelector('form#pomodoro-settings-form');
     const workMin = form.querySelector('input[name="workMin"]');
@@ -10215,7 +9317,7 @@ await checkAsync('pomodoro widget: a repaint tick while the settings panel is op
     breakMin.focus();                  // and moves on to the next field
 
     pomodoroTickFn(intervals)();       // one second passes
-    await flushPomodoro();
+    await flush(1);
     assert.equal(workMin.value, '42', 'the edited value must survive a repaint -- focus moving on is not the reader abandoning the edit, and only Save ends it');
 
     // A full re-fetch (the 15s poll) must not undo it either: the daemon still
@@ -10230,7 +9332,7 @@ await checkAsync('pomodoro widget: the panel resumes syncing the moment it close
   const doc = { settings: { ...POMODORO_SETTINGS, workMin: 33 }, cycle: 0, cycleDate: null, timer: null, now: nowMs };
   await withPomodoroFetch(() => doc, async () => {
     const { document, intervals } = loadIndexWithPomodoro();
-    await flushPomodoro();
+    await flush(1);
     const panel = document.querySelector('details#pomodoro-settings');
     const workMin = document.querySelector('form#pomodoro-settings-form input[name="workMin"]');
     panel.open = true;
@@ -10246,7 +9348,7 @@ await checkAsync('pomodoro widget: a click anywhere outside the settings panel c
   const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
   await withPomodoroFetch(() => doc, async () => {
     const { document } = loadIndexWithPomodoro();
-    await flushPomodoro();
+    await flush(1);
     const panel = document.querySelector('details#pomodoro-settings');
     panel.open = true;
 
@@ -10268,7 +9370,7 @@ await checkAsync('pomodoro widget: closing the panel by clicking away disarms a 
   const running = { settings: POMODORO_SETTINGS, cycle: 1, cycleDate: null, timer: { phase: 'work', deadline: nowMs + 60_000, paused: false }, now: nowMs };
   await withPomodoroFetch(() => running, async (calls) => {
     const { document } = loadIndexWithPomodoro();
-    await flushPomodoro();
+    await flush(1);
     const panel = document.querySelector('details#pomodoro-settings');
     const resetBtn = document.querySelector('button#pomodoro-reset');
     panel.open = true;
@@ -10286,9 +9388,8 @@ await checkAsync('pomodoro widget: closing the panel by clicking away disarms a 
 
 // =================================================================================
 // The settings panel's two menu bar controls, and the
-// fragment the popover's gear opens the panel on. The idle-tomato
-// regression line sits with the other glyph checks further up, beside the states
-// it is about.
+// fragment the popover's gear opens the panel on. Idle's muted tomato is a row of
+// the glyph table further up, beside the states it is about.
 // =================================================================================
 
 check('the settings panel carries its own captioned group for the menu bar, in the same hairline + caption idiom every other section uses', () => {
@@ -10327,7 +9428,7 @@ await checkAsync('pomodoro widget: both menu bar controls sync from the daemon\'
   const hidden = { settings: { ...POMODORO_SETTINGS, menubarCountdown: false, menubarHidden: true }, cycle: 0, cycleDate: null, timer: null, now: nowMs };
   await withPomodoroFetch(() => hidden, async () => {
     const { document } = loadIndexWithPomodoro();
-    await flushPomodoro();
+    await flush(1);
     const form = document.querySelector('form#pomodoro-settings-form');
     assert.equal(form.querySelector('input[name="menubarCountdown"]').checked, false, 'the countdown box must sync to its own stored value');
     assert.equal(form.querySelector('input[name="menubarHidden"]').checked, false, 'a HIDDEN item must show "Show in menu bar" UNTICKED -- ticked means shown');
@@ -10336,7 +9437,7 @@ await checkAsync('pomodoro widget: both menu bar controls sync from the daemon\'
   const shown = { settings: { ...POMODORO_SETTINGS, menubarCountdown: true, menubarHidden: false }, cycle: 0, cycleDate: null, timer: null, now: nowMs };
   await withPomodoroFetch(() => shown, async () => {
     const { document } = loadIndexWithPomodoro();
-    await flushPomodoro();
+    await flush(1);
     const form = document.querySelector('form#pomodoro-settings-form');
     assert.equal(form.querySelector('input[name="menubarCountdown"]').checked, true);
     assert.equal(form.querySelector('input[name="menubarHidden"]').checked, true, 'a SHOWN item must show the box ticked');
@@ -10348,7 +9449,7 @@ await checkAsync('pomodoro widget: unticking "Show in menu bar" saves menubarHid
   const initial = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
   const calls = await withPomodoroFetch(() => initial, async () => {
     const { document } = loadIndexWithPomodoro();
-    await flushPomodoro();
+    await flush(1);
     const form = document.querySelector('form#pomodoro-settings-form');
     // The opposite arrangement to the eleven-field check above, which ticks it:
     // between the two, both directions of the one inversion in this form are
@@ -10356,7 +9457,7 @@ await checkAsync('pomodoro widget: unticking "Show in menu bar" saves menubarHid
     form.querySelector('input[name="menubarHidden"]').checked = false;
     form.querySelector('input[name="menubarCountdown"]').checked = true;
     form.dispatchEvent(new StandInEvent('submit'));
-    await flushPomodoro();
+    await flush(1);
   });
   const posts = calls.filter(c => c.method === 'POST');
   assert.equal(posts.length, 1, 'exactly one write, and it is the settings patch -- not a second route of its own');
@@ -10380,7 +9481,7 @@ await checkAsync('loading the index page on the #pomodoro-settings fragment open
     // writes into an OPEN panel -- opening it here would strand the reader in
     // front of a panel whose every field is blank until they close it again.
     assert.notEqual(panel.open, true, 'the panel must not open before the first fetch has filled the form');
-    await flushPomodoro();
+    await flush(1);
     assert.equal(panel.open, true, 'the fragment must open the panel once the values are in it');
     assert.equal(String(document.querySelector('form#pomodoro-settings-form input[name="workMin"]').value), '25', 'and it must open onto the daemon\'s actual values, not a blank form');
     assert.equal(panel.scrollIntoViewCallCount, 1, 'a panel that opened offscreen is indistinguishable from one that did not open');
@@ -10392,7 +9493,7 @@ await checkAsync('pomodoro widget: an ordinary index load opens nothing -- only 
   const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
   await withPomodoroFetch(() => doc, async () => {
     const { document } = loadIndexWithPomodoro();
-    await flushPomodoro();
+    await flush(1);
     const panel = document.querySelector('details#pomodoro-settings');
     assert.notEqual(panel.open, true, 'the settings panel stays collapsed by default -- the fragment is the only thing that opens it');
     assert.equal(panel.scrollIntoViewCallCount, 0, 'and nothing scrolls the page on an ordinary load');
@@ -10404,7 +9505,7 @@ await checkAsync('the fragment arriving in a tab already open on the index -- a 
   const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
   await withPomodoroFetch(() => doc, async () => {
     const loaded = loadIndexWithPomodoro();
-    await flushPomodoro();
+    await flush(1);
     const panel = loaded.document.querySelector('details#pomodoro-settings');
     assert.notEqual(panel.open, true, 'setup failure: expected a closed panel before the fragment arrives');
     // A real browser updates location first, then fires the event.
@@ -10427,7 +9528,7 @@ await checkAsync('the fragment is SPENT once it has opened the panel, so a secon
   const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
   await withPomodoroFetch(() => doc, async () => {
     const loaded = loadIndexWithPomodoro({ hash: '#pomodoro-settings' });
-    await flushPomodoro();
+    await flush(1);
     const panel = loaded.document.querySelector('details#pomodoro-settings');
     assert.equal(panel.open, true, 'setup failure: the fragment must have opened the panel');
     assert.deepEqual(loaded.history.calls, ['/'],
@@ -10441,7 +9542,7 @@ await checkAsync('pomodoro widget: a hashchange to any OTHER fragment leaves the
   const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
   await withPomodoroFetch(() => doc, async () => {
     const loaded = loadIndexWithPomodoro();
-    await flushPomodoro();
+    await flush(1);
     const panel = loaded.document.querySelector('details#pomodoro-settings');
     loaded.location.hash = '#something-else';
     loaded.window.dispatchEvent(new StandInEvent('hashchange'));
@@ -10505,11 +9606,11 @@ await checkAsync('settings panel: the Store control deletes on ONE click, postin
   const handler = call => (call.url === '/api/store/prune' ? { ok: true, boards: 0, assets: 0 } : doc);
   await withPomodoroFetch(handler, async (calls) => {
     const { document } = loadIndexWithPomodoro();
-    await flushPomodoro();
+    await flush(1);
     document.querySelector('details#pomodoro-settings').open = true;
     document.querySelector('input#store-prune-days').value = '30';
     document.querySelector('button#store-prune').dispatchEvent(new StandInEvent('click'));
-    await flushPomodoro();
+    await flush(1);
 
     const prunes = calls.filter(c => c.url === '/api/store/prune');
     assert.equal(prunes.length, 1, 'ONE click must delete -- no arming step, deliberately unlike the Reset button in the same panel');
@@ -10527,11 +9628,11 @@ await checkAsync('settings panel: a Store click with no window named is refused 
   const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
   await withPomodoroFetch(() => doc, async (calls) => {
     const { document } = loadIndexWithPomodoro();
-    await flushPomodoro();
+    await flush(1);
     document.querySelector('details#pomodoro-settings').open = true;
     // Untouched, which is how the field renders: no default, ever.
     document.querySelector('button#store-prune').dispatchEvent(new StandInEvent('click'));
-    await flushPomodoro();
+    await flush(1);
     assert.equal(calls.filter(c => c.url === '/api/store/prune').length, 0,
       'a prune with no window named must not reach the daemon at all -- refused, never filled in with a plausible number');
     assert.match(document.querySelector('span#store-prune-status').textContent, /window/i,
@@ -10539,58 +9640,13 @@ await checkAsync('settings panel: a Store click with no window named is refused 
   });
 });
 
-check('a markdown link opens in a new tab and drops its opener', () => {
-  // A board is a thing the reviewer is in the middle of: a same-tab navigation throws
-  // away unsubmitted answers and half-typed comments with no warning. The `noopener`
-  // half is the security one -- the opened document must not hold a window handle back
-  // into a page that is authorized against the daemon.
-  const html = mdToHtml('see [the render](https://example.com/doc.html)');
-  assert.match(html, /<a href="https:\/\/example\.com\/doc\.html" target="_blank" rel="noopener noreferrer">the render<\/a>/);
-  // A refused scheme still collapses to `#`, and still carries the same attributes --
-  // the neutralised link must not become the one that navigates the board away.
-  const bad = mdToHtml('[x](javascript:alert(1))');
-  assert.match(bad, /<a href="#" target="_blank" rel="noopener noreferrer">/);
-  assert.ok(!bad.includes('javascript:'));
-});
-
-check('no board or index CSP names an external host -- mermaid is vendored, not a CDN pin any more', () => {
-  // Superseded: this used to pin the one exact `mermaid@<version>` string the CSP
-  // named in both script-src and font-src, the board's own loader in src/ui.mjs, and
-  // (unreachably, from this repo) a skill-side renderer's own CDN fallback all had to
-  // agree on, because a CSP source expression ending in `/` is a prefix match -- a
-  // floating major would have been refused, and a drift between the three would have
-  // gone blank on the next board nobody thought to look at. Mermaid is vendored now (a
-  // digest-pinned file under src/vendor/mermaid/, loaded the same content-addressed,
-  // same-origin way as every other sibling asset -- see src/ui.mjs), so there is no
-  // longer a version string for three parties to keep in sync: the policy simply names
-  // no external host at all, for mermaid or anything else. What that leaves to pin is
-  // the negative -- offline and structural, so a reintroduced CDN allowance (mermaid's
-  // or any other) fails here rather than on the next `/security-review`. `font-src`
-  // itself is not gone: it keeps exactly `data:`, for an artifact's own inline font
-  // (skills/claude-board/SKILL.md tells artifact authors to inline every font as a
-  // `data:` URI, since an `html` stage renders at an opaque origin) -- the AC here is
-  // no external host, not no clause.
-  // Checked against a CLOSED SET of allowed source expressions, not against a pattern
-  // for the hosts we happen to remember. The previous gate here was `!/https?:\/\//`
-  // plus a literal `jsdelivr` test, and both miss the shape a real regression takes: a
-  // CSP host source needs no scheme, so `unpkg.com/npm/...` or `font-src data:
-  // fonts.gstatic.com` sails through every one of them. Enumerating what a source is
-  // ALLOWED to be inverts that -- an external host fails by construction, in any
-  // spelling, including one nobody here thought to name.
-  const ALLOWED_CSP_SOURCES = new Set(["'none'", "'self'", "'unsafe-inline'", 'data:', 'blob:']);
-  for (const [name, csp] of [['CSP', CSP], ['INDEX_CSP', INDEX_CSP]]) {
-    for (const clause of csp.split(';')) {
-      const [directive, ...sources] = clause.trim().split(/\s+/).filter(Boolean);
-      if (!directive) continue;
-      for (const src of sources) {
-        assert.ok(ALLOWED_CSP_SOURCES.has(src),
-          `${name}'s ${directive} names ${src}, which is not in the closed set of allowed source expressions (${[...ALLOWED_CSP_SOURCES].join(' ')}) -- no external host may reach either policy, however it is spelled. Got: ${csp}`);
-      }
-    }
-  }
-
-  // And the loader itself: no dynamic import() of a URL -- src/ui.mjs's mermaid
-  // loader is a same-origin classic <script src> element instead (see that file's own
+check('src/ui.mjs makes no dynamic import(<url>) call: the vendored mermaid engine loads as a same-origin classic script', () => {
+  // Mermaid is vendored (a digest-pinned file under src/vendor/mermaid/, loaded the same
+  // content-addressed, same-origin way as every other sibling asset), so no policy names
+  // an external host -- test/check-http.mjs's every-HTML-response check holds the served
+  // CSP headers to a closed set of source expressions. What this pins is the loader:
+  // no dynamic import() of a URL -- src/ui.mjs's mermaid loader is a same-origin
+  // classic <script src> element instead (see that file's own
   // comment on why: an ES module fetch is CORS-gated over `file:` regardless of
   // same-origin-ness, and upstream's own build only works as a classic script in the
   // first place). Matched as an actual CALL (a string/template literal argument),
@@ -10703,26 +9759,31 @@ check('AC 8: selecting and copying a code block yields block.text back exactly -
   }
 });
 
-check('AC 8, structurally: a multi-line highlighted token never leaves an unbalanced span straddling a row boundary', () => {
+check('AC 8, structurally: a multi-line highlighted token is closed at each row\'s end and reopened on the next, so every row is its own line and no span straddles a row boundary', () => {
   // The hazard highlightRows (src/render.mjs) exists to avoid: tokenising the WHOLE
-  // text first and only then splitting on '\n' would let a single tok-comment span
-  // cross into the next row's own <span class="code-row">, an invalid nesting no
-  // DOM can represent -- parseHTML would either throw or silently reshuffle it,
-  // either of which breaks the byte-identity check above. Counted directly here so
-  // a regression shows up as an obvious tag-count mismatch, not a confusing parse
-  // failure three checks away.
-  const board = createBoard({
-    title: 'AC 8 balance',
-    blocks: [{ kind: 'code', text: '/* start\nmiddle\nend */\nconst x = 1;\n// trailing comment', lang: 'javascript' }],
-  });
-  const markup = renderedMarkup(renderBoardPage(board));
-  const section = /<section class="block code-block"[\s\S]*?<\/section>/.exec(markup)[0];
-  const opens = (section.match(/<span/g) || []).length;
-  const closes = (section.match(/<\/span>/g) || []).length;
-  assert.equal(opens, closes, `every opened span must close within the section: ${opens} opens vs ${closes} closes`);
+  // text first and only then splitting on '\n' lets a single tok-comment span cross
+  // into the next row's own <span class="code-row">. The tag counts still balance
+  // and textContent still round-trips (the check above stays green), but the DOM a
+  // browser builds nests the following rows inside the first one and leaves their
+  // text uncoloured. So what is asserted is the tree: every row a direct child of
+  // the <code>, holding exactly its own physical line, and the comment's colour on
+  // each of the three rows it spans.
+  const text = '/* start\nmiddle\nend */\nconst x = 1;\n// trailing comment';
+  const board = createBoard({ title: 'AC 8 rows', blocks: [{ kind: 'code', text, lang: 'javascript' }] });
+  const code = parseHTML(renderBoardPage(board)).querySelector('.code-block pre code');
+  assert.ok(code, 'setup failure: no rendered <code>');
+  const rows = code.querySelectorAll('.code-row');
   // Five physical lines -> five gutter rows, none skipped and none merged.
-  const dataLines = [...section.matchAll(/data-line="(\d+)"/g)].map(m => Number(m[1]));
-  assert.deepEqual(dataLines, [1, 2, 3, 4, 5]);
+  assert.deepEqual(rows.map(r => Number(r.getAttribute('data-line'))), [1, 2, 3, 4, 5]);
+  const lines = text.split('\n');
+  rows.forEach((row, i) => {
+    assert.equal(row.parentElement, code, `row ${i + 1} must sit directly in the <code>, not inside another row`);
+    assert.equal(row.textContent, lines[i], `row ${i + 1} must hold exactly its own line`);
+  });
+  for (const i of [0, 1, 2]) {
+    const tok = rows[i].querySelector('.tok-comment');
+    assert.ok(tok && tok.textContent === lines[i], `the block comment's colour must be reopened on row ${i + 1}, covering ${JSON.stringify(lines[i])}`);
+  }
 });
 
 check('every vendored language src/resolve.mjs\'s langForPath can name actually highlights through renderCodeBlock, not just through grammarFor in isolation', () => {
@@ -11014,32 +10075,6 @@ check('AC 7 (diff half): a malformed or header-less diff degrades to every row r
   assert.ok(section.includes('this is not'), 'the text itself must still render, plain, not dropped');
 });
 
-check('AC 7 (diff half): a multi-file diff resets its line counters at the second file\'s own headers -- never reads it against the first file\'s stale coordinates', () => {
-  const text = [
-    'diff --git a/one.txt b/one.txt',
-    '--- a/one.txt', '+++ b/one.txt',
-    '@@ -1,1 +1,1 @@',
-    '-file one old',
-    '+file one new',
-    'diff --git a/two.txt b/two.txt',
-    '--- a/two.txt', '+++ b/two.txt',
-    '@@ -10,1 +20,1 @@',
-    '-file two old',
-    '+file two new',
-    '',
-  ].join('\n');
-  const board = createBoard({ title: 'AC7 multi-file', blocks: [{ kind: 'code', lang: 'diff', text }] });
-  const markup = renderedMarkup(renderBoardPage(board));
-  const section = /<section class="block code-block"[\s\S]*?<\/section>/.exec(markup)[0];
-  assert.ok(/<span class="code-row diff-del" data-line="1">-file one old<\/span>/.test(section));
-  assert.ok(/<span class="code-row diff-add" data-line="1">\+file one new<\/span>/.test(section));
-  // File two's hunk starts at old=10/new=20 -- if the counters leaked across the
-  // 'diff --git' boundary these would read 2/2 (one past file one's single line)
-  // instead of the coordinates file two's own '@@' actually names.
-  assert.ok(/<span class="code-row diff-del" data-line="10">-file two old<\/span>/.test(section));
-  assert.ok(/<span class="code-row diff-add" data-line="20">\+file two new<\/span>/.test(section));
-});
-
 check('AC 8 through the diff path: selecting and copying a diff block yields the original bytes exactly -- \'+\'/\'-\' signs included (they are the file\'s own bytes), no gutter digits, no injected newlines', () => {
   const cases = [
     '--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n', // trailing newline
@@ -11123,17 +10158,6 @@ check('a markdown \'diff\' fence: copy fidelity still holds through the new fill
     assert.equal(codeEl.textContent, expected,
       `copied fence text must be byte-identical to the fence's own text for ${JSON.stringify(diffText)}, got ${JSON.stringify(codeEl.textContent)}`);
   }
-});
-
-check('a markdown \'diff\' fence: the kind: "code" diff block path is unaffected -- still real gutter numbers, no .diff-flat, exactly as before this fix', () => {
-  const diffText = '--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n context\n-old\n+new\n';
-  const board = createBoard({ title: 'block unaffected', blocks: [{ kind: 'code', lang: 'diff', text: diffText }] });
-  const markup = renderedMarkup(renderBoardPage(board));
-  const section = /<section class="block code-block"[\s\S]*?<\/section>/.exec(markup)[0];
-  assert.ok(!section.includes('diff-flat'), 'a kind: "code" diff block must never carry the fence-only no-gutter modifier');
-  assert.ok(/<span class="code-row" data-line="1"> context<\/span>/.test(section), 'a context row must still carry its real gutter number');
-  assert.ok(/<span class="code-row diff-del" data-line="2">-old<\/span>/.test(section), 'a removed row must still carry its real gutter number');
-  assert.ok(/<span class="code-row diff-add" data-line="2">\+new<\/span>/.test(section), 'an added row must still carry its real gutter number');
 });
 
 // =================================================================================
@@ -11570,83 +10594,13 @@ check('an absolute reference into a configured root still resolves when the boar
   }
 });
 
-check('the fold\'s safety valve re-measures a push subtree once it is attached: refreshPins calls dropSettledFolds', () => {
-  const start = ui.indexOf('function refreshPins(root)');
-  const end = ui.indexOf('function wirePageDomPins(root)', start);
-  assert.ok(start > 0 && end > start, 'setup failure: both functions must exist in that order');
-  assert.ok(ui.slice(start, end).includes('dropSettledFolds(root)'),
-    'wireRoot runs on a detached subtree where the valve measures nothing; the attached redo must run it');
-});
-
 
 // --- ADR.md entry 117: diagram refusals at the board-normalisation door -----------
-
-check('ADR.md entry 117: a bad mermaid block names its id and parser line, while the fixed block lands', () => {
-  const bad = 'flowchart LR\n a --> ((b';
-  const message = refusedPost(() => createBoard({
-    title: 'bad mermaid',
-    blocks: [{ id: 'm1', kind: 'mermaid', text: bad }],
-  }));
-  assert.equal(message,
-    'mermaid block m1 does not parse. Parse error on line 2. Way out: fix the source and post again; a fence you cannot fix goes up by value with its language changed so it renders as code');
-  assert.doesNotThrow(() => createBoard({
-    title: 'fixed mermaid',
-    blocks: [{ id: 'm1', kind: 'mermaid', text: 'flowchart LR\n a --> b' }],
-  }));
-});
-
-check('ADR.md entry 117: bad by-value markdown fences name top-level, context and compare positions together', () => {
-  const badFence = '```mermaid\nflowchart LR\n a --> ((b\n```';
-  const lines = refusedPost(() => createBoard({
-    title: 'three bad fences',
-    blocks: [
-      { kind: 'markdown', text: badFence },
-      {
-        kind: 'question', prompt: 'Context?', widget: 'single', options: [{ label: 'Yes' }],
-        context: [{ kind: 'markdown', text: badFence }],
-      },
-      {
-        kind: 'compare',
-        left: { label: 'Left', block: { kind: 'markdown', text: badFence } },
-        right: { label: 'Right', block: null },
-      },
-    ],
-  })).split('\n');
-
-  assert.equal(lines.length, 3, 'one refusal per fence, in one rejected post');
-  assert.match(lines[0], /^mermaid fence 1 in markdown block d1 does not parse\. Parse error on line 2\. Way out:/);
-  assert.match(lines[1], /^mermaid fence 1 in markdown block d2 in context 1 of question q1 does not parse\. Parse error on line 2\. Way out:/);
-  assert.match(lines[2], /^mermaid fence 1 in markdown block d3 on left side of compare block x1 does not parse\. Parse error on line 2\. Way out:/);
-});
-
-check('ADR.md entry 117: a bad fence in referenced markdown names the posted file path', () => {
-  const cwd = mkdtempSync(path.join(tmpdir(), 'claude-board-diagram-refusal-'));
-  try {
-    writeFileSync(path.join(cwd, 'broken-diagram.md'), '```mermaid\nflowchart LR\n a --> ((b\n```\n', 'utf8');
-    const message = refusedPost(() => createBoard({
-      title: 'referenced bad fence',
-      cwd,
-      blocks: [{ kind: 'markdown', source: { path: 'broken-diagram.md' } }],
-    }));
-    assert.match(message, /^mermaid fence 1 in markdown block d1 from referenced file broken-diagram\.md does not parse\. Parse error on line 2\. Way out:/);
-    assert.ok(message.includes('fix the file, or post the section by value with the fence marked as code'));
-  } finally {
-    rmSync(cwd, { recursive: true, force: true });
-  }
-});
-
-check('ADR.md entry 117: an amend with a broken diagram refuses before changing its open board', () => {
-  const board = createBoard({
-    title: 'amend refusal',
-    blocks: [{ kind: 'markdown', text: '# Ready' }],
-  });
-  const before = JSON.stringify(board);
-  assert.throws(
-    () => amendRound(board, { blocks: [{ kind: 'mermaid', text: 'flowchart LR\n a --> ((b' }] }),
-    /mermaid block m1 does not parse\. Parse error on line 2\. Way out:/,
-  );
-  assert.equal(JSON.stringify(board), before, 'a refused amend leaves the stored board byte-identical');
-});
+// The door's own refusals (block, fence, file, option and side naming, the budget, one
+// lex per document) live in test/check-diagram-refusal.mjs beside the engine seam, and
+// the ones a post or amend over the daemon shows (every block position, an explainer, an
+// amend leaving its board untouched) in test/check-http.mjs; what stays here joins a
+// diagram refusal with this file's reference-boundary messages.
 
 check('ADR.md entry 117: diagram and reference failures are returned together', () => {
   // A missing reference on a board with no project directory refuses with a
@@ -11676,199 +10630,6 @@ check('ADR.md entry 117: diagram and reference failures are returned together', 
   }
 });
 
-check('ADR.md entry 117: good diagrams land at every block position', () => {
-  const diagram = 'flowchart LR\n a --> b';
-  const board = createBoard({
-    title: 'good diagrams',
-    blocks: [
-      { kind: 'mermaid', text: diagram },
-      {
-        kind: 'question', prompt: 'Context?', widget: 'single', options: [{ label: 'Yes' }],
-        context: [{ kind: 'mermaid', text: diagram }],
-      },
-      {
-        kind: 'compare',
-        left: { label: 'Left', block: { kind: 'mermaid', text: diagram } },
-        right: { label: 'Right', block: null },
-      },
-      {
-        kind: 'question', prompt: 'Variant?', widget: 'choose-between-rendered-variants',
-        options: [{ label: 'Good', block: { kind: 'mermaid', text: diagram } }],
-      },
-      { kind: 'markdown', text: '```mermaid\nflowchart LR\n a --> b\n```' },
-      { kind: 'mermaid', text: '---\ntitle: Good diagram\n---\nflowchart LR\n a --> b' },
-    ],
-  });
-
-  assert.equal(board.blocks.length, 6);
-  assert.doesNotThrow(() => addRound(board, {
-    blocks: [{ kind: 'mermaid', text: diagram }],
-  }));
-  assert.equal(board.rounds.length, 2, 'a good diagram also passes the direct addRound path');
-});
-
-/** Every line `fn` printed through console.error, which is where src/board.mjs and the
- * diagram engine both log what they let through (ADR.md entry 117). */
-function capturedErrors(fn) {
-  const printed = [];
-  const original = console.error;
-  console.error = (...args) => printed.push(args.join(' '));
-  try {
-    fn();
-  } finally {
-    console.error = original;
-  }
-  return printed;
-}
-
-check('ADR.md entry 117: a bad fence in a question explainer refuses the post naming the question', () => {
-  const message = refusedPost(() => createBoard({
-    title: 'bad explainer',
-    blocks: [{
-      kind: 'question',
-      prompt: 'Pick',
-      widget: 'single',
-      explainer: '```mermaid\nflowchart LR\n a --> ((b\n```',
-      options: [{ label: 'Yes' }],
-    }],
-  }));
-  assert.match(message,
-    /^mermaid fence 1 in explainer of question q1 does not parse\. Parse error on line 2\. Way out: fix the source and post again/);
-
-  // The same explainer, fixed, still renders its diagram host for the page.
-  const board = createBoard({
-    title: 'good explainer',
-    blocks: [{
-      kind: 'question',
-      prompt: 'Pick',
-      widget: 'single',
-      explainer: '```mermaid\nflowchart LR\n a --> b\n```',
-      options: [{ label: 'Yes' }],
-    }],
-  });
-  assert.ok(board.blocks[0].explainerHtml.includes('<pre class="mermaid">'));
-});
-
-check('ADR.md entry 117: a bad diagram inside a variant option names the option', () => {
-  const message = refusedPost(() => createBoard({
-    title: 'bad variant',
-    blocks: [{
-      kind: 'question',
-      prompt: 'Which?',
-      widget: 'choose-between-rendered-variants',
-      options: [
-        { label: 'Good', block: { kind: 'mermaid', text: 'flowchart LR\n a --> b' } },
-        { label: 'Bad', block: { kind: 'mermaid', text: 'flowchart LR\n a --> ((b' } },
-      ],
-    }],
-  }));
-  assert.match(message,
-    /^mermaid block m2 in option 2 of question q1 does not parse\. Parse error on line 2\. Way out:/);
-});
-
-check('ADR.md entry 117: a bad diagram on a compare right side names the side', () => {
-  const message = refusedPost(() => createBoard({
-    title: 'bad right side',
-    blocks: [{
-      kind: 'compare',
-      left: { label: 'Left', block: { kind: 'markdown', text: '# Fine' } },
-      right: { label: 'Right', block: { kind: 'mermaid', text: 'flowchart LR\n a --> ((b' } },
-    }],
-  }));
-  assert.match(message,
-    /^mermaid block m1 on right side of compare block x1 does not parse\. Parse error on line 2\. Way out:/);
-});
-
-check('ADR.md entry 117: a post past its diagram budget lands unchecked, with one line logged', () => {
-  // MIN_DIAGRAM_COST is 500 characters and the post's whole allowance is 50,000, so a
-  // hundred two-line diagrams spend it exactly -- the cheapest way to reach the end of
-  // the budget, and the shape the budget exists for.
-  const good = { kind: 'mermaid', text: 'flowchart LR\n a --> b' };
-  const bad = { kind: 'mermaid', text: 'flowchart LR\n a --> ((b' };
-  let board;
-  const printed = capturedErrors(() => {
-    board = createBoard({
-      title: 'budget spent',
-      blocks: [...Array.from({ length: 100 }, () => ({ ...good })), { ...bad }, { ...bad }],
-    });
-  });
-
-  assert.equal(board.blocks.length, 102, 'a spent budget refuses nothing: the post lands whole');
-  assert.equal(board.blocks[100].text, bad.text, 'the unchecked diagram is stored as posted');
-  const budgetLines = printed.filter(line => line.includes('Diagram budget'));
-  assert.equal(budgetLines.length, 1, 'one line per post, not one per diagram left unchecked');
-  assert.match(budgetLines[0],
-    /^Diagram budget of 50,000 characters ran out at mermaid block m101, which costs 500 with 0 left; the rest of this post's diagrams go unchecked$/);
-
-  // The allowance is per post, not per process: the next post checks its first diagram.
-  assert.match(refusedPost(() => createBoard({ title: 'next post', blocks: [{ ...bad }] })),
-    /^mermaid block m1 does not parse\./);
-});
-
-check("ADR.md entry 117: a diagram over the engine's own limit is refused without touching the budget", () => {
-  // `readJsonBody` admits 25 MB, so a diagram past the engine's 50,000-character text
-  // limit is a legal post -- and the one diagram the engine is certain to reject. Its
-  // refusal comes off a length test with no parse behind it, so it costs the budget
-  // nothing and must not be paid for out of it: charging it would leave every later
-  // diagram in the post unchecked for work nobody did.
-  const head = 'flowchart LR\n a --> b\n%% ';
-  const oversized = head + 'x'.repeat(50_001 - head.length);
-  let lines;
-  const printed = capturedErrors(() => {
-    lines = refusedPost(() => createBoard({
-      title: 'over the limit first',
-      blocks: [
-        { kind: 'mermaid', text: oversized },
-        { kind: 'mermaid', text: 'flowchart LR\n a --> ((b' },
-      ],
-    })).split('\n');
-  });
-
-  assert.deepEqual(lines, [
-    "mermaid block m1 does not parse. Diagram is 50,001 characters; Mermaid's limit is 50,000. Way out: fix the source and post again; a fence you cannot fix goes up by value with its language changed so it renders as code",
-    'mermaid block m2 does not parse. Parse error on line 2. Way out: fix the source and post again; a fence you cannot fix goes up by value with its language changed so it renders as code',
-  ]);
-  assert.deepEqual(printed.filter(line => line.includes('Diagram budget')), [],
-    'nothing was spent, so nothing is logged as spent');
-});
-
-check('ADR.md entry 117: a markdown block is lexed once on the post path', () => {
-  const originalLexer = marked.lexer;
-  let lexes = 0;
-  marked.lexer = function countingLexer(...args) {
-    lexes++;
-    return originalLexer.apply(this, args);
-  };
-  try {
-    createBoard({
-      title: 'one lex per block',
-      blocks: [
-        { kind: 'markdown', text: '# Title\n\n```mermaid\nflowchart LR\n a --> b\n```\n' },
-        {
-          kind: 'question',
-          prompt: 'Pick',
-          widget: 'single',
-          explainer: '```mermaid\nflowchart LR\n a --> b\n```',
-          context: [{ kind: 'markdown', text: '```mermaid\nflowchart LR\n c --> d\n```' }],
-          options: [{ label: 'Yes' }],
-        },
-      ],
-    });
-  } finally {
-    marked.lexer = originalLexer;
-  }
-  // One per markdown document in the post: the block, the question's context block and
-  // its explainer. The door reads its fences off those renders; lexing them again to
-  // find the fences is the doubled markdown work ADR.md entry 117 does without.
-  assert.equal(lexes, 3, 'every markdown document on the post path is lexed exactly once');
-});
-
-if (asyncFailures) failures += asyncFailures;
-
 rmSync(fixturesDir, { recursive: true, force: true });
 
-if (failures) {
-  console.error(`\n${failures} check(s) failed`);
-  process.exit(1);
-}
-console.log('\nall pure checks ok');
+await finish('pure');

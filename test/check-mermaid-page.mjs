@@ -12,38 +12,14 @@
 // handed, and it draws whatever it is handed, hidden or not, because a mock has
 // no layout to measure. So the assertion is on what src/ui.mjs HANDS it: a
 // hidden round's node must never reach run(), and the flip that shows the round
-// must hand it over exactly then. The loaders are copied, not shared -- there
-// is no shared test-helper module in this repo, by convention.
+// must hand it over exactly then.
 
 import assert from 'node:assert/strict';
 import { createBoard, addRound, applySubmit } from '../src/board.mjs';
 import { renderBoardPage } from '../src/render.mjs';
-import { ui } from '../src/ui.mjs';
-import { themeBootScript } from '../src/theme.mjs';
-import { parseHTML, StandInEvent } from './dom-stand-in.mjs';
+import { check, finish, flush, pageHarness } from './support.mjs';
 
-let failures = 0;
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
-
-function flush(ticks = 40) {
-  return new Promise(resolve => {
-    let n = 0;
-    (function tick() {
-      n++;
-      if (n > ticks) { resolve(); return; }
-      setTimeout(tick, 0);
-    })();
-  });
-}
+const { loadBoard, click } = await pageHarness();
 
 const DIAGRAM_SOURCE = 'flowchart LR\n  A[Start] --> B[End]';
 
@@ -67,18 +43,6 @@ function mockMermaid() {
   };
 }
 
-async function loadBoard(pageHtml, mermaid) {
-  const document = parseHTML(pageHtml);
-  const window = document.defaultView;
-  window.mermaid = mermaid;
-  const location = { protocol: 'http:' };
-  new Function('document', 'window', 'location', 'EventSource', themeBootScript)(document, window, location, undefined);
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location, undefined);
-  document.finishParsing();
-  await flush();
-  return document;
-}
-
 /** Round 1 sent and carrying a diagram, round 2 open and carrying another: the
  * page lands on round 2, so round 1 is the hidden page at load. */
 function twoDiagramRounds() {
@@ -92,14 +56,10 @@ function preOfRound(document, n) {
   return document.querySelector(`.round[data-round="${n}"] pre.mermaid`);
 }
 
-function click(el) {
-  assert.ok(el, 'setup failure: element to click is missing');
-  el.dispatchEvent(new StandInEvent('click'));
-}
-
 await check('load draws only the page on screen; the hidden round keeps its source, unclaimed', async () => {
   const mermaid = mockMermaid();
-  const document = await loadBoard(renderBoardPage(twoDiagramRounds()), mermaid);
+  const document = loadBoard(renderBoardPage(twoDiagramRounds()), { mermaid, theme: true, finish: true });
+  await flush();
   assert.deepEqual(mermaid.drawn, ['2'], 'only the current round is handed to mermaid at load');
   assert.ok(preOfRound(document, 2).querySelector('svg'), 'the current round is drawn');
   const hidden = preOfRound(document, 1);
@@ -110,7 +70,8 @@ await check('load draws only the page on screen; the hidden round keeps its sour
 
 await check('the flip that shows a round draws it, and a second flip draws nothing twice', async () => {
   const mermaid = mockMermaid();
-  const document = await loadBoard(renderBoardPage(twoDiagramRounds()), mermaid);
+  const document = loadBoard(renderBoardPage(twoDiagramRounds()), { mermaid, theme: true, finish: true });
+  await flush();
   click(document.querySelector('.round-page[data-round="1"]'));
   await flush();
   assert.deepEqual(mermaid.drawn, ['2', '1'], 'the flip hands the arriving round to mermaid');
@@ -124,7 +85,8 @@ await check('the flip that shows a round draws it, and a second flip draws nothi
 
 await check('a theme switch redraws the page on screen and puts the hidden page back to source for its next flip', async () => {
   const mermaid = mockMermaid();
-  const document = await loadBoard(renderBoardPage(twoDiagramRounds()), mermaid);
+  const document = loadBoard(renderBoardPage(twoDiagramRounds()), { mermaid, theme: true, finish: true });
+  await flush();
   click(document.querySelector('.round-page[data-round="1"]'));
   await flush();
   click(document.getElementById('theme-toggle'));
@@ -139,4 +101,4 @@ await check('a theme switch redraws the page on screen and puts the hidden page 
   assert.ok(preOfRound(document, 2).querySelector('svg'), 'round 2 is drawn again');
 });
 
-if (failures) { console.error(`${failures} failure(s)`); process.exit(1); }
+await finish(null, { lead: '', failText: n => `${n} failure(s)` });

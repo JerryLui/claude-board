@@ -24,136 +24,70 @@
 // too, which is exactly the shape this rule announces.
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, chmodSync, statSync, symlinkSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, chmodSync, statSync } from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
-// promisify(execFile), never execFileSync: QUIRKS.md records that a synchronous subprocess
-// call deadlocks against the in-process daemon layer 2 boots below.
-import { execFile, spawn } from 'node:child_process';
-import { promisify } from 'node:util';
-
-const execFileAsync = promisify(execFile);
+import { spawn } from 'node:child_process';
 import { SECRET_HEADER } from '../src/secret.mjs';
 import { createBoard, addRound, amendRound } from '../src/board.mjs';
 import { readBoard, writeBoard } from '../src/store.mjs';
 import { STRANDED_BANNER, SUPPRESSED } from '../src/board.mjs';
 import { roundIsAwaitedOpen } from '../src/badge.mjs';
-import { CLICK_LIFETIME_MAX_MS, notifyRound, withdrawClickChild, parseElapsedTime, mayWithdrawPid } from '../src/notify.mjs';
+import { CLICK_LIFETIME_MAX_MS } from '../src/notify.mjs';
 import { renderBoardPage } from '../src/render.mjs';
 import { startServer, strandedTarget } from '../src/server.mjs';
 import { createStrandedWatch, DEFAULT_STRANDED_GRACE_MS } from '../src/stranded.mjs';
+import {
+  check, runMain, sleep, waitForCount, withEnv, projectFor, secretHome, rawRequest, postBoard,
+  writeStub, STUB_OSASCRIPT_LINGERING, STUB_OPEN, BANNER, rowsFor, spawnsFor,
+} from './support.mjs';
 
-let failures = 0;
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
-
-const workDir = mkdtempSync(path.join(tmpdir(), 'claude-board-stranded-'));
+// One mkdtemp directory holds everything: the secret file at its top, the store under
+// `store`, the stubs under `bin`, and one project folder per scenario.
+const { home: workDir, secret: SECRET } = secretHome('claude-board-stranded-', { secret: 'c'.repeat(64), setHome: false });
 const home = path.join(workDir, 'store');
 mkdirSync(home, { recursive: true });
 // A real directory whose basename is what the banner must name. `resolveBoardCwd`
 // realpath's it, and the character filter in src/notify.mjs accepts this shape.
-const projectDir = path.join(workDir, 'my-project');
-mkdirSync(projectDir, { recursive: true });
+const projectDir = projectFor(workDir, 'my-project');
 
 // The store lives here for the whole file, including the daemon layer below. Set before
 // anything imports a default home out of the environment.
 process.env.CLAUDE_BOARD_HOME = home;
-const SECRET_FILE = path.join(workDir, 'secret');
-const SECRET = 'c'.repeat(64);
-writeFileSync(SECRET_FILE, `${SECRET}\n`, { mode: 0o600 });
-process.env.CLAUDE_BOARD_SECRET_FILE = SECRET_FILE;
 
 // --- the fake notifier on PATH ------------------------------------------------------
 //
-// Same shape as test/check-notify.mjs's and test/check-notify-round.mjs's, plus one
-// thing they do not need: with STUB_OSASCRIPT_LINGER_MS set it STAYS ALIVE and records
-// the signal that eventually kills it, which is how the click-serving process's lifetime
-// becomes observable without a real banner (criteria 6 and 15).
+// test/support.mjs's `STUB_OSASCRIPT_LINGERING`: it records the argv it was spawned with,
+// and with STUB_OSASCRIPT_LINGER_MS set it STAYS ALIVE and records the signal that
+// eventually kills it, which is how the click-serving process's lifetime becomes
+// observable without a real banner (criteria 6 and 15).
 // Every row carries the argv it came from, signals included, so a row can be attributed
-// to the board that produced it -- see `rowsFor` below for why that matters.
-const STUB_OSASCRIPT = `#!/usr/bin/env node
-import fs from 'node:fs';
-const argv = process.argv.slice(2);
-const log = process.env.STUB_OSASCRIPT_LOG;
-const say = what => fs.appendFileSync(log, JSON.stringify([what, ...argv]) + '\\n');
-say('spawn');
-const linger = Number(process.env.STUB_OSASCRIPT_LINGER_MS || '0');
-if (linger > 0) {
-  const bye = sig => { say(sig); process.exit(0); };
-  process.on('SIGTERM', () => bye('SIGTERM'));
-  process.on('SIGINT', () => bye('SIGINT'));
-  setTimeout(() => { say('deadline'); process.exit(0); }, linger);
-}
-`;
-
-// The daemon must open no tab (criterion 1). Stubbed rather than merely not asserted, so
-// a reopen added anywhere on this path shows up as a recorded invocation.
-const STUB_OPEN = `#!/usr/bin/env node
-import fs from 'node:fs';
-fs.appendFileSync(process.env.STUB_OPEN_LOG, JSON.stringify(process.argv.slice(2)) + '\\n');
-`;
-
+// to the board that produced it -- the note on `LOG` says why that matters.
+//
+// The daemon must open no tab (criterion 1). `open` is stubbed rather than merely not
+// asserted, so a reopen added anywhere on this path shows up as a recorded invocation.
 const stubDir = path.join(workDir, 'bin');
-mkdirSync(stubDir, { recursive: true });
-for (const [name, source] of [['osascript', STUB_OSASCRIPT], ['open', STUB_OPEN]]) {
-  const p = path.join(stubDir, name);
-  writeFileSync(p, source);
-  chmodSync(p, 0o755);
-}
+writeStub(stubDir, 'osascript', STUB_OSASCRIPT_LINGERING);
+writeStub(stubDir, 'open', STUB_OPEN);
 process.env.PATH = `${stubDir}:${process.env.PATH}`;
 process.env.STUB_OPEN_LOG = path.join(workDir, 'open-invocations.log');
 process.env.STUB_OSASCRIPT_LINGER_MS = '0';
 
+// ONE log for the whole run, read per project folder (`rowsFor(LOG, folder)` is every
+// recorded row, spawn and signal alike, whose banner names `folder`) rather than rotated
+// per scenario, because a grace armed by one scenario can fire during the next one: a
+// check that closes the tab it opened leaves a real absence behind, and that absence is
+// genuinely announced a few milliseconds later. Rotating the log made those land in the
+// next scenario's file and read as its banner. Each scenario therefore gets its own
+// project directory, and the folder name in the banner body is what says which board a row
+// is about -- which is the same identity the reviewer reads off the screen.
 const LOG = path.join(workDir, 'osascript-invocations.log');
 process.env.STUB_OSASCRIPT_LOG = LOG;
 
-function readLines() {
-  if (!existsSync(LOG)) return [];
-  return readFileSync(LOG, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l));
-}
-
-const BANNER = folder => `display notification "${folder}: a round is waiting." with title "Board"`;
-
-/** Every recorded row -- spawn and signal alike -- whose banner names `folder`.
- *
- * ONE log for the whole run, filtered per board rather than rotated per scenario,
- * because a grace armed by one scenario can fire during the next one: a check that
- * closes the tab it opened leaves a real absence behind, and that absence is genuinely
- * announced a few milliseconds later. Rotating the log made those land in the next
- * scenario's file and read as its banner. Each scenario therefore gets its own project
- * directory, and the folder name in the banner body is what says which board a row is
- * about -- which is the same identity the reviewer reads off the screen. */
-function rowsFor(folder) {
-  const body = BANNER(folder);
-  return readLines().filter(r => r[r.length - 1] === body);
-}
-
-const spawnsFor = folder => rowsFor(folder).filter(r => r[0] === 'spawn');
-
-const tick = (ms = 40) => new Promise(r => setTimeout(r, ms));
-
-/** Run `fn` with a different grace, and put the old one back even if it throws. On the
- * success path only, a failing assertion would leave the next scenario running against
- * this scenario's timing -- which turns one red check into five. */
-async function withGrace(ms, fn) {
-  const saved = process.env.CLAUDE_BOARD_STRANDED_GRACE_MS;
-  process.env.CLAUDE_BOARD_STRANDED_GRACE_MS = String(ms);
-  try {
-    await fn();
-  } finally {
-    if (saved === undefined) delete process.env.CLAUDE_BOARD_STRANDED_GRACE_MS;
-    else process.env.CLAUDE_BOARD_STRANDED_GRACE_MS = saved;
-  }
-}
+// A grace or a look-away window a scenario shortens goes through `withEnv`, which puts the
+// old value back even if the scenario throws. On the success path only, a failing
+// assertion would leave the next scenario running against this scenario's timing -- which
+// turns one red check into five.
 
 /** The daemon's settings document, and the one place any check writes it.
  *
@@ -170,23 +104,6 @@ async function withSettings(settings, fn) {
   } finally {
     rmSync(SETTINGS_PATH, { force: true });
   }
-}
-
-/** Wait until `folder` has `count` rows recorded against it, or give up. */
-async function waitForRows(folder, count, timeoutMs = 2000) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    if (rowsFor(folder).length >= count) break;
-    await tick(10);
-  }
-  return rowsFor(folder);
-}
-
-/** A real project directory whose basename is what the banner will name. */
-function projectFor(name) {
-  const dir = path.join(workDir, name);
-  mkdirSync(dir, { recursive: true });
-  return dir;
 }
 
 /** The banner record this daemon has standing for a board, or null. */
@@ -270,14 +187,6 @@ function stand({ notify, sse } = {}) {
   const watch = createStrandedWatch({
     home,
     sse: sse || {
-      // DERIVED from `attendedRemainingMs`, exactly as the real hub derives it
-      // (src/server.mjs: `remainingMs(boardId) > 0`). Spelling it `looking.get(id) === true`
-      // instead is the drift that hid a defect: the rule reads this boolean in one place
-      // and the milliseconds in another, so a stand-in where the two disagree cannot fail
-      // the way production does -- and production's whole hazard is a board that is
-      // Attended on a CLOCK rather than on a report. A stand-in that has drifted from the
-      // thing it stands in for is worse than none.
-      isConfirmedAttended: id => remaining(id) > 0,
       // How LONG this board stays Attended, which is what tells the rule when to look
       // again (ADR 73). `Infinity` is a tab focused right now, which never ages out; a
       // finite number is a tab that has lost focus and is still inside its look-away
@@ -327,7 +236,7 @@ async function layerOne() {
     const board = seedBoard();
     watch.evaluate(board.id, target(board.id));
     assert.equal(banners.length, 0, 'nothing may fire inside the grace, however short it is');
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 1, 'criterion 1: one banner');
     assert.equal(banners[0].folder, 'my-project', 'the folder is folderName(board.cwd), passed through unfiltered');
     watch.close();
@@ -339,8 +248,9 @@ async function layerOne() {
     addAwaitedRound(board.id, 'And then?');
     const fresh = readBoard(board.id, home);
     watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 1, 'criterion 8: two rounds awaited at once is still one board and one banner');
+    assert.equal(bannerOn(board.id).round, 1, 'the record names the oldest of the two, which is what the click resolves to');
     assert.equal(banners[0].url, `${URL_A}/b/${board.id}#stranded-round`,
       'a plain board URL and the sentinel the index\'s live rows already use -- never a handoff (criterion 13)');
     assert.equal(banners[0].port, PORT,
@@ -354,7 +264,7 @@ async function layerOne() {
     const { banners, watch } = stand();
     const board = seedBoard();
     watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 1);
     const stored = readBoard(board.id, home);
     const rec = stored[STRANDED_BANNER];
@@ -369,13 +279,13 @@ async function layerOne() {
     const { banners, watch } = stand();
     const board = seedBoard();
     watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 1);
     for (const prompt of ['second?', 'third?', 'fourth?']) {
       addAwaitedRound(board.id, prompt);
       watch.evaluate(board.id, target(board.id));
     }
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 1, 'one banner per absence, however many rounds pile up behind it');
     watch.close();
   });
@@ -387,91 +297,19 @@ async function layerOne() {
     const first = stand();
     const board = seedBoard();
     first.watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     assert.equal(first.banners.length, 1);
-    // Deliberately NOT closed: `close()` is the graceful path and it retires what it
-    // withdraws (see the next check). Nothing runs when a process is SIGKILLed.
+    // Deliberately NOT closed: `close()` is the graceful path, which layer 2's
+    // install.sh-shaped stop and start covers. Nothing runs when a process is SIGKILLed.
 
     const second = stand(); // ... a successor comes up over the same store, nobody Attending
     second.watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     assert.equal(second.banners.length, 0,
       'the record is on the board precisely so a restart cannot re-announce what the reviewer is still looking at');
     assert.deepEqual(first.banners[0].child.killed, [], 'and the orphan is still up, because nothing killed it');
     second.watch.close();
     first.watch.close();
-  });
-
-  await check('a graceful stop withdraws the banner and leaves the record standing', async () => {
-    // Stopping the daemon SIGTERMs every click-serving child, and SIGTERM is how a banner
-    // is WITHDRAWN -- criterion 15. It is tempting to conclude that a board with nothing on
-    // screen may be announced again. Criterion 7 rules that out in as many words: further
-    // rounds raise nothing more until the reviewer comes back, "whether or not the banner
-    // already raised is still on screen". An absence ends two ways and only two -- the
-    // reviewer returns, or the announced round stops being awaited -- and a daemon stop is
-    // neither. Retiring here told a reviewer twice for one absence after an ordinary
-    // `install.sh` update.
-    const first = stand();
-    const board = seedBoard();
-    first.watch.evaluate(board.id, target(board.id));
-    await tick();
-    assert.equal(first.banners.length, 1);
-    const rec = bannerOn(board.id);
-    assert.ok(rec);
-
-    first.watch.close(); // install.sh takes an update
-    assert.deepEqual(first.banners[0].child.killed, ['SIGTERM'],
-      'criterion 15: stopping the daemon leaves none of them running');
-    // The record stands -- this absence has been announced -- but its pid does not: it
-    // named the process just killed, while `until` goes on claiming it may live for
-    // another hour, and the successor's own launchd supervisor starts AFTER `at`, so the
-    // start-time gate that used to exclude a supervisor no longer does.
-    assert.deepEqual(bannerOn(board.id), { ...rec, pid: null },
-      'the record survives with only its pid cleared');
-
-    const second = stand();
-    addAwaitedRound(board.id, 'a round landing under the successor?');
-    second.watch.evaluate(board.id, target(board.id));
-    await tick();
-    assert.equal(second.banners.length, 0,
-      'the successor says nothing: the reviewer was told once and has not come back');
-    second.watch.close();
-  });
-
-  await check('a board whose rounds are ABANDONED loses its banner, and keeps its mark', async () => {
-    // ADR 69 (`ask(fresh: true)`) meets ADR 74. The reviewer ran `/clear` with a banner on
-    // screen: nothing on this board is awaited any more, so the banner names a round that
-    // no longer wants an answer and its click would land on a board with nothing to do --
-    // for up to `min(the round's deadline, CLICK_LIFETIME_MAX_MS)`, tens of minutes.
-    //
-    // This used to fall out of `mayAnnounce` spending a record whose round had stopped
-    // being awaited; that spend is gone with the permanent mark, so `evaluate` alone now
-    // cancels the pending grace and never reaches the delivered banner. `abandoned` is the
-    // withdrawal half on its own -- and it must stay ONLY that half: abandoning is not
-    // returning, so the mark and the gate are left exactly as they were.
-    const { banners, watch } = stand();
-    const board = seedBoard();
-    watch.evaluate(board.id, target(board.id));
-    await tick();
-    assert.equal(banners.length, 1);
-    const before = bannerOn(board.id);
-    assert.equal(before.returned, false, 'nobody has come back');
-
-    // The shim declares the conversation over, exactly as handleAbandon does it: every
-    // open round closed on disk, then the rule told.
-    const abandoned = readBoard(board.id, home);
-    for (const r of abandoned.rounds) if (r.status === 'open') r.status = 'abandoned';
-    writeBoard(abandoned, home);
-    watch.abandoned(board.id);
-
-    assert.deepEqual(banners[0].child.killed, ['SIGTERM'],
-      'the banner comes off the screen: SIGTERM is what withdraws a delivered one');
-    const after = bannerOn(board.id);
-    assert.ok(after, 'the mark survives -- abandoning is not returning');
-    assert.equal(after.round, before.round, 'still the round that was announced');
-    assert.equal(after.returned, false, 'and the gate is still shut, because nobody came back');
-    assert.equal(after.pid, null, 'only the pid goes, with the process it named');
-    watch.close();
   });
 
   await check('an abandoned board does not become announceable: the gate is untouched', async () => {
@@ -482,7 +320,7 @@ async function layerOne() {
     const { looking, banners, watch } = stand();
     const board = seedBoard();
     watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 1);
 
     const abandoned = readBoard(board.id, home);
@@ -492,14 +330,14 @@ async function layerOne() {
 
     addAwaitedRound(board.id, 'a round landing on an abandoned board?');
     watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 1, 'silent: withdrawing a banner is not a reviewer returning');
 
     looking.set(board.id, true);   // ... and a genuine return still unblocks it
     watch.evaluate(board.id, target(board.id));
     looking.delete(board.id);
     watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 2, 'the gate still works, it just was not opened by the abandon');
     watch.close();
   });
@@ -512,7 +350,7 @@ async function layerOne() {
     assert.doesNotThrow(() => watch.abandoned(board.id));
     assert.doesNotThrow(() => watch.abandoned('b_never_created'));
     assert.doesNotThrow(() => watch.abandoned('../../etc/passwd'));
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 0);
     assert.equal(bannerOn(board.id), null, 'nothing was written to a board that had nothing');
     watch.close();
@@ -523,15 +361,15 @@ async function layerOne() {
     //
     // It has to WAIT the window out, because no event fires when a window expires: without
     // the sum the window would not delay a banner, it would cancel it (see `evaluate`).
-    await withGrace(30, async () => {
+    await withEnv({ CLAUDE_BOARD_STRANDED_GRACE_MS: 30 }, async () => {
       const { lookAway, banners, watch } = stand();
       const board = seedBoard();
       lookAway(board.id, 250);   // a tab buried a moment ago, 250ms of window left
       try {
         watch.evaluate(board.id, target(board.id));
-        await tick(120);           // four graces later, still inside the window
+        await sleep(120);           // four graces later, still inside the window
         assert.equal(banners.length, 0, 'the grace alone must not be what fires this');
-        await tick(250);
+        await sleep(250);
         assert.equal(banners.length, 1, 'and past the window it announces, once');
       } finally {
         watch.close();
@@ -543,13 +381,13 @@ async function layerOne() {
     // past 2^31-1 does not throw, it warns and fires on the next tick. An operator asking
     // for a month-long window would get every board announcing instantly -- the exact
     // inverse of the request.
-    await withGrace(30, async () => {
+    await withEnv({ CLAUDE_BOARD_STRANDED_GRACE_MS: 30 }, async () => {
       const { lookAway, banners, watch } = stand();
       const board = seedBoard();
       lookAway(board.id, 30 * 24 * 60 * 60 * 1000); // a month, well past the ceiling
       try {
         watch.evaluate(board.id, target(board.id));
-        await tick(120);
+        await sleep(120);
         assert.equal(banners.length, 0,
           'an over-long window must clamp to the ceiling, not wrap around into "fire immediately"');
       } finally {
@@ -566,14 +404,14 @@ async function layerOne() {
     // shorter countdown alone because one is already armed.
     //
     // The grace then fires INSIDE the window. If it simply returns -- which is what asking
-    // `isConfirmedAttended`, a boolean, led to -- the countdown is gone and the window
+    // the hub a boolean led to -- the countdown is gone and the window
     // expires against nothing, because no event fires when a window expires. The round is
     // then never announced at all: not delayed, lost. ADR.md entry 74 accepts a banner
     // missed while the screen was locked never being repeated; it does not accept this.
     //
     // Nothing is called after the window is opened. That is the whole point: the rule has
     // to come back on its own.
-    await withGrace(50, async () => {
+    await withEnv({ CLAUDE_BOARD_STRANDED_GRACE_MS: 50 }, async () => {
       const { lookAway, banners, watch } = stand();
       const board = seedBoard();
       try {
@@ -581,10 +419,10 @@ async function layerOne() {
         lookAway(board.id, 300);                    // ... and the report lands, seeding one
         watch.evaluate(board.id, target(board.id)); // which leaves the armed countdown alone
 
-        await tick(150); // the grace has fired, well inside the window
+        await sleep(150); // the grace has fired, well inside the window
         assert.equal(banners.length, 0, 'nothing may fire while the board is still Attended');
 
-        await tick(400); // the window expires -- and NOTHING calls evaluate here
+        await sleep(400); // the window expires -- and NOTHING calls evaluate here
         assert.equal(banners.length, 1,
           'the rule has to re-arm on the remaining window: no event fires when one expires, so a countdown dropped here is a round that is never announced');
         assert.equal(bannerOn(board.id).round, 1);
@@ -601,18 +439,18 @@ async function layerOne() {
     // scoped to "the board now reports no attended time at all", so it cannot become the
     // general re-arm that would let a flaky socket hold the countdown open forever -- the
     // check just below this one is what pins that.
-    await withGrace(40, async () => {
+    await withEnv({ CLAUDE_BOARD_STRANDED_GRACE_MS: 40 }, async () => {
       const { lookAway, banners, watch } = stand();
       const board = seedBoard();
       lookAway(board.id, 5000); // buried tab, five seconds of window left
       try {
         watch.evaluate(board.id, target(board.id));
-        await tick(80);
+        await sleep(80);
         assert.equal(banners.length, 0, 'waiting out the window, as it should be');
 
         lookAway(board.id, 0);     // the tab closes: its window goes with it
         watch.evaluate(board.id, target(board.id));
-        await tick(120);
+        await sleep(120);
         assert.equal(banners.length, 1,
           'the banner arrives one plain grace later, rather than waiting out a window nobody owns');
       } finally {
@@ -630,17 +468,17 @@ async function layerOne() {
     // and nothing in between has to call anything for that to happen: `windowUntil`
     // decays on the real clock, exactly like the hub it stands in for (ADR 73).
     //
-    // No `withGrace` here: the file-wide grace set at the top of `layerOne` is already
-    // one millisecond, which is the grace this case needs too.
+    // No grace of its own here (no `withEnv`): the file-wide grace set at the top of
+    // `layerOne` is already one millisecond, which is the grace this case needs too.
     const { lookAway, banners, watch } = stand();
-    const board = seedBoard({ cwd: projectFor('attended-between-arm-and-fire') });
+    const board = seedBoard({ cwd: projectFor(workDir, 'attended-between-arm-and-fire') });
     try {
       watch.evaluate(board.id, target(board.id)); // nobody looking: arms the bare grace, unwindowed
       // The double changes with NO call to evaluate -- a look-away window opens on the
       // board between the countdown being armed and the timer firing, which is exactly
       // what a report landing in that gap would produce.
       lookAway(board.id, 80);
-      await tick(40); // past the 1ms grace: announce() has re-asked and found attendedFor > 0
+      await sleep(40); // past the 1ms grace: announce() has re-asked and found attendedFor > 0
       assert.equal(banners.length, 0,
         'a Watcher attended at fire time must get no Banner, even though none was attended when the grace was armed');
 
@@ -649,7 +487,7 @@ async function layerOne() {
       // window's remainder (the bug this branch exists to prevent), the window would now
       // expire against nothing, because no event fires when a look-away window expires,
       // and the round would be lost for good rather than merely delayed.
-      await tick(80); // comfortably past the 80ms window, with no further event of any kind
+      await sleep(80); // comfortably past the 80ms window, with no further event of any kind
       assert.equal(banners.length, 1,
         'the round is not lost: the re-armed countdown must still fire when the window expires on its own');
       assert.equal(bannerOn(board.id).round, 1);
@@ -664,13 +502,13 @@ async function layerOne() {
     // RIGHT NOW is guaranteed to produce a blur, a close or an answer eventually, and each
     // of those is an event that will call `evaluate` on its own.
     const { looking, lookAway, banners, watch } = stand();
-    const board = seedBoard({ cwd: projectFor('attended-indefinitely-at-fire') });
+    const board = seedBoard({ cwd: projectFor(workDir, 'attended-indefinitely-at-fire') });
     try {
       watch.evaluate(board.id, target(board.id)); // nobody looking yet: arms the bare grace
       // Flipped directly, with no further evaluate() call -- same insight as above, the
       // Infinity branch instead of a window's remainder.
       looking.set(board.id, true);
-      await tick(40); // past the 1ms grace: announce() has re-asked and found Infinity
+      await sleep(40); // past the 1ms grace: announce() has re-asked and found Infinity
       assert.equal(banners.length, 0, 'a Watcher attended indefinitely at fire time must get no Banner');
 
       // THE "NO RE-ARM" HALF, proved through a LATER event rather than a long wait -- a
@@ -696,56 +534,12 @@ async function layerOne() {
       looking.delete(board.id);     // the tab is no longer focused...
       lookAway(board.id, 40);       // ...but hasn't closed either -- a plain blur, buried briefly
       watch.evaluate(board.id, target(board.id)); // the ordinary event a blur produces
-      await tick(80); // comfortably past grace + the 40ms window
+      await sleep(80); // comfortably past grace + the 40ms window
       assert.equal(banners.length, 1,
         'a later event must still be able to arm: a stale entry left behind by a missing Infinity branch blocks it forever, and the round is never announced');
     } finally {
       watch.close();
     }
-  });
-
-  await check('criterion 3: returning kills the click-serving process with SIGTERM and leaves the mark standing', async () => {
-    // THE REWRITTEN ASSERTION (ADR 74). This check used to
-    // pin the opposite: that coming back CLEARED the marker, so leaving again raised a
-    // second banner for the same round. That was the defect, measured at roughly one
-    // banner a minute for one round -- a glance at the board, or the banner's own click
-    // bringing the tab forward, reset the budget.
-    //
-    // What a return buys now: the banner comes off the screen, and the board may announce
-    // a round it has never announced. What it does not buy: another banner for the round
-    // already announced, ever, however many times the reviewer leaves and comes back.
-    const { looking, banners, watch } = stand();
-    const board = seedBoard();
-    watch.evaluate(board.id, target(board.id));
-    await tick();
-    assert.equal(banners.length, 1);
-    const mark = bannerOn(board.id);
-    assert.equal(mark.round, 1);
-    assert.equal(mark.returned, false, 'the gate is shut from the moment a banner is raised');
-
-    looking.set(board.id, true); // a tab reports that it is visible and focused
-    watch.evaluate(board.id, target(board.id));
-    assert.deepEqual(banners[0].child.killed, ['SIGTERM'],
-      'SIGTERM specifically: it is the path that withdraws the delivered banner from Notification Center');
-    const returnedRec = bannerOn(board.id);
-    assert.ok(returnedRec, 'coming back does NOT erase the mark');
-    assert.equal(returnedRec.round, 1, 'round 1 stays announced for the whole of its life');
-    assert.equal(returnedRec.returned, true, 'what the return buys is the gate, not the mark');
-    assert.equal(returnedRec.pid, null, 'and the pid goes with the banner it named');
-    assert.equal(returnedRec.at, mark.at, 'the announcement is the same announcement, stamp and all');
-
-    // ... and leaving again raises NOTHING, because the only round waiting has had its one
-    // banner. Three departures and three returns, to make "any number of times" literal.
-    for (let i = 0; i < 3; i++) {
-      looking.delete(board.id);
-      watch.evaluate(board.id, target(board.id));
-      await tick();
-      looking.set(board.id, true);
-      watch.evaluate(board.id, target(board.id));
-      await tick();
-    }
-    assert.equal(banners.length, 1, 'criterion 3: a round is announced at most once, ever');
-    watch.close();
   });
 
   await check('criterion 5: after a genuine return and a fresh departure, a round never announced earns one banner', async () => {
@@ -754,7 +548,7 @@ async function layerOne() {
     const { looking, banners, watch } = stand();
     const board = seedBoard();
     watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 1);
     assert.equal(bannerOn(board.id).round, 1);
 
@@ -765,7 +559,7 @@ async function layerOne() {
     addAwaitedRound(board.id, 'a second question, asked while they were here');
     looking.delete(board.id); // ... and leaves again
     watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 2, 'criterion 5: round 2 has never been announced, so it earns one banner');
     const rec = bannerOn(board.id);
     assert.equal(rec.round, 2, 'and the mark moves to the round it is about');
@@ -777,7 +571,7 @@ async function layerOne() {
     watch.evaluate(board.id, target(board.id));
     looking.delete(board.id);
     watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 2, 'and nothing re-announces round 1 or round 2: both marks are spent');
     watch.close();
   });
@@ -790,7 +584,7 @@ async function layerOne() {
       addAwaitedRound(board.id, prompt);
       watch.evaluate(board.id, target(board.id));
     }
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 0);
     assert.equal(announcedAt(board.id), null);
     watch.close();
@@ -818,46 +612,10 @@ async function layerOne() {
     writeBoard(stored, home);
     addAwaitedRound(board.id, 'round twenty?');
     watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 1, 'the twentieth round rings exactly as the first would');
     assert.equal(bannerOn(board.id).round, 20, 'and names the round actually waiting, not round 1');
     watch.close();
-  });
-
-  await check('AC: a round posted while a board tab is open does not ring', async () => {
-    const { looking, banners, watch } = stand();
-    const board = seedBoard();
-    looking.set(board.id, true); // the reviewer is looking, right now, when the round lands
-    watch.evaluate(board.id, target(board.id));
-    await tick();
-    assert.equal(banners.length, 0, 'a round posted into a board someone is actually watching never rings');
-    watch.close();
-  });
-
-  await check('AC: a re-post that amends a round already open rings on the same terms as a new round', async () => {
-    // The concrete gap: round 1 rings once (nobody watching), and is THEN amended --
-    // still nobody watching, still never returned to -- with new content the reviewer
-    // has never been told about. "If the reviewer cannot see it, it rings" says this must
-    // ring again; before this fix the permanent per-round mark said otherwise.
-    const { banners, watch } = stand();
-    const board = seedBoard();
-    watch.evaluate(board.id, target(board.id));
-    await tick();
-    assert.equal(banners.length, 1, 'round 1 rings once, unwatched');
-    assert.equal(bannerOn(board.id).round, 1);
-
-    // The amend, exactly as handlePostBoard performs it: a fresh call to amendRound,
-    // persisted, then the daemon's own two calls in the order server.mjs makes them --
-    // `amended` before `evaluate`, since the mark has to be moved before evaluate decides
-    // whether there is anything left to announce.
-    const fresh = readBoard(board.id, home);
-    const result = amendRound(fresh, { blocks: [QUESTION('Ship now, or later?')], cwd: projectDir });
-    writeBoard(fresh, home);
-    watch.amended(board.id, result.round);
-    watch.evaluate(board.id, target(board.id));
-    await tick();
-    assert.equal(banners.length, 2, 'the amended round rings again -- unseen content, on the same terms as a new round');
-    assert.equal(bannerOn(board.id).round, 1, 'still round 1: the amend did not mint a new round number');
   });
 
   await check('regression: an amend must not regress the mark past round-1, or an OLDER already-answered-for round rings again while the amended one stays silent', async () => {
@@ -880,7 +638,7 @@ async function layerOne() {
     writeBoard(board, home);
 
     watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 1, 'round 1 rings, unwatched');
     assert.equal(bannerOn(board.id).round, 1);
 
@@ -891,7 +649,7 @@ async function layerOne() {
 
     addAwaitedRound(board.id, 'Ship now, or later?'); // round 2, a genuinely new round
     watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 2, 'round 2 rings, never having been told about before');
     assert.equal(bannerOn(board.id).round, 2);
 
@@ -901,7 +659,7 @@ async function layerOne() {
     writeBoard(fresh, home);
     watch.amended(board.id, result.round);
     watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
 
     assert.equal(banners.length, 3, 'round 2 rings again for the content the reviewer never saw');
     assert.equal(bannerOn(board.id).round, 2, 'the mark names round 2, the round actually amended -- it never regresses to round 1');
@@ -910,7 +668,7 @@ async function layerOne() {
     // of this, however many more times the board is re-evaluated.
     for (let i = 0; i < 3; i++) {
       watch.evaluate(board.id, target(board.id));
-      await tick();
+      await sleep(40);
     }
     assert.equal(banners.length, 3, 'round 1 never rings a second time: the amend touched round 2 alone');
     watch.close();
@@ -930,41 +688,8 @@ async function layerOne() {
     writeBoard(fresh, home);
     watch.amended(board.id, result.round); // no mark exists yet: a no-op
     watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 1, 'exactly one banner, for the amended content, not two');
-    watch.close();
-  });
-
-  await check('AC: a round that rings, is then opened and answered, does not ring again', async () => {
-    const { looking, banners, watch } = stand();
-    const board = seedBoard();
-    watch.evaluate(board.id, target(board.id));
-    await tick();
-    assert.equal(banners.length, 1, 'it rings once, unwatched');
-
-    // Opened: the reviewer arrives.
-    looking.set(board.id, true);
-    watch.evaluate(board.id, target(board.id));
-    assert.equal(bannerOn(board.id).returned, true, 'a genuine return');
-
-    // Answered: exactly as handleSubmit leaves the round -- `sent`, no longer awaited --
-    // and the daemon's own `answered` call withdrawing whatever is still on screen.
-    const stored = readBoard(board.id, home);
-    stored.rounds[0].status = 'sent';
-    stored.rounds[0].awaited = false;
-    writeBoard(stored, home);
-    watch.answered(board.id, 1);
-
-    // They leave, and come back, any number of times: nothing about this round is ever
-    // worth a second banner again.
-    for (let i = 0; i < 3; i++) {
-      looking.set(board.id, false);
-      watch.evaluate(board.id, target(board.id));
-      await tick();
-      looking.set(board.id, true);
-      watch.evaluate(board.id, target(board.id));
-    }
-    assert.equal(banners.length, 1, 'answered, and never rings again');
     watch.close();
   });
 
@@ -986,7 +711,7 @@ async function layerOne() {
     writeBoard(b2, home);
     watch.evaluate(lapsed.id, target(lapsed.id));
 
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 0, 'three boards with nothing genuinely awaited on any of them');
     watch.close();
   });
@@ -996,24 +721,15 @@ async function layerOne() {
   // The check just above is this one's ablation control: the SAME board, content-only and
   // not Suppressed, raises nothing at all. Everything below turns on one field.
 
-  await check('ADR 92: a Suppressed board whose first round asks nothing is Stranded all the same', async () => {
+  await check('ADR 92: a Suppressed board whose first round asks nothing rings once after the grace, clickable and bounded by the launcher\'s ceiling alone', async () => {
     const { banners, watch } = stand();
     const board = seedBoard({ wait: false, suppressed: true });
     watch.evaluate(board.id, target(board.id));
     assert.equal(banners.length, 0, 'the grace is served here exactly as it is for an awaited round');
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 1, 'no tab was opened for this board, so the Banner is the only thing that can announce it');
     assert.equal(banners[0].folder, 'my-project');
     assert.equal(bannerOn(board.id).round, 1, 'the mark goes onto round 1, which is what makes this once and for all');
-    watch.close();
-  });
-
-  await check('ADR 92: and its Banner is clickable, bounded by the launcher\'s ceiling alone', async () => {
-    const { banners, watch } = stand();
-    const board = seedBoard({ wait: false, suppressed: true });
-    watch.evaluate(board.id, target(board.id));
-    await tick();
-    assert.equal(banners.length, 1);
     assert.equal(banners[0].url, `${URL_A}/b/${board.id}#stranded-round`,
       'clicking has to land on the board -- announcing a board nobody can reach announces nothing');
     assert.equal(banners[0].port, PORT, 'and the bound port beside it, or src/notify.mjs refuses the click outright');
@@ -1035,7 +751,7 @@ async function layerOne() {
     const { looking, banners, watch } = stand();
     const board = seedBoard({ wait: false, suppressed: true });
     watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 1);
     // A genuine return, which is the one thing that opens the gate (ADR.md entry 74) --
     // and the case that would otherwise loop forever here, since a content-only round
@@ -1045,7 +761,7 @@ async function layerOne() {
     assert.equal(bannerOn(board.id).returned, true, 'the gate really did open');
     looking.set(board.id, false);
     watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 1, 'round 1 sits at the mark, so an open gate has nothing left to announce');
     watch.close();
   });
@@ -1057,7 +773,7 @@ async function layerOne() {
     stored.rounds[0].status = 'sent';
     writeBoard(stored, home);
     watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 0,
       'an answered first round is a reviewer who got to the board; this clause is for one that landed in silence');
     watch.close();
@@ -1077,7 +793,7 @@ async function layerOne() {
     // announced the board they had just finished reading.
     looking.set(board.id, false);
     watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 0, 'nothing announces a board the reviewer has already been to');
     assert.equal(announcedAt(board.id), null);
     watch.close();
@@ -1099,7 +815,7 @@ async function layerOne() {
     assert.equal(lapsed.rounds[0].awaited, false, 'and stops being awaited, so `waitingRounds` drops it');
 
     watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 0, 'a round whose wait has run out is not a round nobody has been told about');
     assert.equal(announcedAt(board.id), null);
     watch.close();
@@ -1113,7 +829,7 @@ async function layerOne() {
     looking.set(theirs.id, true);
     watch.evaluate(mine.id, target(mine.id));
     watch.evaluate(theirs.id, target(theirs.id));
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 1, 'exactly the board nobody is Attending announces');
     assert.equal(banners[0].url, `${URL_A}/b/${mine.id}#stranded-round`);
     assert.equal(announcedAt(theirs.id), null, 'the attended board is untouched');
@@ -1134,7 +850,7 @@ async function layerOne() {
       const off = stand();
       const silenced = seedBoard();
       off.watch.evaluate(silenced.id, target(silenced.id));
-      await tick();
+      await sleep(40);
       assert.equal(off.banners.length, 0, 'criterion 17: round banners have their own control');
       assert.equal(announcedAt(silenced.id), null,
         'a banner that was never raised must not leave a marker suppressing the next one');
@@ -1148,7 +864,7 @@ async function layerOne() {
       const legacy = stand();
       const silenced = seedBoard();
       legacy.watch.evaluate(silenced.id, target(silenced.id));
-      await tick();
+      await sleep(40);
       assert.equal(legacy.banners.length, 0, 'the legacy off has to reach this gate through the migration');
       legacy.watch.close();
     });
@@ -1158,7 +874,7 @@ async function layerOne() {
       const on = stand();
       const loud = seedBoard();
       on.watch.evaluate(loud.id, target(loud.id));
-      await tick();
+      await sleep(40);
       assert.equal(on.banners.length, 1, 'silencing the pomodoro must not silence these');
       on.watch.close();
     });
@@ -1169,7 +885,7 @@ async function layerOne() {
     // whatever banners at one level banners at every louder one. The Attended board is a
     // DIFFERENT board, which is the only thing that tells "no board is open" apart from
     // "this board is not open".
-    await withGrace(25, async () => {
+    await withEnv({ CLAUDE_BOARD_STRANDED_GRACE_MS: 25 }, async () => {
       for (const [level, expected] of [['off', 0], ['no-board', 0], ['this-board', 1], ['always', 1]]) {
         await withSettings({ bannerLevel: level }, async () => {
           const { looking, banners, watch } = stand();
@@ -1177,7 +893,7 @@ async function layerOne() {
           const mine = seedBoard();
           looking.set(elsewhere.id, true); // the reviewer is sitting on some other board
           watch.evaluate(mine.id, target(mine.id));
-          await tick(120);
+          await sleep(120);
           assert.equal(banners.length, expected, `level ${level}, with another board Attended`);
           watch.close();
         });
@@ -1187,7 +903,7 @@ async function layerOne() {
           const { banners, watch } = stand();
           const mine = seedBoard();
           watch.evaluate(mine.id, target(mine.id));
-          await tick(120);
+          await sleep(120);
           assert.equal(banners.length, expected, `level ${level}, with nobody attending anything`);
           watch.close();
         });
@@ -1200,15 +916,15 @@ async function layerOne() {
     // board Attended for the whole look-away window (ADR.md entry 73), which is exactly
     // what the default level waits out; here it must not delay the Banner past the grace,
     // or the loudest level would also be the slowest one.
-    await withGrace(25, async () => {
+    await withEnv({ CLAUDE_BOARD_STRANDED_GRACE_MS: 25 }, async () => {
       await withSettings({ bannerLevel: 'always' }, async () => {
         const { lookAway, banners, watch } = stand();
         const board = seedBoard();
         lookAway(board.id, 5_000); // five seconds of look-away window left on it
         watch.evaluate(board.id, target(board.id));
-        await tick(120);
+        await sleep(120);
         assert.equal(banners.length, 1, 'the grace alone is the whole delay at this level');
-        await tick(80);
+        await sleep(80);
         assert.equal(banners.length, 1, 'and still exactly one: the per-round mark is untouched by the level (ADR.md entry 74)');
         watch.close();
       });
@@ -1221,7 +937,7 @@ async function layerOne() {
         const board = seedBoard();
         lookAway(board.id, 5_000);
         watch.evaluate(board.id, target(board.id));
-        await tick(120);
+        await sleep(120);
         assert.equal(banners.length, 0, "today's rule waits the look-away window out");
         watch.close();
       });
@@ -1233,18 +949,18 @@ async function layerOne() {
     // fires when a look-away window expires, and here the window belongs to a board this
     // one will never hear about. Dropping the countdown would not delay the round, it
     // would lose it.
-    await withGrace(25, async () => {
+    await withEnv({ CLAUDE_BOARD_STRANDED_GRACE_MS: 25 }, async () => {
       await withSettings({ bannerLevel: 'no-board' }, async () => {
         const { lookAway, banners, watch } = stand();
         const elsewhere = seedBoard();
         const mine = seedBoard();
         lookAway(elsewhere.id, 200); // the reviewer buried a DIFFERENT board's tab
         watch.evaluate(mine.id, target(mine.id));
-        await tick(120); // past the grace, still inside the other board's window
+        await sleep(120); // past the grace, still inside the other board's window
         assert.equal(banners.length, 0, 'any board Attended anywhere keeps this level quiet');
         // NOTHING is called from here on: that window expires on its own, on the real
         // clock, and no event fires when one does.
-        await tick(200);
+        await sleep(200);
         assert.equal(banners.length, 1, 'the Banner arrives when the last board stops being Attended, with no event to bring it');
         watch.close();
       });
@@ -1256,17 +972,17 @@ async function layerOne() {
     // a focused tab must produce a blur, a close or an answer, and each is an event for
     // THIS board. A focused tab on ANOTHER board produces no event for this one at all,
     // so this level has to keep a countdown alive to come back on.
-    await withGrace(25, async () => {
+    await withEnv({ CLAUDE_BOARD_STRANDED_GRACE_MS: 25 }, async () => {
       await withSettings({ bannerLevel: 'no-board' }, async () => {
         const { looking, banners, watch } = stand();
         const elsewhere = seedBoard();
         const mine = seedBoard();
         looking.set(elsewhere.id, true);
         watch.evaluate(mine.id, target(mine.id));
-        await tick(120);
+        await sleep(120);
         assert.equal(banners.length, 0, 'somebody is looking at a board, which is the whole of what this level asks');
         looking.delete(elsewhere.id); // that tab goes -- and nothing here calls evaluate
-        await tick(120);
+        await sleep(120);
         assert.equal(banners.length, 1, 'the countdown has to come back on its own, or this level is silent for the rest of the round');
         watch.close();
       });
@@ -1278,17 +994,17 @@ async function layerOne() {
     // the level says quiet -- the carve-out, at all three On levels. Each half carries its
     // ablation control beside it: the SAME shape on a board that was never Suppressed
     // stays quiet, which is what says the bypass and not the timing is doing the work.
-    await withGrace(25, async () => {
+    await withEnv({ CLAUDE_BOARD_STRANDED_GRACE_MS: 25 }, async () => {
       // "On when no board is open", with the reviewer sitting on another board.
       await withSettings({ bannerLevel: 'no-board' }, async () => {
         const { looking, banners, watch } = stand();
         const elsewhere = seedBoard();
         looking.set(elsewhere.id, true);
-        const owed = seedBoard({ wait: false, suppressed: true, cwd: projectFor('owed-no-board') });
-        const ordinary = seedBoard({ cwd: projectFor('ordinary-no-board') });
+        const owed = seedBoard({ wait: false, suppressed: true, cwd: projectFor(workDir, 'owed-no-board') });
+        const ordinary = seedBoard({ cwd: projectFor(workDir, 'ordinary-no-board') });
         watch.evaluate(owed.id, target(owed.id));
         watch.evaluate(ordinary.id, target(ordinary.id));
-        await tick(120);
+        await sleep(120);
         assert.deepEqual(banners.map(b => b.folder), ['owed-no-board'],
           'a board nobody was ever shown is announced while the reviewer sits on another one; an ordinary awaited round is not');
         watch.close();
@@ -1301,13 +1017,13 @@ async function layerOne() {
       // AFTER the attendance gate, so it could only ever outrank the switch.
       await withSettings({ bannerLevel: 'this-board' }, async () => {
         const { lookAway, banners, watch } = stand();
-        const owed = seedBoard({ wait: false, suppressed: true, cwd: projectFor('owed-this-board') });
-        const ordinary = seedBoard({ cwd: projectFor('ordinary-this-board') });
+        const owed = seedBoard({ wait: false, suppressed: true, cwd: projectFor(workDir, 'owed-this-board') });
+        const ordinary = seedBoard({ cwd: projectFor(workDir, 'ordinary-this-board') });
         watch.evaluate(owed.id, target(owed.id));
         watch.evaluate(ordinary.id, target(ordinary.id));
         lookAway(owed.id, 300);      // both boards are Attended at fire time...
         lookAway(ordinary.id, 300);
-        await tick(120);
+        await sleep(120);
         assert.deepEqual(banners.map(b => b.folder), ['owed-this-board'],
           'the bypass is decided in front of the level\'s attendance condition, not behind it');
         watch.close();
@@ -1318,53 +1034,13 @@ async function layerOne() {
         const { looking, banners, watch } = stand();
         const elsewhere = seedBoard();
         looking.set(elsewhere.id, true);
-        const owed = seedBoard({ wait: false, suppressed: true, cwd: projectFor('owed-always') });
+        const owed = seedBoard({ wait: false, suppressed: true, cwd: projectFor(workDir, 'owed-always') });
         watch.evaluate(owed.id, target(owed.id));
-        await tick(120);
+        await sleep(120);
         assert.equal(banners.length, 1, 'the loudest level owes this board its Banner too');
         watch.close();
       });
     });
-  });
-
-  await check('ADR 106: Off silences even the Banner a Suppressed board is owed, and raising the level later still announces it', async () => {
-    // ADR 106 narrows 92: the bypass survives every On level and Off alone is absolute --
-    // a machine migrated from `notifyRounds: false` loses the one Banner it still got, and
-    // the Popover's Waiting list is what remains. Nothing is MARKED on the way through,
-    // which is what the second half proves: the same board, the same watch, one level up,
-    // still gets the Banner it was owed. That is also the fresh-read property -- the level
-    // is read at fire time, so a change mid-wait lands on the next evaluation rather than
-    // on the next daemon restart.
-    const { banners, watch } = stand();
-    const owed = seedBoard({ wait: false, suppressed: true, cwd: projectFor('owed-at-off') });
-    try {
-      await withSettings({ bannerLevel: 'off' }, async () => {
-        watch.evaluate(owed.id, target(owed.id));
-        await tick();
-        assert.equal(banners.length, 0, 'Off is absolute: it silences the one Banner suppression traded a tab for');
-        assert.equal(announcedAt(owed.id), null, 'and marks nothing, so the debt is still owed');
-        assert.equal(readBoard(owed.id, home)[SUPPRESSED], true,
-          'the suppression decision itself is no business of the Banner level');
-      });
-      await withSettings({ bannerLevel: 'no-board' }, async () => {
-        watch.evaluate(owed.id, target(owed.id));
-        await tick();
-        assert.equal(banners.length, 1, 'the very next evaluation reads the new level: silence at Off was the level, not this board');
-      });
-    } finally {
-      watch.close();
-    }
-  });
-
-  await check('criterion 15: a round being answered terminates the process serving the click', async () => {
-    const { banners, watch } = stand();
-    const board = seedBoard();
-    watch.evaluate(board.id, target(board.id));
-    await tick();
-    assert.equal(banners.length, 1);
-    assert.equal(watch.answered(board.id, 1), true, 'round 1 is the round the banner is about');
-    assert.deepEqual(banners[0].child.killed, ['SIGTERM']);
-    watch.close();
   });
 
   await check('criterion 15: answering a DIFFERENT round leaves the banner alone', async () => {
@@ -1378,7 +1054,7 @@ async function layerOne() {
     const board = seedBoard();                          // round 1, awaited
     addAwaitedRound(board.id, 'a second, awaited too?'); // round 2, awaited
     watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 1);
     assert.equal(bannerOn(board.id).round, 1, 'the banner is about the oldest round');
 
@@ -1392,7 +1068,7 @@ async function layerOne() {
     watch.close();
   });
 
-  await check('criterion 15: ... including after an unclean restart, where the answer comes with no tab', async () => {
+  await check('criterion 15: answering the announced round after an unclean restart withdraws its banner by the recorded pid', async () => {
     // The gap: `answered` could only reach the handle THIS process holds. After a SIGKILL
     // restart there is none, and a round answered by a script carrying the local secret
     // produces no Watcher and no attended report either -- the submit-by-secret case. The
@@ -1402,7 +1078,7 @@ async function layerOne() {
     const crashed = stand();
     const board = seedBoard();
     crashed.watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     const rec = bannerOn(board.id);
     assert.equal(rec.pid, 4242);
 
@@ -1420,7 +1096,7 @@ async function layerOne() {
     const two = seedBoard();
     watch.evaluate(one.id, target(one.id));
     watch.evaluate(two.id, target(two.id));
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 2, 'two absent boards, two banners -- they are counted per board');
     watch.close();
     assert.deepEqual(banners.map(b => b.child.killed), [['SIGTERM'], ['SIGTERM']]);
@@ -1449,6 +1125,8 @@ async function layerOne() {
   const ABRUPT_EXIT_CHILD = `// Written by test/check-stranded.mjs; see "the abrupt path" there.
 import { spawn } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
+// This child is its own program and cannot reach test/support.mjs, so its wait is node's.
+import { setTimeout as sleep } from 'node:timers/promises';
 
 const [, , strandedUrl, boardA, boardB, reportPath] = process.argv;
 const { createStrandedWatch } = await import(strandedUrl);
@@ -1475,7 +1153,7 @@ const stand = () => createStrandedWatch({
 const watches = [stand(), stand()];
 watches[0].evaluate(boardA, { url: 'http://127.0.0.1:7391/b/' + boardA, port: 7391 });
 watches[1].evaluate(boardB, { url: 'http://127.0.0.1:7391/b/' + boardB, port: 7391 });
-await new Promise(r => setTimeout(r, 200));
+await sleep(200);
 
 // Written, not printed: process.exit() below can truncate a pipe mid-write.
 writeFileSync(reportPath, JSON.stringify({ pids, exitListeners: process.listenerCount('exit') }));
@@ -1490,14 +1168,14 @@ process.exit(0);
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
       try { process.kill(pid, 0); } catch { return true; }
-      await tick(20);
+      await sleep(20);
     }
     return false;
   }
 
   await check('criterion 15: an abrupt process.exit(), with no graceful close, still takes every click-serving child', async () => {
-    const one = seedBoard({ cwd: projectFor('abrupt-one') });
-    const two = seedBoard({ cwd: projectFor('abrupt-two') });
+    const one = seedBoard({ cwd: projectFor(workDir, 'abrupt-one') });
+    const two = seedBoard({ cwd: projectFor(workDir, 'abrupt-two') });
     const childPath = path.join(workDir, 'abrupt-exit-child.mjs');
     const reportPath = path.join(workDir, 'abrupt-exit-report.json');
     writeFileSync(childPath, ABRUPT_EXIT_CHILD);
@@ -1548,7 +1226,7 @@ process.exit(0);
     try {
       chmodSync(boardsDir, 0o500); // full disk, read-only volume, whatever it is
       watch.evaluate(board.id, target(board.id));
-      await tick();
+      await sleep(40);
       assert.equal(banners.length, 1, 'the banner still fires');
       assert.equal(bannerOn(board.id), null, 'and nothing about it reached disk');
       watch.close();
@@ -1560,29 +1238,6 @@ process.exit(0);
     }
   });
 
-  await check('criterion 4: a tab that comes back inside the grace raises no banner', async () => {
-    await withGrace(400, async () => {
-      const { looking, banners, watch } = stand();
-      const board = seedBoard();
-      try {
-        watch.evaluate(board.id, target(board.id)); // the last Watcher just dropped
-        await tick(60);
-        // ... and reconnected, well inside the window. The tab reports from its own
-        // `watcher` handler one round trip later, and THAT is what makes this silent --
-        // not the bare socket, which says nothing about whether anyone is looking.
-        looking.set(board.id, null);
-        watch.evaluate(board.id, target(board.id)); // subscribed, has not spoken yet
-        looking.set(board.id, true);
-        watch.evaluate(board.id, target(board.id)); // ... and says it is looking
-        await tick(500);
-        assert.equal(banners.length, 0, 'the grace exists so a reconnect is never mistaken for an absence');
-        assert.equal(announcedAt(board.id), null);
-      } finally {
-        watch.close();
-      }
-    });
-  });
-
   await check('criterion 7: a hidden tab reconnecting is not the reviewer coming back, and raises no second banner', async () => {
     const { looking, banners, watch } = stand();
     const board = seedBoard();
@@ -1590,7 +1245,7 @@ process.exit(0);
     // state rather than a contrived one.
     looking.set(board.id, false);
     watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 1);
     const announced = announcedAt(board.id);
     assert.ok(announced);
@@ -1602,7 +1257,7 @@ process.exit(0);
     watch.evaluate(board.id, target(board.id));
     looking.set(board.id, null);
     watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     assert.equal(announcedAt(board.id), announced,
       'a Watcher that has said nothing yet must not end an absence: the marker is untouched, stamp and all');
     assert.deepEqual(banners[0].child.killed, [],
@@ -1611,7 +1266,7 @@ process.exit(0);
     // ... and a round trip later the page says what it always was: still hidden.
     looking.set(board.id, false);
     watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 1,
       'criterion 7: still exactly one banner for this absence -- the reviewer has not come back');
     watch.close();
@@ -1622,7 +1277,7 @@ process.exit(0);
     // used to cancel the pending timer, and the tab's "still hidden" report a round trip
     // later armed a whole new one. A buried tab on a flaky socket -- or a laptop waking --
     // reconnecting oftener than the grace is long then never produced a banner at all.
-    await withGrace(200, async () => {
+    await withEnv({ CLAUDE_BOARD_STRANDED_GRACE_MS: 200 }, async () => {
       const { looking, banners, watch } = stand();
       const board = seedBoard();
       try {
@@ -1631,7 +1286,7 @@ process.exit(0);
         // longer than it lasts. Restart the countdown on any of these and it never
         // finishes; leave it alone and it fires at 200 regardless of the churn.
         for (let i = 0; i < 6; i++) {
-          await tick(40);
+          await sleep(40);
           looking.set(board.id, null);   // reconnects ...
           watch.evaluate(board.id, target(board.id));
           looking.set(board.id, false);  // ... and reports, a round trip later, that it is still buried
@@ -1654,7 +1309,7 @@ process.exit(0);
     // (criterion 16) sits on the write it never makes. A per-Watcher age bound could not
     // close this: reconnecting shortly before each grace expires keeps every Watcher
     // younger than the bound forever. So an unreported Watcher simply does not count.
-    await withGrace(150, async () => {
+    await withEnv({ CLAUDE_BOARD_STRANDED_GRACE_MS: 150 }, async () => {
       const { looking, banners, watch } = stand();
       const board = seedBoard();
       try {
@@ -1662,7 +1317,7 @@ process.exit(0);
         // A subscriber that holds the stream open and says nothing, reconnecting every
         // 50ms against a 150ms grace -- the churn that defeats any per-Watcher bound.
         for (let i = 0; i < 8; i++) {
-          await tick(50);
+          await sleep(50);
           looking.set(board.id, null);
           watch.evaluate(board.id, target(board.id));
         }
@@ -1673,22 +1328,6 @@ process.exit(0);
     });
   });
 
-  await check('criterion 7: several rounds awaited at once is still one board and one banner', async () => {
-    const { banners, watch } = stand();
-    const board = seedBoard();                          // round 1, awaited
-    addAwaitedRound(board.id, 'a second, awaited too?'); // round 2, awaited, 40 minutes out
-    watch.evaluate(board.id, target(board.id));
-    await tick();
-    assert.equal(banners.length, 1, 'criterion 8');
-    assert.equal(bannerOn(board.id).round, 1, 'the record names the oldest, which is what the click resolves to');
-
-    addAwaitedRound(board.id, 'and a third?');
-    watch.evaluate(board.id, target(board.id));
-    await tick();
-    assert.equal(banners.length, 1, 'the announced round is still awaited, so this is still the same absence');
-    watch.close();
-  });
-
   await check('criterion 6: the announced round being ANSWERED while another waits, with no return, raises nothing', async () => {
     // REWRITTEN (ADR 74). This used to assert the opposite -- that round 1 being answered
     // retired the record and handed round 2 an absence of its own. A round becoming the
@@ -1697,7 +1336,7 @@ process.exit(0);
     const board = seedBoard();                          // round 1, awaited
     addAwaitedRound(board.id, 'a second, awaited too?'); // round 2, awaited
     watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 1);
     assert.equal(bannerOn(board.id).round, 1);
 
@@ -1707,39 +1346,12 @@ process.exit(0);
     answered.rounds[0].status = 'sent';
     writeBoard(answered, home);
     watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 1, 'criterion 6: nobody has come back, so the board stays silent');
     assert.equal(bannerOn(board.id).round, 1, 'the mark stays on the round it was raised for');
     assert.equal(bannerOn(board.id).returned, false, 'and the gate is still shut');
 
     // ... until the reviewer genuinely returns, and then round 2 gets its one banner.
-    watch.close();
-  });
-
-  await check('criterion 6: ... and the round the reviewer does come back for is round 2, once', async () => {
-    // The same shape carried one step further: the silence of criterion 6 is a delay, not
-    // a permanent loss. A genuine return and a fresh departure is what unblocks round 2.
-    const { looking, banners, watch } = stand();
-    const board = seedBoard();
-    addAwaitedRound(board.id, 'a second, awaited too?');
-    watch.evaluate(board.id, target(board.id));
-    await tick();
-    assert.equal(banners.length, 1);
-
-    const answered = readBoard(board.id, home);
-    answered.rounds[0].status = 'sent';
-    writeBoard(answered, home);
-    watch.evaluate(board.id, target(board.id));
-    await tick();
-    assert.equal(banners.length, 1);
-
-    looking.set(board.id, true);   // the reviewer comes back ...
-    watch.evaluate(board.id, target(board.id));
-    looking.delete(board.id);      // ... and leaves again
-    watch.evaluate(board.id, target(board.id));
-    await tick();
-    assert.equal(banners.length, 2, 'round 2 has never been announced, so now it earns its one banner');
-    assert.equal(bannerOn(board.id).round, 2);
     watch.close();
   });
 
@@ -1754,7 +1366,7 @@ process.exit(0);
     const { banners, watch } = stand();
     const board = seedBoard();
     watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 1);
 
     const expired = readBoard(board.id, home);
@@ -1764,7 +1376,7 @@ process.exit(0);
 
     addAwaitedRound(board.id, 'a further round, with nobody back?');
     watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 1, 'exactly one banner total: the absence is still this board\'s one absence');
     assert.equal(bannerOn(board.id).round, 1, 'and the record is untouched');
     watch.close();
@@ -1782,15 +1394,15 @@ process.exit(0);
     const board = seedBoard({ awaitTimeoutMs: 150 }); // a wait that dies almost at once
     addAwaitedRound(board.id, 'a second, waiting behind it', AWAIT_MS);
     watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 1);
     assert.equal(bannerOn(board.id).round, 1);
 
-    await tick(200); // round 1's wait dies, and the banner raised for it goes with it
+    await sleep(200); // round 1's wait dies, and the banner raised for it goes with it
     assert.ok(!roundIsAwaitedOpen(readBoard(board.id, home).rounds[0]), 'round 1 really did lapse');
     assert.ok(roundIsAwaitedOpen(readBoard(board.id, home).rounds[1]), 'and round 2 really is still waiting');
     watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 1, 'criterion 6: a round becoming the oldest waiting one earns nothing on its own');
     assert.equal(bannerOn(board.id).round, 1, 'the mark is untouched');
     watch.close();
@@ -1803,7 +1415,7 @@ process.exit(0);
     const { looking, banners, watch } = stand();
     const board = seedBoard();
     watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 1);
 
     // Answered by a script carrying the local secret: no browser, so no attended Watcher
@@ -1812,20 +1424,21 @@ process.exit(0);
     answered.rounds[0].status = 'sent';
     writeBoard(answered, home);
     watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     assert.ok(bannerOn(board.id), 'the mark survives the round it names being answered');
 
     addAwaitedRound(board.id, 'a new round, with nobody back?');
     watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 1, 'still silent: nobody has been back to this board');
 
     looking.set(board.id, true);
     watch.evaluate(board.id, target(board.id));
     looking.delete(board.id);
     watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 2, 'and a genuine return and departure is what finally lets round 2 speak');
+    assert.equal(bannerOn(board.id).round, 2, 'and the mark moves to the round it is about');
     watch.close();
   });
 
@@ -1836,7 +1449,7 @@ process.exit(0);
     const { banners, watch } = stand();
     const board = seedBoard();
     watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 1);
     const rec = bannerOn(board.id);
     assert.ok(Date.parse(rec.until) <= Date.parse(rec.at) + CLICK_LIFETIME_MAX_MS,
@@ -1856,7 +1469,7 @@ process.exit(0);
     const mode = statSync(boardsDir).mode;
     try {
       watch.evaluate(board.id, target(board.id));
-      await tick();
+      await sleep(40);
       assert.equal(banners.length, 1);
       // Wipe the record and make the store refuse writes, so the next announce cannot land.
       const wiped = readBoard(board.id, home);
@@ -1865,14 +1478,14 @@ process.exit(0);
       chmodSync(boardsDir, 0o500);
 
       watch.evaluate(board.id, target(board.id));
-      await tick();
+      await sleep(40);
       assert.equal(banners.length, 2, 'the banner still fires -- a broken store must not cost the reviewer the signal');
       assert.equal(bannerOn(board.id), null, 'and the write really did fail');
 
       // Every later event on this board -- a round landing, a tab closing -- is another
       // chance to announce the same absence again.
       for (let i = 0; i < 3; i++) watch.evaluate(board.id, target(board.id));
-      await tick();
+      await sleep(40);
       assert.equal(banners.length, 2,
         'but this daemon remembers it announced, so the rounds behind it add nothing (criterion 7)');
     } finally {
@@ -1897,21 +1510,21 @@ process.exit(0);
     const mode = statSync(boardsDir).mode;
     try {
       watch.evaluate(board.id, target(board.id));
-      await tick();
+      await sleep(40);
       assert.equal(banners.length, 1);
       assert.ok(bannerOn(board.id));
 
       chmodSync(boardsDir, 0o500);
       looking.set(board.id, true);   // the reviewer comes back, but the gate cannot be written
       watch.evaluate(board.id, target(board.id));
-      await tick();
+      await sleep(40);
       assert.deepEqual(banners[0].child.killed, [], 'nothing is withdrawn, because nothing could be recorded');
       assert.equal(bannerOn(board.id).returned, false, 'and the gate is still shut, which is what the screen shows');
 
       // The store comes back. Now returning does both.
       chmodSync(boardsDir, mode);
       watch.evaluate(board.id, target(board.id));
-      await tick();
+      await sleep(40);
       assert.deepEqual(banners[0].child.killed, ['SIGTERM'], 'the withdrawal it owed');
       assert.equal(bannerOn(board.id).returned, true, 'and the gate it owed');
       assert.equal(bannerOn(board.id).pid, null, 'with the pid cleared alongside the banner it named');
@@ -1936,7 +1549,7 @@ process.exit(0);
     const mode = statSync(boardsDir).mode;
     try {
       watch.evaluate(board.id, target(board.id));
-      await tick();
+      await sleep(40);
       assert.equal(banners.length, 1, 'round 1 rings, unwatched');
       const before = bannerOn(board.id);
       assert.ok(before, 'durably recorded');
@@ -1955,7 +1568,7 @@ process.exit(0);
       // `amended` tried and failed to write: a later `evaluate` must not act as though
       // the mark had already moved to round 0.
       watch.evaluate(board.id, target(board.id));
-      await tick();
+      await sleep(40);
       assert.equal(banners.length, 1, 'still just the one banner: the amend never actually freed round 1');
 
       // The store recovers, and the same amend -- retried, as the real caller would --
@@ -1963,7 +1576,7 @@ process.exit(0);
       chmodSync(boardsDir, mode);
       watch.amended(board.id, result.round);
       watch.evaluate(board.id, target(board.id));
-      await tick();
+      await sleep(40);
       assert.equal(banners.length, 2, 'once the store can be written, the amend rings again');
       assert.equal(bannerOn(board.id).round, 1, 'still round 1: the amend never minted a new round number');
     } finally {
@@ -1988,7 +1601,7 @@ process.exit(0);
     // needs it -- lands the delete precisely between announce's read and persist's re-read.
     // Ordering chosen, not a race provoked.
     const { banners, watch } = stand();
-    const board = seedBoard({ cwd: projectFor('deleted-before-persist') });
+    const board = seedBoard({ cwd: projectFor(workDir, 'deleted-before-persist') });
     const boardFile = path.join(home, 'boards', `${board.id}.json`);
     const originalPush = banners.push.bind(banners);
     banners.push = (...args) => {
@@ -2018,7 +1631,7 @@ process.exit(0);
     console.error = (...args) => said.push(args.join(' '));
     try {
       watch.evaluate(board.id, target(board.id));
-      await tick();
+      await sleep(40);
       assert.equal(banners.length, 1, 'the banner still fires: notify runs before the write is even attempted');
       assert.ok(!existsSync(boardFile), 'the board really is gone by the time persist re-reads it');
       assert.equal(uncaught, null, 'nothing throws when the write finds no document left to write to');
@@ -2035,72 +1648,18 @@ process.exit(0);
       // announced one silent, applied to a board that came back.
       writeBoard(board, home);
       for (let i = 0; i < 2; i++) watch.evaluate(board.id, target(board.id));
-      await tick();
+      await sleep(40);
       assert.equal(banners.length, 1, 'the daemon still remembers it announced, though the document holds nothing');
       assert.equal(bannerOn(board.id), null, 'and the restored document really does hold nothing: the write never landed');
     } finally {
       // The board goes back here too, and not only on the success path above: this
       // scenario deletes a real file out from under the store, and an assertion failing
       // before line 1435 would otherwise leave it deleted for the rest of the run. Same
-      // reasoning as `withGrace`'s own comment -- a restore that only runs when nothing
-      // went wrong turns one red check into several.
+      // reasoning as the note on `withEnv` at the top of this file -- a restore that only
+      // runs when nothing went wrong turns one red check into several.
       writeBoard(board, home);
       console.error = realError;
       process.off('uncaughtException', onUncaught);
-      watch.close();
-    }
-  });
-
-  await check('a return that could not be written restores the in-memory record byte for byte, not half-mutated with the gate open on a write that never landed', async () => {
-    // The restore line (`board[STRANDED_BANNER] = saved;`) puts the object `returned` was
-    // holding back to exactly what it was before the gate was opened on it. The check
-    // above this one already proves the DOCUMENT is untouched by a failed write; this one
-    // is about the in-memory copy the rule was holding when the write failed -- that it
-    // goes back rather than being left as `{ ...saved, returned: true, pid: null }` on a
-    // gate that was never recorded anywhere.
-    //
-    // `board` is `returned`'s own local variable, discarded the moment the function
-    // returns, and nothing the watch exposes -- the document, `banners`, `withdrawn` --
-    // can tell "restored" from "half-mutated" apart from the outside: both paths return
-    // before touching any of those again, so both leave the whole watch looking
-    // identical. The only honest way to see it is to hold the SAME object `readBoard`
-    // hands `returned`, since a mutation in place is visible through any reference to it,
-    // discarded or not -- so this spies on `JSON.parse`, the one synchronous seam every
-    // `readBoard` call passes through, for the single parse of this board's own file.
-    // That changes no behaviour of `stranded.mjs` or `stand()`; it is restored in the
-    // `finally` either way, exactly like the chmod it runs alongside.
-    const { looking, banners, watch } = stand();
-    const board = seedBoard({ cwd: projectFor('half-mutated-return') });
-    const boardsDir = path.join(home, 'boards');
-    const mode = statSync(boardsDir).mode;
-    const originalParse = JSON.parse;
-    let captured = null;
-    try {
-      watch.evaluate(board.id, target(board.id));
-      await tick();
-      assert.equal(banners.length, 1);
-      const before = bannerOn(board.id);
-
-      chmodSync(boardsDir, 0o500);
-      JSON.parse = function (text, ...rest) {
-        const result = originalParse.call(this, text, ...rest);
-        // The one parse of THIS board's file triggered by the evaluate below is
-        // `returned`'s own `boardOf` read -- the exact object it goes on to mutate and,
-        // on a failed write, restore.
-        if (result && result.id === board.id && captured === null) captured = result;
-        return result;
-      };
-      looking.set(board.id, true); // the reviewer comes back, but the gate cannot be written
-      watch.evaluate(board.id, target(board.id)); // synchronous straight through to `returned`
-      JSON.parse = originalParse;
-      await tick();
-
-      assert.ok(captured, 'the rule never read the board through JSON.parse, so this check proves nothing');
-      assert.deepEqual(captured[STRANDED_BANNER], before,
-        'the in-memory record goes back byte for byte -- pid and returned and all -- rather than staying half-mutated with the gate open on a write that never landed');
-    } finally {
-      JSON.parse = originalParse;
-      chmodSync(boardsDir, mode);
       watch.close();
     }
   });
@@ -2109,7 +1668,7 @@ process.exit(0);
     const { banners, withdrawn, watch } = stand();
     const board = seedBoard();
     watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 1);
     banners[0].child.die(); // its own deadline came round, or the osascript fallback just exited
     watch.answered(board.id, 1);
@@ -2119,28 +1678,6 @@ process.exit(0);
     // and bounded by `until` and by the process's own start time before anything is sent.
     assert.deepEqual(withdrawn.map(w => w.pid), [4242]);
     watch.close();
-  });
-
-  await check('the daemon\'s own SIGTERM is not reported as a notification failure', async () => {
-    // Node hands `killed: true, signal: 'SIGTERM'` to execFile's callback when we kill a
-    // child on purpose -- which is every return-to-board. Unexempted, that printed
-    // "notifications may not be appearing" on the happy path AND burned the one-shot
-    // warning, so a genuinely broken notifier later in the same run said nothing at all.
-    // Real `notifyRound` here, against the lingering stub on PATH, not the fake notifier.
-    process.env.STUB_OSASCRIPT_LINGER_MS = '3000';
-    const said = [];
-    const realError = console.error;
-    console.error = (...args) => said.push(args.join(' '));
-    try {
-      const child = notifyRound('kill-me');
-      await tick(120);
-      child.kill('SIGTERM');
-      await tick(250);
-    } finally {
-      console.error = realError;
-      process.env.STUB_OSASCRIPT_LINGER_MS = '0';
-    }
-    assert.deepEqual(said, [], `killing our own click-serving child must say nothing: ${said.join(' | ')}`);
   });
 
   await check('the click target names the socket the daemon bound, never the Host header', () => {
@@ -2178,7 +1715,7 @@ process.exit(0);
     const first = stand();
     const board = seedBoard();
     first.watch.evaluate(board.id, target(board.id));
-    await tick();
+    await sleep(40);
     assert.equal(first.banners.length, 1);
     const rec = bannerOn(board.id);
     assert.equal(rec.pid, 4242);
@@ -2198,7 +1735,7 @@ process.exit(0);
     const board2 = seedBoard();
     const seeder = stand();
     seeder.watch.evaluate(board2.id, target(board2.id));
-    await tick();
+    await sleep(40);
     const stale = readBoard(board2.id, home);
     stale[STRANDED_BANNER].until = new Date(Date.now() - 60_000).toISOString();
     writeBoard(stale, home);
@@ -2212,141 +1749,6 @@ process.exit(0);
     later.watch.close();
     seeder.watch.close();
     first.watch.close();
-  });
-
-  await check('the daemon will not signal its own supervisor, whatever a record says', async () => {
-    // The start-time gate used to do this job: the launchd supervisor shares APP_EXEC
-    // exactly (install.sh puts that path in ProgramArguments) and its SIGTERM is relayed
-    // to node, but it has run since login, so "started before the record was written"
-    // excluded it. That stopped being true the moment a graceful stop began leaving
-    // records standing -- the SUCCESSOR supervisor starts AFTER `at`. A record naming a
-    // pid this daemon itself killed, plus a pid space that has wrapped over half an hour
-    // of builds, is a SIGTERM to our own supervisor and every blocked `ask` dying with it.
-    assert.equal(mayWithdrawPid(process.ppid), false, 'the parent is the one death that is catastrophic');
-    assert.equal(mayWithdrawPid(process.pid), false, 'and signalling ourselves is never the answer either');
-    for (const bad of [0, 1, -1, 1.5, NaN, null, undefined, '4242']) {
-      assert.equal(mayWithdrawPid(bad), false, `${JSON.stringify(bad)} is not a pid this may signal`);
-    }
-    // An ordinary pid that is neither still passes, or the guard would have eaten the
-    // feature rather than protected it.
-    const ordinary = [process.pid, process.ppid].includes(999_99) ? 99_998 : 99_999;
-    assert.equal(mayWithdrawPid(ordinary), true);
-  });
-
-  await check('the recorded pid is bounded by when it started, not just by what it is called', async () => {
-    // `ps -o comm=` alone cannot discriminate: every claude-board process prints the same
-    // path, including the launchd job that SUPERVISES this daemon (install.sh puts that
-    // exact string in ProgramArguments), whose SIGTERM is relayed to node. So a stale
-    // record naming a recycled pid could take the whole daemon down, or withdraw another
-    // board's banner while its round was still awaited. The start time is what excludes
-    // them: anything running since before the record was written is not what it names.
-    assert.equal(parseElapsedTime('05:23'), 323_000, 'mm:ss');
-    assert.equal(parseElapsedTime('   05:23  '), 323_000, 'ps pads its columns');
-    assert.equal(parseElapsedTime('01:05:23'), 3_923_000, 'hh:mm:ss');
-    assert.equal(parseElapsedTime('2-01:05:23'), 176_723_000, 'dd-hh:mm:ss, i.e. the supervisor');
-    for (const junk of ['', 'x', '5', '1:2:3:4', null, undefined]) {
-      assert.equal(parseElapsedTime(junk), null, `${JSON.stringify(junk)} must refuse rather than guess`);
-    }
-
-    // Measured against the real thing rather than assumed: this process's own etime must
-    // be a shape the parser accepts, and must place its start in the past.
-    const { stdout } = await execFileAsync('ps', ['-o', 'etime=', '-p', String(process.pid)]);
-    const elapsed = parseElapsedTime(stdout);
-    assert.ok(elapsed !== null, `macOS ps -o etime= must parse, got ${JSON.stringify(stdout)}`);
-    assert.ok(elapsed >= 0 && elapsed < 86_400_000, `and be a sane elapsed time, got ${elapsed}`);
-
-    // The COLUMN ORDER is load-bearing and was wrong once, silently. macOS clamps `comm`
-    // to MAXCOMLEN (16 bytes) whenever it is not the final column -- so with
-    // `-o comm=,etime=` the path comparison in withdrawClickChild could never match on
-    // any real install, where APP_EXEC runs past 60 characters, and the recorded-pid
-    // path was inert for the one case it exists for. Asserted against a path of that
-    // length rather than against this process's own, which on a short-path install would
-    // pass either way and prove nothing.
-    // Two things about this setup are load-bearing.
-    //
-    // The path is NOT shaped `claude-board.app/Contents/MacOS/claude-board`, which is what
-    // it used to be. Exec'ing an unsigned binary from inside a bundle makes macOS evaluate
-    // that bundle: it SIGKILLs the process, registers the bundle with LaunchServices
-    // permanently, and puts "claude-board.app is damaged and can't be opened" on screen --
-    // under the real install's name, from a suite run, with the real install perfectly
-    // fine (QUIRKS.md, "A copied platform binary is SIGKILLed on exec from inside a
-    // `.app`, wherever the copy lives" for the kill and the symlink remedy below, and
-    // "`lsregister` records are permanent" for the registration that outlives it).
-    // Only the LENGTH matters
-    // here, so this mirrors the real APP_EXEC's depth with no bundle anywhere in it.
-    //
-    // And the process at that path is a SYMBOLIC LINK to `process.execPath`, not a copy.
-    // `ps` reports the path a process was started from, not the path a link resolves to,
-    // so the link proves the same fact a copy would -- at no disk cost, with nothing to
-    // clean up but the link itself.
-    //
-    // The link points at NODE, not `/bin/sleep`. A link to `/bin/sleep` would run the real
-    // system binary just fine -- a link carries none of a copy's signature problem -- but
-    // `process.execPath` is the one binary certain to exist here: it's the interpreter
-    // already running this check, which is why the `-e` flag passed to it below means
-    // anything at all.
-    const longExec = path.join(workDir, 'launcher-exec-path-over-maxcomlen', 'claude-board');
-    mkdirSync(path.dirname(longExec), { recursive: true });
-    symlinkSync(process.execPath, longExec);
-    assert.ok(longExec.length > 16, 'setup sanity: the path has to exceed MAXCOMLEN to prove anything');
-    assert.ok(!longExec.includes('.app/'), 'and must NOT be bundle-shaped: exec\'ing out of one raises the damaged dialog');
-    // 30s, not the 5s this started at: nothing waits for the deadline (the `finally` below
-    // kills the child the moment the measurements are done), so the only thing a short one
-    // bought was a race with `ps` on a machine booting other checks' daemons in parallel.
-    const sleeper = spawn(longExec, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore' });
-    // A spawn that fails (noexec TMPDIR, a dangling link) emits 'error' asynchronously,
-    // and an unhandled one on a ChildProcess throws out of the event loop rather than into
-    // the try below -- taking the whole file down instead of failing this one check.
-    sleeper.on('error', () => {});
-    try {
-      await new Promise(r => setTimeout(r, 300));
-      // Name the child, not `ps`, when setup itself failed: `sleeper.on('error', ...)`
-      // above swallows a failed spawn and leaves `pid` undefined, and the child's own
-      // deadline can lapse before the two `ps` calls below run on a machine already busy
-      // booting daemons in parallel. Either way `ps -p` finds nothing, prints nothing, and
-      // exits 1 -- which execFileAsync turns into a rejected "Command failed: ps" that
-      // names the wrong culprit.
-      //
-      // Asserted before EACH `ps` call rather than once at the top: the second call is two
-      // awaits after the first, and that gap is itself a window the deadline can lapse in,
-      // so a single check at the top leaves the second call able to reject with exactly the
-      // misattributed message the guard exists to remove.
-      assert.ok(Number.isInteger(sleeper.pid), 'setup failure: the long-path sleeper never got a pid -- spawn failed, not a ps problem');
-      const stillAlive = which => assert.doesNotThrow(() => process.kill(sleeper.pid, 0),
-        `setup failure: the long-path sleeper exited before the ${which} ps could measure it -- not a ps problem`);
-      stillAlive('first');
-      const both = await execFileAsync('ps', ['-o', 'etime=,comm=', '-p', String(sleeper.pid)]);
-      const line = both.stdout.trim();
-      const cut = line.indexOf(' ');
-      assert.equal(line.slice(cut + 1).trim(), longExec,
-        'etime first, comm last: the full executable path must survive, or the pid gate never fires');
-      assert.ok(parseElapsedTime(line.slice(0, cut)) !== null,
-        'and the first column must still be an etime the parser accepts');
-
-      stillAlive('second');
-      const truncated = await execFileAsync('ps', ['-o', 'comm=,etime=', '-p', String(sleeper.pid)]);
-      assert.ok(!truncated.stdout.includes(longExec),
-        'and the other order really does truncate -- if macOS ever stops doing this, the comment above is what needs correcting, not this check');
-    } finally {
-      sleeper.kill();
-    }
-
-    // And that withdrawClickChild ASKS for that order. The two assertions above prove a
-    // fact about macOS; this one proves the code depends on the right side of it. A
-    // behavioural check cannot reach here -- withdrawClickChild returns early without a
-    // bundle, so outside one it is unobservable by construction -- and the cost of
-    // getting this wrong is not a wrong answer but silence: the gate simply never fires,
-    // which is exactly how it shipped.
-    const notifySrc = readFileSync(new URL('../src/notify.mjs', import.meta.url), 'utf8');
-    assert.match(notifySrc, /'-o',\s*'etime=,comm='/,
-      "withdrawClickChild must ask ps for etime FIRST -- with comm first macOS clamps it to 16 bytes and the path comparison can never match an APP_EXEC-length path");
-    assert.doesNotMatch(notifySrc, /'comm=,etime='/,
-      'and must not ask for the truncating order anywhere');
-
-    // The guards refuse rather than throw, on a path where throwing would reach a timer.
-    for (const args of [[0, Date.now()], [-1, Date.now()], [1, Date.now()], [12345, NaN], [12345, undefined]]) {
-      assert.doesNotThrow(() => withdrawClickChild(...args), `withdrawClickChild(${args}) must be a silent no-op`);
-    }
   });
 
   await check('when raising a Banner throws, announce contains it: no uncaught exception, the failure is reported, the watch stays usable, and a later round on another board still announces', async () => {
@@ -2366,8 +1768,8 @@ process.exit(0);
     console.error = (...args) => said.push(args.join(' '));
     let watch;
     try {
-      const brokenBoard = seedBoard({ cwd: projectFor('poison-notify') });
-      const okBoard = seedBoard({ cwd: projectFor('poison-notify-recovers') });
+      const brokenBoard = seedBoard({ cwd: projectFor(workDir, 'poison-notify') });
+      const okBoard = seedBoard({ cwd: projectFor(workDir, 'poison-notify-recovers') });
       const banners = [];
       // Throws only for the poisoned board's own folder, so the SAME double can also
       // prove the third observation: a genuinely different board, raised through the
@@ -2388,7 +1790,7 @@ process.exit(0);
       ({ watch } = stand({ notify }));
 
       watch.evaluate(brokenBoard.id, target(brokenBoard.id));
-      await tick();
+      await sleep(40);
 
       assert.equal(uncaught, null, 'a throwing notifier must not surface as an uncaught exception');
       assert.ok(said.some(s => s.includes('stranded banner') && s.includes(brokenBoard.id)),
@@ -2404,7 +1806,7 @@ process.exit(0);
       // `uncaught` staying null across BOTH throws is the genuine proof that the watch
       // survived the first one rather than merely not exploding synchronously.
       watch.evaluate(brokenBoard.id, target(brokenBoard.id));
-      await tick();
+      await sleep(40);
       assert.equal(uncaught, null, 'the watch stays usable: a second announce on the same poisoned board must not surface as an uncaught exception either');
       assert.ok(said.filter(s => s.includes('stranded banner') && s.includes(brokenBoard.id)).length >= 2,
         'and the second failure is reported too, not silently swallowed once the first one has already fired');
@@ -2413,7 +1815,7 @@ process.exit(0);
       // still announces, proving the throw did not wedge the watch for every board
       // sharing it.
       watch.evaluate(okBoard.id, target(okBoard.id));
-      await tick();
+      await sleep(40);
       assert.equal(banners.length, 1, 'a later round on another board still announces');
       assert.equal(banners[0].folder, 'poison-notify-recovers', 'and it is a genuinely different board, not the same one retried');
     } finally {
@@ -2440,8 +1842,8 @@ process.exit(0);
     console.error = (...args) => said.push(args.join(' '));
     let watch;
     try {
-      const brokenBoard = seedBoard({ cwd: projectFor('poison-hub') });
-      const okBoard = seedBoard({ cwd: projectFor('poison-hub-recovers') });
+      const brokenBoard = seedBoard({ cwd: projectFor(workDir, 'poison-hub') });
+      const okBoard = seedBoard({ cwd: projectFor(workDir, 'poison-hub-recovers') });
       // Throws only for the poisoned board's id, so the same hub double can also answer
       // truthfully -- "nobody attending" -- for any other board, which is what lets the
       // third observation be a real announce rather than a second throw.
@@ -2460,7 +1862,7 @@ process.exit(0);
       // really does reach the throw and observe it contained, with no timer in between.
       assert.doesNotThrow(() => watch.evaluate(brokenBoard.id),
         'evaluate must never rethrow -- it runs from a socket close handler with no caller\'s try left, and an uncaught throw there is an uncaught exception at the top of the event loop');
-      await tick();
+      await sleep(40);
 
       assert.equal(uncaught, null, 'a throwing hub must not surface as an uncaught exception');
       assert.ok(said.some(s => s.includes('stranded rule') && s.includes(brokenBoard.id)),
@@ -2474,7 +1876,7 @@ process.exit(0);
       // A later round on ANOTHER board -- its own project directory, its own banner --
       // still announces.
       watch.evaluate(okBoard.id, target(okBoard.id));
-      await tick();
+      await sleep(40);
       assert.equal(banners.length, 1, 'a later round on another board still announces');
       assert.equal(banners[0].folder, 'poison-hub-recovers', 'and it is a genuinely different board, not the same one retried');
     } finally {
@@ -2491,7 +1893,7 @@ process.exit(0);
     // `handleAttended`, which answers 200 for a board id naming nothing at all.
     assert.doesNotThrow(() => watch.evaluate('../../etc/passwd', target('x')));
     assert.doesNotThrow(() => watch.evaluate('b_never_created', target('x')));
-    await tick();
+    await sleep(40);
     assert.equal(banners.length, 0);
     watch.close();
   });
@@ -2506,7 +1908,7 @@ process.exit(0);
       const { banners, watch } = stand();
       const board = seedBoard();
       watch.evaluate(board.id, target(board.id));
-      await tick(60);
+      await sleep(60);
       assert.equal(banners.length, 0, `CLAUDE_BOARD_STRANDED_GRACE_MS=${JSON.stringify(bad)} must fall back to the shipped five seconds, not fire at once`);
       watch.close();
     }
@@ -2514,59 +1916,16 @@ process.exit(0);
     const { banners, watch } = stand();
     const board = seedBoard();
     watch.evaluate(board.id, target(board.id));
-    await tick(120);
+    await sleep(120);
     assert.equal(banners.length, 0, 'with the variable unset the shipped five seconds applies, so nothing fires yet');
     watch.close();
     process.env.CLAUDE_BOARD_STRANDED_GRACE_MS = '1';
-  });
-
-  // AC: "An unseen round rings 5s after it is posted. The wait stays overridable." The
-  // check above already pins the fallback default; this pins the override actually being
-  // honoured end to end -- a grace set to a few milliseconds fires well inside 5s, and one
-  // set past 5s does not fire before it.
-  await check('the wait stays overridable: a shorter grace fires before 5s, a longer one has not fired by 5s', async () => {
-    await withGrace(30, async () => {
-      const { banners, watch } = stand();
-      const board = seedBoard();
-      watch.evaluate(board.id, target(board.id));
-      await tick(200);
-      assert.equal(banners.length, 1, 'CLAUDE_BOARD_STRANDED_GRACE_MS overrides the default down, well under 5s');
-      watch.close();
-    });
-    await withGrace(5000, async () => {
-      const { banners, watch } = stand();
-      const board = seedBoard();
-      watch.evaluate(board.id, target(board.id));
-      await tick(200);
-      assert.equal(banners.length, 0, 'and overrides it up: a 5s grace has not fired 200ms in');
-      watch.close();
-    });
   });
 }
 
 // ====================================================================================
 // Layer 2: a real daemon, real event streams, a fake notifier on PATH.
 // ====================================================================================
-
-function rawRequest(port, method, pathName, { headers = {}, body = null } = {}) {
-  return new Promise((resolve, reject) => {
-    const payload = body == null ? null : Buffer.from(body, 'utf8');
-    const req = http.request({
-      host: '127.0.0.1',
-      port,
-      method,
-      path: pathName,
-      headers: { host: `127.0.0.1:${port}`, ...headers, ...(payload ? { 'content-length': payload.length } : {}) },
-    }, res => {
-      const chunks = [];
-      res.on('data', c => chunks.push(c));
-      res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString('utf8') }));
-    });
-    req.on('error', reject);
-    if (payload) req.write(payload);
-    req.end();
-  });
-}
 
 /** Open a real event stream and resolve once the daemon has handed it its watcher id --
  * i.e. once it is a Watcher of that board. The caller destroys `req` to close the tab. */
@@ -2589,15 +1948,6 @@ function openStream(port, boardId) {
   });
 }
 
-async function postRound(port, body) {
-  const r = await rawRequest(port, 'POST', '/api/board', {
-    headers: { 'content-type': 'application/json', [SECRET_HEADER]: SECRET },
-    body: JSON.stringify(body),
-  });
-  assert.equal(r.status, 200, `post failed: ${r.body}`);
-  return JSON.parse(r.body);
-}
-
 function reportAttended(port, boardId, watcher, attended) {
   return rawRequest(port, 'POST', `/api/board/${boardId}/attended`, {
     headers: { 'content-type': 'application/json', [SECRET_HEADER]: SECRET },
@@ -2618,7 +1968,7 @@ async function arriveAt(port, boardId) {
 }
 
 /** Post a first round that asks something, into its own project directory. */
-const askBoard = (folder, extra) => ({ title: `Stranded: ${folder}`, blocks: [QUESTION('Ship?')], cwd: projectFor(folder), ...extra });
+const askBoard = (folder, extra) => ({ title: `Stranded: ${folder}`, blocks: [QUESTION('Ship?')], cwd: projectFor(workDir, folder), ...extra });
 
 /** A first round that is Awaited but asks no QUESTION -- an awaited page round (ADR.md
  * entry 45), which is one `html` block and `wait: true`. The point is what happens to the
@@ -2629,7 +1979,7 @@ const askBoard = (folder, extra) => ({ title: `Stranded: ${folder}`, blocks: [QU
 const waitingArtifactBoard = folder => ({
   title: `Stranded: ${folder}`,
   blocks: [{ kind: 'html', html: '<p>an artifact, waiting on a comment</p>' }],
-  cwd: projectFor(folder),
+  cwd: projectFor(workDir, folder),
   wait: true,
 });
 
@@ -2646,38 +1996,24 @@ function stopServer(s) {
   s.closeAllConnections?.();
 }
 
-/** Run `fn` with a different look-away window, and put the old one back even if it
- * throws -- the same shape and the same reason as `withGrace` above. The shipped window
- * is two minutes (ADR 73) and no check may sleep through one. */
-async function withWindow(ms, fn) {
-  const saved = process.env.CLAUDE_BOARD_ATTENDED_WINDOW_MS;
-  process.env.CLAUDE_BOARD_ATTENDED_WINDOW_MS = String(ms);
-  try {
-    await fn();
-  } finally {
-    if (saved === undefined) delete process.env.CLAUDE_BOARD_ATTENDED_WINDOW_MS;
-    else process.env.CLAUDE_BOARD_ATTENDED_WINDOW_MS = saved;
-  }
-}
-
 async function layerTwo() {
   process.env.CLAUDE_BOARD_STRANDED_GRACE_MS = '60';
   // Layer 2 drives the real hub, so the shipped two-minute look-away window (ADR 73)
   // applies to every `reportAttended(..., false)` below -- a buried tab keeps its board
   // Attended, and nothing here could ever strand. Squashed to 20ms for the whole layer so
   // that "the reviewer switched to the terminal" reads as it did before the window
-  // existed; the checks that are ABOUT the window set their own with `withWindow`.
+  // existed; the checks that are ABOUT the window set their own with `withEnv`.
   process.env.CLAUDE_BOARD_ATTENDED_WINDOW_MS = '20';
   ({ server, port } = await startServer({ home, port: 0 }));
 
   await check('criterion 1: a round posted into a board with no tab watching raises one banner', async () => {
-    const { boardId, awaited } = await postRound(port, askBoard('unwatched'));
+    const { boardId, awaited } = await postBoard(port, SECRET, askBoard('unwatched'));
     assert.equal(awaited, true, 'the round has to be genuinely awaited for any of this to be about it');
-    const rows = await waitForRows('unwatched', 1);
+    const rows = await waitForCount(() => rowsFor(LOG, 'unwatched'), 1, { timeoutMs: 2000, intervalMs: 10 });
     assert.deepEqual(rows, [['spawn', '-e', BANNER('unwatched')]],
       'exactly one banner, titled Board, naming the session by its project folder');
-    await tick(200);
-    assert.equal(spawnsFor('unwatched').length, 1, 'and still exactly one after the grace has come round again');
+    await sleep(200);
+    assert.equal(spawnsFor(LOG, 'unwatched').length, 1, 'and still exactly one after the grace has come round again');
     assert.ok(announcedAt(boardId), 'the marker went onto the board document');
   });
 
@@ -2686,16 +2022,16 @@ async function layerTwo() {
     // amend branch, before the unconditional `stranded.evaluate` -- so this is the one
     // check in the file that proves the two are actually connected, not just that
     // `createStrandedWatch.amended` behaves correctly in isolation (layer 1 above).
-    const { boardId } = await postRound(port, askBoard('amend-rings-again'));
-    await waitForRows('amend-rings-again', 1);
+    const { boardId } = await postBoard(port, SECRET, askBoard('amend-rings-again'));
+    await waitForCount(() => rowsFor(LOG, 'amend-rings-again'), 1, { timeoutMs: 2000, intervalMs: 10 });
     assert.equal(bannerOn(boardId).round, 1, 'round 1 rang once, unwatched');
 
     // Still nobody watching: a second post that amends round 1 (askBoard's question is
     // still open, so this lands on amendRound, not addRound).
-    const amended = await postRound(port, { boardId, blocks: [QUESTION('or this one?')] });
+    const amended = await postBoard(port, SECRET, { boardId, blocks: [QUESTION('or this one?')] });
     assert.equal(amended.round, 1, 'setup: this really did amend round 1, not mint round 2');
 
-    const rows = await waitForRows('amend-rings-again', 2);
+    const rows = await waitForCount(() => rowsFor(LOG, 'amend-rings-again'), 2, { timeoutMs: 2000, intervalMs: 10 });
     assert.deepEqual(rows.map(r => r[0]), ['spawn', 'spawn'], 'a second banner, for the content the reviewer has never seen');
     assert.equal(bannerOn(boardId).round, 1, 'still round 1');
   });
@@ -2707,8 +2043,8 @@ async function layerTwo() {
     // that `pages/<id>.html` did not have, breaking the invariant test/check-http.mjs pins
     // and with it the standalone archive that opens from Finder with no daemon at all.
     // That check misses this because test/run.mjs pushes the grace out of its reach.
-    const { boardId } = await postRound(port, askBoard('page-stays-pure'));
-    await waitForRows('page-stays-pure', 1);
+    const { boardId } = await postBoard(port, SECRET, askBoard('page-stays-pure'));
+    await waitForCount(() => rowsFor(LOG, 'page-stays-pure'), 1, { timeoutMs: 2000, intervalMs: 10 });
     assert.ok(bannerOn(boardId), 'the record really is on the stored board');
 
     const served = (await rawRequest(port, 'GET', `/b/${boardId}`, { headers: { [SECRET_HEADER]: SECRET } })).body;
@@ -2726,7 +2062,7 @@ async function layerTwo() {
     assert.ok(!served.includes(SUPPRESSED), 'and it appears nowhere in the markup either');
   });
 
-  await check('criterion 1: and it opens no tab', () => {
+  await check('criterion 1: the daemon announces a round without opening a tab', () => {
     const opened = existsSync(process.env.STUB_OPEN_LOG) ? readFileSync(process.env.STUB_OPEN_LOG, 'utf8') : '';
     assert.equal(opened, '',
       'a stub `open` sits ahead of the real one on PATH: the daemon announces, it does not yank a tab in front of anyone');
@@ -2738,27 +2074,27 @@ async function layerTwo() {
   // one of those, this asserts the opposite of what the rule now says and fails honestly --
   // so it runs while nothing on this daemon has ever been watched, and says so.
   await check('criterion 8: a round that is not awaited raises no banner', async () => {
-    const posted = await postRound(port, {
-      title: 'An artifact', blocks: [{ kind: 'markdown', text: 'nothing is asked here' }], cwd: projectFor('not-awaited'),
+    const posted = await postBoard(port, SECRET, {
+      title: 'An artifact', blocks: [{ kind: 'markdown', text: 'nothing is asked here' }], cwd: projectFor(workDir, 'not-awaited'),
     });
     assert.equal(posted.suppressed, false, 'the precondition: no tab anywhere, so this board opened one of its own');
-    await tick(250);
-    assert.equal(spawnsFor('not-awaited').length, 0, 'nothing to answer means nothing to be stranded');
+    await sleep(250);
+    assert.equal(spawnsFor(LOG, 'not-awaited').length, 0, 'nothing to answer means nothing to be stranded');
     assert.equal(announcedAt(posted.boardId), null);
   });
 
   await check('criterion 5: a round landing on a board somebody is looking at raises nothing', async () => {
-    const { boardId } = await postRound(port, askBoard('watched'));
+    const { boardId } = await postBoard(port, SECRET, askBoard('watched'));
     // Posted before any stream existed, so round 1 is announced. Arriving withdraws that
     // banner and opens the return gate; everything after this is the attended case.
-    await waitForRows('watched', 1);
+    await waitForCount(() => rowsFor(LOG, 'watched'), 1, { timeoutMs: 2000, intervalMs: 10 });
     const tab = await arriveAt(port, boardId);
     try {
-      await tick(30);
+      await sleep(30);
       assert.equal(bannerOn(boardId).returned, true, 'arriving opened the gate');
-      for (const n of [2, 3, 4]) await postRound(port, { boardId, blocks: [QUESTION(`round ${n}?`)] });
-      await tick(250);
-      assert.equal(spawnsFor('watched').length, 1, 'however many rounds land, a board in front of the reviewer says nothing more');
+      for (const n of [2, 3, 4]) await postBoard(port, SECRET, { boardId, blocks: [QUESTION(`round ${n}?`)] });
+      await sleep(250);
+      assert.equal(spawnsFor(LOG, 'watched').length, 1, 'however many rounds land, a board in front of the reviewer says nothing more');
     } finally {
       tab.req.destroy();
     }
@@ -2769,15 +2105,15 @@ async function layerTwo() {
     // announced, the reviewer glanced at the board, and closing the tab announced the same
     // round again. That is the defect -- the round is spent, and no amount of leaving and
     // coming back buys it another banner.
-    const { boardId } = await postRound(port, askBoard('closed-on'));
-    await waitForRows('closed-on', 1);
+    const { boardId } = await postBoard(port, SECRET, askBoard('closed-on'));
+    await waitForCount(() => rowsFor(LOG, 'closed-on'), 1, { timeoutMs: 2000, intervalMs: 10 });
     const tab = await arriveAt(port, boardId); // the reviewer glances at it
-    await tick(30);
+    await sleep(30);
     assert.equal(bannerOn(boardId).returned, true);
 
     tab.req.destroy(); // ... and closes the tab with round 1 still open
-    await tick(250);
-    assert.equal(spawnsFor('closed-on').length, 1, 'criterion 3: round 1 has had its one banner, ever');
+    await sleep(250);
+    assert.equal(spawnsFor(LOG, 'closed-on').length, 1, 'criterion 3: round 1 has had its one banner, ever');
     assert.equal(bannerOn(boardId).round, 1, 'and the mark is untouched');
   });
 
@@ -2785,19 +2121,19 @@ async function layerTwo() {
     // The positive twin of the check above, and the case the disconnect hook exists for:
     // the reviewer genuinely returned, a new round landed while they were there, and then
     // they closed the tab. That round has never been announced, so it earns its one banner.
-    const { boardId } = await postRound(port, waitingArtifactBoard('closed-on-fresh'));
-    await waitForRows('closed-on-fresh', 1);
+    const { boardId } = await postBoard(port, SECRET, waitingArtifactBoard('closed-on-fresh'));
+    await waitForCount(() => rowsFor(LOG, 'closed-on-fresh'), 1, { timeoutMs: 2000, intervalMs: 10 });
     const tab = await arriveAt(port, boardId);
-    await tick(30);
+    await sleep(30);
     assert.equal(bannerOn(boardId).returned, true, 'a genuine return');
 
-    await postRound(port, { boardId, blocks: [QUESTION('asked while they were looking?')] });
-    await tick(100);
-    assert.equal(spawnsFor('closed-on-fresh').length, 1, 'nothing while they are still looking at it');
+    await postBoard(port, SECRET, { boardId, blocks: [QUESTION('asked while they were looking?')] });
+    await sleep(100);
+    assert.equal(spawnsFor(LOG, 'closed-on-fresh').length, 1, 'nothing while they are still looking at it');
 
     tab.req.destroy(); // ... and the fresh departure
-    await waitForRows('closed-on-fresh', 2);
-    assert.equal(spawnsFor('closed-on-fresh').length, 2, 'criterion 5: round 2 earns exactly one banner');
+    await waitForCount(() => rowsFor(LOG, 'closed-on-fresh'), 2, { timeoutMs: 2000, intervalMs: 10 });
+    assert.equal(spawnsFor(LOG, 'closed-on-fresh').length, 2, 'criterion 5: round 2 earns exactly one banner');
     assert.equal(bannerOn(boardId).round, 2, 'and the mark moves to it');
   });
 
@@ -2806,21 +2142,21 @@ async function layerTwo() {
     // click brings the tab forward, the reviewer switches back to the terminal, and the
     // same round announces itself again a grace later, once a minute for as long as it
     // waits.
-    const { boardId } = await postRound(port, askBoard('switched-away'));
-    await waitForRows('switched-away', 1);
+    const { boardId } = await postBoard(port, SECRET, askBoard('switched-away'));
+    await waitForCount(() => rowsFor(LOG, 'switched-away'), 1, { timeoutMs: 2000, intervalMs: 10 });
     const tab = await arriveAt(port, boardId);
     try {
-      await tick(30);
+      await sleep(30);
       assert.equal(bannerOn(boardId).returned, true);
       // Buried and brought back, four times over: the ordinary posture, terminal to
       // browser and back.
       for (let i = 0; i < 4; i++) {
         assert.equal((await reportAttended(port, boardId, tab.watcher, false)).status, 200);
-        await tick(120);
+        await sleep(120);
         await reportAttended(port, boardId, tab.watcher, true);
-        await tick(30);
+        await sleep(30);
       }
-      assert.equal(spawnsFor('switched-away').length, 1,
+      assert.equal(spawnsFor(LOG, 'switched-away').length, 1,
         'criterion 3: glancing at the board and leaving again, any number of times, raises nothing further');
     } finally {
       tab.req.destroy();
@@ -2834,25 +2170,25 @@ async function layerTwo() {
     //
     // The window here is 400ms against a 60ms grace, so "inside" and "past" are far enough
     // apart to be two different observations rather than one race.
-    await withWindow(400, async () => {
-      const { boardId } = await postRound(port, waitingArtifactBoard('look-away'));
-      await waitForRows('look-away', 1);
+    await withEnv({ CLAUDE_BOARD_ATTENDED_WINDOW_MS: 400 }, async () => {
+      const { boardId } = await postBoard(port, SECRET, waitingArtifactBoard('look-away'));
+      await waitForCount(() => rowsFor(LOG, 'look-away'), 1, { timeoutMs: 2000, intervalMs: 10 });
       const tab = await arriveAt(port, boardId);
       try {
-        await tick(30);
+        await sleep(30);
         assert.equal(bannerOn(boardId).returned, true, 'a genuine return');
         // A round the reviewer has not been told about, posted while they are looking.
-        await postRound(port, { boardId, blocks: [QUESTION('and this one?')] });
-        await tick(50);
-        assert.equal(spawnsFor('look-away').length, 1);
+        await postBoard(port, SECRET, { boardId, blocks: [QUESTION('and this one?')] });
+        await sleep(50);
+        assert.equal(spawnsFor(LOG, 'look-away').length, 1);
 
         await reportAttended(port, boardId, tab.watcher, false); // switches to the terminal
-        await tick(200); // well past the 60ms grace, well inside the 400ms window
-        assert.equal(spawnsFor('look-away').length, 1,
+        await sleep(200); // well past the 60ms grace, well inside the 400ms window
+        assert.equal(spawnsFor(LOG, 'look-away').length, 1,
           'criterion 7: a tab open behind the terminal is not nobody watching');
 
-        await waitForRows('look-away', 2, 2000);
-        assert.equal(spawnsFor('look-away').length, 2,
+        await waitForCount(() => rowsFor(LOG, 'look-away'), 2, { timeoutMs: 2000, intervalMs: 10 });
+        assert.equal(spawnsFor(LOG, 'look-away').length, 2,
           'criterion 7: past the window the board may strand, and this round has never been announced');
         assert.equal(bannerOn(boardId).round, 2);
       } finally {
@@ -2865,15 +2201,15 @@ async function layerTwo() {
     // No idle detection: nothing reads the reviewer's keyboard. A tab that reported focus
     // once and never reported anything again is watched for as long as it stays connected,
     // here for many times the look-away window.
-    await withWindow(30, async () => {
-      const { boardId } = await postRound(port, askBoard('left-focused'));
-      await waitForRows('left-focused', 1);
+    await withEnv({ CLAUDE_BOARD_ATTENDED_WINDOW_MS: 30 }, async () => {
+      const { boardId } = await postBoard(port, SECRET, askBoard('left-focused'));
+      await waitForCount(() => rowsFor(LOG, 'left-focused'), 1, { timeoutMs: 2000, intervalMs: 10 });
       const tab = await arriveAt(port, boardId);
       try {
-        await tick(30);
-        await postRound(port, { boardId, blocks: [QUESTION('a fresh round, never announced?')] });
-        await tick(400); // ~13 windows and ~6 graces, with no further report from the tab
-        assert.equal(spawnsFor('left-focused').length, 1,
+        await sleep(30);
+        await postBoard(port, SECRET, { boardId, blocks: [QUESTION('a fresh round, never announced?')] });
+        await sleep(400); // ~13 windows and ~6 graces, with no further report from the tab
+        assert.equal(spawnsFor(LOG, 'left-focused').length, 1,
           'criterion 8: a focused tab never ages out, so the round waits silently in front of the reviewer');
       } finally {
         tab.req.destroy();
@@ -2883,18 +2219,18 @@ async function layerTwo() {
 
   await check('criterion 3: a round landing on a board whose tab is open but hidden rings, and so does an amend to it', async () => {
     // A first round that asks nothing: an open tab, hidden, and nothing yet to strand.
-    const { boardId } = await postRound(port, {
-      title: 'Hidden tab', blocks: [{ kind: 'markdown', text: 'an artifact' }], cwd: projectFor('hidden-tab'),
+    const { boardId } = await postBoard(port, SECRET, {
+      title: 'Hidden tab', blocks: [{ kind: 'markdown', text: 'an artifact' }], cwd: projectFor(workDir, 'hidden-tab'),
     });
     const tab = await openStream(port, boardId);
     try {
       await reportAttended(port, boardId, tab.watcher, false);
-      await tick(250);
-      assert.equal(spawnsFor('hidden-tab').length, 0, 'nothing awaited yet, so nothing to be stranded');
+      await sleep(250);
+      assert.equal(spawnsFor(LOG, 'hidden-tab').length, 0, 'nothing awaited yet, so nothing to be stranded');
 
-      await postRound(port, { boardId, blocks: [QUESTION('now something?')] });
-      await waitForRows('hidden-tab', 1);
-      assert.equal(spawnsFor('hidden-tab').length, 1, 'the round lands on a tab that is open but not looked at');
+      await postBoard(port, SECRET, { boardId, blocks: [QUESTION('now something?')] });
+      await waitForCount(() => rowsFor(LOG, 'hidden-tab'), 1, { timeoutMs: 2000, intervalMs: 10 });
+      assert.equal(spawnsFor(LOG, 'hidden-tab').length, 1, 'the round lands on a tab that is open but not looked at');
 
       // The round just rung is still open and now asks something, so this lands on
       // amendRound, not addRound (see `waitingArtifactBoard`'s own comment on that split).
@@ -2902,9 +2238,9 @@ async function layerTwo() {
       // reviewer cannot see it, it rings" does not distinguish the two -- so the amend
       // rings again here too, on the same terms test/check-stranded.mjs's other AC checks
       // pin for a fully closed tab.
-      await postRound(port, { boardId, blocks: [QUESTION('and another?')] });
-      await waitForRows('hidden-tab', 2);
-      assert.equal(spawnsFor('hidden-tab').length, 2,
+      await postBoard(port, SECRET, { boardId, blocks: [QUESTION('and another?')] });
+      await waitForCount(() => rowsFor(LOG, 'hidden-tab'), 2, { timeoutMs: 2000, intervalMs: 10 });
+      assert.equal(spawnsFor(LOG, 'hidden-tab').length, 2,
         'an amend the reviewer cannot see rings again, even with a tab open behind it');
     } finally {
       tab.req.destroy();
@@ -2912,16 +2248,16 @@ async function layerTwo() {
   });
 
   await check('criterion 5: two tabs on one board count as looking if either one of them is', async () => {
-    const { boardId } = await postRound(port, askBoard('two-tabs'));
-    await waitForRows('two-tabs', 1);
+    const { boardId } = await postBoard(port, SECRET, askBoard('two-tabs'));
+    await waitForCount(() => rowsFor(LOG, 'two-tabs'), 1, { timeoutMs: 2000, intervalMs: 10 });
     const one = await openStream(port, boardId);
     const two = await openStream(port, boardId);
     try {
       await reportAttended(port, boardId, one.watcher, false); // one buried
       await reportAttended(port, boardId, two.watcher, true);  // one in front of the reviewer
-      await postRound(port, { boardId, blocks: [QUESTION('while watched?')] });
-      await tick(250);
-      assert.equal(spawnsFor('two-tabs').length, 1, 'no second banner: either tab looking is enough');
+      await postBoard(port, SECRET, { boardId, blocks: [QUESTION('while watched?')] });
+      await sleep(250);
+      assert.equal(spawnsFor(LOG, 'two-tabs').length, 1, 'no second banner: either tab looking is enough');
       assert.equal(bannerOn(boardId).returned, true, 'and the looking tab counts as the reviewer being back');
     } finally {
       one.req.destroy();
@@ -2932,18 +2268,18 @@ async function layerTwo() {
   await check('criterion 4: a tab that drops and reconnects inside the grace window raises no banner', async () => {
     process.env.CLAUDE_BOARD_STRANDED_GRACE_MS = '600';
     try {
-      const { boardId } = await postRound(port, askBoard('reconnecting'));
+      const { boardId } = await postBoard(port, SECRET, askBoard('reconnecting'));
       const tab = await arriveAt(port, boardId); // arrives inside the post's own grace
-      await tick(50);
+      await sleep(50);
       tab.req.destroy();
-      await tick(50);
+      await sleep(50);
       // EventSource reconnects natively, and the page reports from its `watcher` handler
       // the moment it has an id -- which is what makes this silent. A socket that never
       // reports is not a reviewer and is not treated as one.
       const back = await arriveAt(port, boardId);
       try {
-        await tick(800);
-        assert.equal(spawnsFor('reconnecting').length, 0, 'a reconnect inside the window is not an absence');
+        await sleep(800);
+        assert.equal(spawnsFor(LOG, 'reconnecting').length, 0, 'a reconnect inside the window is not an absence');
         assert.equal(announcedAt(boardId), null);
       } finally {
         back.req.destroy();
@@ -2958,19 +2294,19 @@ async function layerTwo() {
     // carrying the mark) -- `waitingArtifactBoard` is what buys that, exactly as the
     // restart checks above use it, so this stays a check about cross-board isolation
     // rather than also exercising the amend-rings-again behaviour.
-    const mine = await postRound(port, waitingArtifactBoard('board-alone'));
-    const theirs = await postRound(port, askBoard('board-watched'));
-    await waitForRows('board-alone', 1);
-    await waitForRows('board-watched', 1);
+    const mine = await postBoard(port, SECRET, waitingArtifactBoard('board-alone'));
+    const theirs = await postBoard(port, SECRET, askBoard('board-watched'));
+    await waitForCount(() => rowsFor(LOG, 'board-alone'), 1, { timeoutMs: 2000, intervalMs: 10 });
+    await waitForCount(() => rowsFor(LOG, 'board-watched'), 1, { timeoutMs: 2000, intervalMs: 10 });
     const watched = await arriveAt(port, theirs.boardId); // the reviewer sits on the OTHER board
     try {
-      await tick(30);
+      await sleep(30);
       assert.equal(bannerOn(theirs.boardId).returned, true, 'the board being looked at has had its return');
       assert.equal(bannerOn(mine.boardId).returned, false, 'a reviewer attending a different board is not attending this one');
-      await postRound(port, { boardId: mine.boardId, blocks: [QUESTION('still nobody?')] });
-      await tick(250);
-      assert.equal(spawnsFor('board-alone').length, 1, 'nothing crosses between boards, in either direction');
-      assert.equal(spawnsFor('board-watched').length, 1);
+      await postBoard(port, SECRET, { boardId: mine.boardId, blocks: [QUESTION('still nobody?')] });
+      await sleep(250);
+      assert.equal(spawnsFor(LOG, 'board-alone').length, 1, 'nothing crosses between boards, in either direction');
+      assert.equal(spawnsFor(LOG, 'board-watched').length, 1);
     } finally {
       watched.req.destroy();
     }
@@ -2981,14 +2317,14 @@ async function layerTwo() {
     // anyway let any caller holding a credential drive the stranded rule with a made-up
     // id -- reaching a durable write, and steering the click target with its own socket --
     // on a route whose answer is otherwise a silent no-op.
-    const { boardId } = await postRound(port, askBoard('forged-watcher'));
-    await waitForRows('forged-watcher', 1);
+    const { boardId } = await postBoard(port, SECRET, askBoard('forged-watcher'));
+    await waitForCount(() => rowsFor(LOG, 'forged-watcher'), 1, { timeoutMs: 2000, intervalMs: 10 });
     const before = bannerOn(boardId);
     assert.ok(before, 'the board really is in an announced absence');
 
     const r = await reportAttended(port, boardId, 'not-a-watcher-this-board-has', true);
     assert.equal(r.status, 200, 'still answered 200 -- a real tab cannot know it lost that race');
-    await tick(100);
+    await sleep(100);
     assert.deepEqual(bannerOn(boardId), before,
       'and the absence is untouched: nobody has come back, whatever the report claimed');
   });
@@ -3000,17 +2336,17 @@ async function layerTwo() {
     // on purpose (the ticket this file's own AC checks cover); this check is about
     // something else, a further round earning nothing without a genuine return, and has
     // to stay clear of the amend path to keep testing that.
-    const { boardId } = await postRound(port, waitingArtifactBoard('restarted'));
-    await waitForRows('restarted', 1);
+    const { boardId } = await postBoard(port, SECRET, waitingArtifactBoard('restarted'));
+    await waitForCount(() => rowsFor(LOG, 'restarted'), 1, { timeoutMs: 2000, intervalMs: 10 });
     assert.ok(announcedAt(boardId));
 
     const restarted = await startServer({ home, port: 0 }); // a second daemon over the same store
     try {
       // Whatever a restarted daemon does about this board, it must not be a banner: post
       // another round into it, with nobody Attending it.
-      await postRound(restarted.port, { boardId, blocks: [QUESTION('after the restart?')] });
-      await tick(250);
-      assert.equal(spawnsFor('restarted').length, 1,
+      await postBoard(restarted.port, SECRET, { boardId, blocks: [QUESTION('after the restart?')] });
+      await sleep(250);
+      assert.equal(spawnsFor(LOG, 'restarted').length, 1,
         'the reviewer has already been told about this board and has not been back');
     } finally {
       stopServer(restarted.server);
@@ -3029,22 +2365,22 @@ async function layerTwo() {
       // A genuinely new round below, not an amend -- see the restart check just above for
       // why `waitingArtifactBoard` rather than `askBoard` is what keeps this check about
       // restart durability rather than about the amend-rings-again behaviour.
-      const { boardId } = await postRound(own.port, waitingArtifactBoard('stop-and-start'));
-      await waitForRows('stop-and-start', 1);
+      const { boardId } = await postBoard(own.port, SECRET, waitingArtifactBoard('stop-and-start'));
+      await waitForCount(() => rowsFor(LOG, 'stop-and-start'), 1, { timeoutMs: 2000, intervalMs: 10 });
       const rec = bannerOn(boardId);
       assert.ok(rec);
 
       stopServer(own.server); // install.sh takes an update
-      const rows = await waitForRows('stop-and-start', 2);
+      const rows = await waitForCount(() => rowsFor(LOG, 'stop-and-start'), 2, { timeoutMs: 2000, intervalMs: 10 });
       assert.deepEqual(rows[1], ['SIGTERM', '-e', BANNER('stop-and-start')],
         'criterion 15: the click-serving process goes with the daemon');
       assert.deepEqual(bannerOn(boardId), { ...rec, pid: null },
         'the record stays -- this absence has been announced -- with only the pid of the process just killed cleared');
 
       successor = await startServer({ home, port: 0 });
-      await postRound(successor.port, { boardId, blocks: [QUESTION('after the update?')] });
-      await tick(250);
-      assert.equal(spawnsFor('stop-and-start').length, 1,
+      await postBoard(successor.port, SECRET, { boardId, blocks: [QUESTION('after the update?')] });
+      await sleep(250);
+      assert.equal(spawnsFor(LOG, 'stop-and-start').length, 1,
         'criterion 7: nothing more until the reviewer comes back, whether or not the banner is still on screen');
     } finally {
       process.env.STUB_OSASCRIPT_LINGER_MS = '0';
@@ -3058,31 +2394,31 @@ async function layerTwo() {
     // so nothing calls the subscribe hook and the marker survives by never being looked
     // at. Here a tab IS connected and buried, which is criterion 3's own state, and the
     // reconnect goes straight through the hook.
-    const { boardId } = await postRound(port, askBoard('hidden-reconnect'));
-    await waitForRows('hidden-reconnect', 1);
+    const { boardId } = await postBoard(port, SECRET, askBoard('hidden-reconnect'));
+    await waitForCount(() => rowsFor(LOG, 'hidden-reconnect'), 1, { timeoutMs: 2000, intervalMs: 10 });
     const announced = announcedAt(boardId);
     assert.ok(announced, 'the absence has been announced');
 
     const buried = await openStream(port, boardId);
     await reportAttended(port, boardId, buried.watcher, false);
-    await tick(200);
-    assert.equal(spawnsFor('hidden-reconnect').length, 1, 'a tab that opens buried is not the reviewer arriving');
+    await sleep(200);
+    assert.equal(spawnsFor(LOG, 'hidden-reconnect').length, 1, 'a tab that opens buried is not the reviewer arriving');
     assert.equal(announcedAt(boardId), announced, 'so the absence is still the same absence, stamp and all');
 
     // The socket drops and the tab reconnects -- EventSource does this natively, and a
     // laptop wake or a daemon restart under this same buried tab looks identical from
     // here. The fresh Watcher has reported nothing yet.
     buried.req.destroy();
-    await tick(30);
+    await sleep(30);
     const back = await openStream(port, boardId);
     try {
-      await tick(30);
+      await sleep(30);
       assert.equal(announcedAt(boardId), announced,
         'a Watcher that has said nothing yet must not end an absence nobody has returned from');
       // ... and a round trip later the page says what it always was: still hidden.
       await reportAttended(port, boardId, back.watcher, false);
-      await tick(250);
-      assert.equal(spawnsFor('hidden-reconnect').length, 1,
+      await sleep(250);
+      assert.equal(spawnsFor(LOG, 'hidden-reconnect').length, 1,
         'criterion 7: still exactly one banner -- the reviewer has not come back, so nothing may re-announce');
     } finally {
       back.req.destroy();
@@ -3092,17 +2428,19 @@ async function layerTwo() {
   await check('criterion 6: returning to a board withdraws the banner already delivered', async () => {
     process.env.STUB_OSASCRIPT_LINGER_MS = '5000';
     try {
-      const { boardId } = await postRound(port, askBoard('returned-to'));
-      await waitForRows('returned-to', 1);
+      const { boardId } = await postBoard(port, SECRET, askBoard('returned-to'));
+      await waitForCount(() => rowsFor(LOG, 'returned-to'), 1, { timeoutMs: 2000, intervalMs: 10 });
+      const announced = announcedAt(boardId);
       const tab = await arriveAt(port, boardId); // the reviewer comes back, and says so
       try {
-        const rows = await waitForRows('returned-to', 2);
+        const rows = await waitForCount(() => rowsFor(LOG, 'returned-to'), 2, { timeoutMs: 2000, intervalMs: 10 });
         assert.deepEqual(rows[1], ['SIGTERM', '-e', BANNER('returned-to')],
           'the daemon kills the process serving the click, and SIGTERM is what withdraws the delivered banner');
         const rec = bannerOn(boardId);
         assert.equal(rec.returned, true, 'the gate opens, so a round never announced may still speak');
         assert.equal(rec.round, 1, 'but the mark stays: round 1 is announced for the rest of its life');
         assert.equal(rec.pid, null, 'and the pid goes with the banner just withdrawn');
+        assert.equal(rec.at, announced, 'the announcement is the same announcement, stamp and all');
       } finally {
         tab.req.destroy();
       }
@@ -3114,34 +2452,18 @@ async function layerTwo() {
   await check('criterion 15: a round being answered terminates the process serving the click', async () => {
     process.env.STUB_OSASCRIPT_LINGER_MS = '5000';
     try {
-      const { boardId, round } = await postRound(port, askBoard('answered'));
-      await waitForRows('answered', 1);
+      const { boardId, round } = await postBoard(port, SECRET, askBoard('answered'));
+      await waitForCount(() => rowsFor(LOG, 'answered'), 1, { timeoutMs: 2000, intervalMs: 10 });
       const r = await rawRequest(port, 'POST', `/api/board/${boardId}/submit`, {
         headers: { 'content-type': 'application/json', [SECRET_HEADER]: SECRET },
         body: JSON.stringify({ round, action: 'send', answers: [], comments: [] }),
       });
       assert.equal(r.status, 200, `submit failed: ${r.body}`);
-      const rows = await waitForRows('answered', 2);
+      const rows = await waitForCount(() => rowsFor(LOG, 'answered'), 2, { timeoutMs: 2000, intervalMs: 10 });
       assert.deepEqual(rows[1], ['SIGTERM', '-e', BANNER('answered')],
         'nothing is left for the click to open, so the daemon that owns it kills it');
     } finally {
       process.env.STUB_OSASCRIPT_LINGER_MS = '0';
-    }
-  });
-
-  await check('criterion 15: stopping the daemon leaves none of the click-serving processes running', async () => {
-    process.env.STUB_OSASCRIPT_LINGER_MS = '5000';
-    const own = await startServer({ home, port: 0 });
-    try {
-      await postRound(own.port, askBoard('daemon-stopped'));
-      await waitForRows('daemon-stopped', 1);
-      stopServer(own.server);
-      const rows = await waitForRows('daemon-stopped', 2);
-      assert.deepEqual(rows[1], ['SIGTERM', '-e', BANNER('daemon-stopped')],
-        'the daemon owns it, so the daemon takes it with it');
-    } finally {
-      process.env.STUB_OSASCRIPT_LINGER_MS = '0';
-      stopServer(own.server);
     }
   });
 
@@ -3154,8 +2476,8 @@ async function layerTwo() {
     // where nothing is awaited.
     process.env.STUB_OSASCRIPT_LINGER_MS = '5000';
     try {
-      const { boardId } = await postRound(port, askBoard('abandoned-thread'));
-      await waitForRows('abandoned-thread', 1);
+      const { boardId } = await postBoard(port, SECRET, askBoard('abandoned-thread'));
+      await waitForCount(() => rowsFor(LOG, 'abandoned-thread'), 1, { timeoutMs: 2000, intervalMs: 10 });
       const rec = bannerOn(boardId);
       assert.ok(rec, 'the board really is in an announced state');
 
@@ -3165,11 +2487,12 @@ async function layerTwo() {
       assert.equal(r.status, 200, `abandon failed: ${r.body}`);
       assert.ok(JSON.parse(r.body).closed.length >= 1, 'a round really was closed');
 
-      const rows = await waitForRows('abandoned-thread', 2);
+      const rows = await waitForCount(() => rowsFor(LOG, 'abandoned-thread'), 2, { timeoutMs: 2000, intervalMs: 10 });
       assert.deepEqual(rows[1], ['SIGTERM', '-e', BANNER('abandoned-thread')],
         'the process serving the click is killed, and SIGTERM is what withdraws the delivered banner');
       const after = bannerOn(boardId);
       assert.ok(after, 'the mark stays: abandoning is not returning (ADR 74)');
+      assert.equal(after.round, rec.round, 'still the round that was announced');
       assert.equal(after.returned, false, 'and so does the shut gate');
       assert.equal(after.pid, null, 'only the pid goes');
     } finally {
@@ -3189,7 +2512,7 @@ async function layerTwo() {
     // focus and says so, and a fresh Watcher seeds its stamp from that. Never from the
     // fact of connecting, which is the reading entry 73 refuses -- the check below this
     // one is what pins that half.
-    await withWindow(4000, async () => {
+    await withEnv({ CLAUDE_BOARD_ATTENDED_WINDOW_MS: 4000 }, async () => {
       // Its own daemon, so the restart can be a REAL stop and start rather than a second
       // daemon beside the first -- the same shape the install.sh check above uses, and the
       // only one where the original daemon's pending countdown genuinely dies.
@@ -3198,16 +2521,16 @@ async function layerTwo() {
       try {
         // Round 1 is an awaited page round, so round 2 is a real round rather than an
         // amendment (see `waitingArtifactBoard`). Round 1 is announced and spent.
-        const { boardId } = await postRound(own.port, waitingArtifactBoard('survives-restart'));
-        await waitForRows('survives-restart', 1);
+        const { boardId } = await postBoard(own.port, SECRET, waitingArtifactBoard('survives-restart'));
+        await waitForCount(() => rowsFor(LOG, 'survives-restart'), 1, { timeoutMs: 2000, intervalMs: 10 });
         const tab = await arriveAt(own.port, boardId); // the reviewer looks at it
-        await tick(30);
+        await sleep(30);
         assert.equal(bannerOn(boardId).returned, true, 'a genuine return');
 
         // A round they have never been told about, posted while they are looking ...
-        await postRound(own.port, { boardId, blocks: [QUESTION('and this one?')] });
-        await tick(30);
-        assert.equal(spawnsFor('survives-restart').length, 1, 'silent while they are looking');
+        await postBoard(own.port, SECRET, { boardId, blocks: [QUESTION('and this one?')] });
+        await sleep(30);
+        assert.equal(spawnsFor(LOG, 'survives-restart').length, 1, 'silent while they are looking');
         // ... and then they switch to the terminal, with the tab still open.
         await reportAttended(own.port, boardId, tab.watcher, false);
 
@@ -3221,8 +2544,8 @@ async function layerTwo() {
         tab.req.destroy();
         // No banner may be raised on the way out, either: a stopping daemon destroys its
         // open SSE connections, and each close handler re-evaluates on its way out.
-        await tick(150);
-        assert.equal(spawnsFor('survives-restart').length, 1,
+        await sleep(150);
+        assert.equal(spawnsFor(LOG, 'survives-restart').length, 1,
           'a daemon that has been stopped announces nothing, however its connections unwind');
         successor = await startServer({ home, port: 0 });
         const back = await openStream(successor.port, boardId);
@@ -3232,8 +2555,8 @@ async function layerTwo() {
             headers: { 'content-type': 'application/json', [SECRET_HEADER]: SECRET },
             body: JSON.stringify({ watcher: back.watcher, attended: false, seq: 9, sinceFocusMs: 40 }),
           });
-          await tick(400); // six graces, and still well inside the four-second window
-          assert.equal(spawnsFor('survives-restart').length, 1,
+          await sleep(400); // six graces, and still well inside the four-second window
+          assert.equal(spawnsFor(LOG, 'survives-restart').length, 1,
             'the restart must not cost the reviewer their look-away window: round 2 has never been announced and the gate is open, so only the window is holding it back');
         } finally {
           back.req.destroy();
@@ -3251,33 +2574,28 @@ async function layerTwo() {
     // and a Watcher with nothing to count from must not be treated as recently focused --
     // otherwise reconnecting shortly before each grace would be a mute button obtainable
     // with a read credential and one write.
-    await withWindow(4000, async () => {
-      const { boardId } = await postRound(port, waitingArtifactBoard('never-focused'));
-      await waitForRows('never-focused', 1);
+    await withEnv({ CLAUDE_BOARD_ATTENDED_WINDOW_MS: 4000 }, async () => {
+      const { boardId } = await postBoard(port, SECRET, waitingArtifactBoard('never-focused'));
+      await waitForCount(() => rowsFor(LOG, 'never-focused'), 1, { timeoutMs: 2000, intervalMs: 10 });
       const tab = await arriveAt(port, boardId);
-      await tick(30);
+      await sleep(30);
       assert.equal(bannerOn(boardId).returned, true, 'a genuine return, so a later round may speak');
-      await postRound(port, { boardId, blocks: [QUESTION('never announced?')] });
+      await postBoard(port, SECRET, { boardId, blocks: [QUESTION('never announced?')] });
       tab.req.destroy();
-      await tick(50);
+      await sleep(50);
 
       // A tab opened in the background and never looked at: it connects and reports
       // hidden, with no focus of its own to report.
       const buried = await openStream(port, boardId);
       try {
         await reportAttended(port, boardId, buried.watcher, false);
-        await waitForRows('never-focused', 2);
-        assert.equal(spawnsFor('never-focused').length, 2,
+        await waitForCount(() => rowsFor(LOG, 'never-focused'), 2, { timeoutMs: 2000, intervalMs: 10 });
+        assert.equal(spawnsFor(LOG, 'never-focused').length, 2,
           'connected is not recently focused: the round still strands on the plain grace');
       } finally {
         buried.req.destroy();
       }
     });
-  });
-
-  await check('the connected-tab count stays on the round-posting response', async () => {
-    const posted = await postRound(port, askBoard('still-reports-clients'));
-    assert.equal(posted.clients, 0, '`clients` is published protocol and is not a casualty of this rule');
   });
 
   // --- a fresh board defers to an open tab (ADR.md entries 91 and 92) -----------------
@@ -3292,43 +2610,43 @@ async function layerTwo() {
   // it and nothing after them has to know that.
 
   await check('ADR 91: a board posted while ANOTHER board has a Watcher is Suppressed, and still raises its one banner', async () => {
-    const { boardId: watched } = await postRound(port, askBoard('watched-elsewhere'));
+    const { boardId: watched } = await postBoard(port, SECRET, askBoard('watched-elsewhere'));
     const tab = await openStream(port, watched);
     try {
-      const posted = await postRound(port, askBoard('suppressed-awaited'));
+      const posted = await postBoard(port, SECRET, askBoard('suppressed-awaited'));
       assert.equal(posted.suppressed, true,
         'any board, any project: a tab on some other board is what suppresses this one\'s auto-open');
       assert.equal(posted.awaited, true, 'and this one really is awaited, so it is the ordinary banner being checked');
-      const rows = await waitForRows('suppressed-awaited', 1);
+      const rows = await waitForCount(() => rowsFor(LOG, 'suppressed-awaited'), 1, { timeoutMs: 2000, intervalMs: 10 });
       assert.deepEqual(rows, [['spawn', '-e', BANNER('suppressed-awaited')]],
         'nothing opened a tab for this board, so the Banner is the whole announcement');
-      await tick(200);
-      assert.equal(spawnsFor('suppressed-awaited').length, 1, 'and exactly one, after the grace has come round again');
+      await sleep(200);
+      assert.equal(spawnsFor(LOG, 'suppressed-awaited').length, 1, 'and exactly one, after the grace has come round again');
     } finally {
       tab.req.destroy();
     }
   });
 
   await check('ADR 92: a Suppressed page board posted without wait raises one banner too, once, with nothing awaited', async () => {
-    const { boardId: watched } = await postRound(port, askBoard('watched-elsewhere-again'));
+    const { boardId: watched } = await postBoard(port, SECRET, askBoard('watched-elsewhere-again'));
     const tab = await openStream(port, watched);
     try {
       // One `html` block and nothing else is a PAGE board (QUIRKS.md), and with no `wait`
       // nothing on it is Awaited -- the exact shape that used to land in total silence:
       // no tab, because a Watcher exists elsewhere, and no banner, because the rule only
       // knew how to announce a round somebody was blocked on.
-      const posted = await postRound(port, {
+      const posted = await postBoard(port, SECRET, {
         title: 'An artifact, nothing asked',
         blocks: [{ kind: 'html', html: '<p>an artifact, nothing asked</p>' }],
-        cwd: projectFor('suppressed-page'),
+        cwd: projectFor(workDir, 'suppressed-page'),
       });
       assert.equal(posted.suppressed, true);
       assert.equal(posted.awaited, false, 'no question block and no wait: there is nothing here for anyone to answer');
-      const rows = await waitForRows('suppressed-page', 1);
+      const rows = await waitForCount(() => rowsFor(LOG, 'suppressed-page'), 1, { timeoutMs: 2000, intervalMs: 10 });
       assert.deepEqual(rows, [['spawn', '-e', BANNER('suppressed-page')]],
         'the one thing that can tell the reviewer this board exists at all');
-      await tick(250);
-      assert.equal(spawnsFor('suppressed-page').length, 1, 'once, and only once');
+      await sleep(250);
+      assert.equal(spawnsFor(LOG, 'suppressed-page').length, 1, 'once, and only once');
 
       const rec = bannerOn(posted.boardId);
       assert.equal(rec.round, 1, 'the mark is round 1, which is what makes the second grace above silent');
@@ -3348,20 +2666,20 @@ async function layerTwo() {
     // test/check-mcp.mjs's (it needs a real shim and a real opener); this is the daemon's
     // half of the same decision, through the real hub and the real settings document.
     writeFileSync(SETTINGS_PATH, JSON.stringify({ settings: { bannerLevel: 'off' } }));
-    const { boardId: watched } = await postRound(port, askBoard('watched-still-banners'));
+    const { boardId: watched } = await postBoard(port, SECRET, askBoard('watched-still-banners'));
     // Genuinely Attended, not merely subscribed: the reviewer is ON another board, which
     // is what the level below has to stay quiet about for anything but this bypass.
     const tab = await arriveAt(port, watched);
     try {
-      const posted = await postRound(port, {
+      const posted = await postBoard(port, SECRET, {
         title: 'An artifact, nothing asked',
         blocks: [{ kind: 'html', html: '<p>an artifact, nothing asked</p>' }],
-        cwd: projectFor('banner-outranks-switch'),
+        cwd: projectFor(workDir, 'banner-outranks-switch'),
       });
       assert.equal(posted.suppressed, true,
         'a Watcher is standing right there, and the Banner level does not enter into that decision');
-      await tick(400); // several graces: the grace is 60ms for the whole of this layer
-      assert.equal(spawnsFor('banner-outranks-switch').length, 0,
+      await sleep(400); // several graces: the grace is 60ms for the whole of this layer
+      assert.equal(spawnsFor(LOG, 'banner-outranks-switch').length, 0,
         'Off silences even this one (ADR 106)');
       assert.equal(bannerOn(posted.boardId), null,
         'and marks nothing, so the debt survives the level being raised');
@@ -3374,11 +2692,11 @@ async function layerTwo() {
       // like), so this opens a stream purely for the `evaluate` that subscribing does.
       const owedTab = await openStream(port, posted.boardId);
       try {
-        const rows = await waitForRows('banner-outranks-switch', 1);
+        const rows = await waitForCount(() => rowsFor(LOG, 'banner-outranks-switch'), 1, { timeoutMs: 2000, intervalMs: 10 });
         assert.deepEqual(rows, [['spawn', '-e', BANNER('banner-outranks-switch')]],
           'the one Banner suppression owes fires at the level whose attendance condition is loudest against it');
-        await tick(300);
-        assert.equal(spawnsFor('banner-outranks-switch').length, 1, 'and only once');
+        await sleep(300);
+        assert.equal(spawnsFor(LOG, 'banner-outranks-switch').length, 1, 'and only once');
       } finally {
         owedTab.req.destroy();
       }
@@ -3400,21 +2718,21 @@ async function layerTwo() {
     // window two real round trips fit in reliably, and QUIRKS.md's own warning about this
     // file applies: a timing margin that holds on an idle machine is worth nothing, so
     // this one is wide enough to survive the contention that turns those races over.
-    await withGrace(1_200, async () => {
+    await withEnv({ CLAUDE_BOARD_STRANDED_GRACE_MS: 1_200 }, async () => {
       writeFileSync(SETTINGS_PATH, JSON.stringify({ settings: { bannerLevel: 'no-board' } }));
-      const { boardId: watched, suppressed: watchedSuppressed } = await postRound(port, askBoard('level-elsewhere-watched'));
-      const quiet = await postRound(port, askBoard('level-no-board-quiet'));
+      const { boardId: watched, suppressed: watchedSuppressed } = await postBoard(port, SECRET, askBoard('level-elsewhere-watched'));
+      const quiet = await postBoard(port, SECRET, askBoard('level-no-board-quiet'));
       assert.equal(watchedSuppressed, false, 'the premise: nobody had a tab open, so neither board is owed anything by ADR 92');
       assert.equal(quiet.suppressed, false, 'the board under test in particular: nothing owes it a Banner but the level');
       assert.equal(quiet.awaited, true, 'and its round is genuinely awaited, so only the level stands between it and a Banner');
       // The reviewer arrives at the OTHER board, well inside both graces.
       const tab = await arriveAt(port, watched);
       try {
-        await tick(1_800); // both countdowns have fired and been re-decided at least once
-        assert.equal(spawnsFor('level-no-board-quiet').length, 0,
+        await sleep(1_800); // both countdowns have fired and been re-decided at least once
+        assert.equal(spawnsFor(LOG, 'level-no-board-quiet').length, 0,
           'a reviewer Attending any board on this machine keeps this level quiet');
         assert.equal(bannerOn(quiet.boardId), null, 'and nothing is marked while it is quiet');
-        assert.equal(spawnsFor('level-elsewhere-watched').length, 0, 'nor does the board they are actually on ring');
+        assert.equal(spawnsFor(LOG, 'level-elsewhere-watched').length, 0, 'nor does the board they are actually on ring');
 
         // One step louder, with the reviewer still exactly where they were: this level
         // asks only about the round's OWN board, which nobody has ever opened.
@@ -3425,7 +2743,7 @@ async function layerTwo() {
         // all it takes for the change to land on a round already waiting.
         const silent = await openStream(port, quiet.boardId);
         try {
-          const rows = await waitForRows('level-no-board-quiet', 1, 3000);
+          const rows = await waitForCount(() => rowsFor(LOG, 'level-no-board-quiet'), 1, { timeoutMs: 3000, intervalMs: 10 });
           assert.deepEqual(rows, [['spawn', '-e', BANNER('level-no-board-quiet')]],
             'the same round, the same reviewer, one level louder: it rings');
         } finally {
@@ -3440,19 +2758,10 @@ async function layerTwo() {
 }
 
 await layerOne();
-await layerTwo()
-  .catch(err => {
-    failures++;
-    console.error('FAIL - unexpected error');
-    console.error((err && err.stack) || err);
-  })
-  .finally(async () => {
+await runMain('stranded', layerTwo, {
+  cleanup: async () => {
     if (server) stopServer(server);
-    await tick(50);
+    await sleep(50);
     rmSync(workDir, { recursive: true, force: true });
-    if (failures) {
-      console.error(`\n${failures} check(s) failed`);
-      process.exit(1);
-    }
-    console.log('\nall stranded checks ok');
-  });
+  },
+});

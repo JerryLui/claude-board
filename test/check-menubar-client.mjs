@@ -101,8 +101,8 @@
 // waiting row's bezel is really absent on screen.
 //
 // Pattern-matched off test/check-pomodoro.mjs (a live daemon on a temp home via
-// startServer) and test/check-launcher-menubar.mjs (compiles bin/launcher.c from node and
-// drives the built binary). Skips gracefully if no C compiler is available, the same
+// startServer) and test/check-launcher-menubar.mjs (drives a launcher built from node, by
+// test/support.mjs's `buildLauncher`). Skips gracefully if no C compiler is available, the same
 // non-fatal degradation install.sh itself uses when `cc` is missing.
 //
 // Every spawn here is ASYNC. QUIRKS.md: a synchronous spawn that talks to a daemon running
@@ -114,49 +114,21 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { spawnSync, execFile, spawn } from 'node:child_process';
-import { promisify } from 'node:util';
+import { spawnSync, spawn } from 'node:child_process';
 import http from 'node:http';
+import net from 'node:net';
 import { defaultDoc, writeDoc, pomodoroDay, formatCountdown } from '../src/pomodoro.mjs';
 import { startServer } from '../src/server.mjs';
-import { SECRET_HEADER, SESSION_COOKIE, sessionToken } from '../src/secret.mjs';
-import { renderIndexPage, indexScript } from '../src/indexpage.mjs';
-import { parseHTML } from './dom-stand-in.mjs';
+import { SECRET_HEADER } from '../src/secret.mjs';
+import {
+  CC, buildLauncher, check, execFileAsync, freePort, haveCc, pageHarness, repoRoot, runMain, skipFile, sleep, writeStub,
+} from './support.mjs';
 
-const execFileAsync = promisify(execFile);
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ccCmd = process.env.CLAUDE_BOARD_CC || 'cc';
+if (!haveCc()) skipFile('menubar-client', `check-menubar-client.mjs: no C compiler ('${CC}') found`);
 
-if (spawnSync(ccCmd, ['--version']).error) {
-  console.log(`==> skipping check-menubar-client.mjs: no C compiler ('${ccCmd}') found`);
-  console.log('all menubar-client checks ok (skipped)');
-  process.exit(0);
-}
-
-let failures = 0;
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
+const { loadIndexAgainstDaemon } = await pageHarness();
 
 const workDir = mkdtempSync(path.join(tmpdir(), 'claude-board-menubar-client-'));
-
-// --- building the binary ----------------------------------------------------------------
-//
-// The same three-invocation build install.sh performs, against a hand-written
-// launcher_paths.h. Nothing in this file ever runs the SUPERVISING path, so the node and
-// daemon paths baked in below are never exec'd — they only have to exist as strings.
-// Mirrors install.sh's c_escape; every path here is plain mkdtemp ASCII.
-const cEscape = value => value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-const headerDir = path.join(workDir, 'header');
-mkdirSync(headerDir, { recursive: true });
 
 // --- the osascript stub, and why the compiled-in PATH is the seam that reaches it -------
 //
@@ -178,11 +150,9 @@ mkdirSync(headerDir, { recursive: true });
 // hands the script a two-variable environment it builds itself (PATH and HOME, both
 // compiled in), so neither an env var nor `#!/usr/bin/env node` can reach it.
 const stubDir = path.join(workDir, 'stub-bin');
-mkdirSync(stubDir, { recursive: true });
-const osascriptStub = path.join(stubDir, 'osascript');
 const osascriptLog = path.join(stubDir, 'log');
 const osascriptAnswer = path.join(stubDir, 'answer');
-writeFileSync(osascriptStub, `#!${process.execPath}
+const osascriptStub = writeStub(stubDir, 'osascript', `#!${process.execPath}
 import fs from 'node:fs';
 import path from 'node:path';
 const dir = path.dirname(process.argv[1]);
@@ -200,29 +170,17 @@ if (answer === 'slow') {
   process.stdout.write(answer + '\\n');
 }
 `);
-chmodSync(osascriptStub, 0o755);
 
-writeFileSync(path.join(headerDir, 'launcher_paths.h'), [
-  `#define CLAUDE_BOARD_NODE "${cEscape(process.execPath)}"`,
-  `#define CLAUDE_BOARD_DAEMON "${cEscape(path.join(workDir, 'never-run.mjs'))}"`,
-  `#define CLAUDE_BOARD_HOME_DIR "${cEscape(path.join(workDir, 'never-used-home'))}"`,
-  `#define CLAUDE_BOARD_PATH "${cEscape(stubDir)}"`,
-  `#define CLAUDE_BOARD_STORE_DIR "${cEscape(path.join(workDir, 'store'))}"`,
-  `#define CLAUDE_BOARD_REF_ROOTS_VALUE "${cEscape(path.join(workDir, 'roots'))}"`,
-  `#define CLAUDE_BOARD_REPO_ROOT_VALUE "${cEscape(path.join(workDir, 'repo'))}"`,
-  '',
-].join('\n'));
-
-const launcherExec = path.join(workDir, 'launcher');
-const objects = [['notify.m', 'notify.o'], ['menubar.m', 'menubar.o']].map(([src, obj]) =>
-  spawnSync(ccCmd, ['-O2', '-Wall', '-Wextra', '-fobjc-arc', '-c',
-    '-o', path.join(workDir, obj), path.join(repoRoot, 'bin', src)], { encoding: 'utf8' }));
-const builds = [...objects];
-if (objects.every(b => b.status === 0)) {
-  builds.push(spawnSync(ccCmd, ['-O2', '-Wall', '-Wextra', '-o', launcherExec, '-I', headerDir,
-    path.join(repoRoot, 'bin', 'launcher.c'), path.join(workDir, 'notify.o'), path.join(workDir, 'menubar.o'),
-    '-framework', 'Foundation', '-framework', 'UserNotifications', '-framework', 'AppKit'], { encoding: 'utf8' }));
-}
+// --- building the binary ----------------------------------------------------------------
+//
+// The same three-invocation build install.sh performs, against a launcher_paths.h whose
+// compiled-in PATH is the stub directory. Nothing in this file ever runs the SUPERVISING
+// path, so the node and daemon paths baked in are never exec'd: they only have to exist
+// as strings.
+const { exec: launcherExec, builds } = buildLauncher(workDir, {
+  home: path.join(workDir, 'never-used-home'),
+  path: stubDir,
+});
 
 // --- a browser that is running, and nothing else about it ---------------------------------
 //
@@ -478,13 +436,13 @@ function processNames() {
  * process named after a browser would poison every later check in this file. */
 async function withProcessNamed(name, fn) {
   const exe = path.join(fakeAppDir, name);
-  const built = spawnSync(ccCmd, ['-O2', '-o', exe, sleeperSrc], { encoding: 'utf8' });
+  const built = spawnSync(CC, ['-O2', '-o', exe, sleeperSrc], { encoding: 'utf8' });
   assert.equal(built.status, 0, `setup: the stand-in browser must compile:\n${built.stderr}`);
   const child = spawn(exe, [], { stdio: 'ignore' });
   try {
     // A process carries its own name only once it has actually exec'd.
     for (let i = 0; i < 100 && !processNames().has(name); i++) {
-      await new Promise(resolve => setTimeout(resolve, 20));
+      await sleep(20);
     }
     assert.ok(processNames().has(name), `setup: a process named ${name} must be running for this check to mean anything`);
     await fn();
@@ -589,13 +547,13 @@ function assertRowsSpanPanel(rows, label, tolerance = 3) {
 // The two surfaces, compared rather than each pinned to a hand copy.
 // -----------------------------------------------------------------------------------------
 
-/** Loads the REAL `renderIndexPage()` markup and runs the REAL `indexScript` against it,
- * with `fetch` rewritten to reach the given daemon over real HTTP, authorised the way a
- * genuine browser tab is -- a session cookie, never the native secret header `probe()`
- * above uses. Pattern-matched off test/check-pomodoro-page.mjs's own
- * `loadIndexAgainstDaemon`, narrowed to the one element this file needs
- * (`#pomodoro-status`); the settings-panel and SSE-stream halves that file already covers
- * are none of this chunk's business.
+/** `indexStatusText(tab)` is `#pomodoro-status`'s own textContent in an index tab loaded by
+ * test/support.mjs's `loadIndexAgainstDaemon`: the REAL `renderIndexPage()` markup running
+ * the REAL `indexScript`, with `fetch` rewritten to reach the given daemon over real HTTP,
+ * authorised the way a genuine browser tab is -- a session cookie, never the native secret
+ * header `probe()` above uses. The one element this file needs; the settings-panel and
+ * SSE-stream halves test/check-pomodoro-page.mjs already covers are none of this file's
+ * business.
  *
  * This is what makes criteria 4-6 checkable as a comparison rather than a hand copy. ADR
  * 88 says the popover's status line is "the index page's own string, in every state" --
@@ -605,41 +563,28 @@ function assertRowsSpanPanel(rows, label, tolerance = 3) {
  * "Break" reached this suite unnoticed (both sides of that check agreed with themselves).
  * Running the actual client script closes that gap: whatever `renderPomodoro` computes IS
  * what the reader's index tab shows, not a reconstruction of what it is believed to
- * compute. */
-const REAL_FETCH = globalThis.fetch;
-function loadIndexAgainstDaemon(port, secret) {
-  const document = parseHTML(renderIndexPage({ threads: [] }));
-  const cookie = `${SESSION_COOKIE}=${sessionToken(secret)}`;
-  globalThis.fetch = (url, opts) =>
-    REAL_FETCH(`http://127.0.0.1:${port}${url}`, { ...opts, headers: { ...(opts && opts.headers), cookie } });
-  // No interval is ever fired: fetchPomodoro().then(renderPomodoro) runs once,
-  // unconditionally, at script init (src/indexpage.mjs:1111) -- before either
-  // setInterval(tickPomodoro, ...) or setInterval(fetchPomodoro, POMODORO_POLL_MS) is
-  // even registered -- so a stub that never calls back is enough to read the first real
-  // render. 'EventSource' is declared and never passed, the same reason
-  // test/check-pomodoro-page.mjs leaves it unbound: this harness has no live stream to
-  // open, and an unflagged Node would otherwise hand initIndexStream a real constructor.
-  new Function('document', 'setInterval', 'window', 'location', 'EventSource', indexScript)(
-    document, () => 0, document.defaultView, { hash: '' });
-  return {
-    /** Waits out the real network round trip (a stubbed microtask would prove nothing
-     * about the actual fetch/render this check is here to observe) and reads back
-     * #pomodoro-status's own textContent -- 50ms, the same generous, still-fast margin
-     * test/check-pomodoro-page.mjs's own flush() uses. */
-    async statusText() {
-      await new Promise(resolve => setTimeout(resolve, 50));
-      const status = document.querySelector('span#pomodoro-status');
-      return status ? status.textContent : null;
-    },
-    restoreFetch() { globalThis.fetch = REAL_FETCH; },
-  };
+ * compute.
+ *
+ * No interval is ever fired (the loader records each and calls none back):
+ * fetchPomodoro().then(renderPomodoro) runs once, unconditionally, at script init, before
+ * either interval is even registered, so the first real render is there to read. And it
+ * is read settled, never slept: `tab.settle()` waits out the real network round trip (a
+ * stubbed microtask would prove nothing about the actual fetch/render this check is here
+ * to observe), every request the page sent drained to its last body byte and the render
+ * it triggers run (fetchSettler, test/dom-stand-in.mjs) -- a fixed 50ms used to stand in
+ * for that, the bet QUIRKS.md's "a fixed flush sleep is a bet on node's loopback latency"
+ * entry says node 26 lost. */
+async function indexStatusText(tab) {
+  await tab.settle();
+  const status = tab.document.querySelector('span#pomodoro-status');
+  return status ? status.textContent : null;
 }
 
 /** Split a status line into the half that has to match ACROSS the two surfaces exactly and
  * the countdown that cannot.
  *
  * The two surfaces are two processes reading the same running deadline at two different
- * instants -- a spawned probe, then a real HTTP round trip and a 50ms settle -- so their
+ * instants -- a spawned probe, then a real HTTP round trip and its settle -- so their
  * countdowns are computed from two different `now`s. `formatCountdown` rounds to the
  * nearest second, so any gap at all can land the two on different sides of a rounding
  * boundary, and a gap of a second or more (which is what four checks running at once
@@ -708,33 +653,10 @@ async function main() {
     });
   });
 
-  await check('criterion 2, work: a running work interval is full-weight work with a live countdown', async () => {
-    const now = Date.now();
-    await withDaemon(runningDoc({ phase: 'work', deadline: now + 15 * 60_000, paused: false }, { workMin: 30, enabled: true }),
-      async ({ probeHome, port }) => {
-        const state = await probe({ home: probeHome, port });
-        assert.equal(state.phase, 'work');
-        assert.equal(state.paused, 'no');
-        assert.equal(state.countdown, 'yes');
-        assert.match(state.text, /^\d{2}:\d{2}$/);
-      });
-  });
-
-  await check('criterion 2, short break vs long break: the two break phases are told apart, not collapsed into one', async () => {
-    // The two breaks DRAW the same glyph (ADR 84 spent the last dimension that told them
-    // apart), but they are still two phases on the wire and the popover still names them in
-    // words. A derivation that collapsed them here would take that away too, and the
-    // boundary logic would have nothing to say which break just ended.
-    const now = Date.now();
-    await withDaemon(runningDoc({ phase: 'break', deadline: now + 3 * 60_000, paused: false }, { enabled: true }),
-      async ({ probeHome, port }) => {
-        assert.equal((await probe({ home: probeHome, port })).phase, 'break');
-      });
-    await withDaemon(runningDoc({ phase: 'longBreak', deadline: now + 10 * 60_000, paused: false }, { enabled: true }),
-      async ({ probeHome, port }) => {
-        assert.equal((await probe({ home: probeHome, port })).phase, 'longBreak');
-      });
-  });
+  // Short break against long break is not pinned on `phase=` here: the two DRAW the same
+  // glyph (ADR 84), and what tells them apart is the popover's own words, which the
+  // cross-surface comparison below holds against the real index page ("Break 1/4 · ..."
+  // against "Long break · ..."), running and paused alike.
 
   await check('paused: keeps its own phase, reads its frozen remainingMs, and never touches the deadline', async () => {
     // A paused timer carries `remainingMs` and no `deadline` at all -- pauseTimer froze it
@@ -756,7 +678,7 @@ async function main() {
   // Criterion 3 -- the arc.
   // -------------------------------------------------------------------------------------
 
-  await check('criterion 3: the arc fraction at a known remaining time is remaining-over-the-phase\'s-own-length', async () => {
+  await check('a running work interval is full-weight work with a live countdown, and its arc is remaining over the WORK length', async () => {
     // Half of a 30-minute work interval left is half an arc. The denominator has to be the
     // WORK length here -- reading breakMin, or a hardcoded 25, would put the arc at 1.000
     // (clamped) and 0.600 respectively, so this pins the phase-to-duration mapping as much
@@ -765,6 +687,10 @@ async function main() {
     await withDaemon(runningDoc({ phase: 'work', deadline: now + 15 * 60_000, paused: false },
       { workMin: 30, breakMin: 5, longBreakMin: 15, enabled: true }), async ({ probeHome, port }) => {
       const state = await probe({ home: probeHome, port });
+      assert.equal(state.phase, 'work');
+      assert.equal(state.paused, 'no');
+      assert.equal(state.countdown, 'yes');
+      assert.match(state.text, /^\d{2}:\d{2}$/);
       const fraction = Number(state.fraction);
       // A round trip and a process spawn of slack, which at half an hour is far under a
       // thousandth: 0.01 is generous and still an order of magnitude tighter than any
@@ -881,25 +807,14 @@ async function main() {
     });
   });
 
-  await check('criterion 4: the ONE primary control means start, pause or resume exactly as the widget\'s switch does', async () => {
-    // src/indexpage.mjs's pomodoroSwitchAction is three lines: no timer -> ensure, paused
-    // -> resume, otherwise -> pause. The popover mirrors it rather than inventing a second
-    // opinion about what "the button" does, and `primary=` is that mirror's report. A
-    // popover that offered Start beside Pause, or that posted `ensure` at a paused timer
-    // (which is a no-op -- ensureTimer keeps the timer it finds), would fail here.
-    await withDaemon(runningDoc(null, { enabled: true }), async ({ probeHome, port }) => {
-      assert.equal((await probe({ home: probeHome, port })).primary, 'Start', 'idle');
-      await probe({ home: probeHome, port, args: ['start'] });
-      assert.equal((await probe({ home: probeHome, port })).primary, 'Pause', 'running');
-      await probe({ home: probeHome, port, args: ['pause'] });
-      assert.equal((await probe({ home: probeHome, port })).primary, 'Resume', 'paused');
-      await probe({ home: probeHome, port, args: ['resume'] });
-      assert.equal((await probe({ home: probeHome, port })).primary, 'Pause', 'running again');
-    });
-  });
-
-  await check('the switch says the state it is IN, where its accessible name says what a press DOES -- and the two are never the same word', async () => {
-    // A switch needs both, and they answer different questions. `primary` is the action
+  await check('the switch\'s action word is the widget\'s own (Start, Pause, Resume, Pause again) and its state word says the state it is IN (Off, Running, Paused, Running) -- never the same word', async () => {
+    // `primary` mirrors src/indexpage.mjs's pomodoroSwitchAction, which is three lines: no
+    // timer -> ensure, paused -> resume, otherwise -> pause. The popover mirrors it rather
+    // than inventing a second opinion about what "the button" does. A popover that offered
+    // Start beside Pause, or that posted `ensure` at a paused timer (which is a no-op --
+    // ensureTimer keeps the timer it finds), would fail here.
+    //
+    // A switch needs both words, and they answer different questions. `primary` is the action
     // ("Pause"), which is what a screen reader hears and what the widget's aria-label says;
     // `stateword` is the state ("Running"), which is what the reader sees beside the knob.
     // A control whose only word is an instruction leaves the state to be read off the knob
@@ -909,6 +824,7 @@ async function main() {
     // Idle, and a row that says the same word twice is a row that has said nothing twice.
     await withDaemon(runningDoc(null, { enabled: true }), async ({ probeHome, port }) => {
       const idle = await probe({ home: probeHome, port });
+      assert.equal(idle.primary, 'Start', 'idle: a press starts');
       assert.equal(idle.stateword, 'Off', 'idle');
       assert.equal(idle.status, 'Idle', 'and the line above it is the one that says Idle');
       assert.notEqual(idle.stateword, idle.primary, 'the state and the action are two words, never one');
@@ -922,6 +838,11 @@ async function main() {
       const paused = await probe({ home: probeHome, port });
       assert.equal(paused.stateword, 'Paused');
       assert.equal(paused.primary, 'Resume');
+
+      await probe({ home: probeHome, port, args: ['resume'] });
+      const resumed = await probe({ home: probeHome, port });
+      assert.equal(resumed.stateword, 'Running', 'running again');
+      assert.equal(resumed.primary, 'Pause', 'running again: a press pauses');
     });
   });
 
@@ -952,9 +873,11 @@ async function main() {
         });
     }
     // And never at all when nothing is paused -- which is what makes the count above a
-    // count of one thing rather than of a word that is simply always there.
+    // count of one thing rather than of a word that is simply always there. The switch is
+    // ON for both: an off document has its timer nulled by the daemon (normalizeDoc,
+    // src/pomodoro.mjs), so without it the running case would quietly be idle again.
     for (const timer of [null, { phase: 'work', deadline: Date.now() + 5 * 60_000, paused: false }]) {
-      await withDaemon(runningDoc(timer), async ({ probeHome, port }) => {
+      await withDaemon(runningDoc(timer, { enabled: true }), async ({ probeHome, port }) => {
         const state = await probe({ home: probeHome, port });
         assert.equal(countPaused(state), 0,
           `nothing that is not paused may say so: ${JSON.stringify(wordsOf(state))}`);
@@ -966,7 +889,7 @@ async function main() {
   // ADR 88: the popover's status line is "the index page's own string, in every state" --
   // checked here by running the REAL index page against the SAME daemon and comparing,
   // never by pinning both surfaces to a hand-typed reproduction of
-  // pomodoroCyclePosition's formula (loadIndexAgainstDaemon's own comment says why that
+  // pomodoroCyclePosition's formula (indexStatusText's own comment says why that
   // third copy is exactly how a real divergence -- 'Short break' vs 'Break' -- once
   // reached this suite unnoticed).
   // -------------------------------------------------------------------------------------
@@ -1013,9 +936,9 @@ async function main() {
         // a loaded suite rather than an occasional flake.
         const readingsStartedAt = Date.now();
         const popoverState = await probe({ home: probeHome, port });
-        const tab = loadIndexAgainstDaemon(port, secret);
+        const tab = loadIndexAgainstDaemon(port, { secret });
         try {
-          const indexText = await tab.statusText();
+          const indexText = await indexStatusText(tab);
           const spanMs = Date.now() - readingsStartedAt;
           assert.ok(indexText, `setup: the index page must render a status text for phase ${phase}`);
           assertSameStatusLine(popoverState.status, indexText, spanMs, `phase ${phase}`);
@@ -1034,9 +957,9 @@ async function main() {
     // dropped the position the same wrong way.
     await withDaemon(runningDoc({ phase: 'longBreak', deadline: now + 9 * 60_000, paused: false }, { enabled: true }),
       async ({ probeHome, port, secret }) => {
-        const tab = loadIndexAgainstDaemon(port, secret);
+        const tab = loadIndexAgainstDaemon(port, { secret });
         try {
-          const indexText = await tab.statusText();
+          const indexText = await indexStatusText(tab);
           assert.doesNotMatch(indexText, /\d+\/\d+/, `the index page's own long break line must carry no position: ${JSON.stringify(indexText)}`);
           assert.match(indexText, /^Long break/, `and must still name the phase: ${JSON.stringify(indexText)}`);
         } finally {
@@ -1050,9 +973,9 @@ async function main() {
       await withDaemon(runningDoc({ phase, paused: true, remainingMs: 90_000 }, { enabled: true }),
         async ({ probeHome, port, secret }) => {
           const popoverState = await probe({ home: probeHome, port });
-          const tab = loadIndexAgainstDaemon(port, secret);
+          const tab = loadIndexAgainstDaemon(port, { secret });
           try {
-            const indexText = await tab.statusText();
+            const indexText = await indexStatusText(tab);
             assert.ok(indexText, `setup: the index page must render a status text for a paused ${phase}`);
             assert.match(indexText, /\(paused\)$/, `setup: the index page's own paused line must name the state too: ${JSON.stringify(indexText)}`);
             // STRICT here, unlike the running comparison above, and deliberately so: a
@@ -1120,24 +1043,23 @@ async function main() {
   // none of the check's power to catch it.
   // -------------------------------------------------------------------------------------
 
-  await check('criterion 1 and 13: every popover row -- the status row, the control row, the divider, the waiting caption -- spans the PANEL\'s own content width', async () => {
-    await withDaemon(runningDoc({ phase: 'work', deadline: Date.now() + 7 * 60_000 + 30_000, paused: false }, { enabled: true }),
-      async ({ probeHome, port }) => {
-        const state = await probe({ home: probeHome, port, args: ['layout'] });
-        const rowNames = Object.keys(state.frames).filter(name => /^row\d+$/.test(name))
-          .sort((a, b) => Number(a.slice(3)) - Number(b.slice(3)));
-        assert.ok(rowNames.length >= 4, `expected at least 4 top-level rows, got ${rowNames.length}: ${rowNames.join(', ')}`);
-        assertRowsSpanPanel(rowNames.map(name => state.frames[name]), 'row');
-      });
-  });
-
-  await check('criterion 13: the panel\'s documented row order -- a status row, a control row, a divider, a caption, each a known kind, each in its own place', async () => {
+  await check('the on-state popover layout: four rows in the documented order and kinds, each spanning the PANEL\'s own content width; glyph and switch at their row\'s left edge; gear and forward button on the panel\'s right content edge, in the status and control rows', async () => {
+    // One daemon and one layout probe for every on-state arrangement claim, each read off
+    // the same resolved frames. The switch is ON in the fixture, and that is load-bearing:
+    // an off popover builds no glyph, switch or forward button at all, and a nil view's
+    // frame reads back as 0,0,0,0 -- which is "at the left edge" to an assertion that only
+    // checks x.
     await withDaemon(runningDoc({ phase: 'work', deadline: Date.now() + 7 * 60_000 + 30_000, paused: false }, { enabled: true }),
       async ({ probeHome, port }) => {
         const state = await probe({ home: probeHome, port, args: ['layout'] });
         const rowNames = Object.keys(state.frames).filter(name => /^row\d+$/.test(name))
           .sort((a, b) => Number(a.slice(3)) - Number(b.slice(3)));
         const rows = rowNames.map(name => state.frames[name]);
+
+        // Every row -- the status row, the control row, the divider, the waiting caption --
+        // spans the PANEL's own content width, not merely its siblings'.
+        assert.ok(rowNames.length >= 4, `expected at least 4 top-level rows, got ${rowNames.length}: ${rowNames.join(', ')}`);
+        assertRowsSpanPanel(rows, 'row');
 
         // The DOCUMENTED sequence of row KINDS (bin/menubar.m's own section comment, "The
         // layout, top to bottom"): a horizontal stack for the status row, a horizontal
@@ -1160,44 +1082,31 @@ async function main() {
             `row ${i} (y=${rows[i].y}) must sit below row ${i - 1} (y=${rows[i - 1].y})`);
         }
 
-        // Row IDENTITY for the two controls criteria 2 and 3 are about: not merely "some
-        // row, and that row is well-formed" (every row is the same width, so a control in
-        // the WRONG row still reads as "flush with my row's own trailing edge"), but the
-        // SPECIFIC row the panel is documented to hold it in.
+        // Row IDENTITY for the controls: not merely "some row, and that row is
+        // well-formed" (every row is the same width, so a control in the WRONG row still
+        // reads as "flush with my row's own trailing edge"), but the SPECIFIC row the panel
+        // is documented to hold it in.
         assert.equal(state.rowIndex.glyph, 0, 'the phase glyph must be in the FIRST row (the status row)');
         assert.equal(state.rowIndex.statusline, 0, 'the status line must be in the FIRST row (the status row)');
         assert.equal(state.rowIndex.gear, 0, 'the gear must be in the status row, not the control row');
         assert.equal(state.rowIndex.toggle, 1, 'the switch must be in the SECOND row (the control row)');
         assert.equal(state.rowIndex.stateword, 1, 'the state word must be in the SECOND row (the control row)');
         assert.equal(state.rowIndex.forward, 1, 'the forward button must be in the control row, not the status row');
-      });
-  });
 
-  await check('criterion 1: the phase glyph and the switch both begin at their own row\'s left edge', async () => {
-    await withDaemon(runningDoc({ phase: 'work', deadline: Date.now() + 7 * 60_000 + 30_000, paused: false }),
-      async ({ probeHome, port }) => {
-        const state = await probe({ home: probeHome, port, args: ['layout'] });
         // Row-relative: the glyph is the FIRST view in the status row and the switch is the
         // FIRST view in the control row, so "begins at the left edge" is "x == 0" in each
         // one's own row, not a shared panel-relative number.
         assert.ok(Math.abs(state.frames.glyph.x) <= 0.5, `the phase glyph must begin at its row's own left edge, got x=${state.frames.glyph.x}`);
         assert.ok(Math.abs(state.frames.toggle.x) <= 0.5, `the switch must begin at its row's own left edge, got x=${state.frames.toggle.x}`);
-      });
-  });
 
-  await check('criterion 2 and 13: the gear\'s right edge and the forward button\'s right edge hold the PANEL\'s own right content edge -- and the two rows share a right column', async () => {
-    await withDaemon(runningDoc({ phase: 'work', deadline: Date.now() + 7 * 60_000 + 30_000, paused: false }, { enabled: true }),
-      async ({ probeHome, port }) => {
-        const state = await probe({ home: probeHome, port, args: ['layout'] });
-        const statusRow = state.frames.row0;
-        const controlRow = state.frames.row1;
+        // The gear's and the forward button's right edges: row-relative (x/w) converted to
+        // panel-relative by adding the row's own panel-relative origin, then compared
+        // against the panel's own known right edge directly, not merely "flush with A row"
+        // (see the section comment above for why that used to be all this proved) -- so
+        // the two rows share one right column.
         const panelRight = PANEL_WIDTH - PANEL_INSET;
-        // Row-relative (gear.x/w) converted to panel-relative by adding its own row's
-        // panel-relative origin, then compared against the panel's own known right edge
-        // directly -- criterion 2's literal claim, not merely "flush with A row" (see the
-        // section comment above for why that used to be all this proved).
-        const gearRight = statusRow.x + state.frames.gear.x + state.frames.gear.w;
-        const forwardRight = controlRow.x + state.frames.forward.x + state.frames.forward.w;
+        const gearRight = state.frames.row0.x + state.frames.gear.x + state.frames.gear.w;
+        const forwardRight = state.frames.row1.x + state.frames.forward.x + state.frames.forward.w;
         assert.ok(Math.abs(gearRight - panelRight) <= 3,
           `the gear's right edge (${gearRight}) must sit at the panel's own content edge (${panelRight})`);
         assert.ok(Math.abs(forwardRight - panelRight) <= 3,
@@ -1284,11 +1193,16 @@ async function main() {
   // is still uncovered is whether the two fields reach pixels that look like anything.
   // -------------------------------------------------------------------------------------
 
-  await check('the glyph vocabulary, state by state: the silhouette always, a ring only while WORK runs, and one centre mark at a time', async () => {
+  await check('the glyph vocabulary, state by state: a ring only while WORK runs, the two paused bars only while paused, one rest bar for either break, and neither for a silent daemon', async () => {
     const now = Date.now();
     // Every state the item can be in, and what each one draws. The silhouette is not in
     // this table because it has no field: it is drawn unconditionally, which is the whole
     // point of it -- there is no state in which the tomato is not a tomato.
+    //
+    // Exact pairs, so the absences ADR 84 bought are in the table too: nothing that is not
+    // paused draws the paused bars (the meaning they carried for a break before), and a
+    // short and a long break draw one identical glyph (the long break's filled disc is
+    // retired).
     const cases = [
       { name: 'idle', timer: null, ring: 'no', mark: 'none' },
       { name: 'running work', timer: { phase: 'work', deadline: now + 5 * 60_000, paused: false }, ring: 'yes', mark: 'none' },
@@ -1311,47 +1225,10 @@ async function main() {
     // And the daemon that has gone quiet, which is not a timer state at all: no ring and no
     // mark, because there is nothing to say. The dimming is the only thing that changes,
     // and the dimming is alpha -- asserted structurally below, there being no pixel here.
-    const dead = await (async () => {
-      const { createServer } = await import('node:net');
-      return new Promise((resolve, reject) => {
-        const socket = createServer();
-        socket.on('error', reject);
-        socket.listen(0, '127.0.0.1', () => {
-          const bound = socket.address().port;
-          socket.close(() => resolve(bound));
-        });
-      });
-    })();
-    const stale = await probe({ home: makeProbeHome(randomBytes(32).toString('hex')), port: dead });
+    const stale = await probe({ home: makeProbeHome(randomBytes(32).toString('hex')), port: await freePort() });
     assert.equal(stale.answered, 'no');
     assert.equal(stale.ring, 'no', 'a silent daemon draws no ring -- there is no live fraction to draw');
     assert.equal(stale.mark, 'none', 'nor a centre mark: silence is not a phase and it is not paused');
-  });
-
-  await check('the two vertical bars mean PAUSED and nothing else, and short break and long break draw one identical glyph', async () => {
-    // Two claims that are each an absence-shaped thing, and both are what ADR 84 bought by
-    // giving every signal one dimension. If a later edit gave the bars back to `break` --
-    // the meaning they carried before -- a paused break and a running break would draw the
-    // same picture again, and the first assertion is what notices.
-    const now = Date.now();
-    const marks = {};
-    const runningTimers = {
-      idle: null,
-      work: { phase: 'work', deadline: now + 5 * 60_000, paused: false },
-      break: { phase: 'break', deadline: now + 3 * 60_000, paused: false },
-      longBreak: { phase: 'longBreak', deadline: now + 9 * 60_000, paused: false },
-    };
-    for (const [name, timer] of Object.entries(runningTimers)) {
-      await withDaemon(runningDoc(timer, { enabled: true }), async ({ probeHome, port }) => {
-        const state = await probe({ home: probeHome, port });
-        marks[name] = `${state.ring}/${state.mark}`;
-        assert.notEqual(state.mark, 'paused', `nothing that is not paused may draw the paused bars: ${name} did`);
-      });
-    }
-    assert.equal(marks.break, marks.longBreak,
-      `a short break and a long break are ONE glyph now -- the long break's filled disc is retired: ${marks.break} vs ${marks.longBreak}`);
-    assert.notEqual(marks.work, marks.break, 'a running break is still not a running work interval');
-    assert.notEqual(marks.idle, marks.work, 'and idle is still not a running work interval');
   });
 
   await check('opacity carries exactly one fact -- the daemon has stopped answering -- and the file has no second weight left to spend', async () => {
@@ -1588,25 +1465,44 @@ async function main() {
   // is decoration -- the behavioural half pins the seam, the structural half pins the file.
   // -------------------------------------------------------------------------------------
 
-  await check('criterion 8: `reset` is refused by the one seam that can act, and the daemon\'s timer survives asking', async () => {
+  await check('`reset` and `hide` are refused by the one seam that can act, and the daemon\'s timer and settings survive asking; hiding stays the index page\'s, and the item picks it up', async () => {
+    // `hide` is here for the same reason `reset` is. The popover used to carry a "Hide from
+    // menu bar" row, which was a one-way door: it removed the only surface a reader could
+    // use to undo it. The row is gone, and so is the action behind it -- and the refusal is
+    // the assertion that the DELETION is real rather than a row that stopped being built
+    // while the code that hid the item stayed one caller away from coming back.
     await withDaemon(runningDoc(null, { enabled: true }), async ({ probeHome, port, secret }) => {
+      const doc = async () => (await fetch(`http://127.0.0.1:${port}/api/pomodoro`, {
+        headers: { [SECRET_HEADER]: secret },
+      })).json();
       await probe({ home: probeHome, port, args: ['start'] });
-      const before = await (await fetch(`http://127.0.0.1:${port}/api/pomodoro`, {
-        headers: { [SECRET_HEADER]: secret },
-      })).json();
+      const before = await doc();
       assert.equal(before.timer.phase, 'work', 'setup: there has to be something for a reset to destroy');
+      assert.equal(before.settings.menubarHidden, false, 'setup: visible to begin with');
 
-      const refused = await probe({ home: probeHome, port, args: ['reset'] });
-      assert.notEqual(refused.code, 0, 'an action this file cannot perform must not exit 0');
-      assert.equal(refused.signal, null, 'and must be a refusal rather than a crash');
-      assert.match(refused.stderr, /unrecognised menu bar action/);
+      for (const word of ['reset', 'hide']) {
+        const refused = await probe({ home: probeHome, port, args: [word] });
+        assert.notEqual(refused.code, 0, `${word}: an action this file cannot perform must not exit 0`);
+        assert.equal(refused.signal, null, `${word}: and must be a refusal rather than a crash`);
+        assert.match(refused.stderr, /unrecognised menu bar action/);
 
-      const after = await (await fetch(`http://127.0.0.1:${port}/api/pomodoro`, {
-        headers: { [SECRET_HEADER]: secret },
-      })).json();
-      assert.equal(after.timer.phase, 'work', 'the interval is still running');
-      assert.equal(after.timer.deadline, before.timer.deadline, 'and untouched -- nothing was posted at all');
-      assert.equal(after.cycle, before.cycle, 'reset zeroes the cycle; the cycle is where it was');
+        const after = await doc();
+        assert.equal(after.timer.phase, 'work', `${word}: the interval is still running`);
+        assert.equal(after.timer.deadline, before.timer.deadline, `${word}: and untouched -- nothing was posted at all`);
+        assert.equal(after.cycle, before.cycle, `${word}: reset zeroes the cycle; the cycle is where it was`);
+        assert.equal(after.settings.menubarHidden, false, `${word}: and nothing was written: the item is still on the bar`);
+      }
+
+      // The way to hide it is the index page's own panel, and it still works -- which is
+      // the half that had to survive the row's deletion. It is exactly what the widget's
+      // "Show in menu bar" checkbox posts, inverted.
+      await fetch(`http://127.0.0.1:${port}/api/pomodoro/settings`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', [SECRET_HEADER]: secret },
+        body: JSON.stringify({ menubarHidden: true }),
+      });
+      assert.equal((await probe({ home: probeHome, port })).hidden, 'yes',
+        'and the running item picks that up on its next poll, with no restart');
     });
   });
 
@@ -1691,9 +1587,9 @@ async function main() {
     await withDaemon({ ...running, cycle: 1e300 }, async ({ probeHome, port, secret }) => {
       const readingsStartedAt = Date.now();
       const state = await probe({ home: probeHome, port });
-      const tab = loadIndexAgainstDaemon(port, secret);
+      const tab = loadIndexAgainstDaemon(port, { secret });
       try {
-        const indexText = await tab.statusText();
+        const indexText = await indexStatusText(tab);
         assert.match(indexText, /^Work 4\/4 · /, `setup: the index page clamps the same absurd cycle to 4/4: ${JSON.stringify(indexText)}`);
         assertSameStatusLine(state.status, indexText, Date.now() - readingsStartedAt, 'an absurd cycle');
       } finally {
@@ -1955,14 +1851,6 @@ async function main() {
     });
   });
 
-  await check('AC 5 and 6: with no tab on this board anywhere, the click falls through to opening it', async () => {
-    armOsascript('none');
-    assert.equal(await clickVerdict(), 'opened', 'nothing was showing it, so the URL is opened as before ADR 93');
-    const calls = osascriptCalls();
-    assert.deepEqual(calls.map(c => c.app).sort(), runningBrowsers(),
-      'and every running browser was asked before giving up -- no early exit on the first "none"');
-  });
-
   await check('AC 5: a Chromium is asked in the Chromium dialect, never in Safari\'s', async () => {
     // The two dialects are the whole of ADR 93's "Safari and Chromium": one names the tab
     // (`set current tab of w to t`), the other names its index (`set active tab index of w
@@ -1977,7 +1865,7 @@ async function main() {
     });
   });
 
-  await check('AC 5 and 6: only browsers already running are asked -- one that is not is never launched', async () => {
+  await check('AC 5 and 6: with no tab on this board, the click falls through to opening it after asking every running browser -- and only browsers already running are asked, so one that is not is never launched', async () => {
     // The point of the running check, and the reason it happens before anything is spawned:
     // `tell application "Safari"` LAUNCHES Safari when it is not, and asking a browser
     // nobody opened is also how a reviewer collects an Automation prompt for an app they
@@ -1985,9 +1873,10 @@ async function main() {
     // read back from the binary under test, so the reader's own open browsers move both
     // sides together and neither this check's power nor its stability depends on them.
     armOsascript('none');
-    await clickVerdict();
+    assert.equal(await clickVerdict(), 'opened', 'nothing was showing it, so the URL is opened as before ADR 93');
     const before = osascriptCalls().map(c => c.app).sort();
-    assert.deepEqual(before, runningBrowsers(), 'the browsers asked are exactly the table browsers running');
+    assert.deepEqual(before, runningBrowsers(),
+      'the browsers asked are exactly the table browsers running -- every one of them before giving up, no early exit on the first "none"');
 
     // Whichever table browser this machine is NOT running, so the delta below is a delta
     // rather than a no-op -- chosen at run time because the reader's own open browsers are
@@ -2155,59 +2044,6 @@ async function main() {
     });
   });
 
-  await check('menubarHidden is reported to the item, both ways round', async () => {
-    // The index page's pomodoro settings hide the item and bring it back, and both halves
-    // of that are this one boolean arriving on every poll. Reported, never acted on by
-    // exiting: an item that exited when hidden would leave nothing for the settings panel
-    // to reach. The item itself never WRITES this key -- there is no route to it from
-    // bin/menubar.m at all (see the closed route set above), which is why the popover has
-    // no "Hide from menu bar" row and the way back is never behind the door it closed.
-    await withDaemon(runningDoc(null, { menubarHidden: true }), async ({ probeHome, port }) => {
-      assert.equal((await probe({ home: probeHome, port })).hidden, 'yes');
-    });
-    await withDaemon(runningDoc(null, { menubarHidden: false }), async ({ probeHome, port }) => {
-      assert.equal((await probe({ home: probeHome, port })).hidden, 'no');
-    });
-  });
-
-  await check('the item can no longer hide itself: `hide` is refused like any other word this file does not know', async () => {
-    // The popover used to carry a "Hide from menu bar" row, which was a one-way door: it
-    // removed the only surface a reader could use to undo it. The row is gone, and so is
-    // the action behind it -- and this is the assertion that the DELETION is real rather
-    // than a row that stopped being built while the code that hid the item stayed one
-    // caller away from coming back.
-    //
-    // Same shape as the reset refusal above, and for the same reason: an absence cannot be
-    // checked by driving a UI.
-    await withDaemon(runningDoc({ phase: 'work', deadline: Date.now() + 10 * 60_000, paused: false }, { enabled: true }),
-      async ({ probeHome, port, secret }) => {
-        const doc = async () => (await fetch(`http://127.0.0.1:${port}/api/pomodoro`, {
-          headers: { [SECRET_HEADER]: secret },
-        })).json();
-        assert.equal((await doc()).settings.menubarHidden, false, 'setup: visible to begin with');
-
-        const refused = await probe({ home: probeHome, port, args: ['hide'] });
-        assert.notEqual(refused.code, 0, 'an action this file cannot perform must not exit 0');
-        assert.equal(refused.signal, null, 'and must be a refusal rather than a crash');
-        assert.match(refused.stderr, /unrecognised menu bar action/);
-
-        const after = await doc();
-        assert.equal(after.settings.menubarHidden, false, 'and nothing was written: the item is still on the bar');
-        assert.equal(after.timer.phase, 'work', 'nor was the timer touched');
-
-        // The way to hide it is the index page's own panel, and it still works -- which is
-        // the half that had to survive this deletion. It is exactly what the widget's
-        // "Show in menu bar" checkbox posts, inverted.
-        await fetch(`http://127.0.0.1:${port}/api/pomodoro/settings`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', [SECRET_HEADER]: secret },
-          body: JSON.stringify({ menubarHidden: true }),
-        });
-        assert.equal((await probe({ home: probeHome, port })).hidden, 'yes',
-          'and the running item picks that up on its next poll, with no restart');
-      });
-  });
-
   // -------------------------------------------------------------------------------------
   // The Master switch (settings.enabled) -- criteria 6 and 8. The daemon-side gating (a
   // timer start refused, the switch clearing a running Timer on flip-off) is a different
@@ -2218,18 +2054,19 @@ async function main() {
   // menubarHidden -- both already this file's own business -- stay exactly what they were.
   //
   // `runningDoc`'s `settings` here is written straight to `pomodoro.json` via `writeDoc`,
-  // never through the validated HTTP settings route (mergeSettings, src/pomodoro.mjs,
-  // does not know the key yet in this worktree) -- the same shortcut every other settings
-  // fixture in this suite already takes (menubarCountdown/menubarHidden above), and it is
+  // never through the validated HTTP settings route -- the same shortcut every other
+  // settings fixture in this suite already takes (menubarCountdown above), and it is
   // enough here: this end of the feature only cares what `GET /api/pomodoro` answers with,
-  // not how the daemon came to write it.
+  // not how the daemon came to write it. The daemon fills `enabled` on every read
+  // (normalizeDoc, src/pomodoro.mjs), so the wire never carries a document without the key.
   // -------------------------------------------------------------------------------------
 
-  await check('criterion 6: the switch off derives no ring, no centre mark and no countdown text, whatever the timer document still says', async () => {
+  await check('the switch off: the item still answers and reads off, with no ring, no centre mark and no countdown text whatever the stored timer or menubarCountdown says -- and the stored menubarCountdown survives, unwritten', async () => {
     const now = Date.now();
     // Every timer shape the daemon could still be holding the instant the switch flips off
     // -- idle, running, paused, on a break -- because AC6 is "the switch off outranks the
-    // Timer", not "the switch off happens to line up with idle".
+    // Timer", not "the switch off happens to line up with idle". `menubarCountdown: true`
+    // (its default, written out) so "no digits" is the switch's doing and not the setting's.
     const cases = [
       { name: 'idle', timer: null },
       { name: 'running work', timer: { phase: 'work', deadline: now + 5 * 60_000, paused: false } },
@@ -2237,64 +2074,37 @@ async function main() {
       { name: 'running break', timer: { phase: 'break', deadline: now + 3 * 60_000, paused: false } },
     ];
     for (const c of cases) {
-      await withDaemon(runningDoc(c.timer, { enabled: false }), async ({ probeHome, port }) => {
+      await withDaemon(runningDoc(c.timer, { enabled: false, menubarCountdown: true }), async ({ probeHome, port, secret }) => {
         const state = await probe({ home: probeHome, port });
+        // The existence gate: cb_current_display's own `answered_once` still opens, because
+        // a daemon that keeps answering with `enabled: false` is not a daemon that has
+        // "stopped answering" -- so the item still appears, and criterion 9's dimming never
+        // enters into it.
+        assert.equal(state.answered, 'yes', `${c.name}: the daemon must still answer with the switch off`);
         assert.equal(state.enabled, 'no', `${c.name}: the switch itself must read as off`);
         assert.equal(state.ring, 'no', `${c.name}: no ring while the switch is off`);
         assert.equal(state.mark, 'none', `${c.name}: no centre mark while the switch is off`);
-        assert.equal(state.countdown, 'no', `${c.name}: no countdown text while the switch is off`);
+        assert.equal(state.countdown, 'no', `${c.name}: no countdown text while the switch is off, whatever menubarCountdown says`);
         assert.equal(state.text, 'none', `${c.name}: nothing for the countdown to say`);
+        // This file never writes a setting at all (the closed route set above has no
+        // settings route) -- so the value GET /api/pomodoro answers with is exactly what the
+        // fixture wrote, never something this derivation reset on the way through, and
+        // re-enabling shows the countdown from that same stored `true`.
+        const doc = await (await fetch(`http://127.0.0.1:${port}/api/pomodoro`, {
+          headers: { [SECRET_HEADER]: secret },
+        })).json();
+        assert.equal(doc.settings.menubarCountdown, true, `${c.name}: the stored preference survives the switch being off, unwritten`);
       });
     }
   });
 
-  await check('criterion 6: the item\'s existence gate is untouched by the switch -- GET /api/pomodoro keeps answering with pomodoro off, so the item still appears', async () => {
-    // The paint itself is not checkable (this file's own opening comment says so, and it
-    // is as true of the board glyph as of the tomato) -- what IS checkable, and what AC6's
-    // "the menu-bar item still appears" comes down to on this end, is that
-    // cb_current_display's own gate (`answered_once`) still opens: a daemon that keeps
-    // answering with `enabled: false` is not a daemon that has "stopped answering", so
-    // criterion 9's dimming/hiding never enters into it either.
-    await withDaemon(runningDoc(null, { enabled: false }), async ({ probeHome, port }) => {
-      const state = await probe({ home: probeHome, port });
-      assert.equal(state.answered, 'yes', 'the daemon must still answer with the switch off');
-      assert.equal(state.enabled, 'no');
-    });
-  });
-
-  await check('missing settings.enabled reads as off -- the client\'s own fallback, matching the daemon\'s ships-off default (ADR 105)', async () => {
-    await withDaemon(runningDoc(null), async ({ probeHome, port }) => {
-      // No `enabled` key at all in this fixture (defaultDoc's own shape) -- a response
-      // without the key reads as a fresh document, and fresh means off.
-      const state = await probe({ home: probeHome, port });
-      assert.equal(state.enabled, 'no', 'a missing key must read as off, the same default src/pomodoro.mjs fills in');
-    });
-  });
-
-  await check('AC4: with the switch off there is no countdown text regardless of menubarCountdown, and the stored preference is untouched for re-enable', async () => {
-    const now = Date.now();
-    const timer = { phase: 'work', deadline: now + 20 * 60_000, paused: false };
-    await withDaemon(runningDoc(timer, { enabled: false, menubarCountdown: true }), async ({ probeHome, port, secret }) => {
-      const off = await probe({ home: probeHome, port });
-      assert.equal(off.countdown, 'no', 'no countdown text while the switch is off, whatever menubarCountdown says');
-      // This file never writes a setting at all (the closed route set a few checks above
-      // has no settings route) -- so the value GET /api/pomodoro answers with is exactly
-      // what the fixture wrote, never something this derivation reset on the way through.
-      const doc = await (await fetch(`http://127.0.0.1:${port}/api/pomodoro`, {
-        headers: { [SECRET_HEADER]: secret },
-      })).json();
-      assert.equal(doc.settings.menubarCountdown, true, 'the stored preference survives the switch being off, unwritten');
-    });
-    // Re-enabling (a fresh document is the daemon chunk's own job; this simulates the far
-    // side of it) shows the countdown again from the very same stored `true` -- never a
-    // fresh default, because nothing here ever touched it.
-    await withDaemon(runningDoc(timer, { enabled: true, menubarCountdown: true }), async ({ probeHome, port }) => {
-      assert.equal((await probe({ home: probeHome, port })).countdown, 'yes',
-        're-enabling must restore the countdown from the untouched stored value');
-    });
-  });
-
   await check('criterion 8: Hide menu bar icon hides/unhides the whole item regardless of the switch, on or off', async () => {
+    // The index page's pomodoro settings hide the item and bring it back, and both halves
+    // of that are this one boolean arriving on every poll. Reported, never acted on by
+    // exiting: an item that exited when hidden would leave nothing for the settings panel
+    // to reach. The item itself never WRITES this key -- there is no route to it from
+    // bin/menubar.m at all (the closed route set above), which is why the popover has no
+    // "Hide from menu bar" row and the way back is never behind the door it closed.
     for (const enabled of [true, false]) {
       await withDaemon(runningDoc(null, { enabled, menubarHidden: true }), async ({ probeHome, port }) => {
         const state = await probe({ home: probeHome, port });
@@ -2372,18 +2182,7 @@ async function main() {
     // answer" -- which is what makes the item stay off the menu bar until there IS one, and
     // what dims it rather than deleting it afterwards.
     const home = makeProbeHome(randomBytes(32).toString('hex'));
-    // A port nothing is listening on. Bound and released first, so this is a port the
-    // kernel just confirmed free rather than a guess that could collide with the suite's
-    // other concurrent checks.
-    const { createServer } = await import('node:net');
-    const port = await new Promise((resolve, reject) => {
-      const probeSocket = createServer();
-      probeSocket.on('error', reject);
-      probeSocket.listen(0, '127.0.0.1', () => {
-        const bound = probeSocket.address().port;
-        probeSocket.close(() => resolve(bound));
-      });
-    });
+    const port = await freePort();
     const state = await probe({ home, port });
     assert.equal(state.answered, 'no');
     assert.equal(state.phase, 'idle', 'and it draws the calm idle glyph rather than inventing one');
@@ -2398,15 +2197,7 @@ async function main() {
     // and not a crash (which under ADR 72 costs the menu bar but is still the one thing
     // this process is not allowed to do quietly).
     const home = makeProbeHome(randomBytes(32).toString('hex'));
-    const { createServer } = await import('node:net');
-    const port = await new Promise((resolve, reject) => {
-      const probeSocket = createServer();
-      probeSocket.on('error', reject);
-      probeSocket.listen(0, '127.0.0.1', () => {
-        const bound = probeSocket.address().port;
-        probeSocket.close(() => resolve(bound));
-      });
-    });
+    const port = await freePort();
     for (const action of ['start', 'pause', 'resume', 'forward', 'restart']) {
       const state = await probe({ home, port, args: [action] });
       assert.equal(state.signal, null, `${action} must not crash against an absent daemon`);
@@ -2421,20 +2212,31 @@ async function main() {
     // stale. bin/menubar.m drops its cached secret on any failed poll so the next one picks
     // up a rotated file -- what must NOT happen is a retry storm against a daemon that is
     // refusing it, which would be indistinguishable from a working item while pinning a
-    // core. The one-shot probe pins the report; the elapsed time pins that nothing spun.
-    await withDaemon(runningDoc(null), async ({ port }) => {
+    // core. The one-shot probe pins the report; the daemon's own request log pins that
+    // nothing was retried -- one GET per route the report reads, and no second of either.
+    await withDaemon(runningDoc(null), async ({ port, server }) => {
+      const requests = [];
+      server.on('request', req => requests.push(`${req.method} ${req.url}`));
       const wrongHome = makeProbeHome(randomBytes(32).toString('hex'));
       const state = await probe({ home: wrongHome, port });
       assert.equal(state.answered, 'no');
+      assert.deepEqual(requests, ['GET /api/pomodoro', 'GET /api/waiting'],
+        'a refused credential is asked once per route the report reads, never retried');
       assert.ok(state.elapsedMs < 10_000, `a refused credential must be reported at once: took ${state.elapsedMs}ms`);
     });
   });
 
   await check('criterion 9: a MISSING secret file is not-answering, with no request sent at all', async () => {
-    await withDaemon(runningDoc(null), async ({ port }) => {
+    // cb_request gives up before building a request when there is no secret to put on it,
+    // so the daemon is never asked anything: an unauthenticated GET would be a 401 the
+    // daemon had to answer, for a credential the item already knew it did not have.
+    await withDaemon(runningDoc(null), async ({ port, server }) => {
+      const requests = [];
+      server.on('request', req => requests.push(`${req.method} ${req.url}`));
       const emptyHome = makeProbeHome(null);
       const state = await probe({ home: emptyHome, port });
       assert.equal(state.answered, 'no');
+      assert.deepEqual(requests, [], 'no request at all reaches the daemon without a secret');
       assert.ok(state.elapsedMs < 10_000, `a missing credential must be reported at once: took ${state.elapsedMs}ms`);
     });
   });
@@ -2531,42 +2333,6 @@ async function main() {
       assert.equal(code, 0, `the probe must report success:\n${stdout}\n${stderr}`);
       assert.match(stdout, /^event=waiting$/m, `a newly-awaited board must reach this probe as a 'waiting' event:\n${stdout}`);
     });
-  });
-
-  await check('ticket 01: with nothing pushed, the probe reports a timeout rather than hanging or inventing an event -- the ablation for the two checks above', async () => {
-    // Without this, the two checks above could pass for the wrong reason: a probe that
-    // printed `event=pomodoro` unconditionally, having never actually parsed the stream,
-    // would satisfy both. This is what proves `event=` is read off the wire and not
-    // fabricated -- the same reasoning criterion 9's negative cases carry for the poll.
-    await withDaemon(runningDoc(null), async ({ probeHome, port }) => {
-      const started = Date.now();
-      const state = await probe({ home: probeHome, port, args: ['stream', '1'] });
-      assert.equal(state.code, 0, `a timeout is a reported outcome, not a failure: ${state.stderr}`);
-      assert.equal(state.stream, 'connected');
-      assert.equal(state.event, 'timeout');
-      const elapsed = Date.now() - started;
-      assert.ok(elapsed >= 900, `must actually wait out the window, not return early: ${elapsed}ms`);
-      assert.ok(elapsed < 10_000, `must not overrun the window it was given: ${elapsed}ms`);
-    });
-  });
-
-  await check('ticket 01: an absent daemon is `stream=refused`, promptly, with no event line and no hang', async () => {
-    const home = makeProbeHome(randomBytes(32).toString('hex'));
-    const { createServer } = await import('node:net');
-    const port = await new Promise((resolve, reject) => {
-      const probeSocket = createServer();
-      probeSocket.on('error', reject);
-      probeSocket.listen(0, '127.0.0.1', () => {
-        const bound = probeSocket.address().port;
-        probeSocket.close(() => resolve(bound));
-      });
-    });
-    const started = Date.now();
-    const state = await probe({ home, port, args: ['stream', '5'] });
-    assert.equal(state.code, 0);
-    assert.equal(state.stream, 'refused');
-    assert.equal(state.event, undefined, 'no wait was ever entered, so there is nothing to report about one');
-    assert.ok(Date.now() - started < 10_000, 'a connection nothing answers must not be waited out to the stream window');
   });
 
   // -------------------------------------------------------------------------------------
@@ -2680,54 +2446,71 @@ async function main() {
     });
   });
 
-  await check('ticket 02: with nothing pushed, the live probe reports a timeout rather than a change from nowhere -- the ablation for the two checks above', async () => {
-    // Without this, the two checks above could pass for the wrong reason: a probe that
-    // reported updated state unconditionally, having never actually wired the stream to
-    // cb_poll_once, would satisfy both. This is what proves the report is read off a real
-    // push and not fabricated -- the same reasoning ticket 01's own ablation carries.
+  // The two held probes, `stream` (ticket 01) and `live` (ticket 02), are two code paths
+  // (cb_stream_probe, and cb_stream_start under cb_menubar_probe_live) with one shape of
+  // honest negative each, so both checks below are one row per mode.
+
+  await check('with nothing pushed, the stream probe reports `event=timeout` and the live probe `live=timeout answered=no` -- each waits out its window, neither hangs nor invents an event: the ablation for the push checks above', async () => {
+    // Without this, the push checks above could pass for the wrong reason: a stream probe
+    // that printed `event=pomodoro` unconditionally, having never actually parsed the
+    // stream, or a live probe that reported updated state unconditionally, having never
+    // wired the stream to cb_poll_once, would satisfy them. This is what proves each report
+    // is read off a real push and not fabricated -- the same reasoning criterion 9's
+    // negative cases carry for the poll.
     await withDaemon(runningDoc(null), async ({ probeHome, port }) => {
-      const started = Date.now();
-      const state = await probe({ home: probeHome, port, args: ['live', '1'] });
-      assert.equal(state.code, 0, `a timeout is a reported outcome, not a failure: ${state.stderr}`);
-      assert.equal(state.stream, 'connected');
-      assert.equal(state.live, 'timeout');
-      assert.equal(state.answered, 'no', 'nothing was ever pushed, so the item never got its first answer');
-      const elapsed = Date.now() - started;
-      assert.ok(elapsed >= 900, `must actually wait out the window, not return early: ${elapsed}ms`);
-      assert.ok(elapsed < 10_000, `must not overrun the window it was given: ${elapsed}ms`);
+      for (const mode of ['stream', 'live']) {
+        const started = Date.now();
+        const state = await probe({ home: probeHome, port, args: [mode, '1'] });
+        assert.equal(state.code, 0, `${mode}: a timeout is a reported outcome, not a failure: ${state.stderr}`);
+        assert.equal(state.stream, 'connected', `${mode}: the subscription itself opened`);
+        if (mode === 'stream') {
+          assert.equal(state.event, 'timeout');
+        } else {
+          assert.equal(state.live, 'timeout');
+          assert.equal(state.answered, 'no', 'live: nothing was ever pushed, so the item never got its first answer');
+        }
+        const elapsed = Date.now() - started;
+        assert.ok(elapsed >= 900, `${mode}: must actually wait out the window, not return early: ${elapsed}ms`);
+        assert.ok(elapsed < 10_000, `${mode}: must not overrun the window it was given: ${elapsed}ms`);
+      }
     });
   });
 
-  await check('ticket 02: an absent daemon is `stream=refused` for the live probe too, promptly, with no hang', async () => {
+  await check('an absent daemon is `stream=refused` for the stream probe and the live probe alike, promptly, with no wait reported and no hang', async () => {
     const home = makeProbeHome(randomBytes(32).toString('hex'));
-    const { createServer } = await import('node:net');
-    const port = await new Promise((resolve, reject) => {
-      const probeSocket = createServer();
-      probeSocket.on('error', reject);
-      probeSocket.listen(0, '127.0.0.1', () => {
-        const bound = probeSocket.address().port;
-        probeSocket.close(() => resolve(bound));
-      });
-    });
-    const started = Date.now();
-    const state = await probe({ home, port, args: ['live', '5'] });
-    assert.equal(state.code, 0);
-    assert.equal(state.stream, 'refused');
-    assert.equal(state.live, undefined, 'no wait was ever entered, so there is nothing to report about one');
-    assert.ok(Date.now() - started < 10_000, 'a connection nothing answers must not be waited out to the push window');
+    const port = await freePort();
+    for (const mode of ['stream', 'live']) {
+      const started = Date.now();
+      const state = await probe({ home, port, args: [mode, '5'] });
+      assert.equal(state.code, 0, `${mode}: a refusal is a reported outcome: ${state.stderr}`);
+      assert.equal(state.stream, 'refused', mode);
+      assert.equal(state[mode === 'stream' ? 'event' : 'live'], undefined,
+        `${mode}: no wait was ever entered, so there is nothing to report about one`);
+      assert.ok(Date.now() - started < 10_000, `${mode}: a connection nothing answers must not be waited out to the window`);
+    }
   });
 
-  await check('ticket 02: the poll is untouched -- CB_POLL_S, its queue and cb_poll_once are still exactly what they were', async () => {
+  await check('the poll is untouched: CB_POLL_S is still 15s, and the real run loop (cb_menubar\'s own body, not the probe\'s copy) still arms a timer source on cb_poll_queue that calls cb_poll_once', async () => {
     // A structural pin rather than a behavioural one: the spec is explicit that the
     // stream lives BESIDE the existing poll, never in place of it, and ticket 03 needs
     // the poll to still be there to fall back on. The easiest way for that constraint to
     // quietly break is an edit that "simplifies" cb_menubar by folding the poll into the
     // stream -- which would pass every check above (a live daemon always has a stream to
-    // push through) while failing ticket 03's whole premise.
+    // push through) while failing ticket 03's whole premise. cb_menubar is the AppKit run
+    // loop, which no probe reaches, so its own body is what is read.
+    //
+    // Scoped to that body, not the whole file: `--probe run` (cb_menubar_probe_run) arms
+    // an identical copy of the same poll, so a file-wide match stayed green with
+    // cb_menubar's own poll deleted -- and the behavioural ticket 03 check below drives
+    // that copy, never this one.
     const source = readFileSync(path.join(repoRoot, 'bin', 'menubar.m'), 'utf8');
     assert.match(source, /static const double CB_POLL_S = 15\.0;/, 'the poll period is untouched');
-    assert.match(source, /dispatch_source_create\(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, cb_poll_queue\)/, 'the poll is still a timer source on the poll queue');
-    assert.match(source, /dispatch_source_set_event_handler\(poll, \^\{ cb_poll_once\(\); \}\);/, 'the poll still calls cb_poll_once on its own timer');
+    const start = source.indexOf('int cb_menubar(void) {');
+    const end = source.indexOf('\n}\n', start);
+    assert.ok(start >= 0 && end > start, 'setup: cb_menubar must still be findable by name');
+    const runLoop = source.slice(start, end);
+    assert.match(runLoop, /dispatch_source_create\(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, cb_poll_queue\)/, 'the poll is still a timer source on the poll queue');
+    assert.match(runLoop, /dispatch_source_set_event_handler\(poll, \^\{ cb_poll_once\(\); \}\);/, 'the poll still calls cb_poll_once on its own timer');
   });
 
   // -------------------------------------------------------------------------------------
@@ -2808,7 +2591,7 @@ async function main() {
         // A beat with nobody on the port at all -- long enough that the client's own first
         // reconnect attempt, if it fired instantly, would find no daemon there, which is
         // exactly the restart window this criterion is about.
-        await new Promise(resolve => setTimeout(resolve, 500));
+        await sleep(500);
 
         // Back on the SAME port, with a DIFFERENT document: a report matching THIS one and
         // not the pre-kill one is what proves the reconnect fetched fresh data rather than
@@ -2850,15 +2633,7 @@ async function main() {
     // real poll in, would satisfy it just as well. Same reasoning every other ablation in
     // this file carries.
     const home = makeProbeHome(randomBytes(32).toString('hex'));
-    const { createServer } = await import('node:net');
-    const port = await new Promise((resolve, reject) => {
-      const probeSocket = createServer();
-      probeSocket.on('error', reject);
-      probeSocket.listen(0, '127.0.0.1', () => {
-        const bound = probeSocket.address().port;
-        probeSocket.close(() => resolve(bound));
-      });
-    });
+    const port = await freePort();
     const started = Date.now();
     const state = await probe({ home, port, args: ['run', '3'] });
     assert.equal(state.code, 0);
@@ -2875,8 +2650,7 @@ async function main() {
     // and destroying the socket at once (never answering) is what forces a fast, repeated
     // failure -- the shape a reconnect-with-backoff has to survive without spinning.
     const attempts = [];
-    const { createServer } = await import('node:net');
-    const stub = createServer(socket => {
+    const stub = net.createServer(socket => {
       attempts.push(Date.now());
       socket.destroy();
     });
@@ -3125,7 +2899,7 @@ async function main() {
     child.stderr.on('data', c => { out += c; });
     let exited = null;
     child.on('exit', (code, signal) => { exited = { code, signal }; });
-    await new Promise(resolve => setTimeout(resolve, 1200));
+    await sleep(1200);
     try {
       assert.equal(exited, null, `--menubar alone must keep running, not print and exit:\n${out}`);
       assert.ok(!out.includes('phase='), `--menubar alone must not reach the probe:\n${out}`);
@@ -3137,17 +2911,4 @@ async function main() {
   });
 }
 
-main()
-  .catch(err => {
-    failures++;
-    console.error('FAIL - unexpected error');
-    console.error(err);
-  })
-  .finally(() => {
-    rmSync(workDir, { recursive: true, force: true });
-    if (failures) {
-      console.error(`\n${failures} check(s) failed`);
-      process.exit(1);
-    }
-    console.log('\nall menubar-client checks ok');
-  });
+await runMain('menubar-client', main, { cleanup: () => rmSync(workDir, { recursive: true, force: true }) });

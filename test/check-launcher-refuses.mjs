@@ -10,46 +10,22 @@
 // daemon, write nothing anywhere, and show nothing on screen.
 //
 // Pattern-matched on test/check-launcher-env.mjs: compiles bin/launcher.c directly
-// against a hand-written launcher_paths.h pointed at a stub "daemon" that proves it ran
-// two ways -- a marker FILE on disk (the acceptance criterion's "writes nothing to the
-// store" stand-in: absence of this file is not "didn't print", it is "never executed at
-// all") and its own environment dump on stdout (proving a real launchd start still
-// supervises exactly as before). No real installed bundle, no ~/Applications, no
-// ~/Library/LaunchAgents -- everything lives under one mkdtempSync workDir.
+// (test/support.mjs's `buildLauncher`) against a launcher_paths.h pointed at a stub
+// "daemon" that proves it ran two ways -- a marker FILE on disk (the acceptance
+// criterion's "writes nothing to the store" stand-in: absence of this file is not
+// "didn't print", it is "never executed at all") and its own environment dump on stdout
+// (proving a real launchd start still supervises exactly as before). No real installed
+// bundle, no ~/Applications, no ~/Library/LaunchAgents -- everything lives under one
+// mkdtempSync workDir.
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, existsSync, chmodSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, existsSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { CC, buildLauncher, check, haveCc, runMain, skipFile } from './support.mjs';
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const launcherSrc = path.join(repoRoot, 'bin', 'launcher.c');
-const notifySrc = path.join(repoRoot, 'bin', 'notify.m');
-// The launcher is one binary out of three sources since ADR.md entry 72 put the status
-// item in it, so a check that links only two gets an undefined cb_menubar and fails at
-// the build rather than at the thing it is about.
-const menubarSrc = path.join(repoRoot, 'bin', 'menubar.m');
-const ccCmd = process.env.CLAUDE_BOARD_CC || 'cc';
-
-if (spawnSync(ccCmd, ['--version']).error) {
-  console.log(`==> skipping check-launcher-refuses.mjs: no C compiler ('${ccCmd}') found`);
-  console.log('all launcher-refuses checks ok (skipped)');
-  process.exit(0);
-}
-
-let failures = 0;
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
+if (!haveCc()) skipFile('launcher-refuses', `check-launcher-refuses.mjs: no C compiler ('${CC}') found`);
 
 const workDir = mkdtempSync(path.join(tmpdir(), 'claude-board-launcher-refuses-'));
 
@@ -73,45 +49,28 @@ const compiledRefRoots = path.join(workDir, 'compiled-home', '.claude', 'skills'
 const compiledPath = '/usr/bin:/bin:/usr/sbin:/sbin';
 const compiledRepoRoot = path.join(workDir, 'compiled-repo');
 
-function cEscape(value) {
-  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-}
-
-const headerDir = path.join(workDir, 'header');
-mkdirSync(headerDir, { recursive: true });
-const headerPath = path.join(headerDir, 'launcher_paths.h');
-writeFileSync(headerPath, [
-  `#define CLAUDE_BOARD_NODE "${cEscape(process.execPath)}"`,
-  `#define CLAUDE_BOARD_DAEMON "${cEscape(stubDaemon)}"`,
-  `#define CLAUDE_BOARD_HOME_DIR "${cEscape(compiledHome)}"`,
-  `#define CLAUDE_BOARD_PATH "${cEscape(compiledPath)}"`,
-  `#define CLAUDE_BOARD_STORE_DIR "${cEscape(compiledStore)}"`,
-  `#define CLAUDE_BOARD_REF_ROOTS_VALUE "${cEscape(compiledRefRoots)}"`,
-  `#define CLAUDE_BOARD_REPO_ROOT_VALUE "${cEscape(compiledRepoRoot)}"`,
-  '',
-].join('\n'));
-
-const launcherExec = path.join(workDir, 'launcher');
-const notifyObj = path.join(workDir, 'notify.o');
-const menubarObj = path.join(workDir, 'menubar.o');
-const notifyBuild = spawnSync(ccCmd,
-  ['-O2', '-Wall', '-Wextra', '-fobjc-arc', '-c', '-o', notifyObj, notifySrc], { encoding: 'utf8' });
-const menubarBuild = notifyBuild.status !== 0 ? notifyBuild : spawnSync(ccCmd,
-  ['-O2', '-Wall', '-Wextra', '-fobjc-arc', '-c', '-o', menubarObj, menubarSrc], { encoding: 'utf8' });
-const build = menubarBuild.status !== 0 ? menubarBuild : spawnSync(ccCmd,
-  ['-O2', '-Wall', '-Wextra', '-o', launcherExec, '-I', headerDir, launcherSrc, notifyObj, menubarObj,
-   '-framework', 'Foundation', '-framework', 'UserNotifications', '-framework', 'AppKit'], { encoding: 'utf8' });
+// All three sources, linked as install.sh links them: the launcher has been one binary out
+// of three since ADR.md entry 72 put the status item in it.
+const { exec: launcherExec, build } = buildLauncher(workDir, {
+  daemon: stubDaemon,
+  home: compiledHome,
+  path: compiledPath,
+  store: compiledStore,
+  refRoots: compiledRefRoots,
+  repoRoot: compiledRepoRoot,
+});
 
 async function main() {
-  await check('the launcher compiles clean against the generated header', async () => {
-    assert.equal(build.status, 0, `stdout:\n${build.stdout}\nstderr:\n${build.stderr}`);
-    assert.ok(existsSync(launcherExec), 'the launcher binary must exist after a clean build');
-  });
+  // The clean-build check (all three halves, no warnings) is check-launcher-env.mjs's; a
+  // build that fails here only has to name itself rather than surface as a missing binary.
+  if (build.status !== 0 || !existsSync(launcherExec)) {
+    throw new Error(`the launcher did not build:\nstdout:\n${build.stdout}\nstderr:\n${build.stderr}`);
+  }
   chmodSync(launcherExec, 0o755);
 
   // --- a no-argument launch WITHOUT the launchd marker: the stray-LaunchServices case ---
 
-  await check('acceptance criterion: no-argument launch, no launchd marker -- starts no daemon', async () => {
+  await check('a no-argument launch without the launchd marker starts no daemon, exits 0, and prints nothing that reads as a crash', async () => {
     // Deliberately not process.env: a from-scratch object, so this is never accidentally
     // hidden by a marker this suite's own shell happens to carry.
     const run = spawnSync(launcherExec, [], { env: {}, encoding: 'utf8', timeout: 10_000 });
@@ -122,13 +81,8 @@ async function main() {
     // store". (Ablation: delete the check in launcher.c's main() and this file exists.)
     assert.ok(!existsSync(ranMarkerFile), 'the daemon must never run for a stray launch -- no file it would have written may exist');
     assert.equal(run.stdout, '', 'nothing the stub daemon would have printed may appear -- it never ran');
-  });
-
-  await check('the refusal is silent: no alarming stderr, nothing that looks like a crash or a dialog trigger', async () => {
-    const run = spawnSync(launcherExec, [], { env: {}, encoding: 'utf8', timeout: 10_000 });
-    // "A log line the reviewer would only see if they went looking is fine" (the spec's
-    // own words) -- so stderr may say something, but it must not be the exec-failure
-    // line (which would read as a broken install) or anything implying a crash.
+    // The refusal may log a line a reviewer only sees by looking, but not the exec-failure
+    // line (which reads as a broken install) or anything implying a crash.
     assert.doesNotMatch(run.stderr || '', /cannot exec/, 'a stray launch must not look like a broken node install');
     assert.doesNotMatch(run.stderr || '', /Segmentation|Abort|Bus error/i, 'a stray launch must not look like a crash');
   });
@@ -144,7 +98,7 @@ async function main() {
 
   // --- the SAME launch WITH the marker: the real-launchd case must be unaffected ---
 
-  await check('acceptance criterion: the identical no-argument launch, WITH the launchd marker, still supervises', async () => {
+  await check('the identical no-argument launch, WITH the launchd marker, still supervises', async () => {
     const run = spawnSync(launcherExec, [], {
       env: { CLAUDE_BOARD_LAUNCHD_MARKER: '1' },
       encoding: 'utf8',
@@ -158,17 +112,4 @@ async function main() {
   });
 }
 
-main()
-  .catch(err => {
-    failures++;
-    console.error('FAIL - unexpected error');
-    console.error(err);
-  })
-  .finally(() => {
-    rmSync(workDir, { recursive: true, force: true });
-    if (failures) {
-      console.error(`\n${failures} check(s) failed`);
-      process.exit(1);
-    }
-    console.log('\nall launcher-refuses checks ok');
-  });
+runMain('launcher-refuses', main, { cleanup: () => rmSync(workDir, { recursive: true, force: true }) });

@@ -55,48 +55,17 @@ import path from 'node:path';
 import http from 'node:http';
 import net from 'node:net';
 import { randomBytes } from 'node:crypto';
-import { fileURLToPath } from 'node:url';
 import { SECRET_HEADER, SESSION_COOKIE, sessionToken } from '../src/secret.mjs';
 import { assetsNamedBy, MERMAID_ASSET_NAME } from '../src/assets.mjs';
 import { parseMermaidDomId, MERMAID_NODE_SELECTOR } from '../src/anchor.mjs';
+import { check, freePort, repoRoot, runMain, sleep, withTimeout } from './support.mjs';
 
-const HERE = path.dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = path.join(HERE, '..');
 const CHROME = process.env.CLAUDE_BOARD_CHROME_BIN
   || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 
 const ARTIFACT_PATH = process.env.CLAUDE_BOARD_BROWSER_CHECK_ARTIFACT
-  || path.join(HERE, 'fixtures', 'mermaid-stage-artifact.html');
+  || path.join(repoRoot, 'test', 'fixtures', 'mermaid-stage-artifact.html');
 const FIGURE_SELECTOR = process.env.CLAUDE_BOARD_BROWSER_CHECK_FIGURE_SELECTOR || 'pre.mermaid';
-
-let failures = 0;
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
-
-function sleep(ms) {
-  return new Promise(r => setTimeout(r, ms));
-}
-
-/** Races `promise` against a deadline without leaving an unhandled rejection
- * behind when `promise` wins: `Promise.race([p, sleep(ms).then(() => {throw})])`
- * looks equivalent but is not -- the loser's `.then` chain still runs to
- * completion and throws into nothing, which Node treats as an unhandled
- * rejection (fatal under this Node version's default). Racing the timer's OWN
- * promise, and clearing it once either side settles, has no loser left to
- * reject unobserved. */
-function withTimeout(promise, ms, message) {
-  let timer;
-  const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), ms); });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
-}
 
 // ---------------------------------------------------------------------------
 // The network witness. A per-target DevTools Protocol Network.enable races a
@@ -429,35 +398,25 @@ async function waitForTruthy(send, sessionId, expression, timeoutMs = 15000) {
 // ---------------------------------------------------------------------------
 // Daemon: the branch's own bin/daemon.mjs, on a scratch port against a
 // scratch CLAUDE_BOARD_HOME -- never the real store, never the real secret.
-/** A free loopback port, picked by asking the OS for one (`listen(0)`) and
- * releasing it immediately. `CLAUDE_BOARD_PORT=0` cannot be used to ask
- * `bin/daemon.mjs` for an ephemeral port the way `startServer({port: 0})`
- * can in-process (test/check-http.mjs's own route): src/server.mjs reads the
- * env var through `Number(process.env.CLAUDE_BOARD_PORT) || DEFAULT_PORT`,
- * and `0` is falsy in JS, so `CLAUDE_BOARD_PORT=0` silently falls through to
- * the real default port (7391) instead -- observed directly (EADDRINUSE
- * against this machine's own real daemon). Out of scope to fix (src/
- * feature code); picking a real, already-free port before spawning is the
- * workaround, with the ordinary narrow TOCTOU a throwaway check accepts. */
-async function getFreePort() {
-  return new Promise((resolve, reject) => {
-    const probe = net.createServer();
-    probe.on('error', reject);
-    probe.listen(0, '127.0.0.1', () => {
-      const { port } = probe.address();
-      probe.close(() => resolve(port));
-    });
-  });
-}
 
 async function startScratchDaemon() {
   const home = mkdtempSync(path.join(tmpdir(), 'cb-mermaid-browser-home-'));
   const secretFile = path.join(home, 'secret');
   const secret = randomBytes(32).toString('hex');
   writeFileSync(secretFile, `${secret}\n`, { mode: 0o600 });
-  const wantPort = await getFreePort();
+  // test/support.mjs's `freePort` picks the port, since `CLAUDE_BOARD_PORT=0`
+  // cannot ask `bin/daemon.mjs` for an ephemeral one the way
+  // `startServer({port: 0})` can in-process (the route test/check-http.mjs
+  // takes): src/server.mjs reads the env var through
+  // `Number(process.env.CLAUDE_BOARD_PORT) || DEFAULT_PORT`, and `0` is falsy
+  // in JS, so `CLAUDE_BOARD_PORT=0` silently falls through to the real default
+  // port (7391) instead -- observed directly (EADDRINUSE against this machine's
+  // own real daemon). Out of scope to fix (src/ feature code); picking a real,
+  // already-free port before spawning is the workaround, with the ordinary
+  // narrow TOCTOU a throwaway check accepts.
+  const wantPort = await freePort();
 
-  const child = spawn(process.execPath, [path.join(REPO_ROOT, 'bin', 'daemon.mjs')], {
+  const child = spawn(process.execPath, [path.join(repoRoot, 'bin', 'daemon.mjs')], {
     env: {
       ...process.env,
       CLAUDE_BOARD_HOME: home,
@@ -717,15 +676,7 @@ async function main() {
   console.log(`\nartifact: ${ARTIFACT_PATH}`);
   console.log(`witness proxy observed ${witness.seen.length} request(s) total (loopback + Chrome infra included):`);
   for (const e of witness.seen) console.log(`  [${e.phase}] ${e.kind} ${e.hostname}:${e.port} ${e.url}`);
-
-  if (failures) {
-    console.error(`\n${failures} assertion group(s) FAILED`);
-    process.exit(1);
-  }
-  console.log('\nall assertions ok');
 }
 
-main().catch(err => {
-  console.error(err);
-  process.exit(1);
-});
+await runMain(null, main, { failText: n => `${n} assertion group(s) FAILED` });
+console.log('\nall assertions ok');

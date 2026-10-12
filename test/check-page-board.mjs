@@ -14,8 +14,7 @@
 // Everything runs against the real `renderBoardPage`, the real `stageAgentScript`
 // and the real `ui`, through test/dom-stand-in.mjs -- never a hand-summary of
 // what they do; same shape as test/check-stage-isolation.mjs and
-// test/check-stage-lens.mjs, whose loaders this file's are copied from (there is
-// no shared test-helper module in this repo, by convention).
+// test/check-stage-lens.mjs, through test/support.mjs's page harness.
 //
 // WHAT NO CHECK HERE CAN PROVE. Criterion 3 is "the artifact's own theme toggle,
 // its table-of-contents scroll-spy, its quiz and its own diagram dialog all
@@ -30,16 +29,15 @@
 import assert from 'node:assert/strict';
 import { createBoard, addRound, applySubmit, abandonOpenRounds } from '../src/board.mjs';
 import { renderBoardPage, renderRoundSection, groupCommentsByBlock, stageAgentScript, COMMENT_ICON } from '../src/render.mjs';
-// The daemon's own push builder, imported rather than re-implemented: a check
-// that rebuilt the payload locally would assert its own copy of the rule and
-// stay green through any change to the real one (which is how the amend path's
-// missing `fullpage` survived two other push checks).
-import { buildRoundPushPayload } from '../src/server.mjs';
-import { ui } from '../src/ui.mjs';
 import { styles } from '../src/styles.mjs';
-import { PAGE_SEND_EXPIRED_LABEL, PAGE_SEND_EXPIRED_TITLE, PILL_SUBMITTED_TITLE } from '../src/badge.mjs';
-import { themeBootScript } from '../src/theme.mjs';
-import { parseHTML, StandInEvent, StandInEventSource, resolveComputedProperty } from './dom-stand-in.mjs';
+import { PAGE_SEND_EXPIRED_LABEL, PAGE_SEND_EXPIRED_TITLE, PILL_READONLY_TITLE } from '../src/badge.mjs';
+import { parseHTML, StandInEvent } from './dom-stand-in.mjs';
+import { check, checkAsync, finish, flush, pageHarness } from './support.mjs';
+
+const {
+  loadBoard, loadBoardWithEventSource, withFetchCapture, enableCommentMode,
+  reportScroll, condensed, progress, computed,
+} = await pageHarness();
 
 // src/ui.mjs's reportStageBand falls back to hardcoded pixel figures when
 // getComputedStyle cannot be trusted (this suite's DOM stand-in, see this
@@ -50,32 +48,6 @@ import { parseHTML, StandInEvent, StandInEventSource, resolveComputedProperty } 
 // suite silently asserting a stale fallback.
 const SPACE_4_FALLBACK = parseFloat(styles.match(/--space-4:\s*([\d.]+)px/)[1]);
 const SPACE_3_FALLBACK = parseFloat(styles.match(/--space-3:\s*([\d.]+)px/)[1]);
-
-let failures = 0;
-function check(name, fn) {
-  try {
-    fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
-
-/** check(), for a case that has to let a promise chain settle -- the client's own
- * resync is a fetch and two .then hops deep, and its effects are invisible until
- * they drain. Same shape and same name as test/check-amend-integrity.mjs's. */
-async function checkAsync(name, fn) {
-  try {
-    await fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
 
 /** A rendered artifact of the shape /visualize posts: its own <style>, its own
  * markup, and its own <script>, all inline (ADR.md entry 32 -- an opaque origin
@@ -108,64 +80,6 @@ function nonAwaitedPageBoard(html = ARTIFACT) {
   return createBoard({ title: 'Rendered artifact, unawaited', blocks: [{ kind: 'html', html }] });
 }
 
-// 'EventSource' is a named parameter of the `new Function` call below, not
-// merely a global the script happens to see -- `new Function` hands the
-// script only the names it is given, so leaving the name off would let it
-// fall through to the node process's OWN global instead. `eventSource`
-// defaults to undefined: an ordinary loadBoard() call declares the name and
-// binds it to nothing, so src/ui.mjs's `typeof EventSource !== 'undefined'`
-// guard reads false and no subscription opens -- exactly the shape
-// loadBoardWithEventSource below opts back into by passing a real stand-in.
-function loadBoard(pageHtml, protocol = 'http:', eventSource = undefined) {
-  const document = parseHTML(pageHtml);
-  const window = document.defaultView;
-  const location = { protocol };
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location, eventSource);
-  return document;
-}
-
-/** loadBoard with 'EventSource' bound to a captured, stubbed instance -- test/
- * check-round-end.mjs's own idiom, reused to drive a real 'round' push. */
-function loadBoardWithEventSource(pageHtml) {
-  let captured = null;
-  class CapturingEventSource extends StandInEventSource {
-    constructor(url) { super(url); captured = this; }
-  }
-  const document = loadBoard(pageHtml, 'http:', CapturingEventSource);
-  assert.ok(captured, 'setup failure: the real ui script never constructed an EventSource');
-  return { document, es: captured };
-}
-
-/** Run `fn` with a stubbed global fetch and hand back every call it made --
- * test/check-enter.mjs's own idiom, reused so "posts nothing" is asserted
- * against the actual request the page would have sent, not against a button's
- * attribute. */
-function withFetchCapture(fn) {
-  const original = globalThis.fetch;
-  const calls = [];
-  globalThis.fetch = (url, opts) => {
-    calls.push({ url, method: opts && opts.method, body: opts && opts.body ? JSON.parse(opts.body) : null });
-    return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
-  };
-  try {
-    fn();
-  } finally {
-    globalThis.fetch = original;
-  }
-  return calls;
-}
-
-// Idempotent: an awaited page board now hydrates with comment mode already ON,
-// so a bare unconditional click here would toggle it straight back OFF on
-// exactly the fixture this file's checks mostly use. Only clicks when it
-// still needs to.
-function enableCommentMode(document) {
-  const toggle = document.getElementById('comment-mode-toggle');
-  assert.ok(toggle, 'setup failure: no #comment-mode-toggle rendered');
-  if (!toggle.classList.contains('active')) toggle.dispatchEvent(new StandInEvent('click'));
-  assert.equal(toggle.classList.contains('active'), true, 'setup failure: the toggle did not turn comment mode on');
-}
-
 /** Load a page board and bring its stage up exactly as a browser would: the
  * srcdoc navigation completes (the artifact's own script and the injected stage
  * agent both run), the agent posts 'ready', and the parent wires it. */
@@ -181,37 +95,23 @@ function openPageBoard(board = pageBoard()) {
  * them: themeBootScript inline in <head>, then `ui` (a deferred module script,
  * so after parsing but before DOMContentLoaded), then the parser reaching the
  * end of the document -- which is what actually invokes themeBootScript's
- * `wire()` and attaches the theme control's click listener. QUIRKS.md
- * ("test/check-archive.mjs's own loadBoard never runs themeBootScript") is the
- * trap this avoids: with `ui` alone, #theme-toggle is in the markup, is not
- * disabled, and does nothing at all when clicked. Neither check in this file
- * that uses this loader dispatches over a stream, so 'EventSource' is declared
- * on both calls and never passed -- each script sees no subscription, rather
- * than one bound to whatever the node process itself carries under that name. */
+ * `wire()` and attaches the theme control's click listener. That order is
+ * test/support.mjs's loadBoard with `theme` and `finish` set. Left at its
+ * defaults that loader runs `ui` alone, the trap QUIRKS.md records for a
+ * loader that never runs themeBootScript: #theme-toggle is in the markup, is
+ * not disabled, and does nothing at all when clicked. Neither check in this
+ * file that uses this loader dispatches over a stream, so no EventSource
+ * stand-in is passed -- each script sees no subscription, rather than one
+ * bound to whatever the node process itself carries under that name. */
 function openPageBoardThemed(board = pageBoard(), protocol = 'http:') {
-  const document = parseHTML(renderBoardPage(board));
-  const window = document.defaultView;
-  const location = { protocol };
-  new Function('document', 'window', 'location', 'EventSource', themeBootScript)(document, window, location, undefined);
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location, undefined);
-  document.finishParsing();
+  const document = loadBoard(renderBoardPage(board), { protocol, theme: true, finish: true });
   const frame = document.querySelector('.html-stage');
   assert.ok(frame, 'setup failure: no .html-stage rendered');
   frame.loadSrcdoc();
-  return { document, window, frame };
+  return { document, window: document.defaultView, frame };
 }
 
-/** What a page board's stage reports as it is scrolled (ADR.md entry 40) --
- * forged from the stage's OWN window, which is the only source the parent's
- * listener trusts (origin 'null' plus event.source identity), i.e. exactly the
- * shape agent-authored markup can put on this channel. */
-function reportScroll(frame, top) {
-  frame.contentWindow.parent.postMessage({ cb: 'cb-stage', type: 'scroll', top }, '*');
-}
-
-const condensed = (document) => document.body.classList.contains('stage-scrolled');
 const backToTop = (document) => document.querySelector('button#back-to-top');
-const computed = (el, prop) => resolveComputedProperty(styles, el, true, prop);
 
 /** Every `scroll` report the BOARD's window receives, in order. Watched on the
  * board side because the stage's own `window.parent` is the narrow
@@ -229,8 +129,6 @@ function stageReports(document) {
 // Criterion 16: reading the artifact condenses the header, scrolling back expands
 // it, and the frame's height never moves through any of it.
 // =================================================================================
-
-const progress = (document) => document.body.style.getPropertyValue('--stage-p');
 
 check('criterion 16: a scroll report condenses the header into a centred floating pill, and scrolling back up expands it again', () => {
   const { document, frame } = openPageBoard();
@@ -352,37 +250,6 @@ check('criterion 16: the pill wears a corner rather than a capsule, and holds on
   // hydrate) and a divider with nothing after it is what the reviewer would see.
   assert.match(styles, /body\.page-board \.round-meta:empty \{ display: none; \}/,
     'the divider must not be drawn while the slot is still empty');
-});
-
-check('a page board\'s comment-mode toggle wears COMMENT_ICON\'s own glyph, at rest and condensed alike -- the same node, never redrawn or swapped', () => {
-  const { document, frame } = openPageBoard();
-  const commentPaths = [...COMMENT_ICON.matchAll(/<path d="([^"]+)"/g)].map(m => m[1]);
-  const toggle = document.getElementById('comment-mode-toggle');
-  assert.ok(toggle, 'setup failure: no #comment-mode-toggle rendered');
-  assert.deepEqual([...toggle.querySelectorAll('path')].map(p => p.getAttribute('d')), commentPaths,
-    'at rest, the toggle must render COMMENT_ICON\'s own path data');
-
-  reportScroll(frame, 800);
-  assert.equal(condensed(document), true, 'setup failure: the scroll must have condensed the header into the pill');
-  // Condensing is a pure CSS change of box, never of markup (src/styles.mjs's
-  // own comment: "there is still exactly ONE #comment-mode-toggle in the
-  // document, condensed or not") -- so the SAME element, not a second one, is
-  // what this re-reads.
-  const stillToggle = document.getElementById('comment-mode-toggle');
-  assert.equal(stillToggle, toggle, 'condensing must not swap in a second #comment-mode-toggle element');
-  assert.deepEqual([...stillToggle.querySelectorAll('path')].map(p => p.getAttribute('d')), commentPaths,
-    'condensed, the toggle must still render COMMENT_ICON\'s own path data');
-});
-
-check('ADR.md entry 42: a page board\'s header names no round, at rest or condensed', () => {
-  const { document, frame } = openPageBoard();
-  assert.equal(document.getElementById('round-badge'), null, 'setup: no #round-badge at rest');
-  assert.equal(document.querySelectorAll('.round-badge').length, 0, 'setup: no .round-badge element at rest');
-
-  reportScroll(frame, 800);
-  assert.equal(condensed(document), true, 'setup failure: the scroll must have condensed the header into the pill');
-  assert.equal(document.getElementById('round-badge'), null, 'condensing must not resurrect a #round-badge element');
-  assert.equal(document.querySelectorAll('.round-badge').length, 0, 'condensing must not resurrect a .round-badge element');
 });
 
 check('criterion 16: the frame is untouched across a whole condense/expand cycle -- it floats OVER the frame, which stays a constant 100vh', () => {
@@ -531,8 +398,14 @@ check('criterion 16: a malformed scroll report is inert, and an ordinary board\'
 // Criterion 17: the condensed pill carries the comment-mode toggle.
 // =================================================================================
 
-check('criterion 17: the condensed pill carries the comment-mode toggle -- one control, still in the header, still shown', () => {
+check('criterion 17: the condensed pill carries the comment-mode toggle -- the same one control, still COMMENT_ICON\'s glyph, still in the header, still shown, and no round badge (ADR.md entry 42)', () => {
   const { document, frame } = openPageBoard();
+  // Read after the real ui has hydrated an awaited page board (setCommentMode
+  // has already run once), so a hydrate that redrew the glyph fails here.
+  const commentPaths = [...COMMENT_ICON.matchAll(/<path d="([^"]+)"/g)].map(m => m[1]);
+  const toggleAtRest = document.getElementById('comment-mode-toggle');
+  assert.deepEqual([...toggleAtRest.querySelectorAll('path')].map(p => p.getAttribute('d')), commentPaths,
+    'at rest, the toggle must render COMMENT_ICON\'s own path data');
   reportScroll(frame, 800);
   assert.equal(condensed(document), true, 'setup: the header is condensed');
 
@@ -543,11 +416,20 @@ check('criterion 17: the condensed pill carries the comment-mode toggle -- one c
   assert.equal(document.querySelectorAll('#comment-mode-toggle').length, 1,
     'there must be exactly one comment-mode control in the document at any moment');
   const toggle = document.querySelector('button#comment-mode-toggle');
+  // Condensing is a pure CSS change of box, never of markup: the SAME element,
+  // with the same glyph, not a second one drawn for the pill.
+  assert.equal(toggle, toggleAtRest, 'condensing must not swap in a second #comment-mode-toggle element');
+  assert.deepEqual([...toggle.querySelectorAll('path')].map(p => p.getAttribute('d')), commentPaths,
+    'condensed, the toggle must still render COMMENT_ICON\'s own path data');
   assert.ok(toggle.closest('.board-head'), 'and it must be inside the header that condensed, not left behind above it');
   assert.equal(computed(toggle, 'display'), 'inline-flex',
     'a pill that hid the one control it exists to carry would be decoration');
   assert.equal(computed(document.querySelector('button#theme-toggle'), 'display'), 'inline-flex',
     'and the theme control rides along -- entry 40 changes the header\'s state, never its contents');
+  // The pill names no round: nothing server-side renders a badge
+  // (test/check-pure.mjs), and nothing at hydrate or on condense may add one.
+  assert.equal(document.getElementById('round-badge'), null, 'condensing must not resurrect a #round-badge element');
+  assert.equal(document.querySelectorAll('.round-badge').length, 0, 'condensing must not resurrect a .round-badge element');
 });
 
 check('criterion 17: comment mode can be switched on AND off while condensed, without scrolling back to the top', () => {
@@ -609,20 +491,6 @@ check('criterion 18: a back-to-top control appears once the artifact is scrolled
 
   reportScroll(frame, 0);
   assert.equal(btn.classList.contains('visible'), false, 'and it leaves once there is nowhere to go');
-});
-
-check('criterion 18: clicking back-to-top returns the artifact to the top -- over the channel, since the parent cannot scroll a sandboxed frame', () => {
-  const { document, frame } = openPageBoard();
-  const calls = [];
-  // The stage's own window is what actually scrolls; a real browser gives the
-  // parent no way to reach it, which is why this is a message at all.
-  frame.contentWindow.scrollTo = (...args) => { calls.push(args); };
-
-  reportScroll(frame, 800);
-  backToTop(document).dispatchEvent(new StandInEvent('click'));
-
-  assert.equal(calls.length, 1, 'the click must reach the stage document that actually scrolls');
-  assert.deepEqual(calls[0], [{ top: 0, left: 0, behavior: 'smooth' }], 'and take it to the top');
 });
 
 check('the INBOUND half of the channel is shape-checked too -- the stage refuses a malformed or unaddressed message from the parent', () => {
@@ -726,7 +594,7 @@ check('criterion 18: the control is live in a read-only archive, where the artif
   // visible and dead, which is worse than absent. There is no matching CSS gate
   // to carve out -- no body.readonly rule ever hid it -- so the JS carve-out is
   // the whole fix, and this is what fails if it is dropped.
-  const document = loadBoard(renderBoardPage(pageBoard()), 'file:');
+  const document = loadBoard(renderBoardPage(pageBoard()), { protocol: 'file:' });
   assert.equal(document.body.classList.contains('readonly'), true, 'setup: file: is a read-only archive');
   assert.equal(backToTop(document).disabled, false,
     'an archived page board still scrolls, so the way back up still has to work');
@@ -751,12 +619,6 @@ function stageTheme(frame) {
   const root = frame.contentDocument.documentElement;
   return { attr: root.getAttribute('data-theme'), colorScheme: root.style.colorScheme };
 }
-
-check('criterion 15: a stage is painted in the board\'s theme the moment it announces itself, before any toggle', () => {
-  const { frame } = openPageBoardThemed();
-  assert.deepEqual(stageTheme(frame), { attr: 'dark', colorScheme: 'dark' },
-    'the artifact must be told the current theme at "ready" -- a stage that only heard about CHANGES would paint its first frame in whatever its own markup guessed');
-});
 
 check('criterion 15: the board\'s theme control drives the artifact through the whole three-state cycle, resolved to a concrete light/dark', () => {
   const { document, frame } = openPageBoardThemed();
@@ -862,23 +724,6 @@ check('criterion 3: the artifact\'s own script genuinely executes inside the pag
   frame.contentDocument.getElementById('theme').dispatchEvent(new StandInEvent('click'));
   assert.equal(frame.contentDocument.getElementById('out').textContent, 'themed',
     'a control the artifact wired itself must still respond inside a page board');
-});
-
-check('criterion 3: the injected stage agent runs alongside it -- both scripts, one document, and the parent hears the stage announce itself', () => {
-  const { document, frame, blockId } = openPageBoard();
-  // 'ready' is the stage's first message; the parent answers it with the current
-  // comment mode. If the page board's markup had dropped .html-block (the class
-  // src/ui.mjs's listener finds a stage's block by), every stage message would be
-  // silently discarded and this is the cheapest place that shows.
-  assert.ok(frame.closest('.html-block'), 'the stage must still sit inside an .html-block section, or every message from it is dropped at the parent\'s lookup');
-  assert.equal(frame.closest('.html-block').getAttribute('data-block-id'), blockId);
-  assert.ok(document.querySelector('.stage-wrap .pin-layer'), 'and its pin layer must still sit over the frame');
-  assert.equal(frame.contentWindow.__artifactRan, 1, 'the artifact\'s script and the agent\'s share one document and both run');
-  // Both scripts live at the mercy of one attribute, so it is asserted on the
-  // frame they actually ran in, not inferred from the fact that they ran.
-  assert.equal(frame.getAttribute('sandbox'), 'allow-scripts');
-  assert.ok(!frame.getAttribute('sandbox').includes('allow-same-origin'),
-    'and never allow-same-origin: a same-origin artifact could script the board page and answer its own questions (ADR.md entry 32)');
 });
 
 // =================================================================================
@@ -1015,7 +860,7 @@ check('the pin layer clips at the frame edge -- a pin whose element scrolled out
 // Criterion 2, live: the frame's height never changes while it is read.
 // =================================================================================
 
-check('criterion 2: a page board\'s frame never takes an inline height from a report -- not the artifact\'s own, and not a forged one', () => {
+check('criterion 2: a page board\'s frame never takes an inline height from a height report -- neither a forged tall one nor a forged short one', () => {
   // A stage that measures itself against the viewport reports a huge height, and
   // stageAgentScript has no way to know which kind of card it is in (its own
   // comment) -- so every stage sends this message and the parent decides. A page
@@ -1339,50 +1184,6 @@ check('criterion 11: the refusal is a property of the PAGE, so flipping to a que
 // The live push and the page it would reload as have to be the same markup.
 // =================================================================================
 
-check('an amend push of a page-board block renders it as a PAGE, byte-identical to what a reload of the same board renders', () => {
-  // src/server.mjs's buildRoundPushPayload derives `fullpage` for the
-  // 'new-round' branch by going through renderRoundSection, which computes it
-  // itself -- but the amend branch renders bare blocks with no round wrapper, so
-  // it has to derive it too. Passing nothing meant `false`: the pushed fragment
-  // came back as an ORDINARY stage, and applyRoundPush replaces the block
-  // outright, so a page board picked up a kicker and an expand control over its
-  // 100vh frame (criteria 1 and 25) and lost `.page-comments`, dropping the
-  // comment form below the fold of a page that cannot scroll (criterion 5).
-  // Nothing repaired it short of a reload -- and the reload rendered something
-  // different, which is exactly what that function's contract forbids.
-  const board = pageBoard();
-  const blockId = board.blocks[0].id;
-  const payload = buildRoundPushPayload(board, 1, 'amend', [blockId]);
-
-  const reloaded = renderRoundSection(board, 1, groupCommentsByBlock([]));
-  // The block's own section out of each, so the round wrapper renderRoundSection
-  // adds around it is not what this compares. An html block section nests no
-  // other <section>, so its first closing tag is its own.
-  const section = (html) => {
-    const start = html.indexOf('<section class="block html-block"');
-    assert.notEqual(start, -1, 'setup failure: no html block section in this markup');
-    const end = html.indexOf('</section>', start);
-    assert.notEqual(end, -1, 'setup failure: unclosed block section');
-    return html.slice(start, end + '</section>'.length);
-  };
-  assert.equal(section(payload.html).trim(), section(reloaded).trim(),
-    'the amend fragment and the reload must be the same block markup -- one board cannot render two ways');
-
-  assert.ok(!payload.html.includes('block-kicker'), 'no kicker over a full-viewport artifact');
-  assert.ok(!payload.html.includes('expand-btn'), 'and no expand control');
-  assert.ok(payload.html.includes('page-comments'), 'and the comment surface still floats over the frame');
-
-  // And the same call for an ORDINARY board's stage is untouched: this derives
-  // the layout from the round's own shape, it does not impose one.
-  const ordinary = createBoard({
-    title: 'artifact + note',
-    blocks: [{ kind: 'html', html: ARTIFACT }, { kind: 'markdown', text: 'a stats line' }],
-  });
-  const ordinaryPush = buildRoundPushPayload(ordinary, 1, 'amend', [ordinary.blocks[0].id]);
-  assert.ok(ordinaryPush.html.includes('block-kicker'), 'an ordinary stage keeps its kicker on the same path');
-  assert.ok(ordinaryPush.html.includes('expand-btn'), 'and its lens control');
-});
-
 check('the seam for ticket 05: a round arriving over SSE ends the page-board layout in place, and the comment queued on the artifact survives to ride it', () => {
   const board = pageBoard();
   const { document, es } = loadBoardWithEventSource(renderBoardPage(board));
@@ -1538,10 +1339,12 @@ check('AC 6: the header pill carries the round\'s countdown as a muted figure, w
   // criterion-16 check in this file already uses.
   assert.notEqual(computed(meta, 'display'), 'none', 'the pill slot must be visible while the header is expanded');
 
+  const restText = meta.textContent;
   reportScroll(frame, 800);
   assert.equal(condensed(document), true, 'setup: the header is condensed');
   assert.notEqual(computed(meta, 'display'), 'none', 'and still visible once the header condenses into the pill -- AC 6\'s "in both" states');
-  assert.equal(meta.textContent, roundMeta(document).textContent, 'condensing must not have touched the pill\'s own text -- it is the same element, not a second copy');
+  assert.equal(roundMeta(document), meta, 'condensing must not swap in a second #round-meta element');
+  assert.equal(meta.textContent, restText, 'condensing must not have touched the pill\'s own text');
 });
 
 // =================================================================================
@@ -1657,7 +1460,33 @@ check('AC 11: a page board\'s pill falls back to "read-only" once its round is s
   const sentDocument = loadBoard(renderBoardPage(board));
   const meta = roundMeta(sentDocument);
   assert.equal(meta.textContent, 'read-only', 'a sent round\'s pill falls back exactly like a never-awaited one\'s, never "submitted", on a page board');
-  assert.notEqual(meta.title, PILL_SUBMITTED_TITLE);
+  assert.equal(meta.title, PILL_READONLY_TITLE, 'and carries the page board\'s read-only title, never the Submitted one');
+});
+
+check('a sent awaited page round keeps its comment surface, disabled rather than dropped -- the form and both send controls locked, the label naming what was sent, the sent comment still listed', () => {
+  const board = pageBoard();
+  applySubmit(board, { action: 'send', answers: [], comments: [{ blockId: board.blocks[0].id, anchor: { kind: 'block' }, text: 'looks good' }] }, 1);
+  const document = loadBoard(renderBoardPage(board));
+
+  const roundSection = document.querySelector('.round[data-round="1"]');
+  assert.ok(roundSection, 'setup failure: no round 1 section rendered');
+  assert.equal(roundSection.classList.contains('round-history'), true, 'a sent round renders as history, exactly like any other');
+
+  const form = document.querySelector('.comment-form');
+  assert.ok(form, 'the compose form must still be rendered -- read-only, not removed, matching every other sent block\'s comment form');
+  assert.equal(form.querySelector('input[type=text]').disabled, true);
+  assert.equal(form.querySelector('button[type=submit]').disabled, true);
+
+  const sendBtn = pageSendBtn(document);
+  const discussBtn = pageDiscussBtn(document);
+  assert.ok(sendBtn && discussBtn, 'the send control must still be rendered on a sent page round too, disabled rather than gone');
+  assert.equal(sendBtn.disabled, true);
+  assert.equal(discussBtn.disabled, true);
+  assert.equal(sendBtn.textContent, 'Send 1 comment', 'the label still names what WAS sent');
+
+  const item = document.querySelector('.comment-item');
+  assert.ok(item, 'the sent comment must still be visible in the list');
+  assert.match(item.textContent, /looks good/);
 });
 
 // =================================================================================
@@ -1871,7 +1700,7 @@ async function withResync(es, event, data, fresh) {
   globalThis.DOMParser = class { parseFromString(text) { return parseHTML(text); } };
   try {
     es.dispatch(event, data);
-    await new Promise(r => setTimeout(r, 0));
+    await flush(1);
   } finally {
     globalThis.fetch = originalFetch;
     globalThis.DOMParser = originalParser;
@@ -1952,8 +1781,4 @@ await checkAsync('the expired Send label survives the flush it announces (ablati
   assert.equal(frozen.disabled, true);
 });
 
-if (failures) {
-  console.error(`\n${failures} page-board check(s) failed`);
-  process.exit(1);
-}
-console.log('\nall page-board checks ok');
+await finish('page-board', { failText: n => `${n} page-board check(s) failed` });

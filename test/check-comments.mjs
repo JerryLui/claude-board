@@ -77,19 +77,11 @@ import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { check, configure, finish } from './support.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 
-let failed = 0;
-function check(name, fn) {
-  try {
-    fn();
-    console.log(`ok   ${name}`);
-  } catch (err) {
-    failed++;
-    console.error(`FAIL ${name}\n     ${err.message}`);
-  }
-}
+configure({ format: 'aligned' });
 
 // --- the tree -----------------------------------------------------------------
 //
@@ -627,5 +619,4 @@ check('rule 5 reports each local-only name, and stays silent on tracked ones', (
   ], 'the two dangling names and the scratch list must be reported; the ADR and DESIGN citations must not');
 });
 
-console.log(failed ? `\n${failed} check(s) failed` : '\nall comment checks ok');
-process.exit(failed ? 1 : 0);
+finish('comment', { failStream: 'stdout' });

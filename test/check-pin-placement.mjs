@@ -6,7 +6,9 @@
 // markdown block's `.resolve-error` branch, and a mermaid block's `.resolve-error`
 // branch. Two of the three are retired rather than fixed now: ADR.md entry 28 took
 // the affordance off the compare wrapper, and entry 28 took it off `markdown`
-// entirely. What survives is the mermaid case
+// entirely (test/check-comment-mode.mjs drives the compare wrapper's inert
+// chrome; test/check-pure.mjs pins that it renders no pin-layer of its own). What
+// survives is the mermaid case
 // (a mermaid section's ONLY pin-layer used to be the stage-scoped one
 // nested inside `.stage-wrap`, entirely absent when the block errored). A `dom`
 // anchor rooted at any of these still resolved server-side (resolveDomAnchorInSection
@@ -30,45 +32,10 @@
 import assert from 'node:assert/strict';
 import { createBoard, addRound, applySubmit } from '../src/board.mjs';
 import { renderBoardPage } from '../src/render.mjs';
-import { ui } from '../src/ui.mjs';
-import { parseHTML, StandInEvent } from './dom-stand-in.mjs';
+import { StandInEvent } from './dom-stand-in.mjs';
+import { check, finish, pageHarness } from './support.mjs';
 
-let failures = 0;
-function check(name, fn) {
-  try {
-    fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
-
-function loadBoard(pageHtml) {
-  const document = parseHTML(pageHtml);
-  const window = document.defaultView;
-  const location = { protocol: 'http:' };
-  // 'EventSource' declared, never passed -- see QUIRKS.md "A `new Function` harness
-  // inherits the host's globals".
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
-  return document;
-}
-
-function enableCommentMode(document) {
-  const toggle = document.getElementById('comment-mode-toggle');
-  assert.ok(toggle, 'setup failure: no #comment-mode-toggle rendered');
-  toggle.dispatchEvent(new StandInEvent('click'));
-  assert.equal(toggle.classList.contains('active'), true, 'setup failure: the toggle did not turn comment mode on');
-}
-
-/** The direct-child `.pin-layer` of a block section -- exactly what
- * directChildPinLayer (src/ui.mjs) itself walks, never a deep querySelector (a
- * compare section's nested sides each carry their OWN pin-layer too, and a deep
- * search from the outer section could find one of those instead). */
-function directChildPinLayer(section) {
-  return Array.prototype.slice.call(section.children).find(c => c.classList && c.classList.contains('pin-layer')) || null;
-}
+const { loadBoard, enableCommentMode, directChildPinLayer } = await pageHarness();
 
 function clickAndSubmit(document, el, blockId, text) {
   el.dispatchEvent(new StandInEvent('click'));
@@ -80,60 +47,10 @@ function clickAndSubmit(document, el, blockId, text) {
   return form;
 }
 
-// --- C4 (retired by ADR.md entry 28): a compare side's own chrome ----------------
-//
-// This check used to prove that clicking a compare side's own chrome (not the
-// content nested inside it) minted a page-scoped `dom` anchor into the OUTER
-// compare section's own pin-layer. ADR.md entry 28, "Commenting is confined to
-// content blocks" (2026-08-01), reverses that: `compare` is a wrapper, not
-// content, and loses the comment affordance entirely, including this outer
-// pin-layer -- src/render.mjs's renderCompareBlock no longer renders one at
-// all -- and the click-to-anchor gesture over the wrapper's own surfaces,
-// which src/ui.mjs's isNonAnchorableRoot now stands down. The exact case this
-// check exercised -- a compare side's own chrome being anchorable, button or
-// no button -- is named in the ADR as "the middle position on `compare`
-// (button gone, side-level clicks kept)... rejected as the one option
-// inconsistent with every other wrapper". Nothing in the old assertion
-// survives as a positive case, so it is retired outright (same style as
-// ADR.md entry 5's retirement of `check-grill`'s assertions) and
-// replaced below with a check that the new behaviour actually holds, plus a
-// re-pointed case proving the wrapper's own nested content did NOT lose the
-// guarantee this file exists to protect.
-
-check('C4 (retired by ADR.md entry 28): a compare block renders no page-scoped pin-layer of its own, and clicking a side\'s own chrome mints no comment at all', () => {
-  const board = createBoard({
-    title: 'ADR entry 28 -- a compare wrapper has no comment affordance of its own',
-    blocks: [{
-      kind: 'compare',
-      left: { label: 'Before', block: { kind: 'markdown', text: 'old copy' } },
-      right: { label: 'After', block: { kind: 'markdown', text: 'new copy' } },
-    }],
-  });
-  const compareBlockId = board.blocks[0].id;
-  const document = loadBoard(renderBoardPage(board));
-  enableCommentMode(document);
-
-  const section = document.querySelector('.compare-block');
-  assert.ok(section, 'setup failure: no .compare-block section rendered');
-  const side = document.querySelectorAll('.compare-side')[0];
-  assert.ok(side, 'setup failure: no .compare-side rendered');
-
-  assert.equal(directChildPinLayer(section), null, 'a compare block must no longer carry a direct-child page-scoped pin-layer of its own (ADR.md entry 28)');
-  assert.equal(document.getElementById('comment-form-' + compareBlockId), null, 'a compare block must no longer carry a comment-form of its own');
-
-  // Click the side's own chrome -- its label, structural not authored --
-  // rather than anything nested inside it.
-  const label = side.querySelector('.compare-label');
-  assert.ok(label, 'setup failure: no .compare-label rendered');
-  label.dispatchEvent(new StandInEvent('click'));
-
-  assert.equal(document.getElementById('comment-form-' + compareBlockId), null, 'clicking a compare side\'s own chrome must mint no comment form -- the gesture is inert over the wrapper\'s own surfaces');
-  assert.equal(document.querySelectorAll('.anchor-pin').length, 0, 'clicking a compare side\'s own chrome must draw no pin anywhere on the page');
-});
-
 // ADR.md entry 28 draws the comment rule on KIND and never on position, so the
-// nested block this case re-points at is now a rendered one: a `mermaid` diagram
-// inside a compare side is exactly as commentable as one at the top level.
+// compare case re-points at the wrapper's nested content, now a rendered block: a
+// `mermaid` diagram inside a compare side is exactly as commentable as one at the
+// top level.
 // Its errored branch is used because that is the one part of a
 // mermaid section the generic page-scoped gesture can reach -- `pre.mermaid` and
 // `.stage-wrap` are chrome, and a node click is the diagram's own gesture,
@@ -302,8 +219,4 @@ check('U6: a lost pin\'s fallback stacked position stays put across repeated re-
   }
 });
 
-if (failures) {
-  console.error(`\n${failures} check(s) failed`);
-  process.exit(1);
-}
-console.log('\nall pin-placement checks ok');
+finish('pin-placement');

@@ -17,45 +17,14 @@
 import assert from 'node:assert/strict';
 import { createBoard, addRound } from '../src/board.mjs';
 import { renderBoardPage } from '../src/render.mjs';
+import { buildRoundPushPayload } from '../src/server.mjs';
 import { ui } from '../src/ui.mjs';
-import { parseHTML, StandInEvent, StandInEventSource, StandInHistory } from './dom-stand-in.mjs';
+import { parseHTML, StandInEvent, StandInHistory } from './dom-stand-in.mjs';
+import { check, finish, pageHarness, sleep } from './support.mjs';
 
-let failures = 0;
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
+const { loadBoard, loadBoardWithEventSource } = await pageHarness();
 
 const Q = { kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] };
-
-/** Loads the real `ui` script against a real board document, with 'EventSource'
- * declared as a named parameter of the `new Function` call and a captured
- * instance passed as its argument -- test/check-anchor-push.mjs's
- * `loadBoardWithEventSource`, copied rather than imported (no shared
- * test-helper module in this repo, by convention: see that file's own header
- * comment). `new Function` hands the script only the names it is given; every
- * name left undeclared falls through to the node process's OWN globals, which
- * is what a `globalThis.EventSource` assign-then-restore dance used to risk --
- * pinning the name here means the class handed to the script is always this
- * call's own CapturingEventSource, never whatever the process happens to carry. */
-function loadBoardWithEventSource(html) {
-  let captured = null;
-  class CapturingEventSource extends StandInEventSource {
-    constructor(url) { super(url); captured = this; }
-  }
-  const document = parseHTML(html);
-  const window = document.defaultView;
-  const location = { protocol: 'http:', hash: '' };
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location, CapturingEventSource);
-  assert.ok(captured, 'setup failure: the real ui script never constructed an EventSource');
-  return { document, window, location, es: captured };
-}
 
 /** Stubs `fetch`, capturing every call's URL and parsed JSON body. Restore is
  * the caller's job (a `finally`), matching every other fetch stub in this
@@ -78,7 +47,7 @@ async function flushMicrotasks(times = 20) {
 
 await check('the watcher id arriving over SSE fires an immediate report, before any visibility/focus/blur edge', async () => {
   const board = createBoard({ title: 'x', blocks: [{ kind: 'markdown', text: '# hi' }] });
-  const { es } = loadBoardWithEventSource(renderBoardPage(board));
+  const { es } = loadBoardWithEventSource(renderBoardPage(board), { location: { protocol: 'http:', hash: '' } });
   const { calls, restore } = stubFetch();
   try {
     es.dispatch('watcher', JSON.stringify({ id: 'w1' }));
@@ -90,7 +59,7 @@ await check('the watcher id arriving over SSE fires an immediate report, before 
 
 await check("blur -- the tab stays VISIBLE, only loses focus to another window -- reports attended: false; this is the product's main stranded scenario, and before the fix, nothing reported it at all", async () => {
   const board = createBoard({ title: 'x', blocks: [{ kind: 'markdown', text: '# hi' }] });
-  const { document, window, es } = loadBoardWithEventSource(renderBoardPage(board));
+  const { document, window, es } = loadBoardWithEventSource(renderBoardPage(board), { location: { protocol: 'http:', hash: '' } });
   let focused = true;
   // document.hidden stays false throughout this check -- a plain blur never
   // touches it in a real browser either, which is exactly why visibilitychange
@@ -137,7 +106,7 @@ await check('sinceFocusMs measures from when focus was LOST, not from when it wa
   // costs the whole look-away window for anyone who reads a board for longer than two
   // minutes before switching to the terminal, which is the posture the window exists for.
   const board = createBoard({ title: 'x', blocks: [{ kind: 'markdown', text: '# hi' }] });
-  const { document, window, es } = loadBoardWithEventSource(renderBoardPage(board));
+  const { document, window, es } = loadBoardWithEventSource(renderBoardPage(board), { location: { protocol: 'http:', hash: '' } });
   let focused = true;
   document.hasFocus = () => focused;
   const { calls, restore } = stubFetch();
@@ -146,7 +115,7 @@ await check('sinceFocusMs measures from when focus was LOST, not from when it wa
     assert.equal(calls[0].body.attended, true, 'setup sanity: the reviewer is looking at it');
 
     const READING_MS = 250; // a stretch of reading, with no DOM edge and so no report
-    await new Promise(r => setTimeout(r, READING_MS));
+    await sleep(READING_MS);
     assert.equal(calls.length, 1, 'setup sanity: nothing is reported while the tab just sits there focused');
 
     focused = false;
@@ -159,7 +128,7 @@ await check('sinceFocusMs measures from when focus was LOST, not from when it wa
     // Watcher gets must measure from the BLUR, so the daemon seeds what is genuinely left
     // of the window rather than one already spent by the time spent reading.
     const AWAY_MS = 120;
-    await new Promise(r => setTimeout(r, AWAY_MS));
+    await sleep(AWAY_MS);
     es.dispatch('watcher', JSON.stringify({ id: 'w2' })); // EventSource reconnected
     const reconnect = calls[calls.length - 1].body;
     assert.equal(reconnect.watcher, 'w2', 'setup sanity: this is the reconnect report');
@@ -168,22 +137,13 @@ await check('sinceFocusMs measures from when focus was LOST, not from when it wa
   } finally { restore(); }
 });
 
-await check('a report that says the tab IS focused carries no sinceFocusMs, and one from a tab that never had focus carries none either', async () => {
-  // Two absences, and both are deliberate. A tab that has focus right now says the
-  // stronger thing already, so the field would be noise. A tab that has NEVER had focus
-  // has nothing to report, and sending zero would hand it a full look-away window it has
-  // not earned -- "connected implies recently focused" is the reading ADR 73 refuses.
-  const board = createBoard({ title: 'x', blocks: [{ kind: 'markdown', text: '# hi' }] });
-  const { document, window, es } = loadBoardWithEventSource(renderBoardPage(board));
-  const { calls, restore } = stubFetch();
-  try {
-    es.dispatch('watcher', JSON.stringify({ id: 'w1' }));
-    assert.ok(!('sinceFocusMs' in calls[0].body), `a focused report must not carry it: ${JSON.stringify(calls[0].body)}`);
-    restore();
-  } finally { restore(); }
-
+await check('a report from a tab that has never had focus carries no sinceFocusMs', async () => {
+  // A tab that has NEVER had focus has nothing to report, and sending zero would hand
+  // it a full look-away window it has not earned -- "connected implies recently
+  // focused" is the reading ADR 73 refuses. (A focused report carries none either;
+  // the first check's strict deepEqual holds that.)
   const other = createBoard({ title: 'y', blocks: [{ kind: 'markdown', text: '# hi' }] });
-  const buried = loadBoardWithEventSource(renderBoardPage(other));
+  const buried = loadBoardWithEventSource(renderBoardPage(other), { location: { protocol: 'http:', hash: '' } });
   buried.document.hasFocus = () => false;
   const { calls: buriedCalls, restore: restoreBuried } = stubFetch();
   try {
@@ -198,7 +158,7 @@ await check('a report that says the tab IS focused carries no sinceFocusMs, and 
 
 await check('regaining focus after a blur reports attended: true again, through the SAME listener pair blur uses', async () => {
   const board = createBoard({ title: 'x', blocks: [{ kind: 'markdown', text: '# hi' }] });
-  const { document, window, es } = loadBoardWithEventSource(renderBoardPage(board));
+  const { document, window, es } = loadBoardWithEventSource(renderBoardPage(board), { location: { protocol: 'http:', hash: '' } });
   let focused = true;
   document.hasFocus = () => focused;
   // Stubbed before ANY dispatch, for the same reason as the check above.
@@ -232,11 +192,11 @@ await check('a focused tab whose attended reports keep failing retries UNBOUNDED
   // no further visibility/focus/blur edge on its own (the reviewer is already
   // looking and has no reason to touch it), so a fixed retry count just moves
   // the mute hole from "one dropped POST" to "N dropped POSTs" -- worse now
-  // that isAttended no longer tolerates a Watcher that has never successfully
+  // that the daemon no longer counts a Watcher that has never successfully
   // reported at all, which is exactly what a daemon-restart storm (failures
   // clustering) produces.
   const board = createBoard({ title: 'x', blocks: [{ kind: 'markdown', text: '# hi' }] });
-  const { es } = loadBoardWithEventSource(renderBoardPage(board));
+  const { es } = loadBoardWithEventSource(renderBoardPage(board), { location: { protocol: 'http:', hash: '' } });
   const { delays, restore: restoreTimeout } = fastForwardSetTimeout();
   const FAIL_COUNT = 6; // past the point the backoff must have hit its ceiling
   let attempts = 0;
@@ -269,7 +229,7 @@ await check("an HTTP-level rejection -- a 401 mid secret-rotation, a 5xx, anythi
   // applies to this exact shape too: a rejected response is not a lost
   // packet, but it is just as silent from the reviewer's side.
   const board = createBoard({ title: 'x', blocks: [{ kind: 'markdown', text: '# hi' }] });
-  const { es } = loadBoardWithEventSource(renderBoardPage(board));
+  const { es } = loadBoardWithEventSource(renderBoardPage(board), { location: { protocol: 'http:', hash: '' } });
   const { delays, restore: restoreTimeout } = fastForwardSetTimeout();
   const REJECT_COUNT = 3;
   let attempts = 0;
@@ -309,7 +269,7 @@ function controllableSetTimeout() {
 
 await check("a pending retry from a STALE call never fires its own duplicate report once a fresher edge has reported on its own -- superseded by a monotonic epoch, not by cancelling a timer handle: a single handle cannot track more than one in-flight chain, and more than one CAN be in flight at once (the next check proves exactly that)", async () => {
   const board = createBoard({ title: 'x', blocks: [{ kind: 'markdown', text: '# hi' }] });
-  const { document, window, es } = loadBoardWithEventSource(renderBoardPage(board));
+  const { document, window, es } = loadBoardWithEventSource(renderBoardPage(board), { location: { protocol: 'http:', hash: '' } });
   document.hasFocus = () => true;
   const timers = controllableSetTimeout();
   let rejectNext = true;
@@ -341,7 +301,7 @@ await check("a pending retry from a STALE call never fires its own duplicate rep
 
 await check("an alt-tab burst -- focus, blur, focus, blur, all within milliseconds, EVERY one of the four POSTs genuinely in flight together before any has rejected -- arms exactly ONE retry timer once they all reject, not one per in-flight POST, and keeps sending exactly one report per interval afterward. This is the exact defect a coordinator's review found in the first version of this fix: attendedRetryTimer held one handle, but a burst like this starts a new POST every time because 'none of the earlier fetches has rejected yet', so each of the four catches independently armed its OWN retry, clobbering the same one variable and leaking three chains", async () => {
   const board = createBoard({ title: 'x', blocks: [{ kind: 'markdown', text: '# hi' }] });
-  const { document, window, es } = loadBoardWithEventSource(renderBoardPage(board));
+  const { document, window, es } = loadBoardWithEventSource(renderBoardPage(board), { location: { protocol: 'http:', hash: '' } });
   let focused = true;
   document.hasFocus = () => focused;
   const timers = controllableSetTimeout();
@@ -375,23 +335,21 @@ await check("an alt-tab burst -- focus, blur, focus, blur, all within millisecon
   } finally { restoreFetch(); timers.restore(); }
 });
 
-await check('readonly mode never reports, even with a watcher id and a real blur', async () => {
+await check('readonly mode never reports: a file:// archive POSTs nothing on blur, focus or visibilitychange', async () => {
   const board = createBoard({ title: 'x', blocks: [{ kind: 'markdown', text: '# hi' }] });
-  const document = parseHTML(renderBoardPage(board));
-  const window = document.defaultView;
-  const location = { protocol: 'file:' };
   const { calls, restore } = stubFetch();
   try {
     // EventSource is never opened in readonly mode (guarded in src/ui.mjs), so
     // there is no 'watcher' event to dispatch here at all -- the archive simply
     // never subscribes. This proves the SILENCE, not a code path that fires
-    // and is then swallowed. 'EventSource' is declared here anyway and never
-    // passed, matching every other undriven call in this file: the readonly
+    // and is then swallowed. loadBoard declares 'EventSource' and passes
+    // nothing, matching every other undriven boot in this file: the readonly
     // guard short-circuits before src/ui.mjs ever reads the name, but a
     // declared-and-unpassed parameter is what keeps the process's own global
     // out of the script's scope on principle, not by the accident of an
     // earlier guard.
-    new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location, undefined);
+    const document = loadBoard(renderBoardPage(board), { protocol: 'file:' });
+    const window = document.defaultView;
     window.dispatchEvent(new StandInEvent('blur'));
     window.dispatchEvent(new StandInEvent('focus'));
     document.dispatchEvent(new StandInEvent('visibilitychange'));
@@ -399,11 +357,55 @@ await check('readonly mode never reports, even with a watcher id and a real blur
   } finally { restore(); }
 });
 
+// --- The tab's pending mark ---------------------------------------------------
+//
+// The other half of the same edges: a round pushed while the reviewer is
+// elsewhere marks the tab's favicon, and coming back -- the tab turning visible,
+// the window regaining focus -- or a Send landing takes the mark off again. The
+// stand-in has no canvas, so the mark is drawn through a stub one that answers
+// with a fixed data URL; what is asserted is the page's own favicon link.
+
+await check('a pushed awaited round marks the tab, and the tab turning visible, the window regaining focus, or a Send landing each clear the mark', async () => {
+  const board = createBoard({ title: 'Mark', blocks: [Q] });
+  const { document, window, es } = loadBoardWithEventSource(renderBoardPage(board), { location: { protocol: 'http:', hash: '' } });
+  const MARK = 'data:image/png;base64,MARK';
+  const createElement = document.createElement.bind(document);
+  const ctx = { beginPath() {}, roundRect() {}, fill() {}, fillText() {} };
+  document.createElement = tag => (tag === 'canvas' ? { getContext: () => ctx, toDataURL: () => MARK } : createElement(tag));
+  const icon = document.querySelector('link[rel="icon"]');
+  assert.ok(icon, 'setup failure: the page carries no favicon link');
+  const unmarked = icon.getAttribute('href');
+  const pushRound = () => {
+    const round = addRound(board, { blocks: [Q] });
+    es.dispatch('round', JSON.stringify(buildRoundPushPayload(board, round, 'new-round', board.blocks.filter(b => b.round === round).map(b => b.id))));
+    assert.equal(icon.getAttribute('href'), MARK, `setup failure: pushing awaited round ${round} did not mark the tab`);
+  };
+  const { restore } = stubFetch(() => Promise.resolve({ ok: true, status: 200, json: async () => ({}) }));
+  try {
+    pushRound();
+    document.dispatchEvent(new StandInEvent('visibilitychange'));
+    assert.equal(icon.getAttribute('href'), unmarked, 'the tab turning visible again must clear the mark');
+
+    pushRound();
+    window.dispatchEvent(new StandInEvent('focus'));
+    assert.equal(icon.getAttribute('href'), unmarked, 'the window regaining focus must clear the mark');
+
+    pushRound();
+    const sendBtn = document.getElementById('send-btn');
+    sendBtn.dispatchEvent(new StandInEvent('click')); // arms: the pushed question is unanswered
+    sendBtn.dispatchEvent(new StandInEvent('click')); // sends
+    await flushMicrotasks();
+    assert.equal(icon.getAttribute('href'), unmarked, 'a Send that lands must clear the mark -- nothing is pending once the round went out');
+  } finally { restore(); }
+});
+
 // --- The banner's own click sentinel, '#stranded-round' ----------------------
 //
 // None of the checks below dispatch anything over a stream -- they are all
 // about the '#stranded-round'/'#open-round' hash gesture, not SSE -- so every
-// `new Function` call in this section declares 'EventSource' as a named
+// page boot in this section (test/support.mjs's loadBoard, and each inline
+// `new Function` call that has to mark the document complete before the script
+// runs, which loadBoard has no option for) declares 'EventSource' as a named
 // parameter and never passes an argument for it. Declaring the name (bound to
 // undefined inside the script) is what keeps src/ui.mjs's own
 // `typeof EventSource !== 'undefined'` guard reading false on the strength of
@@ -480,10 +482,9 @@ await check("'#stranded-round' resolves to the OLDEST awaited round on load, nev
 
 await check("'#stranded-round' also resolves via 'hashchange' -- the commonest stranded shape is a hidden-but-connected tab, where a click is a same-document fragment change that never fires 'load' at all", () => {
   const board = oldestAwaitedNotNewestBoard();
-  const document = parseHTML(renderBoardPage(board));
-  const window = document.defaultView;
   const location = { protocol: 'http:', hash: '' };
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location, undefined);
+  const document = loadBoard(renderBoardPage(board), { location });
+  const window = document.defaultView;
   assert.equal(document.querySelector('.round-current').getAttribute('data-round'), '2', 'setup: the board opens on its newest round with no sentinel present');
   location.hash = '#stranded-round';
   window.dispatchEvent(new StandInEvent('hashchange'));
@@ -492,16 +493,17 @@ await check("'#stranded-round' also resolves via 'hashchange' -- the commonest s
 
 await check("'#stranded-round' also resolves via 'focus' -- revealing a tab already sitting at this exact hash from an earlier click is silent in a real browser (hash unchanged, no 'hashchange'), so a second click needs a third edge to land anywhere", () => {
   const board = oldestAwaitedNotNewestBoard();
-  const document = parseHTML(renderBoardPage(board));
-  const window = document.defaultView;
-  // readyState defaults to 'complete' (test/dom-stand-in.mjs's parseHTML), so
-  // running the script with the sentinel already in the hash would resolve it
-  // immediately on the 'load' path -- deliberately avoided here (hash starts
-  // empty, script boots, THEN the hash is set exactly as if the tab had been
-  // sitting at a stale sentinel with nothing to reset it) to isolate the
-  // 'focus' fallback specifically.
+  // The hash starts empty, so src/ui.mjs's boot-time branch never runs: it
+  // resolves the sentinel at once on a 'complete' document and otherwise waits
+  // for 'load', but only when the sentinel is already in the hash. (The
+  // document is 'loading' here, test/dom-stand-in.mjs's default after
+  // parseHTML, and no 'load' is dispatched either.) The hash is set only after
+  // the script boots, exactly as if the tab had been sitting at a stale
+  // sentinel with nothing to reset it, and no 'hashchange' follows, which
+  // isolates the 'focus' fallback.
   const location = { protocol: 'http:', hash: '' };
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location, undefined);
+  const document = loadBoard(renderBoardPage(board), { location });
+  const window = document.defaultView;
   location.hash = '#stranded-round';
   window.dispatchEvent(new StandInEvent('focus'));
   assert.equal(document.querySelector('.round-current').getAttribute('data-round'), '1', "'focus' alone, hash already at the sentinel, must still resolve it");
@@ -548,15 +550,8 @@ await check("the sentinel is consumed through window.history.replaceState in a R
 
 await check("'#open-round' (src/indexpage.mjs's own sentinel, unrelated to the banner) keeps its existing meaning -- the LATEST unsent round -- untouched by the new one", () => {
   const board = oldestAwaitedNotNewestBoard();
-  const document = parseHTML(renderBoardPage(board));
-  const window = document.defaultView;
-  const location = { protocol: 'http:', hash: '#open-round' };
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location, undefined);
+  const document = loadBoard(renderBoardPage(board), { location: { protocol: 'http:', hash: '#open-round' } });
   assert.equal(document.querySelector('.round-current').getAttribute('data-round'), '2', "'#open-round' must still resolve to round 2 (the latest unsent round), exactly as it did before the banner's own sentinel existed");
 });
 
-if (failures) {
-  console.error(`\n${failures} check(s) failed`);
-  process.exit(1);
-}
-console.log('\nall attended-client checks ok');
+await finish('attended-client');

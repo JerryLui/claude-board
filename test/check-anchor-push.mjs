@@ -11,49 +11,24 @@
 // `EventSource` (test/dom-stand-in.mjs's `StandInEventSource`), runs the real `ui`
 // script so it constructs one and registers its OWN `addEventListener('round', ...)`
 // / `addEventListener('submitted', ...)` listeners, then fires the exact events a
-// real server push would carry (built with the same functions src/server.mjs's own
-// `buildRoundPushPayload`/the `submitted` broadcast use -- resolveComment,
-// groupCommentsByBlock, renderRoundSection/renderBlock -- never a hand-shaped
-// payload), and asserts the pushed content is ACTUALLY ANCHORABLE end to end:
+// real server push would carry (the 'round' payload from src/server.mjs's own
+// exported `buildRoundPushPayload`, the 'submitted' one from the same functions
+// that broadcast uses -- resolveComment, groupCommentsByBlock, renderRoundSection
+// -- never a hand-shaped payload), and asserts the pushed content is ACTUALLY ANCHORABLE end to end:
 // comment mode on, click the pushed element, a form opens, submitting it draws a
 // pin. Never by calling applyRoundPush/applySubmittedPush directly -- that would
 // prove nothing about whether the subscription is wired at all.
 
 import assert from 'node:assert/strict';
 import { createBoard, addRound, amendRound, applySubmit, resolveComment } from '../src/board.mjs';
-import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock } from '../src/render.mjs';
-import { ui } from '../src/ui.mjs';
-import { parseHTML, StandInEvent, StandInEventSource } from './dom-stand-in.mjs';
+import { renderBoardPage, renderRoundSection, groupCommentsByBlock } from '../src/render.mjs';
+// The daemon's own 'round' payload builder, imported rather than rebuilt here, so
+// a push in this file is byte-for-byte what a real daemon broadcasts.
+import { buildRoundPushPayload } from '../src/server.mjs';
+import { StandInEvent } from './dom-stand-in.mjs';
+import { check, finish, pageHarness } from './support.mjs';
 
-let failures = 0;
-function check(name, fn) {
-  try {
-    fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
-
-/** The exact payload shape src/server.mjs's buildRoundPushPayload builds for a
- * live 'round' push -- reimplemented from the same three functions (not imported
- * from server.mjs, which is not a pure module and pulls in the HTTP/daemon
- * surface) so this test constructs a payload no different from what a real daemon
- * would broadcast. */
-function buildRoundPushPayload(board, round, mode, blockIds) {
-  const resolvedComments = board.comments.map(c => resolveComment(board, c));
-  const commentsByBlock = groupCommentsByBlock(resolvedComments);
-  const boardForClient = { ...board, comments: resolvedComments };
-  const html = mode === 'new-round'
-    ? renderRoundSection(board, round, commentsByBlock)
-    : blockIds.map(id => {
-      const block = board.blocks.find(b => b.id === id);
-      return block ? renderBlock(block, board, commentsByBlock, false) : '';
-    }).join('\n');
-  return { round, mode, blockIds, html, board: boardForClient };
-}
+const { loadBoard, loadBoardWithEventSource, enableCommentMode } = await pageHarness();
 
 /** The exact payload shape src/server.mjs's handleSubmit builds for the
  * 'submitted' broadcast. */
@@ -63,38 +38,6 @@ function buildSubmittedPushPayload(board, round) {
   const boardForClient = { ...board, comments: resolvedComments };
   const html = renderRoundSection(board, round, commentsByBlock);
   return { round, board: boardForClient, html };
-}
-
-/** Load `pageHtml` through the real client script with 'EventSource' declared as
- * a named parameter of the `new Function` call and a captured, stubbed instance
- * passed as its argument -- `new Function` hands the script only the names it is
- * given; any name left off falls through to the node process's OWN globals,
- * which is exactly the trap a `globalThis.EventSource` assign-then-restore dance
- * used to fall into (a stray global left set by an earlier failed test, or a
- * node build shipping its own). src/ui.mjs constructs one synchronously, guarded
- * only by `typeof EventSource !== 'undefined'`, so the class has to be the value
- * BOUND to the name for this to prove the subscription is wired, not merely
- * happen to be reachable. Returns both the document and the constructed
- * StandInEventSource instance so a check can
- * `.dispatch('round'|'submitted', JSON.stringify(payload))` on it. */
-function loadBoardWithEventSource(pageHtml) {
-  let captured = null;
-  class CapturingEventSource extends StandInEventSource {
-    constructor(url) { super(url); captured = this; }
-  }
-  const document = parseHTML(pageHtml);
-  const window = document.defaultView;
-  const location = { protocol: 'http:' };
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location, CapturingEventSource);
-  assert.ok(captured, 'setup failure: the real ui script never constructed an EventSource -- fix the fixture (readonly must be false), not this file');
-  return { document, es: captured };
-}
-
-function enableCommentMode(document) {
-  const toggle = document.getElementById('comment-mode-toggle');
-  assert.ok(toggle, 'setup failure: no #comment-mode-toggle rendered');
-  toggle.dispatchEvent(new StandInEvent('click'));
-  assert.equal(toggle.classList.contains('active'), true, 'setup failure: the toggle did not turn comment mode on');
 }
 
 /** Click `button` (comment mode already on), submit the opened form, and return
@@ -198,20 +141,20 @@ check('a block amended into the still-open round over SSE (mode: amend) is genui
 // a live session, same as every other check in this suite mints an anchor), then
 // fires the 'submitted' push a second, already-subscribed tab would receive, and
 // asserts that second tab's swapped-in (now-historical) stage still shows the
-// pin -- which requires wireRoot(replacement) to have registered the 'load'
-// listener that later draws it, since a freshly-parsed detached iframe starts out
-// wired to nothing at all (see test/dom-stand-in.mjs's own file comment on why an
-// iframe needs an explicit loadSrcdoc()).
+// pin. The pin itself is drawn by the page-level stage 'ready' listener, which
+// needs no per-push wiring; what wireRoot(replacement) alone provides is the
+// swapped-in section's own controls, so the stage's expand control -- kept live
+// on a sent round -- is pressed last and must open the lens.
 
-check('a round that just went sent, pushed over SSE (\'submitted\'), still shows an existing comment\'s pin on its (now historical) html stage (ablation: deleting applySubmittedPush\'s wireRoot(replacement) call)', () => {
+check('a round that just went sent, pushed over SSE (\'submitted\'), still shows an existing comment\'s pin on its (now historical) html stage, and its expand control still opens the lens (ablation: deleting applySubmittedPush\'s wireRoot(replacement) call)', () => {
   const board = freshBoard();
   // A trailing markdown block, same reasoning as this file's other two
   // fixtures above: round 2 stays an ORDINARY round, not a page round whose
-  // comment gesture (ADR.md entry 46) gates on being *awaited* -- and
-  // here it matters doubly, since round 2 IS the round in view when `mintDoc`
-  // below hydrates: a page round that were also awaited would hydrate with
-  // comment mode already ON (AC 5), and the very next line's enableCommentMode
-  // would then click it straight back OFF.
+  // comment gesture (ADR.md entry 46) gates on being *awaited*. Round 2 IS
+  // the round in view when `mintDoc` below hydrates, and a page round that
+  // were also awaited would hydrate with comment mode already ON (AC 5): the
+  // mint asserts the mode starts off, so a fixture that drifted into a page
+  // round fails setup there.
   const round2 = addRound(board, {
     blocks: [
       { kind: 'html', html: '<div class="mock"><button>Ship it</button></div>' },
@@ -224,13 +167,14 @@ check('a round that just went sent, pushed over SSE (\'submitted\'), still shows
   // test/check-archive.mjs's own mint-then-submit pattern -- so the anchor fed
   // into applySubmit is one the real gesture actually produced, not a
   // hand-guessed index chain. This session only clicks and submits one form,
-  // never dispatches over a stream, so it wants no EventSource stand-in --
-  // 'EventSource' is still declared, bound to nothing, so the script sees no
-  // subscription rather than reaching past its declared scope for the node
-  // process's own global.
+  // never dispatches over a stream, so it wants no EventSource stand-in:
+  // plain `loadBoard` still declares 'EventSource', bound to nothing, so the
+  // script sees no subscription rather than reaching past its declared scope
+  // for the node process's own global.
   const mintHtml = renderBoardPage(board);
-  const mintDoc = parseHTML(mintHtml);
-  new Function('document', 'window', 'location', 'EventSource', ui)(mintDoc, mintDoc.defaultView, { protocol: 'http:' }, undefined);
+  const mintDoc = loadBoard(mintHtml);
+  assert.equal(mintDoc.getElementById('comment-mode-toggle').classList.contains('active'), false,
+    'setup failure: round 2 must be an ordinary round, so comment mode starts off');
   enableCommentMode(mintDoc);
   const mintFrame = mintDoc.querySelectorAll('.html-stage')[0];
   mintFrame.loadSrcdoc();
@@ -264,18 +208,22 @@ check('a round that just went sent, pushed over SSE (\'submitted\'), still shows
 
   const frame = section.querySelector('.html-stage');
   assert.ok(frame, 'setup failure: the swapped-in section has no html-stage iframe');
-  // The swapped-in iframe starts out wired to nothing (a freshly-parsed detached
-  // node has never had a 'load' listener attached to it by anyone) -- exactly
-  // like a real browser's about:blank placeholder, per test/dom-stand-in.mjs's
-  // own file comment. Only wireRoot(replacement) having registered that listener
-  // makes the srcdoc "navigation" below actually draw the pin.
+  // The swapped-in iframe starts out on an about:blank placeholder, per
+  // test/dom-stand-in.mjs's own file comment; its real document arrives here.
   frame.loadSrcdoc();
 
   const layer = section.querySelector('.pin-layer');
   assert.ok(layer, 'setup failure: the swapped-in section has no pin-layer');
   const pins = layer.querySelectorAll('.anchor-pin');
-  assert.equal(pins.length, 1, `expected the pre-existing comment's pin to render on the swapped-in (historical) stage once its real document "loads", got ${pins.length} pin(s) -- if this is 0, the replacement was never wired for anchoring at all`);
+  assert.equal(pins.length, 1, `expected the pre-existing comment's pin to render on the swapped-in (historical) stage once its real document "loads", got ${pins.length} pin(s)`);
   assert.equal(pins[0].classList.contains('pin-lost'), false, 'the comment minted against this exact element moments earlier must not render as lost');
+
+  const expand = section.querySelector('.expand-btn');
+  assert.ok(expand, 'setup failure: the swapped-in stage has no expand control');
+  assert.equal(expand.disabled, false, 'the expand control stays live on a sent round');
+  expand.dispatchEvent(new StandInEvent('click'));
+  assert.ok(document.querySelector('.stage-lens-frame'),
+    'pressing the swapped-in stage\'s expand control must open the lens -- if it does nothing, the replacement section was never wired');
 });
 
 // --- the html-stage case above self-corrects  ----
@@ -315,11 +263,10 @@ check('a round that just went sent, pushed over SSE (\'submitted\'), positions a
   assert.equal(typeof round2Block.error, 'string', 'setup failure: the pushed block must carry a stored failed reference');
 
   // Mint the comment through a REAL client session first, same pattern as the
-  // html-stage check above -- 'EventSource' declared and left unpassed for the
-  // same reason: this session wants no stand-in.
+  // html-stage check above -- loaded through plain `loadBoard` for the same
+  // reason: this session wants no stand-in.
   const mintHtml = renderBoardPage(board);
-  const mintDoc = parseHTML(mintHtml);
-  new Function('document', 'window', 'location', 'EventSource', ui)(mintDoc, mintDoc.defaultView, { protocol: 'http:' }, undefined);
+  const mintDoc = loadBoard(mintHtml);
   enableCommentMode(mintDoc);
   const mintTarget = mintDoc.querySelector(`[data-block-id="${round2BlockId}"] .resolve-error`);
   assert.ok(mintTarget, 'setup failure: no .resolve-error note in the minting session\'s mermaid block');
@@ -457,8 +404,4 @@ check('...and a SHORT code block arriving the same way is left completely alone 
   assert.equal(pre.style.height, undefined, 'a short block must never be given an explicit height');
 });
 
-if (failures) {
-  console.error(`\n${failures} check(s) failed`);
-  process.exit(1);
-}
-console.log('\nall anchor-push checks ok');
+finish('anchor-push');

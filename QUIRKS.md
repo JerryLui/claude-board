@@ -11,6 +11,7 @@ Tooling traps in this repo. Read before fighting something; append when somethin
 - [Worktrees, the shared checkout, and two files with the same tail](#worktrees-the-shared-checkout-and-two-files-with-the-same-tail)
 - [Vendoring a CJS-shaped npm package under `"type": "module"`](#vendoring-a-cjs-shaped-npm-package-under-type-module)
 - [Shapes the page-board stage is pinned to](#shapes-the-page-board-stage-is-pinned-to)
+- [First bites](#first-bites)
 
 ---
 
@@ -184,10 +185,8 @@ click-suppression on a disabled element, so a check that dispatches a click and 
 the result passes against a genuinely dead button); out of the JS loop alone leaves it
 `display: none`.
 
-Neither existing rule could be edited to add the exception — both are asserted by
-exact literal text elsewhere in the suite (`qsa('textarea, input, button')` in
-`test/check-pure.mjs`), so the fix in both places is an ADDITIONAL rule stated as an
-override. Before reusing a control's class for one with different readonly semantics,
+Neither existing rule was edited to add the exception: the fix in both places is an
+ADDITIONAL rule stated as an override, so each reads as the carve-out it is. Before reusing a control's class for one with different readonly semantics,
 grep every place that class is gated on `body.readonly`: CSS and JS are not the same
 gate.
 
@@ -722,7 +721,7 @@ answer.
 ## The check suite's own shapes
 
 - [A client script that parses is not a client script that is on the page](#a-client-script-that-parses-is-not-a-client-script-that-is-on-the-page)
-- [`test/check-archive.mjs`'s own `loadBoard`/`loadArchive` never run `themeBootScript`](#testcheck-archivemjss-own-loadboardloadarchive-never-run-themebootscript)
+- [A loader that skips `themeBootScript` finds `#theme-toggle` dead](#a-loader-that-skips-themebootscript-finds-theme-toggle-dead)
 - [Finding the real `<style>` tag in rendered bytes](#finding-the-real-style-tag-in-rendered-bytes)
 - [A block-comment stripper needs to know about regex literals, not just strings](#a-block-comment-stripper-needs-to-know-about-regex-literals-not-just-strings)
 - [A rendered page contains every comment's text twice, so "it must not render" cannot be grepped](#a-rendered-page-contains-every-comments-text-twice-so-it-must-not-render-cannot-be-grepped)
@@ -755,9 +754,12 @@ Worth checking on any file that exports a string meant to be *embedded* somewher
 (`indexScript`, `stageAgentScript()` in `src/render.mjs`, `ui` in `src/ui.mjs`): a check
 that the string is well-formed is not a check that the assembly step uses it.
 
-### `test/check-archive.mjs`'s own `loadBoard`/`loadArchive` never run `themeBootScript`
+### A loader that skips `themeBootScript` finds `#theme-toggle` dead
 
-They run exactly one script — `src/ui.mjs`'s `ui` — against the real file bytes. That is
+`test/support.mjs`'s `loadBoard` runs exactly one script unless it is passed `theme`:
+`src/ui.mjs`'s `ui`, or the `script` it is handed. `test/check-archive.mjs` calls it
+without `theme`, and its local `loadArchive` runs only the script the archive itself
+names, against the real file bytes. That is
 enough for every check that does not depend on `src/theme.mjs` (readonly, pins,
 gestures). But `#theme-toggle`'s click handler and the pre-paint `data-theme` attribute
 are both wired by `themeBootScript`, not `ui` — a real page runs the boot script first
@@ -765,7 +767,8 @@ are both wired by `themeBootScript`, not `ui` — a real page runs the boot scri
 ADR.md entry 70), so a check that only
 runs `ui` finds `#theme-toggle` in the markup and not disabled, and nothing happens when
 it is clicked, since no listener was ever attached. Proving the theme control works *in
-the archive* needs a loader that runs both scripts in that order (`loadArchiveThemed`).
+the archive* needs a loader that runs both scripts in that order (`test/support.mjs`'s
+`loadArchiveThemed`).
 
 ### Finding the real stylesheet in rendered bytes
 
@@ -866,15 +869,18 @@ because an earlier assertion threw, which is not a property to rely on.
 
 Since the read gate landed (`SECURITY.md` "Every route requires a credential"), a plain
 `fetch('/b/:id')` from a check gets 401. `test/check-http.mjs` and
-`test/check-anchor-robustness.mjs` each shadow the global `fetch` at module scope with a
-wrapper that adds the secret header, so the hundred-odd requests that are *not* about the
-credential keep reading as they did. If you add a check that stands up a daemon, do the
-same — or send `x-claude-board-secret` by hand.
+`test/check-anchor-robustness.mjs` each shadow the global `fetch` at module scope with
+`test/support.mjs`'s `secretFetch`, a wrapper that adds the secret header
+(`const fetch = secretFetch(SECRET)`), so the hundred-odd requests that are *not* about
+the credential keep reading as they did. If you add a check that stands up a daemon, do
+the same, or send `x-claude-board-secret` by hand.
 
 Anything that deliberately speaks as an unauthorized caller must NOT go through that
-wrapper: use `rawRequest`/`rawGet`, or `rawFetch`, which send exactly the headers they
-are given. Raw `http.request` calls (SSE streams, the hang-up-mid-wait check) need the
-header spelled out; there is no wrapper for them.
+wrapper: use `test/support.mjs`'s `rawRequest`/`rawGet`, or the unwrapped global `fetch`
+that `test/check-http.mjs` keeps as `rawFetch` and hands `secretFetch` as its base, which
+send exactly the headers they are given. Two paths never go through the wrapper at all:
+`test/support.mjs`'s `openSseClient` sends the header only when handed `secret`, and a
+bare `http.request` (the hang-up-mid-wait check) needs it spelled out.
 
 ### `execFileSync` deadlocks against an in-process daemon
 
@@ -1082,9 +1088,10 @@ The fix is to DECLARE the name and never pass it — `new Function('document', '
 'EventSource', src)(doc, fakeSetInterval)` binds it to `undefined` inside the scope, so the
 guard fires by the check's choice rather than by the interpreter's build options. Done for
 every site that runs `indexScript`, and since done for every site in this suite that runs
-`ui`/`themeBootScript` too — a `new Function` call whose body drives a real page's stream
-(`test/check-anchor-push.mjs` and friends) passes a stand-in as that same declared argument
-instead, the shape `test/check-index-live.mjs` already used for the index page.
+`ui`/`themeBootScript` too. A check that drives a real page's stream gets a stand-in
+passed as that same declared argument instead: `test/support.mjs`'s
+`loadBoardWithEventSource` (and `loadBoard`'s `EventSource` option) does it for a board
+page, and `loadIndexAgainstDaemon`'s `stream` option for the index page.
 
 What holds the line now that both are done: `test/check-harness-globals.mjs`, a static check
 scanning every `test/*.mjs` file's own source for two shapes — a `new Function(...)` call
@@ -1110,13 +1117,18 @@ already resolved), so whichever check happened to draw a slow request failed, a
 different one each run. CI never saw it while the matrix stopped at 24; a homebrew
 machine on 26 saw it constantly.
 
-The fix is `fetchSettler` (test/dom-stand-in.mjs): the harness's fetch wrapper tracks
-every request from send to last body byte (it buffers the body and hands the page a
-pre-read `Response`, so `r.json()` costs a microtask instead of untracked I/O), and
-`flush()` settles — drains every in-flight request, then hops one macrotask so the
-page's own `.then` chain (including a chained re-fetch, `patchRows`' `rowsPending`
-replay) is either finished or back in the tracked set. No duration appears anywhere,
-so there is no margin to lose.
+The fix is `fetchSettler` (test/dom-stand-in.mjs): the fetch wrapper that
+`test/support.mjs`'s `loadIndexAgainstDaemon` installs tracks every request from send
+to last body byte (it buffers the body and hands the page a pre-read `Response`, so
+`r.json()` costs a microtask instead of untracked I/O), and each file's `settle()`
+(`const settle = () => settler.settle()`) drains every in-flight request, then hops one
+macrotask so the page's own `.then` chain (including a chained re-fetch, `patchRows`'
+`rowsPending` replay) is either finished or back in the tracked set. No duration appears
+anywhere, so there is no margin to lose.
+
+`settle` is not `test/support.mjs`'s `flush`. `flush` hops a fixed count of macrotasks so
+a stubbed engine's promise chain lands (a mermaid stand-in's `run`); it tracks no request,
+so it is never the wait for a page talking to a daemon.
 
 Two shapes to keep straight when touching those files:
 
@@ -1648,7 +1660,7 @@ thread. This is the trap waiting for the once-a-second countdown tick.
 
 A status item's `NSPopover` cannot become key — so it cannot be driven from the keyboard at
 all — unless the app is active. The two calls that come to hand both fail this repo's
-warning-free build check (`test/check-launcher-menubar.mjs` asserts empty compiler stderr):
+warning-free build check (`test/check-launcher-env.mjs` asserts empty compiler stderr):
 `-[NSApplication activateIgnoringOtherApps:]` is `API_DEPRECATED(macos(10.0, 14.0))`, and its
 named replacement `-[NSApplication activate]` does not exist before macOS 14, so an unguarded
 call to it will not build on an older SDK.
@@ -2187,3 +2199,24 @@ chrome band; if that ever surfaces, the fix is this same resend, not a broadcast
 - **`CLAUDE_BOARD_PORT=0` silently becomes 7391**: `Number(...) || DEFAULT_PORT` in
   src/server.mjs treats the legitimate "give me an ephemeral port" zero as unset. Pick a real
   scratch port in harnesses; do not ask for 0.
+
+---
+
+## First bites
+
+Traps that have bitten once. A second bite moves the entry up into the section it belongs to.
+
+- **A text swap over `test/` also rewrites child programs held in template literals**
+  (2026-10-12). Several checks write a child script or stub to disk from a string
+  (`test/check-stranded.mjs`'s reporter child, `test/check-install.mjs`'s health stub). A
+  `perl -pi` swap of an inline wait for `sleep(N)` reached into the stranded child, where
+  `test/support.mjs`'s `sleep` does not exist: `ReferenceError`, and only a run showed it.
+  The same shape fools a line grep the other way: `const repoRoot = process.argv[4];` inside
+  the install stub's source reads as a top-level declaration of the check file. After a
+  mechanical edit, run every touched file, and read a grep hit's surroundings before
+  believing it.
+- **Two branches that each pass `test/check-comments.mjs` can fail it merged** (2026-10-12).
+  A comment that credits a helper to another check file ("test/check-stranded.mjs's
+  `withGrace`") stays green while that name still appears in the cited file, and goes red
+  once the name leaves it. One branch deleting the helper and another still citing it are
+  each green alone. Re-run the check on the merged tip, not only on each branch.

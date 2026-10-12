@@ -25,8 +25,8 @@
 // own header for why prismjs's CJS-shaped source needed the `.cjs` extension trick to
 // load at all here. So: import the real vendored marked and the real vendored Prism
 // loader, parse something with marked, and tokenize a real sample in every one of the
-// 19 languages `langForPath` (src/resolve.mjs) names plus `diff` (vendored ahead of
-// need, for chunk 05) -- cross-checked against `langForPath` itself, not a hand-copied
+// 19 languages `langForPath` (src/resolve.mjs) names plus `diff` (which it now maps
+// from .diff and .patch too) -- cross-checked against `langForPath` itself, not a hand-copied
 // list, so a future edit to resolve.mjs's extension table cannot drift silently past
 // this check.
 //
@@ -39,15 +39,15 @@
 // picking one number.
 
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { check, checkAsync, failureCount, listFiles, repoRoot, runMain } from './support.mjs';
 
 const selfPath = fileURLToPath(import.meta.url);
-const repoRoot = path.resolve(path.dirname(selfPath), '..');
 const vendorRoot = path.join(repoRoot, 'src', 'vendor');
 // Overridable ONLY so this check can prove its own gate: the "tampering stops the
 // run" check below re-runs this file in a child process against a deliberately wrong
@@ -57,37 +57,6 @@ const vendorRoot = path.join(repoRoot, 'src', 'vendor');
 const REAL_MANIFEST = path.join(repoRoot, 'test', 'fixtures', 'vendor-manifest.json');
 const manifestPath = process.env.CLAUDE_BOARD_VENDOR_MANIFEST || REAL_MANIFEST;
 
-let failures = 0;
-function check(name, fn) {
-  try {
-    fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
-async function checkAsync(name, fn) {
-  try {
-    await fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
-
-function walk(dir) {
-  let out = [];
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) out = out.concat(walk(full));
-    else out.push(full);
-  }
-  return out;
-}
 function sha256(buf) {
   return createHash('sha256').update(buf).digest('hex');
 }
@@ -95,7 +64,7 @@ function sha256(buf) {
 async function main() {
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
   const manifestFiles = Object.keys(manifest).sort();
-  const actualFiles = walk(vendorRoot)
+  const actualFiles = listFiles(vendorRoot)
     .map(f => path.relative(vendorRoot, f).split(path.sep).join('/'))
     .sort();
 
@@ -143,8 +112,8 @@ async function main() {
     });
   }
 
-  if (failures) {
-    console.error(`\n${failures} check(s) failed -- refusing to import the vendored tree`);
+  if (failureCount()) {
+    console.error(`\n${failureCount()} check(s) failed -- refusing to import the vendored tree`);
     process.exit(1);
   }
 
@@ -204,7 +173,7 @@ async function main() {
       assert.ok(matchedSomething, `tokenizing a real ${actualLang} sample must produce at least one real token, not just unmatched text -- an empty/broken grammar would still return a 1-element array of the input string unchanged`);
     }
 
-    // langForPath names exactly 20 distinct languages (AC 2's own enumerated list --
+    // Besides diff, langForPath names exactly 20 distinct languages (AC 2's own enumerated list --
     // see the "NOTE on 19" above); confirm the extension table above actually
     // exercised all of them, not fewer by accident.
     assert.equal(seenLangs.size, 20, `expected exactly 20 distinct languages out of langForPath (AC 2's enumerated list), saw: ${[...seenLangs].sort().join(', ')}`);
@@ -212,9 +181,9 @@ async function main() {
       assert.ok(seenLangs.has(lang), `AC 2 names '${lang}' as one of langForPath's languages; it must have been exercised above`);
     }
 
-    // diff is vendored ahead of need (chunk 05: a referenced .patch/.diff or a fenced
-    // diff block) -- langForPath does not name it yet (that wiring is chunk 05's, per
-    // AC 3), so it is proven directly against the grammar registry instead.
+    // diff sits outside AC 2's enumerated list, though langForPath maps .diff and
+    // .patch to it (src/resolve.mjs's EXT_LANG) and a fenced diff block reaches it too,
+    // so it is proven directly against the grammar registry with a sample of its own.
     const diffGrammar = grammarFor('diff');
     assert.ok(diffGrammar, "grammarFor('diff') must return a loaded Prism grammar");
     const diffTokens = Prism.tokenize('--- a\n+++ b\n@@ -1 +1 @@\n-old\n+new', diffGrammar);
@@ -272,16 +241,4 @@ async function main() {
   });
 }
 
-main()
-  .catch(err => {
-    failures++;
-    console.error('FAIL - unexpected error');
-    console.error(err);
-  })
-  .finally(() => {
-    if (failures) {
-      console.error(`\n${failures} check(s) failed`);
-      process.exit(1);
-    }
-    console.log('\nall vendor-digest checks ok');
-  });
+await runMain('vendor-digest', main);

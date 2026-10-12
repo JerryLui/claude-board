@@ -85,7 +85,7 @@ function isLiveBoard(board) {
 }
 
 /** How many rounds one board doc has reached. */
-export function roundCount(board) {
+function roundCount(board) {
   return (board.rounds || []).length;
 }
 

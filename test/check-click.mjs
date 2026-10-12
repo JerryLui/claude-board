@@ -3,40 +3,28 @@
 // the actual gesture a reviewer performs -- click an element inside a hand-mocked
 // html stage -- and asserts a comment form opens with the anchor filled in.
 //
-// This check exists because "a check fails if the click path breaks end to end,
-// exercising the real gesture rather than the pieces underneath it." Every check in
-// test/check-pure.mjs and test/check-http.mjs passed while this gesture was dead --
-// they exercise src/anchor.mjs's pure resolution logic and the rendered markup, but
-// none of them ever attaches a listener to a live document and clicks it. This file
-// is the first thing in the suite that does.
+// It fails if the click path breaks end to end,
+// exercising the real gesture rather than the pieces underneath it. src/anchor.mjs's
+// pure resolution logic and the rendered markup can both be right while a click
+// inside the stage reaches nothing, so each gesture check here loads the page, turns
+// comment mode on through its toggle, lets the stage's srcdoc load, and clicks.
 //
-// It is written against the CURRENT, broken src/ui.mjs and is expected to fail here
-// (see the second check below) -- its own credibility is established first by the
-// check above it, which pins the exact browser behaviour the defect turns on (an
-// iframe's about:blank placeholder document, not the real srcdoc content, being what
-// is live the moment the page's own script runs). An ablation log records the
-// proof that this check goes green once the gesture is fixed (temporarily
-// dropping the synchronous `readyState === 'complete'` wiring call in src/ui.mjs and
-// re-running this file) -- fixing it for real is a separate job, not this file's.
+// Three checks. The first pins the browser behaviour the stand-in has to reproduce
+// for the other two to mean anything: an iframe's about:blank placeholder document,
+// not its real srcdoc content, is what is live the moment the page's own script
+// runs. The second proves the click opens the block's comment form with a dom anchor
+// (ref + hint). The third proves the same on a mock that opens with its own
+// <style>, and that src/anchor.mjs's resolveDomAnchor accepts the ref the click
+// minted.
 
 import assert from 'node:assert/strict';
 import { createBoard } from '../src/board.mjs';
 import { renderBoardPage } from '../src/render.mjs';
-import { ui } from '../src/ui.mjs';
 import { resolveDomAnchor } from '../src/anchor.mjs';
 import { parseHTML, StandInEvent } from './dom-stand-in.mjs';
+import { check, finish, pageHarness } from './support.mjs';
 
-let failures = 0;
-function check(name, fn) {
-  try {
-    fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
+const { loadBoard } = await pageHarness();
 
 // A real board page, rendered exactly as the daemon would serve it: one hand-mocked
 // html stage, nothing else, so the only thing the DOM stand-in has to model is the
@@ -60,20 +48,6 @@ const board = createBoard({
 });
 const blockId = board.blocks[0].id;
 const pageHtml = renderBoardPage(board);
-
-/** Parse the page and run the real `ui` client script against it, exactly as a
- * browser would inline and execute it (src/render.mjs embeds this exact string in a
- * `<script type="module">`), returning the stand-in `document` for assertions. A
- * fresh document every call, so the two checks below never share mutated state. */
-function loadBoard() {
-  const document = parseHTML(pageHtml);
-  const window = document.defaultView;
-  const location = { protocol: 'http:' }; // not 'file:' -- this is the live, non-readonly path
-  // 'EventSource' declared, never passed -- see QUIRKS.md "A `new Function` harness
-  // inherits the host's globals" for why.
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
-  return document;
-}
 
 // --- credibility: pin the one browser behaviour this check exists to reproduce --
 //
@@ -101,7 +75,7 @@ check('a fresh .html-stage iframe starts out wired to an about:blank-shaped plac
 // --- the actual gesture: click an element inside the stage, end to end ----------
 
 check('clicking an element inside a hand-mocked html stage opens that block\'s comment form with a dom anchor filled in (ref + hint) -- the real click gesture, not the anchor logic underneath it', () => {
-  const document = loadBoard();
+  const document = loadBoard(pageHtml);
   const frame = document.querySelector('.html-stage');
   assert.ok(frame, 'setup failure: no .html-stage iframe on the rendered page');
 
@@ -178,20 +152,11 @@ const styledBlockId = styledBoard.blocks[0].id;
 const styledPageHtml = renderBoardPage(styledBoard);
 
 check('C2: clicking an element in a mock whose srcdoc opens with its own <style> mints a ref the server actually resolves, not an off-by-one', () => {
-  const document = parseHTML(styledPageHtml);
-  // A real, working `window` here, not a
-  // throwaway `{ addEventListener() {} }` stub -- src/ui.mjs's own
-  // `window.addEventListener('message', ...)` (the parent's half of the
-  // postMessage protocol the html-stage click now goes over) has to reach a
-  // window the stage can actually deliver to, which `document.defaultView`
-  // (auto-wired by parseHTML) is and a no-op stub is not. Every other check in
-  // this suite already made this switch; this one is new, and
-  // needs the same fix.
-  const window = document.defaultView;
-  const location = { protocol: 'http:' };
-  // 'EventSource' declared, never passed -- see QUIRKS.md "A `new Function` harness
-  // inherits the host's globals" for why.
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
+  // The page's real `window` (`document.defaultView`), which test/support.mjs's
+  // loadBoard hands the script: src/ui.mjs's own `window.addEventListener('message', ...)`
+  // (the parent's half of the postMessage protocol the html-stage click goes over) has
+  // to reach a window the stage can actually deliver to.
+  const document = loadBoard(styledPageHtml);
 
   document.getElementById('comment-mode-toggle').dispatchEvent(new StandInEvent('click'));
   const frame = document.querySelector('.html-stage');
@@ -229,8 +194,4 @@ check('C2: clicking an element in a mock whose srcdoc opens with its own <style>
     'the server must resolve the exact ref/hint a real click mints against a self-styling mock');
 });
 
-if (failures) {
-  console.error(`\n${failures} check(s) failed`);
-  process.exit(1);
-}
-console.log('\nall click checks ok');
+finish('click');

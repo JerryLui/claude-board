@@ -64,50 +64,17 @@ import { createBoard, applySubmit } from '../src/board.mjs';
 import { writePage } from '../src/store.mjs';
 import { renderBoardPage, STAGE_MARGIN_RESET } from '../src/render.mjs';
 import { ui } from '../src/ui.mjs';
-import { styles, palettes } from '../src/styles.mjs';
-import { themeBootScript } from '../src/theme.mjs';
+import { styles } from '../src/styles.mjs';
 import { parseHTML, StandInEvent, StandInLocalStorage, resolveComputedProperty } from './dom-stand-in.mjs';
+import { check, finish, pageHarness } from './support.mjs';
 
-let failures = 0;
-function check(name, fn) {
-  try {
-    fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
-
-/** Parse `html` and run a client script against it, with `location.protocol` set to
- * `protocol` -- the ONLY input src/ui.mjs reads to decide read-only mode. A fresh
- * document every call.
- *
- * `script` defaults to the in-memory `ui` export, which is right for the minting session
- * below (an ordinary live page, never written to disk). Every ARCHIVE load in this file
- * passes the script the archive itself names, read back off disk -- see `openArchive`.
- *
- * 'EventSource' is DECLARED as a parameter of the evaluated script, closing the same trap
- * every other check file in this suite closes: left off the list, the name would resolve
- * to whatever this node build happens to expose (a global EventSource has sat behind a
- * flag since 22.x), and the MINTING call below (an ordinary http: session, readonly false)
- * would open a live connection to '/api/board/<id>/events' and throw, from a check that is
- * about archived markup. `eventSource` defaults to undefined, which is exactly that fix for
- * the minting call and every ordinary caller. loadArchive()/loadPageArchive() below are the
- * one exception: they pass their own SpyEventSource through this parameter explicitly
- * (never through globalThis) so "archive: never opens an SSE connection, even though
- * EventSource exists in this environment" keeps proving the real `!readonly` gate against a
- * name the script can actually see -- a blanket undefined here would make that check pass
- * no matter what the gate did, since `typeof EventSource` would already read 'undefined'
- * regardless of readonly. */
-function loadBoard(html, protocol, script = ui, eventSource) {
-  const document = parseHTML(html);
-  const window = document.defaultView;
-  const location = { protocol };
-  new Function('document', 'window', 'location', 'EventSource', script)(document, window, location, eventSource);
-  return document;
-}
+// test/support.mjs's `loadBoard` runs the in-memory `ui` export unless handed a
+// `script`: right for the minting session below (an ordinary live page, never
+// written to disk). loadArchive(), loadPageArchive() and loadFoldArchive() each
+// pass the script their archive itself names, read back off disk, and set
+// `protocol` to 'file:' -- the ONLY input src/ui.mjs reads to decide read-only
+// mode.
+const { loadBoard, loadArchiveThemed, enableCommentMode } = await pageHarness();
 
 /** Resolve one of the two sibling files an archive NAMES, exactly as a browser opening
  * that file would: take the bare filename out of the page's own bytes, join it to the
@@ -138,13 +105,6 @@ const namedStylesheet = (pagePath, pageText) =>
 // the old marker would simply have vanished from the bytes, leaving every cascade
 // assertion in this file passing against a stylesheet the archive no longer had any way
 // to load.
-
-function enableCommentMode(document) {
-  const toggle = document.getElementById('comment-mode-toggle');
-  assert.ok(toggle, 'setup failure: no #comment-mode-toggle rendered');
-  toggle.dispatchEvent(new StandInEvent('click'));
-  assert.equal(toggle.classList.contains('active'), true, 'setup failure: the toggle did not turn comment mode on');
-}
 
 /** Click `el` (comment mode already on) and read back the anchor the real client
  * script minted onto `blockId`'s comment form -- test/check-http.mjs's own
@@ -281,7 +241,7 @@ const errorDiagramId = board.blocks[6].id;
 // session -- comment mode on, one click per content kind -- exactly as a reviewer
 // would produce it before this board was ever archived.
 const mintHtml = renderBoardPage(board);
-const mintDoc = loadBoard(mintHtml, 'http:');
+const mintDoc = loadBoard(mintHtml, { protocol: 'http:' });
 enableCommentMode(mintDoc);
 
 const errorNote = blockId => mintDoc.querySelector(`[data-block-id="${blockId}"] .resolve-error`);
@@ -377,11 +337,6 @@ assert.equal(fileContents, renderedNow, 'setup failure: the file on disk does no
 const archiveScript = namedScript(archivePath, fileContents);
 const archiveCss = namedStylesheet(archivePath, fileContents);
 
-check('setup: the file actually landed on disk at a real path', () => {
-  assert.ok(archivePath.startsWith(archiveDir), 'setup failure: the archive path is not under the temp dir it was written to');
-  assert.equal(fileContents.length > 0, true);
-});
-
 check('archive: the sibling files the page names are really beside it on disk, and really are the shared payloads', () => {
   assert.equal(archiveScript, ui, 'the script sitting next to the archive must be the real client script, byte for byte');
   assert.equal(archiveCss, styles, 'the stylesheet sitting next to the archive must be the real stylesheet, byte for byte');
@@ -405,54 +360,18 @@ function loadArchive() {
   class SpyEventSource {
     constructor() { esConstructed = true; }
   }
-  // Passed through loadBoard's own `eventSource` parameter directly, never via
-  // globalThis -- see loadBoard's comment on why this is one of the two callers
-  // that must.
-  const document = loadBoard(fileContents, 'file:', archiveScript, SpyEventSource);
+  // Passed as `loadBoard`'s `EventSource` option, never via globalThis, so
+  // "archive: never opens an SSE connection, even though EventSource exists in
+  // this environment" proves the real `!readonly` gate against a name the script
+  // can actually see. Left undefined, that check would pass no matter what the
+  // gate did, since `typeof EventSource` would already read 'undefined'
+  // regardless of readonly.
+  const document = loadBoard(fileContents, { protocol: 'file:', script: archiveScript, EventSource: SpyEventSource });
   return {
     document,
     restore() { globalThis.fetch = originalFetch; },
     fetchCalled: () => fetchCalled,
     esConstructed: () => esConstructed,
-  };
-}
-
-// Like loadArchive() above, but also runs src/theme.mjs's
-// themeBootScript -- the SAME bytes read off disk above, run through BOTH real
-// client scripts in the real page's own order (the inline pre-<style> boot
-// script first, then ui's deferred module script second), with
-// location.protocol genuinely 'file:', never a hand-set flag (this file's own
-// header comment). `storage`, if given, is attached to the fresh document's own
-// window BEFORE either script runs -- one StandInLocalStorage instance passed to
-// two separate calls models one origin's storage outliving a single sitting
-// (test/dom-stand-in.mjs's own comment on StandInLocalStorage), which is what
-// the reopen check below needs. fetch/EventSource are stubbed exactly like
-// loadArchive(), for the same reason: the archive must never reach for either.
-function loadArchiveThemed(storage) {
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = () => Promise.reject(new Error('the archive must never call fetch'));
-
-  const document = parseHTML(fileContents);
-  const window = document.defaultView;
-  if (storage) window.localStorage = storage;
-  const location = { protocol: 'file:' };
-  // Unlike loadArchive()/loadPageArchive(), nothing here reads back whether an
-  // EventSource was constructed, so 'EventSource' is simply declared and left
-  // unpassed -- same as every ordinary site in this suite -- rather than stood
-  // up on globalThis: a declared parameter shadows the global either way, so a
-  // stand-in left there would never be seen even if one were still assigned.
-  new Function('document', 'window', 'location', 'EventSource', themeBootScript)(document, window, location);
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
-  // A freshly parsed document now starts `readyState
-  // === 'loading'`, so the theme control's click listener is not wired until
-  // this simulates the parser reaching the end of the document (see
-  // test/dom-stand-in.mjs's own comment on finishParsing/readyState) --
-  // every check below that clicks the control depends on this having run.
-  document.finishParsing();
-
-  return {
-    document,
-    restore() { globalThis.fetch = originalFetch; },
   };
 }
 
@@ -662,8 +581,9 @@ check('archive: hovering inside the isolated html-stage document adds no outline
     assert.ok(button);
 
     // Not offered, not merely inert: wireHtmlStage's own readonly guard sits
-    // BEFORE the hover <style> is ever created (test/check-pure.mjs already pins
-    // this ordering structurally) -- checked here behaviourally, against the
+    // BEFORE the hover <style> is ever created (test/check-stage-isolation.mjs
+    // drives the live half: no hover style until comment mode turns on) --
+    // checked here behaviourally, against the
     // iframe's own live document, which the board page's stylesheet deliberately
     // never reaches (QUIRKS.md).
     //
@@ -783,26 +703,6 @@ check('archive: the block-level "comment" button opens no form either -- disable
   } finally { restore(); }
 });
 
-// Was "the emitted page still has no external script or stylesheet reference" -- ADR 70
-// replaced that rule with a narrower one (QUIRKS.md, "No external assets — not even
-// mermaid, now three bare sibling filenames"): every reference the page loads must be
-// either self-carrying (`data:`) or a bare sibling filename that really is sitting
-// beside it. Both halves matter here specifically, because this board carries
-// compare/html/mermaid content and nine comments -- the richest page the renderer
-// emits, and the one most likely to sneak a reference to something outside the folder.
-check('archive: every reference the emitted page loads resolves inside its own folder, even carrying compare/html/mermaid content and nine comments', () => {
-  for (const [, tag, attrs] of fileContents.matchAll(/<(link|script|img|iframe)\b([^>]*)>/g)) {
-    const m = attrs.match(/\s(?:src|href)="([^"]*)"/);
-    if (!m || m[1].startsWith('data:')) continue;
-    const ref = m[1];
-    assert.ok(!ref.includes('/') && !ref.includes(':') && !ref.startsWith('.'),
-      `<${tag}> loads "${ref}", which is not a bare sibling filename -- it cannot resolve from Finder`);
-    assert.equal(readFileSync(path.join(archiveDir, ref), 'utf8').length > 0, true,
-      `<${tag}> names "${ref}", which is not on disk beside the archive`);
-  }
-  assert.ok(archiveScript.length > 0 && archiveCss.length > 0, 'setup failure: the archive names no script or stylesheet at all');
-});
-
 // =================================================================================
 // 4. Light theme: the archive follows the OS, its control still
 //    works for the sitting, and nothing persists across a reopen -- spec:
@@ -811,51 +711,24 @@ check('archive: every reference the emitted page loads resolves inside its own f
 //    way every other check in this file is: never a hand-set `readonly` flag,
 //    never a constructed document standing in for the real file (this file's
 //    own header comment).
+//
+//    Loaded through test/support.mjs's `loadArchiveThemed`: like loadArchive()
+//    above, but through BOTH real client scripts in the real page's own order
+//    (src/theme.mjs's inline pre-<style> boot script first, then ui's deferred
+//    module script second). `storage` is attached to the fresh document's own
+//    window BEFORE either script runs -- one StandInLocalStorage instance passed
+//    to two separate calls models one origin's storage outliving a single
+//    sitting (test/dom-stand-in.mjs's own comment on StandInLocalStorage), which
+//    is what the reopen check needs.
 // =================================================================================
-
-// This used to assert the two light rules by their
-// SPELLING -- a regex matching the literal `@media { :root:not(...) { ... } }`
-// nesting and a separate `:root[data-theme="light"] { ... }` match, each
-// checked for a substring. That is exactly the trap QUIRKS.md's "the
-// stylesheet and the markup are checked against each other" entry warns
-// against (see also the mermaid-id trap it documents): nesting the override
-// INSIDE the media query -- breaking a dark-OS reader's Light choice, the one
-// case this feature exists for -- still contains both substrings, so the old
-// version of this check stayed green through it. Replaced with the real
-// cascade resolver (test/dom-stand-in.mjs) run against the file's
-// OWN `<style>` text (not the in-memory `styles` export -- if render.mjs ever
-// diverged from it, this would still catch that too), asserting the full
-// {OS dark, OS light} x {no attribute, data-theme="light", data-theme="dark"}
-// matrix resolves to the intended palette.
-check('archive: the bytes on disk carry a real, working cascade -- every (OS preference, data-theme) combination resolves to the intended palette, computed from the file\'s own <style> text, not asserted by any one rule\'s spelling', () => {
-  const cssText = archiveCss;
-
-  const document = parseHTML(fileContents);
-  const docEl = document.documentElement;
-
-  const cases = [
-    { systemDark: true, attr: null, expect: 'dark' },
-    { systemDark: true, attr: 'light', expect: 'light' },
-    { systemDark: true, attr: 'dark', expect: 'dark' },
-    { systemDark: false, attr: null, expect: 'light' },
-    { systemDark: false, attr: 'light', expect: 'light' },
-    { systemDark: false, attr: 'dark', expect: 'dark' },
-  ];
-  for (const { systemDark, attr, expect } of cases) {
-    if (attr) docEl.setAttribute('data-theme', attr); else docEl.removeAttribute('data-theme');
-    const got = resolveComputedProperty(cssText, docEl, systemDark, '--bg');
-    assert.equal(got, palettes[expect]['--bg'],
-      `OS ${systemDark ? 'dark' : 'light'} + data-theme=${attr || '(none)'}: expected ${expect}'s --bg from the file's own <style> text, got "${got}"`);
-  }
-});
 
 check('archive: opened fresh, the control is live -- not merely present-and-enabled -- and clicking it actually cycles data-theme through light and dark, without ever writing to storage', () => {
   const storage = new StandInLocalStorage();
-  const { document, restore } = loadArchiveThemed(storage);
+  const { document, restore } = loadArchiveThemed(fileContents, { storage });
   try {
     const btn = document.getElementById('theme-toggle');
     assert.ok(btn, 'setup failure: no #theme-toggle rendered in the archive');
-    assert.equal(btn.disabled, false, 'the theme control must not be disabled in the archive (test/check-theme.mjs already proves this on an in-memory page; re-checked here against the real bytes on disk)');
+    assert.equal(btn.disabled, false, 'the theme control must not be disabled in the archive -- an archive reader is exactly who needs it');
     assert.equal(document.documentElement.hasAttribute('data-theme'), false, 'setup failure: the archive must start following the OS -- no data-theme attribute');
 
     // Belt and suspenders, same as this file's own toggle check above: the
@@ -874,7 +747,7 @@ check('archive: opened fresh, the control is live -- not merely present-and-enab
 check('archive: reopening the SAME file in a fresh document, sharing the storage stand-in a previous sitting used, comes up with no data-theme -- the previous sitting\'s explicit choice left nothing behind', () => {
   const sharedStorage = new StandInLocalStorage();
 
-  const first = loadArchiveThemed(sharedStorage);
+  const first = loadArchiveThemed(fileContents, { storage: sharedStorage });
   try {
     const firstBtn = first.document.getElementById('theme-toggle');
     firstBtn.dispatchEvent(new StandInEvent('click')); // System -> Light: an explicit choice, made during this sitting
@@ -882,12 +755,12 @@ check('archive: reopening the SAME file in a fresh document, sharing the storage
     assert.equal(sharedStorage.map.size, 0, 'setup failure: even mid-sitting the archive must not have written to storage');
   } finally { first.restore(); }
 
-  // A brand-new document/window (a real reopen mints a fresh one -- see
-  // loadArchiveThemed's own comment), but the SAME storage instance: this is
+  // A brand-new document/window (a real reopen mints a fresh one, as every
+  // `loadArchiveThemed` call does), but the SAME storage instance: this is
   // the one input that could leak a previous sitting's choice into a reopen,
   // and it is exactly what test/check-theme.mjs's `file:` guard is supposed to
   // prevent from ever being written to in the first place.
-  const second = loadArchiveThemed(sharedStorage);
+  const second = loadArchiveThemed(fileContents, { storage: sharedStorage });
   try {
     assert.equal(second.document.documentElement.hasAttribute('data-theme'), false, 'reopening the archive must return to the OS preference -- the previous sitting\'s explicit Light choice must not leak in, even sharing the same storage instance');
     const secondBtn = second.document.getElementById('theme-toggle');
@@ -914,8 +787,11 @@ const pageArtifact = '<style>.doc{font:14px system-ui}</style>'
 // Bound to a real project directory, like every board a reviewer actually
 // archives: `cwd` is the one field on a board that names something about the
 // machine rather than about the work, and the check below is what keeps it out
-// of a file meant to be handed to someone else.
-const pageBoardDoc = createBoard({ title: 'Archived artifact', cwd: archiveDir, blocks: [{ kind: 'html', html: pageArtifact }] });
+// of a file meant to be handed to someone else. Posted with `wait: true`, the way
+// an agent asks on a page board: only an awaited round renders the Tray's
+// composer (src/render.mjs's renderPageCommentPanel), so this archive carries a
+// live text field for the readonly lock to shut.
+const pageBoardDoc = createBoard({ title: 'Archived artifact', cwd: archiveDir, wait: true, blocks: [{ kind: 'html', html: pageArtifact }] });
 const pageArchivePath = path.join(archiveDir, `${pageBoardDoc.id}.html`);
 writePage(pageBoardDoc.id, renderBoardPage(pageBoardDoc), archiveHome);
 const pageFileContents = readFileSync(pageArchivePath, 'utf8');
@@ -931,9 +807,9 @@ function loadPageArchive() {
   class SpyEventSource {
     constructor() { esConstructed = true; }
   }
-  // Passed through loadBoard's own `eventSource` parameter directly -- see
-  // loadBoard's comment and loadArchive()'s identical call just above.
-  const document = loadBoard(pageFileContents, 'file:', pageArchiveScript, SpyEventSource);
+  // Passed as `loadBoard`'s `EventSource` option -- see loadArchive()'s
+  // identical call above for why.
+  const document = loadBoard(pageFileContents, { protocol: 'file:', script: pageArchiveScript, EventSource: SpyEventSource });
   return {
     document,
     restore() { globalThis.fetch = originalFetch; },
@@ -942,12 +818,22 @@ function loadPageArchive() {
   };
 }
 
-check('criterion 7: a page board archived to disk opens from Finder as a page board, with the artifact in the frame rather than an empty one', () => {
+check('criterion 7: a page board archived to disk opens from Finder as a page board, with the artifact in the frame rather than an empty one, its own script live, its comment field disabled, and no network or event stream', () => {
   const { document, restore, fetchCalled, esConstructed } = loadPageArchive();
   try {
     assert.equal(document.body.classList.contains('page-board'), true,
       'the archived page board must still lay out as one -- the class is in the bytes, not applied by anything the daemon does');
     assert.equal(document.body.classList.contains('readonly'), true, 'and opening from file:// must still make it read-only');
+
+    // The awaited round's composer is always on screen, not toggled by comment
+    // mode, and its <input> arrives enabled in the bytes (renderPageCommentPanel
+    // adds `disabled` only for a sent round): the readonly lock's blanket disable
+    // in src/ui.mjs is the one thing that shuts it.
+    assert.equal(parseHTML(pageFileContents).querySelector('.page-comments input').hasAttribute('disabled'), false,
+      'setup failure: the open round\'s comment field must arrive enabled in the bytes, or the lock is not what disables it');
+    const commentField = document.querySelector('.page-comments input');
+    assert.ok(commentField, 'setup failure: the page board must render its always-visible comment field');
+    assert.equal(commentField.disabled, true, 'the archived page board\'s comment field must be disabled -- there is no agent to send a comment to');
 
     const frame = document.querySelector('.html-stage');
     assert.ok(frame, 'the frame itself must be in the archived bytes');
@@ -993,16 +879,26 @@ check('criterion 7: the archived page board carries no local project path -- the
     'the archived file must not contain the project directory anywhere in its bytes');
 });
 
-check('criterion 7: every reference the archived page board loads resolves inside its own folder either', () => {
-  for (const [, tag, attrs] of pageFileContents.matchAll(/<(link|script|img|iframe)\b([^>]*)>/g)) {
-    const m = attrs.match(/\s(?:src|href)="([^"]*)"/);
-    if (!m || m[1].startsWith('data:')) continue;
-    const ref = m[1];
-    assert.ok(!ref.includes('/') && !ref.includes(':') && !ref.startsWith('.'),
-      `<${tag}> loads "${ref}" -- an artifact that pulled anything in from outside the folder would be a page board that opens empty from Finder`);
-    assert.equal(readFileSync(path.join(archiveDir, ref), 'utf8').length > 0, true,
-      `<${tag}> names "${ref}", which is not on disk beside the archive`);
+// Was "the emitted page still has no external script or stylesheet reference" -- ADR 70
+// replaced that rule with a narrower one (QUIRKS.md, "No external assets — not even
+// mermaid, now three bare sibling filenames"): every reference the page loads must be
+// either self-carrying (`data:`) or a bare sibling filename that really is sitting
+// beside it. Run over both archives: the board above carries compare/html/mermaid
+// content and nine comments -- the richest page the renderer emits -- and a page board
+// is a different render whose artifact is snapshotted INTO the page (ADR.md entry 32).
+check('archive: every reference the emitted page loads resolves inside its own folder -- the richest board and a page board alike -- and a page board carries its artifact inline in its srcdoc', () => {
+  for (const [what, bytes] of [['the board archive', fileContents], ['the page board archive', pageFileContents]]) {
+    for (const [, tag, attrs] of bytes.matchAll(/<(link|script|img|iframe)\b([^>]*)>/g)) {
+      const m = attrs.match(/\s(?:src|href)="([^"]*)"/);
+      if (!m || m[1].startsWith('data:')) continue;
+      const ref = m[1];
+      assert.ok(!ref.includes('/') && !ref.includes(':') && !ref.startsWith('.'),
+        `${what}: <${tag}> loads "${ref}", which is not a bare sibling filename -- it cannot resolve from Finder`);
+      assert.equal(readFileSync(path.join(archiveDir, ref), 'utf8').length > 0, true,
+        `${what}: <${tag}> names "${ref}", which is not on disk beside the archive`);
+    }
   }
+  assert.ok(archiveScript.length > 0 && archiveCss.length > 0, 'setup failure: the archive names no script or stylesheet at all');
   // The artifact's own markup is snapshotted into the page's `srcdoc`, escaped -- so the
   // stage's `<style>`/`<script>` are attribute text, not tags, and cannot be reached by
   // the tag scan above. This is what keeps them accounted for.
@@ -1037,6 +933,13 @@ const foldBoardDoc = createBoard({
     // FOLD_CAP), which test/check-pure.mjs pins on its own -- here it only has
     // to be long enough that the server marks it.
     context: [{ kind: 'markdown', text: Array.from({ length: 20 }, (_, i) => `- a point worth reading, number ${i + 1}`).join('\n') }],
+  }, {
+    // An open round's rank items are natively draggable; the readonly pass has to
+    // strip that, since a <li> has no disabled state to set.
+    kind: 'question',
+    prompt: 'Order these',
+    widget: 'rank',
+    options: [{ label: 'First' }, { label: 'Second' }],
   }],
 });
 const foldArchivePath = path.join(archiveDir, `${foldBoardDoc.id}.html`);
@@ -1050,7 +953,7 @@ function loadFoldArchive() {
   // No EventSource spy: this pair of checks is not about the SSE gate (the
   // loadArchive() checks above own that), and `undefined` here would make a
   // regressed gate throw loudly rather than pass quietly.
-  const document = loadBoard(foldFileContents, 'file:', foldArchiveScript);
+  const document = loadBoard(foldFileContents, { protocol: 'file:', script: foldArchiveScript });
   return { document, restore() { globalThis.fetch = originalFetch; } };
 }
 
@@ -1060,7 +963,7 @@ const foldItem = document => {
   return item;
 };
 
-check('archive: the fold arrives folded in the page\'s own bytes, and its control is the one thing readonly leaves live', () => {
+check('archive: the fold arrives folded in the page\'s own bytes, and its control is the one thing readonly leaves live -- every answer control disabled, every rank item stripped of native drag', () => {
   const { document, restore } = loadFoldArchive();
   try {
     assert.ok(foldFileContents.includes('fold-toggle'),
@@ -1076,6 +979,13 @@ check('archive: the fold arrives folded in the page\'s own bytes, and its contro
     assert.equal(document.querySelector('.choice-single').disabled, true, 'the answer widget is still disabled');
     assert.equal(document.querySelector('.btn-defer').disabled, true, 'so is Defer');
     assert.equal(document.querySelector('.note-field textarea').disabled, true, 'so is the note field');
+
+    assert.match(foldFileContents, /<li draggable="true"/, 'setup failure: the open round\'s rank items must arrive draggable in the bytes');
+    const rankItems = document.querySelectorAll('.rank-list li');
+    assert.equal(rankItems.length, 2, 'setup failure: the rank question must render both items');
+    for (const li of rankItems) {
+      assert.equal(li.hasAttribute('draggable'), false, 'a rank item in a read-only archive must lose native drag -- a <li> has no disabled state, so this is its lock');
+    }
   } finally { restore(); }
 });
 
@@ -1116,8 +1026,4 @@ check('archive: keyboard focus reaching into the clipped part of a folded item o
   } finally { restore(); }
 });
 
-if (failures) {
-  console.error(`\n${failures} check(s) failed`);
-  process.exit(1);
-}
-console.log('\nall archive checks ok');
+finish('archive');

@@ -2,34 +2,21 @@
 // the daemon whether it is being looked at, and the daemon recording that per board.
 // Two layers:
 //
-//  - `createSseHub` directly, with no HTTP at all, for the OR-across-Watchers rule and
-//    the "gone means gone" rule -- nothing over HTTP surfaces those yet (`isAttended`
-//    has no production caller at all), so a unit-shaped check against the hub itself
-//    is the only seam that can prove them.
+//  - `createSseHub` directly, with no HTTP at all, for the OR-across-Watchers rule, the
+//    "gone means gone" rule and the look-away window (ADR 73), read through
+//    `attendedRemainingMs` -- the one accessor the stranded rule reads -- since nothing
+//    over HTTP surfaces its answer.
 //  - a real daemon on an ephemeral port, opening and dropping a board's `/events`
 //    stream exactly as test/check-http.mjs's own SSE checks do, to prove AC 16: the
 //    report is authenticated exactly like the board's other cookie writes, and an
 //    unauthenticated one is refused rather than believed.
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
+import { rmSync } from 'node:fs';
 import http from 'node:http';
-import { SECRET_HEADER, SESSION_COOKIE, sessionToken } from '../src/secret.mjs';
+import { SECRET_HEADER } from '../src/secret.mjs';
 import { startServer, createSseHub, DEFAULT_ATTENDED_WINDOW_MS } from '../src/server.mjs';
-
-let failures = 0;
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
+import { check, rawRequest, runMain, secretHome, sessionCookieHeader, sleep, withEnv } from './support.mjs';
 
 // --- Layer 1: createSseHub directly, no daemon involved ---------------------------
 
@@ -37,51 +24,16 @@ function fakeRes() {
   return { write() {} };
 }
 
-const tick = (ms = 20) => new Promise(r => setTimeout(r, ms));
+// Every check that needs the look-away window (ADR 73) shortens it through `withEnv`: the
+// shipped window is two minutes, which no check may sleep through.
 
-/** Run `fn` with a different look-away window, and put the old one back even if it
- * throws (ADR 73). The shipped window is two minutes,
- * which no check may sleep through -- the same reason, and the same idiom, as
- * test/check-stranded.mjs's `withGrace`. Restored in a `finally` so a failing assertion
- * leaves the next check running against the shipped value rather than this one's. */
-async function withWindow(ms, fn) {
-  const saved = process.env.CLAUDE_BOARD_ATTENDED_WINDOW_MS;
-  process.env.CLAUDE_BOARD_ATTENDED_WINDOW_MS = String(ms);
-  try {
-    await fn();
-  } finally {
-    if (saved === undefined) delete process.env.CLAUDE_BOARD_ATTENDED_WINDOW_MS;
-    else process.env.CLAUDE_BOARD_ATTENDED_WINDOW_MS = saved;
-  }
-}
-
-await check('a fresh Watcher defaults to Attended, so a tab that never changes state still counts', () => {
+await check('a fresh Watcher gets a 32-hex id and holds no attended time until it reports', () => {
   const hub = createSseHub();
   const watcherId = hub.subscribe('b_x', fakeRes());
-  assert.equal(hub.isAttended('b_x'), true);
   assert.ok(/^[0-9a-f]{32}$/.test(watcherId), `watcherId should be a 32-hex-char id, got ${watcherId}`);
-});
-
-await check('... but it has not CONFIRMED it is attended, which is a different question', async () => {
-  // The two must not collapse into one. `isAttended` answers "nothing here says the
-  // reviewer is away", which is what deciding whether to raise a banner needs;
-  // `isConfirmedAttended` answers "a Watcher has actually said it is looking", which is
-  // what deciding whether the reviewer has COME BACK needs. A tab that has merely
-  // subscribed -- i.e. one that has just reconnected -- is the first and not the second.
-  await withWindow(40, async () => {
-    const hub = createSseHub();
-    const watcherId = hub.subscribe('b_x', fakeRes());
-    assert.equal(hub.isConfirmedAttended('b_x'), false, 'a Watcher that has said nothing has not said it is looking');
-    hub.setAttended('b_x', watcherId, true);
-    assert.equal(hub.isConfirmedAttended('b_x'), true, 'and once it reports, it has');
-    hub.setAttended('b_x', watcherId, false);
-    // Not "false at once" any more (ADR 73): the tab has just LOST focus, so it is
-    // still inside its look-away window and the board is still Attended by both
-    // measures. Past the window it is neither.
-    await tick(120);
-    assert.equal(hub.isConfirmedAttended('b_x'), false);
-    assert.equal(hub.isAttended('b_x'), false, 'a Watcher hidden for longer than the window is not Attended by either measure');
-  });
+  // A tab that has merely subscribed -- i.e. one that has just reconnected -- has not said
+  // the reviewer is looking, so it can neither end an absence nor hold a banner back.
+  assert.equal(hub.attendedRemainingMs('b_x'), 0, 'a Watcher that has said nothing is not evidence anyone is looking');
 });
 
 // --- Criteria 7 and 8: Attended survives a look-away, and a focused tab has no clock ---
@@ -91,16 +43,16 @@ await check('criterion 7: a tab that loses focus keeps its board Attended for th
   // terminal -- the ordinary working posture -- counts as nobody watching, so the board
   // strands within seconds of every glance away and a banner arrives roughly once a
   // minute. The window is what makes an open tab mean "the reviewer is around".
-  await withWindow(300, async () => {
+  await withEnv({ CLAUDE_BOARD_ATTENDED_WINDOW_MS: 300 }, async () => {
     const hub = createSseHub();
     const w = hub.subscribe('b_x', fakeRes());
     hub.setAttended('b_x', w, true);
     hub.setAttended('b_x', w, false); // the reviewer switches to the terminal
-    assert.equal(hub.isConfirmedAttended('b_x'), true, 'the instant after the blur, the board is still watched');
-    await tick(80);
-    assert.equal(hub.isConfirmedAttended('b_x'), true, 'and still watched well inside the window');
-    await tick(320);
-    assert.equal(hub.isConfirmedAttended('b_x'), false, 'past the window the board may strand, exactly as before');
+    assert.ok(hub.attendedRemainingMs('b_x') > 0, 'the instant after the blur, the board is still watched');
+    await sleep(80);
+    assert.ok(hub.attendedRemainingMs('b_x') > 0, 'and still watched well inside the window');
+    await sleep(320);
+    assert.equal(hub.attendedRemainingMs('b_x'), 0, 'past the window the board may strand, exactly as before');
   });
 });
 
@@ -109,27 +61,13 @@ await check('criterion 7: the window runs from the BLUR, not from when focus was
   // looked at. Stamping the window at the moment focus was GAINED would leave it already
   // expired -- and the ordinary reviewer, who sits on a board for minutes before switching
   // to the terminal, would get exactly the behaviour ADR 73 removes.
-  await withWindow(200, async () => {
+  await withEnv({ CLAUDE_BOARD_ATTENDED_WINDOW_MS: 200 }, async () => {
     const hub = createSseHub();
     const w = hub.subscribe('b_x', fakeRes());
     hub.setAttended('b_x', w, true);
-    await tick(260); // longer than the whole window, spent focused
+    await sleep(260); // longer than the whole window, spent focused
     hub.setAttended('b_x', w, false);
-    assert.equal(hub.isConfirmedAttended('b_x'), true, 'the window starts now, not when the tab was focused');
-  });
-});
-
-await check('criterion 8: a tab that stays focused is watched for as long as it stays focused, with no idle detection', async () => {
-  // No clock at all on a focused tab. Idle detection was considered and refused: nothing
-  // here reads the reviewer's keyboard to decide whether they are present, so a tab left
-  // focused counts as watching however long it sits there -- four windows, here.
-  await withWindow(30, async () => {
-    const hub = createSseHub();
-    const w = hub.subscribe('b_x', fakeRes());
-    hub.setAttended('b_x', w, true);
-    await tick(140);
-    assert.equal(hub.isConfirmedAttended('b_x'), true, 'a focused tab never ages out');
-    assert.equal(hub.isAttended('b_x'), true);
+    assert.ok(hub.attendedRemainingMs('b_x') > 0, 'the window starts now, not when the tab was focused');
   });
 });
 
@@ -140,12 +78,12 @@ await check('criterion 7: a reconnecting tab carries its own look-away window ac
   // restarts the daemon under them, EventSource reconnects, and the buried tab's first
   // report reads as "never focused". The page says how long ago it last had focus and the
   // fresh Watcher seeds its stamp from that.
-  await withWindow(4000, async () => {
+  await withEnv({ CLAUDE_BOARD_ATTENDED_WINDOW_MS: 4000 }, async () => {
     const hub = createSseHub();
     const w = hub.subscribe('b_x', fakeRes());
-    assert.equal(hub.isConfirmedAttended('b_x'), false, 'a fresh Watcher has said nothing yet');
+    assert.equal(hub.attendedRemainingMs('b_x'), 0, 'a fresh Watcher has said nothing yet');
     hub.setAttended('b_x', w, false, 1, 40); // buried, last focused 40ms ago
-    assert.equal(hub.isConfirmedAttended('b_x'), true, 'the window comes across with the report');
+    assert.ok(hub.attendedRemainingMs('b_x') > 0, 'the window comes across with the report');
     assert.ok(hub.attendedRemainingMs('b_x') > 3000, 'and most of it is left, since the tab was focused a moment ago');
   });
 });
@@ -155,37 +93,35 @@ await check('sinceFocusMs seeds only an unknown Watcher, and can never extend a 
   // already tracking -- otherwise a tab could hold its board attended forever by
   // re-reporting `sinceFocusMs: 0` -- and it may not invent one for a tab that never said
   // it had focus, which is the "connected implies recently focused" reading ADR 73 refuses.
-  await withWindow(200, async () => {
+  await withEnv({ CLAUDE_BOARD_ATTENDED_WINDOW_MS: 200 }, async () => {
     const hub = createSseHub();
     const w = hub.subscribe('b_x', fakeRes());
     hub.setAttended('b_x', w, true, 1);   // the daemon observes focus itself
     hub.setAttended('b_x', w, false, 2);  // ... and the blur that starts the window
-    await tick(140);
+    await sleep(140);
     const left = hub.attendedRemainingMs('b_x');
     assert.ok(left > 0 && left < 100, `the window should be most of the way through, got ${left}`);
     hub.setAttended('b_x', w, false, 3, 0); // "I had focus this instant" -- must not reset it
     const after = hub.attendedRemainingMs('b_x');
     assert.ok(after <= left, `a report must not extend a window the daemon observed, ${left} -> ${after}`);
-    await tick(120);
-    assert.equal(hub.isConfirmedAttended('b_x'), false, 'so it still ages out on the daemon\'s own clock');
+    await sleep(120);
+    assert.equal(hub.attendedRemainingMs('b_x'), 0, 'so it still ages out on the daemon\'s own clock');
   });
 
-  await withWindow(4000, async () => {
+  await withEnv({ CLAUDE_BOARD_ATTENDED_WINDOW_MS: 4000 }, async () => {
     const hub = createSseHub();
     const w = hub.subscribe('b_x', fakeRes());
     hub.setAttended('b_x', w, false, 1); // no sinceFocusMs at all: nothing to count from
-    assert.equal(hub.isConfirmedAttended('b_x'), false, 'connected is not recently focused');
-    assert.equal(hub.attendedRemainingMs('b_x'), 0);
+    assert.equal(hub.attendedRemainingMs('b_x'), 0, 'connected is not recently focused');
   });
 });
 
 await check('a sinceFocusMs older than the window lands as an expired window, not an error', async () => {
-  await withWindow(100, async () => {
+  await withEnv({ CLAUDE_BOARD_ATTENDED_WINDOW_MS: 100 }, async () => {
     const hub = createSseHub();
     const w = hub.subscribe('b_x', fakeRes());
     assert.equal(hub.setAttended('b_x', w, false, 1, 60_000), true, 'applied, like any other report');
-    assert.equal(hub.isConfirmedAttended('b_x'), false, 'a tab last looked at a minute ago is not Attended');
-    assert.equal(hub.attendedRemainingMs('b_x'), 0, 'and the remainder never goes negative');
+    assert.equal(hub.attendedRemainingMs('b_x'), 0, 'a tab last looked at a minute ago is not Attended, and the remainder never goes negative');
   });
 });
 
@@ -195,7 +131,7 @@ await check('attendedAnywhereRemainingMs: the whole machine\'s answer, in the pe
   // board that answers: a reading that went quiet as soon as one board answered 0 would
   // banner in cases the level below it stays quiet in, and the ladder would stop being
   // monotone.
-  await withWindow(4000, async () => {
+  await withEnv({ CLAUDE_BOARD_ATTENDED_WINDOW_MS: 4000 }, async () => {
     const hub = createSseHub();
     assert.equal(hub.attendedAnywhereRemainingMs(), 0, 'a daemon nobody has connected to is not Attended anywhere');
     const a = hub.subscribe('b_a', fakeRes());
@@ -214,28 +150,15 @@ await check('attendedAnywhereRemainingMs: the whole machine\'s answer, in the pe
 
   // And it ages out on the same clock the per-board answer does, or the middle level would
   // be a mute button rather than a delay.
-  await withWindow(60, async () => {
+  await withEnv({ CLAUDE_BOARD_ATTENDED_WINDOW_MS: 60 }, async () => {
     const hub = createSseHub();
     const w = hub.subscribe('b_x', fakeRes());
     hub.setAttended('b_x', w, true, 1);
     hub.setAttended('b_x', w, false, 2); // the blur that starts the window
     const left = hub.attendedAnywhereRemainingMs();
     assert.ok(left > 0 && left <= 60, `the window is running machine-wide too, got ${left}`);
-    await tick(140);
+    await sleep(140);
     assert.equal(hub.attendedAnywhereRemainingMs(), 0, 'and once every window anywhere is spent, nobody is Attended');
-  });
-});
-
-await check('criterion 7: a tab that has never had focus gets no window of its own', async () => {
-  // A tab opened in the background and never looked at. It has nothing to count two
-  // minutes from, and treating "connected" as "recently focused" would hand any
-  // subscriber a mute button on a board it has never been in front of.
-  await withWindow(5_000, async () => {
-    const hub = createSseHub();
-    const w = hub.subscribe('b_x', fakeRes());
-    hub.setAttended('b_x', w, false);
-    assert.equal(hub.isConfirmedAttended('b_x'), false);
-    assert.equal(hub.isAttended('b_x'), false);
   });
 });
 
@@ -245,40 +168,42 @@ await check('the window is two minutes by default, and every unusable value fall
   // quietly reinstate "a buried tab is nobody watching" -- the exact defect ADR 73 fixes.
   assert.equal(DEFAULT_ATTENDED_WINDOW_MS, 120_000, 'the two minutes CONTEXT.md\'s "Attended" names');
   for (const bad of ['', '   ', '0', '-1', 'soon', 'NaN', '2m']) {
-    await withWindow(bad, async () => {
+    await withEnv({ CLAUDE_BOARD_ATTENDED_WINDOW_MS: bad }, async () => {
       const hub = createSseHub();
       const w = hub.subscribe('b_x', fakeRes());
       hub.setAttended('b_x', w, true);
       hub.setAttended('b_x', w, false);
-      await tick(30);
-      assert.equal(hub.isConfirmedAttended('b_x'), true,
+      await sleep(30);
+      assert.ok(hub.attendedRemainingMs('b_x') > 0,
         `CLAUDE_BOARD_ATTENDED_WINDOW_MS=${JSON.stringify(bad)} must fall back to the shipped two minutes, not to no window at all`);
     });
   }
 });
 
-await check('isAttended is the OR across every Watcher of one board', () => {
+await check('a board is Attended while any one of its Watchers is focused, whichever one it is', () => {
   const hub = createSseHub();
   const w1 = hub.subscribe('b_x', fakeRes());
   const w2 = hub.subscribe('b_x', fakeRes());
   hub.setAttended('b_x', w1, false);
   hub.setAttended('b_x', w2, false);
-  assert.equal(hub.isAttended('b_x'), false, 'both hidden: the board is not Attended');
+  assert.equal(hub.attendedRemainingMs('b_x'), 0, 'both hidden, neither ever focused: the board is not Attended');
 
   hub.setAttended('b_x', w1, true);
-  assert.equal(hub.isAttended('b_x'), true, 'either one looking is enough (AC 5)');
+  assert.equal(hub.attendedRemainingMs('b_x'), Infinity, 'either one looking is enough (AC 5)');
 
-  hub.setAttended('b_x', w1, false);
+  hub.setAttended('b_x', w1, false); // w1 is now only inside its look-away window
   hub.setAttended('b_x', w2, true);
-  assert.equal(hub.isAttended('b_x'), true, 'the OR does not care which Watcher it is');
+  assert.equal(hub.attendedRemainingMs('b_x'), Infinity,
+    'the OR does not care which Watcher it is: a reading of w1 alone would answer its window, not Infinity');
 });
 
-await check('a board never crosses into another (AC 9)', () => {
+await check('a Watcher on another board neither attends nor counts toward this one (AC 9)', () => {
   const hub = createSseHub();
   const wOther = hub.subscribe('b_other', fakeRes());
   hub.setAttended('b_other', wOther, true);
-  assert.equal(hub.isAttended('b_x'), false, 'a board with no Watchers of its own is not Attended');
-  assert.equal(hub.clientCount('b_x'), 0);
+  assert.equal(hub.attendedRemainingMs('b_other'), Infinity, 'the premise: the other board is being looked at');
+  assert.equal(hub.attendedRemainingMs('b_x'), 0, 'a board with no Watchers of its own is not Attended');
+  assert.equal(hub.clientCount('b_x'), 0, 'and has no connected client, whatever another board has');
 });
 
 await check('a Watcher that goes away stops counting, with no separate timeout', () => {
@@ -287,15 +212,15 @@ await check('a Watcher that goes away stops counting, with no separate timeout',
   const w2 = hub.subscribe('b_x', fakeRes());
   hub.setAttended('b_x', w1, false);
   hub.setAttended('b_x', w2, true);
-  assert.equal(hub.isAttended('b_x'), true);
+  assert.equal(hub.attendedRemainingMs('b_x'), Infinity);
 
   hub.unsubscribe('b_x', w2); // the one Watcher that was looking closes its tab
-  assert.equal(hub.isAttended('b_x'), false, 'closing the only attended tab must drop the board to unattended immediately');
+  assert.equal(hub.attendedRemainingMs('b_x'), 0, 'closing the only attended tab must drop the board to unattended immediately');
   assert.equal(hub.clientCount('b_x'), 1, 'the still-open (hidden) tab must still be counted as a Watcher');
 
   hub.unsubscribe('b_x', w1);
   assert.equal(hub.clientCount('b_x'), 0);
-  assert.equal(hub.isAttended('b_x'), false, 'no Watchers left at all is not Attended either');
+  assert.equal(hub.attendedRemainingMs('b_x'), 0, 'no Watchers left at all is not Attended either');
 });
 
 await check('two reports in flight at once are applied in the page\'s order, not the network\'s', () => {
@@ -303,33 +228,34 @@ await check('two reports in flight at once are applied in the page\'s order, not
   // connection for the later one while the first is still outstanding -- so the network
   // decides which lands first. Applied in arrival order, a blur overtaken by its own
   // earlier focus leaves the Watcher marked attended with the reviewer gone: then
-  // `isConfirmedAttended` is true forever, every evaluate resolves to a return, no grace
-  // is ever armed, and no banner fires for the rest of that wait, with no further DOM
-  // edge coming to correct it.
+  // `attendedRemainingMs` answers Infinity forever, every evaluate resolves to a return, no
+  // grace is ever armed, and no banner fires for the rest of that wait, with no further
+  // DOM edge coming to correct it.
   const hub = createSseHub();
   const w = hub.subscribe('b_x', fakeRes());
 
   assert.equal(hub.setAttended('b_x', w, false, 2), true, 'the blur, seq 2, arrives first');
-  assert.equal(hub.isConfirmedAttended('b_x'), false);
+  assert.equal(hub.attendedRemainingMs('b_x'), 0);
   assert.equal(hub.setAttended('b_x', w, true, 1), false, 'the focus it overtook, seq 1, is dropped');
-  assert.equal(hub.isConfirmedAttended('b_x'), false, 'so the reviewer is still correctly gone');
+  assert.equal(hub.attendedRemainingMs('b_x'), 0, 'so the reviewer is still correctly gone');
 
   assert.equal(hub.setAttended('b_x', w, true, 3), true, 'a genuinely newer edge still applies');
-  assert.equal(hub.isConfirmedAttended('b_x'), true);
+  assert.equal(hub.attendedRemainingMs('b_x'), Infinity);
   assert.equal(hub.setAttended('b_x', w, false, 3), false, 'a repeat of the same seq is not newer');
-  assert.equal(hub.isConfirmedAttended('b_x'), true);
+  // Infinity, not merely > 0: an applied blur would leave a running window, still > 0.
+  assert.equal(hub.attendedRemainingMs('b_x'), Infinity, 'so the tab is still focused');
 });
 
 await check('a report with no seq at all is applied, so a page predating the ordering still works', async () => {
-  await withWindow(40, async () => {
+  await withEnv({ CLAUDE_BOARD_ATTENDED_WINDOW_MS: 40 }, async () => {
     const hub = createSseHub();
     const w = hub.subscribe('b_x', fakeRes());
     assert.equal(hub.setAttended('b_x', w, true, 5), true);
     assert.equal(hub.setAttended('b_x', w, false), true, 'no seq: applied, degrade rather than refuse');
     // Applied, but the tab has only just lost focus, so it is still inside its look-away
     // window (ADR 73) -- the report having landed is what the window is measured FROM.
-    await tick(120);
-    assert.equal(hub.isAttended('b_x'), false);
+    await sleep(120);
+    assert.equal(hub.attendedRemainingMs('b_x'), 0, 'past the window: the unsequenced blur was applied');
     // ... and it leaves the counter alone, so seq'd reports still order among themselves.
     assert.equal(hub.setAttended('b_x', w, true, 4), false, 'still older than the seq 5 already applied');
   });
@@ -340,54 +266,20 @@ await check('a report naming an unknown watcher, or an unknown board, is a silen
   assert.equal(hub.setAttended('b_never_subscribed', 'deadbeef', true), false);
   const w1 = hub.subscribe('b_x', fakeRes());
   assert.equal(hub.setAttended('b_x', 'not-the-real-id', true), false, 'a stale id from a since-disconnected tab must not resurrect an entry');
-  assert.equal(hub.isAttended('b_x'), true, 'the real Watcher (default-Attended) must be untouched by the bogus report');
+  assert.equal(hub.attendedRemainingMs('b_x'), 0, 'the real Watcher, which has said nothing, must be untouched by the bogus report');
   hub.unsubscribe('b_x', w1);
 });
 
 // --- Layer 2: a real daemon, HTTP only ---------------------------------------------
 
-const home = mkdtempSync(path.join(tmpdir(), 'claude-board-attended-'));
-process.env.CLAUDE_BOARD_HOME = home;
-
-const SECRET_FILE = path.join(home, 'secret');
-const SECRET = 'b'.repeat(64);
-writeFileSync(SECRET_FILE, `${SECRET}\n`, { mode: 0o600 });
-process.env.CLAUDE_BOARD_SECRET_FILE = SECRET_FILE;
-
-function sessionCookieHeader() {
-  return `${SESSION_COOKIE}=${sessionToken(SECRET)}`;
-}
-
-/** Raw node:http request -- like test/check-http.mjs's own `rawRequest` -- because the
- * cookie and same-origin checks below need headers `fetch()` refuses to let a caller
- * set (`Cookie`, `Origin`, `Sec-Fetch-Site` are all forbidden headers for `fetch`). */
-function rawRequest(port, method, pathName, { headers = {}, body = null } = {}) {
-  return new Promise((resolve, reject) => {
-    const payload = body == null ? null : Buffer.from(body, 'utf8');
-    const req = http.request({
-      host: '127.0.0.1',
-      port,
-      method,
-      path: pathName,
-      headers: { host: `127.0.0.1:${port}`, ...headers, ...(payload ? { 'content-length': payload.length } : {}) },
-    }, res => {
-      const chunks = [];
-      res.on('data', c => chunks.push(c));
-      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString('utf8') }));
-    });
-    req.on('error', reject);
-    if (payload) req.write(payload);
-    req.end();
-  });
-}
+const { home, secret: SECRET } = secretHome('claude-board-attended-', { secret: 'b'.repeat(64) });
 
 /** Open a raw SSE connection and resolve with the first REAL (`event:`-carrying) frame
  * -- everything this check needs to prove is that `watcher` is the first EVENT the
  * stream sends, skipping past the leading `: connected\n\n` comment line, which is not
  * one (`handleEvents`, src/server.mjs, writes that ahead of the `watcher` event on
- * every connection). Mirrors test/check-http.mjs's own `openSseClient`, trimmed to one
- * frame. The caller owns destroying `req` when done, exactly as that helper
- * documents. */
+ * every connection). Mirrors test/support.mjs's `openSseClient`, trimmed to one frame.
+ * The caller owns destroying `req` when done. */
 function openSseAndReadFirstFrame(port, boardId, headers) {
   return new Promise((resolve, reject) => {
     const req = http.request(
@@ -454,7 +346,7 @@ async function main() {
 
   await check('AC 16: a forged cross-origin report is refused before it ever reaches the credential check', async () => {
     const r = await rawRequest(port, 'POST', `/api/board/${boardId}/attended`, {
-      headers: { 'content-type': 'application/json', origin: 'https://evil.example', cookie: sessionCookieHeader() },
+      headers: { 'content-type': 'application/json', origin: 'https://evil.example', cookie: sessionCookieHeader(SECRET) },
       body: JSON.stringify({ watcher: 'whatever', attended: true }),
     });
     assert.equal(r.status, 403, 'a page on another origin holding a stolen cookie must not be able to silence a banner');
@@ -468,7 +360,7 @@ async function main() {
           'content-type': 'application/json',
           origin: `http://127.0.0.1:${port}`,
           'sec-fetch-site': 'same-origin',
-          cookie: sessionCookieHeader(),
+          cookie: sessionCookieHeader(SECRET),
         },
         body: JSON.stringify({ watcher: watcher.id, attended: false }),
       });
@@ -477,14 +369,6 @@ async function main() {
     } finally {
       req.destroy();
     }
-  });
-
-  await check('the shim\'s own secret also works, same as every other write', async () => {
-    const r = await rawRequest(port, 'POST', `/api/board/${boardId}/attended`, {
-      headers: { 'content-type': 'application/json', [SECRET_HEADER]: SECRET },
-      body: JSON.stringify({ watcher: 'unknown-but-authorized', attended: true }),
-    });
-    assert.equal(r.status, 200);
   });
 
   await check('the route carries the sequence through, and refuses a malformed one', async () => {
@@ -557,18 +441,9 @@ async function main() {
   });
 }
 
-main()
-  .catch(err => {
-    failures++;
-    console.error('FAIL - unexpected error');
-    console.error(err);
-  })
-  .finally(() => {
+runMain('attended', main, {
+  cleanup: () => {
     if (server) server.close();
     rmSync(home, { recursive: true, force: true });
-    if (failures) {
-      console.error(`\n${failures} check(s) failed`);
-      process.exit(1);
-    }
-    console.log('\nall attended checks ok');
-  });
+  },
+});

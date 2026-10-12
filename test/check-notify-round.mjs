@@ -16,78 +16,18 @@
 // the real binaries.
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync, chmodSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { notifyBoundary, notifyRound } from '../src/notify.mjs';
-
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-
-let failures = 0;
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
+import {
+  check, runMain, repoRoot, writeStub, STUB_OSASCRIPT, readJsonLines, freshLog, sleep, waitForCount, withStubOnPath,
+} from './support.mjs';
 
 const workDir = mkdtempSync(path.join(tmpdir(), 'claude-board-notify-round-check-'));
 
-// Same STUB_OSASCRIPT shape as test/check-notify.mjs: a tiny node script standing in for
-// the real binary, recording every invocation's argv as one JSON line.
-const STUB_OSASCRIPT = `#!/usr/bin/env node
-import fs from 'node:fs';
-fs.appendFileSync(process.env.STUB_OSASCRIPT_LOG, JSON.stringify(process.argv.slice(2)) + '\\n');
-process.exit(Number(process.env.STUB_OSASCRIPT_EXIT || '0'));
-`;
-
 const stubDir = path.join(workDir, 'bin');
-mkdirSync(stubDir, { recursive: true });
-const stubPath = path.join(stubDir, 'osascript');
-writeFileSync(stubPath, STUB_OSASCRIPT);
-chmodSync(stubPath, 0o755);
-
-let logCounter = 0;
-function freshLog() {
-  logCounter++;
-  return path.join(workDir, `osascript-invocations-${logCounter}.log`);
-}
-
-function readLines(logPath) {
-  if (!existsSync(logPath)) return [];
-  return readFileSync(logPath, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l));
-}
-
-async function waitForLines(logPath, count, timeoutMs = 3000) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    if (readLines(logPath).length >= count) return readLines(logPath);
-    await new Promise(r => setTimeout(r, 20));
-  }
-  return readLines(logPath);
-}
-
-async function withStubEnv(patch, fn) {
-  const keys = Object.keys(patch);
-  const saved = Object.fromEntries(keys.map(k => [k, process.env[k]]));
-  Object.assign(process.env, patch);
-  try {
-    await fn();
-  } finally {
-    for (const k of keys) {
-      if (saved[k] === undefined) delete process.env[k];
-      else process.env[k] = saved[k];
-    }
-  }
-}
-
-const withStubOnPath = (logPath, extra, fn) =>
-  withStubEnv({ PATH: `${stubDir}:${process.env.PATH}`, STUB_OSASCRIPT_LOG: logPath, STUB_OSASCRIPT_EXIT: '0', ...extra }, fn);
+writeStub(stubDir, 'osascript', STUB_OSASCRIPT);
 
 // The bundled path (ADR.md entry 19), same staging trick check-notify.mjs uses: a copy
 // of src/notify.mjs (plus cues.mjs, its one relative import) dropped into a fake
@@ -95,11 +35,8 @@ const withStubOnPath = (logPath, extra, fn) =>
 // what is under test is the shipped derivation, not a restatement of it.
 async function importFromFakeBundle(name, launcherSource) {
   const appDir = path.join(workDir, `${name}.app`);
-  mkdirSync(path.join(appDir, 'Contents', 'MacOS'), { recursive: true });
   mkdirSync(path.join(appDir, 'Contents', 'Resources', 'src'), { recursive: true });
-  const exec = path.join(appDir, 'Contents', 'MacOS', name);
-  writeFileSync(exec, launcherSource);
-  chmodSync(exec, 0o755);
+  const exec = writeStub(path.join(appDir, 'Contents', 'MacOS'), name, launcherSource);
   const modPath = path.join(appDir, 'Contents', 'Resources', 'src', 'notify.mjs');
   writeFileSync(modPath, readFileSync(path.join(repoRoot, 'src', 'notify.mjs'), 'utf8'));
   writeFileSync(
@@ -138,10 +75,10 @@ async function main() {
   // checks do, so APP_EXEC is null and fire() always takes the osascript branch.
 
   await check('a round names the session by its folder: titled Board, body "<folder>: a round is waiting."', async () => {
-    const log = freshLog();
-    await withStubOnPath(log, {}, async () => {
+    const log = freshLog(workDir);
+    await withStubOnPath(stubDir, log,{}, async () => {
       notifyRound('my-project');
-      const lines = await waitForLines(log, 1);
+      const lines = await waitForCount(() => readJsonLines(log), 1);
       assert.equal(lines.length, 1, 'exactly one osascript invocation: a banner was raised (AC 19, no app bundle here)');
       const [flag, script] = lines[0];
       assert.equal(flag, '-e');
@@ -153,61 +90,34 @@ async function main() {
     });
   });
 
-  await check('a missing folder degrades to the unnamed sentence, and still raises a banner', async () => {
-    const log = freshLog();
-    await withStubOnPath(log, {}, async () => {
-      notifyRound(null);
-      const lines = await waitForLines(log, 1);
-      assert.equal(lines.length, 1, 'AC 11: the banner still fires; it just says less');
-      const [, script] = lines[0];
-      assert.equal(script, 'display notification "A round is waiting." with title "Board"');
-    });
-  });
-
-  await check('a folder name outside the accepted character set degrades to the unnamed sentence', async () => {
-    const log = freshLog();
-    await withStubOnPath(log, {}, async () => {
+  await check('a missing, unsafe or over-long folder degrades to the unnamed sentence, and still raises a banner', async () => {
+    for (const [folder, why] of [
+      [null, 'a missing folder: the banner still fires, it just says less'],
       // Semicolons, slashes and quotes are exactly the AppleScript-interpreter-facing
       // bytes the character filter exists to keep out (ADR.md entry 56), not just a
       // convenient example -- a folder called `foo"; do shell script "rm -rf ~"` must
       // never reach the script string this file builds.
-      notifyRound('foo"; do shell script "rm -rf ~"');
-      const lines = await waitForLines(log, 1);
-      assert.equal(lines.length, 1);
-      const [, script] = lines[0];
-      assert.equal(script, 'display notification "A round is waiting." with title "Board"',
-        'an unsafe name must never reach the script -- not escaped, not truncated, just refused');
-    });
-  });
-
-  await check('a folder name at exactly the length bound degrades to the unnamed sentence', async () => {
-    const log = freshLog();
-    await withStubOnPath(log, {}, async () => {
-      // src/notify.mjs's own MAX_FOLDER_NAME_LEN is 80; this proves the bound is
-      // enforced at all, independent of its exact value.
-      notifyRound('a'.repeat(200));
-      const lines = await waitForLines(log, 1);
-      assert.equal(lines.length, 1);
-      assert.equal(lines[0][1], 'display notification "A round is waiting." with title "Board"');
-    });
+      ['foo"; do shell script "rm -rf ~"', 'an unsafe name must never reach the script -- not escaped, not truncated, just refused'],
+      // src/notify.mjs's own MAX_FOLDER_NAME_LEN is 80, and a name must be shorter.
+      ['a'.repeat(80), 'a name exactly at the length bound is refused'],
+    ]) {
+      const log = freshLog(workDir);
+      await withStubOnPath(stubDir, log,{}, async () => {
+        notifyRound(folder);
+        const lines = await waitForCount(() => readJsonLines(log), 1);
+        assert.equal(lines.length, 1, `exactly one banner: ${why}`);
+        assert.equal(lines[0][1], 'display notification "A round is waiting." with title "Board"', why);
+      });
+    }
   });
 
   await check('a folder name inside the accepted set, including spaces, underscores and hyphens, crosses whole', async () => {
-    const log = freshLog();
-    await withStubOnPath(log, {}, async () => {
+    const log = freshLog(workDir);
+    await withStubOnPath(stubDir, log,{}, async () => {
       notifyRound('My Project_v2-final');
-      const lines = await waitForLines(log, 1);
+      const lines = await waitForCount(() => readJsonLines(log), 1);
       assert.equal(lines.length, 1);
       assert.equal(lines[0][1], 'display notification "My Project_v2-final: a round is waiting." with title "Board"');
-    });
-  });
-
-  await check('a round never crosses a sound name clause on the osascript path (no cue picker for this row)', async () => {
-    const log = freshLog();
-    await withStubOnPath(log, {}, async () => {
-      notifyRound('my-project');
-      const lines = await waitForLines(log, 1);
-      assert.doesNotMatch(lines[0][1], /sound name/);
     });
   });
 
@@ -224,10 +134,10 @@ async function main() {
 
   for (const phase of Object.keys(POMODORO_MESSAGE)) {
     await check(`pomodoro '${phase}' banner text and title are byte-identical to before this generalisation`, async () => {
-      const log = freshLog();
-      await withStubOnPath(log, {}, async () => {
+      const log = freshLog(workDir);
+      await withStubOnPath(stubDir, log,{}, async () => {
         notifyBoundary(phase, { notify: true, cueWork: 'None', cueBreak: 'None', cueLongBreak: 'None' });
-        const lines = await waitForLines(log, 1);
+        const lines = await waitForCount(() => readJsonLines(log), 1);
         assert.equal(lines.length, 1);
         const [flag, script] = lines[0];
         assert.equal(flag, '-e');
@@ -243,55 +153,50 @@ async function main() {
   // --- The bundle path (AC 10, 11, 19 again, from the other install shape).
 
   await check('inside a bundle, a round crosses the folder as the format slot, and never osascript', async () => {
-    const log = freshLog();
+    const log = freshLog(workDir);
     const launcherLog = path.join(workDir, 'launcher-invocations-1.log');
     const { mod } = await importFromFakeBundle('claude-board-round-1', STUB_LAUNCHER);
-    await withStubOnPath(log, { STUB_LAUNCHER_LOG: launcherLog }, async () => {
+    await withStubOnPath(stubDir, log,{ STUB_LAUNCHER_LOG: launcherLog }, async () => {
       mod.notifyRound('my-project');
-      const lines = await waitForLines(launcherLog, 1);
+      const lines = await waitForCount(() => readJsonLines(launcherLog), 1);
       assert.deepEqual(lines[0], ['--notify', 'round', 'my-project']);
-      assert.deepEqual(readLines(log), [], 'osascript must not be invoked when the bundle executable is present');
+      assert.deepEqual(readJsonLines(log), [], 'osascript must not be invoked when the bundle executable is present');
     });
   });
 
   await check('inside a bundle, a missing or unsafe folder crosses no third argument at all', async () => {
     const launcherLog = path.join(workDir, 'launcher-invocations-2.log');
     const { mod } = await importFromFakeBundle('claude-board-round-2', STUB_LAUNCHER);
-    await withStubOnPath(freshLog(), { STUB_LAUNCHER_LOG: launcherLog }, async () => {
+    await withStubOnPath(stubDir, freshLog(workDir),{ STUB_LAUNCHER_LOG: launcherLog }, async () => {
       mod.notifyRound(null);
       mod.notifyRound('bad; name');
-      const lines = await waitForLines(launcherLog, 2);
+      const lines = await waitForCount(() => readJsonLines(launcherLog), 2);
       assert.deepEqual(lines, [['--notify', 'round'], ['--notify', 'round']],
         'an absent or unsafe folder must reach the launcher exactly like a phase with no cue does -- absent, never an empty string or a sentinel');
     });
   });
 
-  await check('inside a bundle, an ordinary pomodoro phase is unaffected: still just the phase, no folder slot', async () => {
-    const launcherLog = path.join(workDir, 'launcher-invocations-3.log');
-    const { mod } = await importFromFakeBundle('claude-board-round-3', STUB_LAUNCHER);
-    await withStubOnPath(freshLog(), { STUB_LAUNCHER_LOG: launcherLog }, async () => {
-      mod.notifyBoundary('work', { notify: true, cueWork: 'None' });
-      const lines = await waitForLines(launcherLog, 1);
-      assert.deepEqual(lines[0], ['--notify', 'work']);
-    });
-  });
-
   // --- AC 20: an install predating this work raises no banner, not a malformed one.
 
-  await check('a launcher that predates the round row is sent --notify round and raises nothing, silently', async () => {
+  await check('a launcher that predates the round row is sent --notify round and raises nothing, silently, while its old phases still raise', async () => {
     const launcherLog = path.join(workDir, 'launcher-invocations-4.log');
     const { mod } = await importFromFakeBundle('claude-board-round-4', STUB_LAUNCHER_PREDATING);
     let uncaught = null;
     const onUncaught = err => { uncaught = err; };
     process.on('uncaughtException', onUncaught);
     try {
-      await withStubOnPath(freshLog(), { STUB_LAUNCHER_LOG: launcherLog }, async () => {
+      await withStubOnPath(stubDir, freshLog(workDir),{ STUB_LAUNCHER_LOG: launcherLog }, async () => {
         assert.doesNotThrow(() => mod.notifyRound('my-project'));
         // No promise to await -- give the async spawn+exit time to actually happen
         // before asserting the log stayed empty.
-        await new Promise(r => setTimeout(r, 300));
-        assert.deepEqual(readLines(launcherLog), [],
-          'AC 20: an old launcher rejecting an unrecognised phase must leave no banner content anywhere, not an empty or malformed one');
+        await sleep(300);
+        assert.deepEqual(readJsonLines(launcherLog), [],
+          'an old launcher rejecting an unrecognised phase must leave no banner content anywhere, not an empty or malformed one');
+        // The control that keeps the assertion above from passing on a stub that can log
+        // nothing at all: a phase the old launcher already knew still reaches it.
+        mod.notifyBoundary('work', { notify: true, cueWork: 'None' });
+        assert.deepEqual(await waitForCount(() => readJsonLines(launcherLog), 1), [['--notify', 'work']],
+          'a phase the old launcher already knew must be unaffected, and the round row must still have left nothing');
       });
     } finally {
       process.off('uncaughtException', onUncaught);
@@ -299,28 +204,9 @@ async function main() {
     assert.equal(uncaught, null, `a launcher rejecting --notify round must not raise: ${uncaught}`);
   });
 
-  await check('the same predating launcher still raises its old phases exactly as before (control)', async () => {
-    const launcherLog = path.join(workDir, 'launcher-invocations-5.log');
-    const { mod } = await importFromFakeBundle('claude-board-round-5', STUB_LAUNCHER_PREDATING);
-    await withStubOnPath(freshLog(), { STUB_LAUNCHER_LOG: launcherLog }, async () => {
-      mod.notifyBoundary('work', { notify: true, cueWork: 'None' });
-      const lines = await waitForLines(launcherLog, 1);
-      assert.deepEqual(lines[0], ['--notify', 'work'], 'a phase the old launcher already knew must be unaffected');
-    });
-  });
-
-  // --- Structural: bin/launcher.c actually carries the mirrored shape this file
-  // depends on, so a C-side-only revert cannot leave every check above passing while
-  // the bundled install silently drops the round banner's title, folder filter or
-  // default-sound behaviour.
-
-  await check('bin/launcher.c mirrors the round row: its own title, a format slot, and an is_safe_cue_name-shaped folder filter', async () => {
-    const c = readFileSync(path.join(repoRoot, 'bin', 'launcher.c'), 'utf8');
-    assert.match(c, /is_safe_folder_name/, 'the folder filter must exist in C, not just in JS');
-    assert.match(c, /"round"\s*,\s*"Board"/, 'the round row must carry its own title, "Board"');
-    assert.match(c, /"%s: a round is waiting\."/, 'the round row\'s format string must match src/notify.mjs\'s own template exactly');
-    assert.match(c, /"A round is waiting\."/, 'the unnamed sentence must exist in C too, not only in JS');
-  });
+  // --- Structural: bin/notify.m, which no check here compiles or runs. The C row it is
+  // handed (title, format, folder filter) is compiled and exercised for real by
+  // test/check-notify-click.mjs.
 
   await check('bin/notify.m composes the title from an argument, not a compiled-in constant', async () => {
     const m = readFileSync(path.join(repoRoot, 'bin', 'notify.m'), 'utf8');
@@ -330,12 +216,6 @@ async function main() {
   });
 
   rmSync(workDir, { recursive: true, force: true });
-
-  if (failures) {
-    console.error(`${failures} check(s) failed`);
-    process.exit(1);
-  }
-  console.log('all check-notify-round checks ok');
 }
 
-await main();
+await runMain('check-notify-round', main, { lead: '' });

@@ -10,8 +10,8 @@
 // One layer, deliberately: a real daemon on an ephemeral port, with the REAL
 // renderIndexPage output parsed by test/dom-stand-in.mjs and the REAL indexScript run
 // against it, its relative fetches rewritten onto that daemon and carrying the session
-// cookie a browser tab already holds. That is the same harness
-// test/check-pomodoro-page.mjs uses for the widget, and it is the only seam that can
+// cookie a browser tab already holds. That is test/support.mjs's `loadIndexAgainstDaemon`,
+// the harness test/check-pomodoro-page.mjs uses for the widget, and it is the only seam that can
 // prove the two halves meet: a rows endpoint nobody fetches, or a client patch fed a
 // hand-written payload, would each pass a narrower check and still leave the index stale.
 //
@@ -32,80 +32,31 @@
 // daemon-booting check in this suite uses.
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, chmodSync, readdirSync, unlinkSync, statSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, rmSync, writeFileSync, readFileSync, chmodSync, readdirSync, unlinkSync, statSync } from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
-import { SECRET_HEADER, SESSION_COOKIE, sessionToken } from '../src/secret.mjs';
+import { SECRET_HEADER } from '../src/secret.mjs';
 import { startServer } from '../src/server.mjs';
-import { renderIndexPage, indexScript } from '../src/indexpage.mjs';
-import { parseHTML, StandInEvent, StandInEventSource, fetchSettler } from './dom-stand-in.mjs';
+import { StandInEvent, fetchSettler } from './dom-stand-in.mjs';
+import { check, runMain, secretHome, writeStub, rawRequest, projectFor, pageHarness, postBoard, sleep } from './support.mjs';
 
-let failures = 0;
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
+const { loadIndexAgainstDaemon } = await pageHarness();
 
-const workDir = mkdtempSync(path.join(tmpdir(), 'claude-board-index-live-'));
+// The secret sits in the work dir itself and the daemon's home is a `store` folder inside
+// it, so CLAUDE_BOARD_HOME is set here rather than by `secretHome`.
+const { home: workDir, secret: SECRET } = secretHome('claude-board-index-live-', { secret: 'd'.repeat(64), setHome: false });
 const home = path.join(workDir, 'store');
 mkdirSync(home, { recursive: true });
 process.env.CLAUDE_BOARD_HOME = home;
-
-const SECRET = 'd'.repeat(64);
-const SECRET_FILE = path.join(workDir, 'secret');
-writeFileSync(SECRET_FILE, `${SECRET}\n`, { mode: 0o600 });
-process.env.CLAUDE_BOARD_SECRET_FILE = SECRET_FILE;
 
 // The banner rule must never reach the reviewer's screen from this file. Both guards, not
 // either: the grace makes it never fire, the PATH stub makes it harmless if it somehow did.
 process.env.CLAUDE_BOARD_STRANDED_GRACE_MS = String(24 * 60 * 60 * 1000);
 const stubDir = path.join(workDir, 'bin');
-mkdirSync(stubDir, { recursive: true });
-const stub = path.join(stubDir, 'osascript');
-writeFileSync(stub, '#!/bin/sh\nexit 0\n');
-chmodSync(stub, 0o755);
+writeStub(stubDir, 'osascript', '#!/bin/sh\nexit 0\n');
 process.env.PATH = `${stubDir}:${process.env.PATH}`;
 
-const sessionCookieHeader = () => `${SESSION_COOKIE}=${sessionToken(SECRET)}`;
-const REAL_FETCH = globalThis.fetch;
-
-function rawRequest(port, method, pathName, { headers = {}, body = null } = {}) {
-  return new Promise((resolve, reject) => {
-    const payload = body == null ? null : Buffer.from(body, 'utf8');
-    const req = http.request({
-      host: '127.0.0.1',
-      port,
-      method,
-      path: pathName,
-      headers: { host: `127.0.0.1:${port}`, ...headers, ...(payload ? { 'content-length': payload.length } : {}) },
-    }, res => {
-      const chunks = [];
-      res.on('data', c => chunks.push(c));
-      res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString('utf8') }));
-    });
-    req.on('error', reject);
-    if (payload) req.write(payload);
-    req.end();
-  });
-}
-
 const QUESTION = prompt => ({ kind: 'question', prompt, widget: 'single', options: [{ label: 'Yes' }] });
-
-async function postBoard(port, body) {
-  const r = await rawRequest(port, 'POST', '/api/board', {
-    headers: { 'content-type': 'application/json', [SECRET_HEADER]: SECRET },
-    body: JSON.stringify(body),
-  });
-  assert.equal(r.status, 200, `post failed: ${r.body}`);
-  return JSON.parse(r.body);
-}
 
 /** ADR 105: the Master switch ships off, so `ensure` (and the widget's own toggle,
  * which posts the same route) would no-op on a fresh document without this. */
@@ -117,62 +68,27 @@ async function enablePomodoro(port) {
   assert.equal(r.status, 200, `enabling the pomodoro switch failed: ${r.body}`);
 }
 
-function projectFor(name) {
-  const dir = path.join(workDir, name);
-  mkdirSync(dir, { recursive: true });
-  return dir;
-}
-
-/** Load the REAL index page and run the REAL indexScript against it, exactly as
- * test/check-pomodoro-page.mjs does -- see that file's comment on why the cookie is
- * attached by hand (node's fetch has no jar, and `credentials: 'same-origin'` does
- * nothing outside a browser). `intervals` captures every registration so the
- * fifteen-second tick can be fired by hand.
+/** One open index tab: test/support.mjs's `loadIndexAgainstDaemon` (the REAL index page
+ * with the REAL indexScript run against it, its fetches rewritten onto the daemon and
+ * carrying the session cookie) plus the two things only this file drives by hand, the
+ * fifteen-second tick, taken from the `intervals` the loader records, and a push
+ * dispatched into the listeners the real script registered on its own stream.
  *
  * `eventSource: false` loads the page in a scope with no EventSource in it at all --
  * an older browser, and the same shape test/check-pure.mjs's narrow function-extraction
  * stand-ins run this script under. The page must still work; that is criterion 5. */
 function openIndexTab(port, { threads = [], query = '', eventSource = true } = {}) {
-  const document = parseHTML(renderIndexPage({ threads, query }));
-  const intervals = [];
-  // Captured the way test/check-anchor-push.mjs captures the board page's own
-  // EventSource: a subclass whose constructor keeps the instance, so a check can
-  // dispatch into the very listeners the real script registered rather than calling
-  // patchRows/fetchPomodoro directly -- which would prove nothing about whether the
-  // subscription is wired at all. StandInEventSource (test/dom-stand-in.mjs) already
-  // models exactly as much of one as this needs: a url, addEventListener, and a
-  // dispatch that hands the listener a real string `ev.data`.
-  let stream = null;
-  class CapturingEventSource extends StandInEventSource {
-    constructor(url) { super(url); stream = this; }
-  }
-  globalThis.fetch = (url, opts) => {
-    const target = `http://127.0.0.1:${port}${url}`;
-    const headers = { ...(opts && opts.headers), cookie: sessionCookieHeader() };
-    return settler.track(REAL_FETCH(target, { ...opts, headers }));
-  };
-  // 'window'/'location' ride along for the same reason test/check-pomodoro-page.mjs
-  // passes them: indexScript registers a 'hashchange' listener for the settings
-  // panel the menu bar item opens, and a stand-in one parameter short of the real
-  // page throws on load rather than failing the thing under test. The window is the
-  // parsed document's own defaultView; location is a plain { hash }, empty because
-  // no check here is about the fragment. 'EventSource' is the fifth and newest: the
-  // page reads it through `typeof`, so passing nothing is a faithful browser without
-  // one rather than a broken harness.
-  new Function('document', 'setInterval', 'window', 'location', 'EventSource', indexScript)(document, (fn, ms) => {
-    intervals.push({ fn, ms });
-    return intervals.length;
-  }, document.defaultView, { hash: '' }, eventSource ? CapturingEventSource : undefined);
-  const poll = intervals.find(i => i.ms === 15000);
+  const tab = loadIndexAgainstDaemon(port, { secret: SECRET, page: { threads, query }, stream: eventSource, settler });
+  const poll = tab.intervals.find(i => i.ms === 15000);
   assert.ok(poll, 'setup failure: the index must register a fifteen-second tick');
   return {
-    document,
+    document: tab.document,
     /** The subscription the page opened, or null if it opened none. */
-    stream,
+    stream: tab.stream,
     /** One poll interval, as the page really runs it. */
     async tick() {
       poll.fn();
-      await flush();
+      await settle();
     },
     /** One push, delivered into the page's own listener exactly as the daemon wrote
      * it on the wire -- `data` is JSON.stringify'd here because a real EventSource
@@ -180,20 +96,22 @@ function openIndexTab(port, { threads = [], query = '', eventSource = true } = {
      * Asserts the subscription exists first: with the push path gone there is no
      * stream and no listener, and this says so instead of silently doing nothing. */
     async push(name, data) {
+      const stream = tab.stream;
       assert.ok(stream, `the index page must hold the daemon-wide stream open to hear '${name}': nothing constructed an EventSource`);
       const listeners = stream.listeners.get(name) || [];
       assert.ok(listeners.length, `the index page must listen for '${name}' on the daemon-wide stream`);
       stream.dispatch(name, JSON.stringify(data));
-      await flush();
+      await settle();
     },
-    restoreFetch() { globalThis.fetch = REAL_FETCH; },
+    restoreFetch: tab.restoreFetch,
   };
 }
 
 // Settling, not sleeping: node 26 broke the fixed-sleep version of this
-// (QUIRKS.md "A fixed flush sleep is a bet on node's loopback latency").
+// (QUIRKS.md "A fixed flush sleep is a bet on node's loopback latency"). The loader
+// tracks every page fetch on this one settler, so `settle` drains them all.
 const settler = fetchSettler();
-const flush = () => settler.settle();
+const settle = () => settler.settle();
 
 /** A second subscriber on `GET /api/events`, held open beside the page the way
  * bin/menubar.m holds it -- raw HTTP, no page, no client script (the shape
@@ -240,7 +158,7 @@ function openWireStream(port) {
       const hit = ready();
       if (hit) return hit;
       if (Date.now() >= deadline) throw new Error(`${what} never arrived within ${ms}ms -- the stream carried: ${JSON.stringify(raw)}`);
-      await new Promise(resolve => setTimeout(resolve, 20));
+      await sleep(20);
     }
   };
 
@@ -275,7 +193,7 @@ async function main() {
     // ---------------------------------------------------------------------------------
 
     await check('GET /api/index/rows answers the rows and nothing else -- no page, no styles, no board bodies', async () => {
-      const posted = await postBoard(port, { title: 'First session', blocks: [QUESTION('Ship?')], cwd: projectFor('alpha') });
+      const posted = await postBoard(port, SECRET, { title: 'First session', blocks: [QUESTION('Ship?')], cwd: projectFor(workDir, 'alpha') });
       const r = await rawRequest(port, 'GET', '/api/index/rows', { headers: { [SECRET_HEADER]: SECRET } });
       assert.equal(r.status, 200);
       const { html } = JSON.parse(r.body);
@@ -287,7 +205,7 @@ async function main() {
     });
 
     await check('the rows endpoint honours the same ?q= filter the page was rendered with', async () => {
-      await postBoard(port, { title: 'A different session', blocks: [QUESTION('And this?')], cwd: projectFor('beta') });
+      await postBoard(port, SECRET, { title: 'A different session', blocks: [QUESTION('And this?')], cwd: projectFor(workDir, 'beta') });
       const all = JSON.parse((await rawRequest(port, 'GET', '/api/index/rows', { headers: { [SECRET_HEADER]: SECRET } })).body);
       assert.equal((all.html.match(/class="thread-item/g) || []).length, 2, 'both sessions, unfiltered');
 
@@ -299,9 +217,9 @@ async function main() {
       assert.match(none.html, /No sessions match/, 'and an empty filter says so, rather than reading as an empty store');
     });
 
-    await check('the rows endpoint is behind the read credential, like the index it feeds', async () => {
+    await check('the rows endpoint answers 401 to a caller with no credential, like the index it feeds', async () => {
       const r = await rawRequest(port, 'GET', '/api/index/rows');
-      assert.notEqual(r.status, 200, 'a caller with no credential must not read the session list');
+      assert.equal(r.status, 401, 'a caller with no credential must be refused the session list, not merely fail to get it');
     });
 
     await check('an unchanged store answers the poll without parsing a single board document', async () => {
@@ -340,13 +258,13 @@ async function main() {
       // (the directory listing versus one entry's size and mtime).
       const before = JSON.parse((await rawRequest(port, 'GET', '/api/index/rows', { headers: { [SECRET_HEADER]: SECRET } })).body);
 
-      const posted = await postBoard(port, { title: 'Freshly posted', blocks: [QUESTION('New?')], cwd: projectFor('eta') });
+      const posted = await postBoard(port, SECRET, { title: 'Freshly posted', blocks: [QUESTION('New?')], cwd: projectFor(workDir, 'eta') });
       const added = JSON.parse((await rawRequest(port, 'GET', '/api/index/rows', { headers: { [SECRET_HEADER]: SECRET } })).body);
       assert.notEqual(added.html, before.html, 'a new board must be picked up');
       assert.ok(added.html.includes('Freshly posted'));
 
-      await new Promise(r => setTimeout(r, 1100)); // mtime has second resolution on some stores
-      await postBoard(port, { boardId: posted.boardId, blocks: [QUESTION('Amended?')] });
+      await sleep(1100); // mtime has second resolution on some stores
+      await postBoard(port, SECRET, { boardId: posted.boardId, blocks: [QUESTION('Amended?')] });
       const amended = JSON.parse((await rawRequest(port, 'GET', '/api/index/rows', { headers: { [SECRET_HEADER]: SECRET } })).body);
       assert.notEqual(amended.html, added.html, 'a board rewritten in place must be picked up too');
     });
@@ -366,7 +284,7 @@ async function main() {
       //
       // The other status checks in this file move a row by SUBMITTING, which writes, so
       // none of them can see this.
-      const posted = await postBoard(port, { title: 'About to lapse', blocks: [QUESTION('Quickly?')], cwd: projectFor('theta') });
+      const posted = await postBoard(port, SECRET, { title: 'About to lapse', blocks: [QUESTION('Quickly?')], cwd: projectFor(workDir, 'theta') });
       const tab = openIndexTab(port, { threads: [] });
       try {
         await tab.tick();
@@ -387,7 +305,7 @@ async function main() {
           'setup failure: the wait must still be alive at this point');
         const printBefore = statSync(path.join(home, 'boards', file)).mtimeMs;
 
-        await new Promise(r => setTimeout(r, 400)); // the wait dies, and NOTHING writes
+        await sleep(400); // the wait dies, and NOTHING writes
         assert.equal(statSync(path.join(home, 'boards', file)).mtimeMs, printBefore,
           'setup sanity: the board file really is untouched, so only a lapse can have changed the row');
 
@@ -423,7 +341,7 @@ async function main() {
         await tab.tick();
         assert.ok(rows(tab.document).length >= 2, 'the sessions already in the store arrive on the first tick');
 
-        const posted = await postBoard(port, { title: 'Posted after load', blocks: [QUESTION('Now?')], cwd: projectFor('gamma') });
+        const posted = await postBoard(port, SECRET, { title: 'Posted after load', blocks: [QUESTION('Now?')], cwd: projectFor(workDir, 'gamma') });
         await tab.tick();
         const row = rowFor(tab.document, posted.thread);
         assert.ok(row, 'the new session has a row of its own');
@@ -438,10 +356,10 @@ async function main() {
       // rather than a question, because a post into a still-open question round AMENDS it
       // (src/server.mjs handlePostBoard) instead of minting round 2 -- and a round count
       // that cannot move proves nothing.
-      const posted = await postBoard(port, {
+      const posted = await postBoard(port, SECRET, {
         title: 'Moving session',
         blocks: [{ kind: 'html', html: '<p>an artifact to comment on</p>' }],
-        cwd: projectFor('delta'),
+        cwd: projectFor(workDir, 'delta'),
         wait: true,
       });
       const tab = openIndexTab(port, { threads: [] });
@@ -456,8 +374,8 @@ async function main() {
         assert.match(beforeMeta, /1 round ·/, 'one round so far');
 
         // A second round on the same board: the count moves, the activity stamp moves.
-        await new Promise(r => setTimeout(r, 1100)); // updatedAt has second resolution
-        await postBoard(port, { boardId: posted.boardId, blocks: [QUESTION('And now?')] });
+        await sleep(1100); // updatedAt has second resolution
+        await postBoard(port, SECRET, { boardId: posted.boardId, blocks: [QUESTION('And now?')] });
         await tab.tick();
         const moved = rowFor(tab.document, posted.thread);
         assert.match(moved.querySelector('.thread-meta').textContent, /2 rounds ·/, 'the round count moved');
@@ -484,7 +402,7 @@ async function main() {
     });
 
     await check('criterion 9: a board that disappears from the store loses its row within one tick', async () => {
-      const posted = await postBoard(port, { title: 'Doomed session', blocks: [QUESTION('Briefly?')], cwd: projectFor('epsilon') });
+      const posted = await postBoard(port, SECRET, { title: 'Doomed session', blocks: [QUESTION('Briefly?')], cwd: projectFor(workDir, 'epsilon') });
       const tab = openIndexTab(port, { threads: [] });
       try {
         await tab.tick();
@@ -563,10 +481,11 @@ async function main() {
     });
 
     // ---------------------------------------------------------------------------------
-    // Criterion 10: an update preserves scroll position and the search box.
+    // Criteria 10 and 6: an update, from the tick or a push, preserves scroll position
+    // and the search box.
     // ---------------------------------------------------------------------------------
 
-    await check('criterion 10: a live update preserves scroll position and whatever is typed in the search box', async () => {
+    await check('criteria 10 and 6: a live update, from the tick or from a push, preserves scroll position and whatever is typed in the search box', async () => {
       const tab = openIndexTab(port, { threads: [] });
       try {
         await tab.tick();
@@ -580,7 +499,7 @@ async function main() {
         input.value = 'half-typed filt';
 
         // ... and while they are typing, a board lands.
-        await postBoard(port, { title: 'Landed mid-type', blocks: [QUESTION('Rudely?')], cwd: projectFor('zeta') });
+        await postBoard(port, SECRET, { title: 'Landed mid-type', blocks: [QUESTION('Rudely?')], cwd: projectFor(workDir, 'zeta') });
         await tab.tick();
         assert.ok(rows(tab.document).some(r => r.textContent.includes('Landed mid-type')),
           'setup failure: this only proves anything if the update really happened');
@@ -590,6 +509,21 @@ async function main() {
           'the search box is the same element -- a reload or a shell re-render would replace it');
         assert.equal(input.value, 'half-typed filt', 'and what was typed into it is still there');
         assert.equal(tab.document.querySelector('div.thread-list'), list, 'the list itself is patched, not replaced');
+        assert.equal(tab.document.querySelector('body'), body, 'and nothing above it is rebuilt');
+
+        // Criterion 6: the same five invariants when the update arrives on the daemon's
+        // push instead of the tick. The 'waiting' listener reaches the same patchRows, and
+        // a push that reloaded or re-rendered the shell would throw a half-typed filter
+        // away while the reader was still typing. A hand-shaped event is enough: the
+        // payload is not read, and criterion 1 below proves the daemon sends this name.
+        await postBoard(port, SECRET, { title: 'Pushed mid-type', blocks: [QUESTION('Rudely?')], cwd: projectFor(workDir, 'kappa') });
+        await tab.push('waiting', { total: 1, now: Date.now() });
+        assert.ok(rows(tab.document).some(r => r.textContent.includes('Pushed mid-type')),
+          'setup failure: this only proves anything if the push really updated the list');
+        assert.equal(tab.document.documentElement.scrollTop, 420, 'the scroll position survives a push');
+        assert.equal(tab.document.querySelector('input.search-input'), input, 'the search box is the same element after a push');
+        assert.equal(input.value, 'half-typed filt', 'and what was typed into it is still there');
+        assert.equal(tab.document.querySelector('div.thread-list'), list, 'the list is patched by a push too, not replaced');
         assert.equal(tab.document.querySelector('body'), body, 'and nothing above it is rebuilt');
       } finally {
         tab.restoreFetch();
@@ -644,7 +578,7 @@ async function main() {
       try {
         await wire.connected();
         await tab.tick(); // the list starts current, so what follows can only be the push
-        const posted = await postBoard(port, { title: 'Pushed in', blocks: [QUESTION('Heard?')], cwd: projectFor('iota'), wait: true });
+        const posted = await postBoard(port, SECRET, { title: 'Pushed in', blocks: [QUESTION('Heard?')], cwd: projectFor(workDir, 'iota'), wait: true });
         assert.equal(rowFor(tab.document, posted.thread), null, 'setup: the page cannot already know about it');
 
         // The daemon's own event, fed to the page verbatim. A page listening for a name
@@ -693,15 +627,15 @@ async function main() {
         const held = new Promise(resolve => { release = resolve; });
         globalThis.fetch = (url, opts) => inflight(url, opts).then(async r => { await held; return r; });
 
-        const first = await postBoard(port, { title: 'First of two', blocks: [QUESTION('One?')], cwd: projectFor('xi') });
+        const first = await postBoard(port, SECRET, { title: 'First of two', blocks: [QUESTION('One?')], cwd: projectFor(workDir, 'xi') });
         await tab.push('waiting', { total: 1, now: Date.now() }); // the fetch goes out, and parks
 
-        const second = await postBoard(port, { title: 'Second of two', blocks: [QUESTION('Two?')], cwd: projectFor('omicron') });
+        const second = await postBoard(port, SECRET, { title: 'Second of two', blocks: [QUESTION('Two?')], cwd: projectFor(workDir, 'omicron') });
         await tab.push('waiting', { total: 2, now: Date.now() }); // ... and this one meets a busy page
 
         release();
-        await flush(); // the parked answer lands: the first board, and only the first
-        await flush(); // and whatever the page owes itself for the push it could not serve
+        await settle(); // the parked answer lands: the first board, and only the first
+        await settle(); // and whatever the page owes itself for the push it could not serve
 
         globalThis.fetch = inflight;
         assert.ok(rowFor(tab.document, first.thread), 'the board the outstanding fetch already knew about');
@@ -720,7 +654,7 @@ async function main() {
       const tab = openIndexTab(port, { threads: [] });
       try {
         await wire.connected();
-        await flush(); // the widget's own load-time fetch settles: an idle daemon
+        await settle(); // the widget's own load-time fetch settles: an idle daemon
         const status = tab.document.querySelector('span#pomodoro-status');
         assert.match(status.textContent, /^Idle/, 'setup failure: the widget must start from an idle daemon');
 
@@ -758,7 +692,7 @@ async function main() {
       const tab = openIndexTab(port, { threads: [] });
       try {
         await wire.connected();
-        await flush();
+        await settle();
         const toggle = tab.document.querySelector('button#pomodoro-toggle');
         assert.equal(toggle.getAttribute('aria-checked'), 'false', 'setup failure: expected an idle daemon, so the press starts a timer');
 
@@ -774,39 +708,6 @@ async function main() {
       }
     });
 
-    await check('criterion 6: a push-driven update leaves scroll position and the search box exactly as they were', async () => {
-      // The tick-driven twin of this is 'criterion 10' above. Both matter, and they are
-      // the same code: a push calls the same patchRows, which replaces the contents of
-      // the list and nothing else. A push that reloaded, or re-rendered the shell, would
-      // throw away a half-typed filter -- and it would do it while the reader was typing,
-      // which is worse than a tick doing it fifteen seconds after they stopped.
-      //
-      // A hand-shaped event is enough here: the payload is deliberately not read (the
-      // check above is what proves the daemon really sends this name).
-      const tab = openIndexTab(port, { threads: [] });
-      try {
-        await tab.tick();
-        const input = tab.document.querySelector('input.search-input');
-        const list = tab.document.querySelector('div.thread-list');
-        const body = tab.document.querySelector('body');
-        tab.document.documentElement.scrollTop = 420;
-        input.value = 'half-typed filt';
-
-        await postBoard(port, { title: 'Pushed mid-type', blocks: [QUESTION('Rudely?')], cwd: projectFor('kappa') });
-        await tab.push('waiting', { total: 1, now: Date.now() });
-        assert.ok(rows(tab.document).some(r => r.textContent.includes('Pushed mid-type')),
-          'setup failure: this only proves anything if the push really updated the list');
-
-        assert.equal(tab.document.documentElement.scrollTop, 420, 'the scroll position survives a push');
-        assert.equal(tab.document.querySelector('input.search-input'), input, 'the search box is the same element');
-        assert.equal(input.value, 'half-typed filt', 'and what was typed into it is still there');
-        assert.equal(tab.document.querySelector('div.thread-list'), list, 'the list itself is patched, not replaced');
-        assert.equal(tab.document.querySelector('body'), body, 'and nothing above it is rebuilt');
-      } finally {
-        tab.restoreFetch();
-      }
-    });
-
     await check('criterion 5: with no stream at all, and with one that never says anything, the fifteen-second tick still does the whole job', async () => {
       // Nothing that works today gets slower. Two ways the stream can be unavailable: a
       // browser with no EventSource in it at all, and a connection that is made and then
@@ -815,7 +716,7 @@ async function main() {
       const blind = openIndexTab(port, { threads: [], eventSource: false });
       try {
         assert.equal(blind.stream, null, 'setup failure: nothing may have subscribed here');
-        const posted = await postBoard(port, { title: 'No stream here', blocks: [QUESTION('Still?')], cwd: projectFor('lambda') });
+        const posted = await postBoard(port, SECRET, { title: 'No stream here', blocks: [QUESTION('Still?')], cwd: projectFor(workDir, 'lambda') });
         await blind.tick();
         assert.ok(rowFor(blind.document, posted.thread), 'the tick alone still brings the row in, exactly as it always did');
       } finally {
@@ -825,7 +726,7 @@ async function main() {
       const silent = openIndexTab(port, { threads: [] });
       try {
         assert.ok(silent.stream, 'setup failure: this half is about a stream that connects and then says nothing');
-        const posted = await postBoard(port, { title: 'Silent stream', blocks: [QUESTION('Anyone?')], cwd: projectFor('mu') });
+        const posted = await postBoard(port, SECRET, { title: 'Silent stream', blocks: [QUESTION('Anyone?')], cwd: projectFor(workDir, 'mu') });
         await silent.tick(); // no push is ever delivered into this tab
         assert.ok(rowFor(silent.document, posted.thread), 'a silent stream must not cost the page its own tick');
       } finally {
@@ -849,7 +750,7 @@ async function main() {
       const tab = openIndexTab(port, { threads: [] });
       try {
         await tab.tick();
-        await flush();
+        await settle();
         assert.match(tab.document.querySelector('span#pomodoro-status').textContent, /^Idle/, 'setup failure: expected an idle daemon before the restart');
 
         await new Promise(resolve => {
@@ -864,7 +765,7 @@ async function main() {
 
         // Both changes happen while this page is disconnected, so neither can arrive as
         // an event -- they can only be found by asking.
-        const posted = await postBoard(port, { title: 'Landed while down', blocks: [QUESTION('Back?')], cwd: projectFor('nu') });
+        const posted = await postBoard(port, SECRET, { title: 'Landed while down', blocks: [QUESTION('Back?')], cwd: projectFor(workDir, 'nu') });
         await rawRequest(port, 'POST', '/api/pomodoro/ensure', { headers: { [SECRET_HEADER]: SECRET } });
         assert.equal(rowFor(tab.document, posted.thread), null, 'setup: the page cannot know about it yet');
 
@@ -882,21 +783,7 @@ async function main() {
     server.close();
     server.closeIdleConnections?.();
     server.closeAllConnections?.();
-    globalThis.fetch = REAL_FETCH;
   }
 }
 
-main()
-  .catch(err => {
-    failures++;
-    console.error('FAIL - unexpected error');
-    console.error((err && err.stack) || err);
-  })
-  .finally(() => {
-    rmSync(workDir, { recursive: true, force: true });
-    if (failures) {
-      console.error(`\n${failures} check(s) failed`);
-      process.exit(1);
-    }
-    console.log('\nall index-live checks ok');
-  });
+runMain('index-live', main, { cleanup: () => rmSync(workDir, { recursive: true, force: true }) });

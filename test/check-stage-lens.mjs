@@ -16,12 +16,13 @@
 //   - Esc and a backdrop click both close the lens, and focus goes
 //     back to the control that opened it.
 //   - a standalone stage is otherwise untouched -- the inline frame
-//     stays where it was rendered, stays the only '.html-stage' on the page while
-//     the lens is open, and its own click-to-comment gesture still works after.
+//     stays where it was rendered, and its own click-to-comment gesture still
+//     works after.
 //
 // The trust-boundary half of this feature -- the lens frame's sandbox attribute,
-// and what happens when that frame speaks on the stage message channel -- lives
-// in test/check-stage-isolation.mjs instead, next to the related checks it
+// that it never joins the page's '.html-stage' walk, and what happens when that
+// frame speaks on the stage message channel -- lives in
+// test/check-stage-isolation.mjs instead, next to the related checks it
 // belongs with.
 //
 // What this file cannot do, stated rather than faked (QUIRKS.md "The stand-in has
@@ -34,21 +35,11 @@
 import assert from 'node:assert/strict';
 import { createBoard, applySubmit } from '../src/board.mjs';
 import { renderBoardPage, renderBlock } from '../src/render.mjs';
-import { ui } from '../src/ui.mjs';
 import { styles } from '../src/styles.mjs';
-import { parseHTML, StandInEvent, resolveComputedProperty } from './dom-stand-in.mjs';
+import { StandInEvent, resolveComputedProperty } from './dom-stand-in.mjs';
+import { check, finish, pageHarness } from './support.mjs';
 
-let failures = 0;
-function check(name, fn) {
-  try {
-    fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
+const { loadBoard, enableCommentMode } = await pageHarness();
 
 // A mock that is taller than any stage will ever be and runs its own script --
 // the two things this is about (content that has somewhere to scroll to,
@@ -71,27 +62,6 @@ const board = createBoard({
 });
 const blockId = board.blocks[0].id;
 const pageHtml = renderBoardPage(board);
-
-/** Parse a rendered page and run the real `ui` client script against it -- the
- * loader every DOM-stand-in check in this repo uses (test/check-click.mjs's is
- * the original). A fresh document per call, so no check inherits another's
- * lens state. */
-function loadBoard(html = pageHtml, protocol = 'http:') {
-  const document = parseHTML(html);
-  const window = document.defaultView;
-  const location = { protocol };
-  // 'EventSource' declared, never passed -- see QUIRKS.md "A `new Function` harness
-  // inherits the host's globals".
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
-  return document;
-}
-
-function enableCommentMode(document) {
-  const toggle = document.getElementById('comment-mode-toggle');
-  assert.ok(toggle, 'setup failure: no #comment-mode-toggle rendered');
-  toggle.dispatchEvent(new StandInEvent('click'));
-  assert.equal(toggle.classList.contains('active'), true, 'setup failure: the toggle did not turn comment mode on');
-}
 
 function expandControl(document) {
   return document.querySelector('.html-block .expand-btn');
@@ -131,7 +101,7 @@ function variantBoard() {
 // -------------------------------------------------------------------------------
 
 check('a standalone html stage carries an expand control naming its own block, and clicking it opens the lens on that stage', () => {
-  const document = loadBoard();
+  const document = loadBoard(pageHtml);
   const btn = expandControl(document);
   assert.ok(btn, 'an html block\'s kicker must carry an expand control');
   assert.equal(btn.getAttribute('data-expand-for'), blockId, 'the control must name the block it opens');
@@ -185,7 +155,7 @@ check('an html block whose source failed to resolve carries NO expand control --
 // -------------------------------------------------------------------------------
 
 check('the lens frame is a live document running the mock\'s own script, not a picture of one', () => {
-  const document = loadBoard();
+  const document = loadBoard(pageHtml);
   const lens = openStageLens(document);
   lens.frame.loadSrcdoc(); // the srcdoc navigation completing, as a browser would
   assert.equal(lens.frame.contentWindow.__mockRan, 1,
@@ -218,22 +188,6 @@ check('nothing in the stylesheet makes the lens frame inert, while a variant opt
   assert.equal(resolveComputedProperty(styles, frame, true, 'width'), '100%');
 });
 
-check('the lens frame is not one of the page\'s wired stages -- it never joins the message-sender walk', () => {
-  // src/ui.mjs's findStageFrame walks qsa('.html-stage', document) and assumes
-  // every frame it finds is one block's INLINE stage (it reads the block id, the
-  // pin layer and the sentRefs off that frame's '.html-block' ancestor). The lens
-  // mounts a second frame for the same block, so it must stay out of that walk by
-  // construction -- see src/ui.mjs's own design comment. Asserted structurally
-  // here; that a message from it is actually inert is asserted adversarially in
-  // test/check-stage-isolation.mjs.
-  const document = loadBoard();
-  assert.equal(document.querySelectorAll('.html-stage').length, 1, 'setup failure: expected exactly one stage before the lens opens');
-  const lens = openStageLens(document);
-  assert.equal(document.querySelectorAll('.html-stage').length, 1,
-    'with the lens open there must still be exactly one .html-stage in the document -- the lens frame must not wear that class');
-  assert.equal(lens.frame.classList.contains('html-stage'), false, 'the lens frame must not carry the .html-stage class');
-});
-
 // -------------------------------------------------------------------------------
 //
 // Every close path is this page's own code rather than the browser's, and that is
@@ -244,7 +198,7 @@ check('the lens frame is not one of the page\'s wired stages -- it never joins t
 // own comment).
 
 check('Esc closes the lens and returns focus to the control that opened it', () => {
-  const document = loadBoard();
+  const document = loadBoard(pageHtml);
   const lens = openStageLens(document);
   assert.notEqual(document.activeElement, lens.btn, 'setup failure: focus must not already be on the control, or the assertion below proves nothing');
 
@@ -255,7 +209,7 @@ check('Esc closes the lens and returns focus to the control that opened it', () 
 
 check('a backdrop click closes the lens and returns focus -- both the dialog itself and the surround around the framed stage', () => {
   for (const targetName of ['dlg', 'body']) {
-    const document = loadBoard();
+    const document = loadBoard(pageHtml);
     const lens = openStageLens(document);
     lens[targetName].dispatchEvent(new StandInEvent('click'));
     assert.equal(lens.dlg.hasAttribute('open'), false, `a click on the ${targetName} must close the lens`);
@@ -267,7 +221,7 @@ check('a click on the lens chrome is NOT a backdrop click -- the bar and its tit
   // Without this, the "backdrop" test above would be satisfied by a lens that
   // closes on any click anywhere, which would make the pick control checks
   // below unreachable.
-  const document = loadBoard();
+  const document = loadBoard(pageHtml);
   const lens = openStageLens(document);
   document.querySelector('.stage-lens .lens-title').dispatchEvent(new StandInEvent('click'));
   assert.equal(lens.dlg.hasAttribute('open'), true, 'a click on the bar must not close the lens');
@@ -276,7 +230,7 @@ check('a click on the lens chrome is NOT a backdrop click -- the bar and its tit
 });
 
 check('the close control closes the lens, returns focus, and ends the copy\'s document rather than hiding it', () => {
-  const document = loadBoard();
+  const document = loadBoard(pageHtml);
   const lens = openStageLens(document);
   document.querySelector('.stage-lens .lens-btn[data-lens="close"]').dispatchEvent(new StandInEvent('click'));
   assert.equal(lens.dlg.hasAttribute('open'), false, 'the close control must close the lens');
@@ -286,7 +240,7 @@ check('the close control closes the lens, returns focus, and ends the copy\'s do
 });
 
 check('closing and reopening works, and a second open while already open is refused rather than stacking frames', () => {
-  const document = loadBoard();
+  const document = loadBoard(pageHtml);
   const first = openStageLens(document);
   first.btn.dispatchEvent(new StandInEvent('click')); // already open
   assert.equal(document.querySelectorAll('.stage-lens .stage-lens-frame').length, 1, 'a second open must not mount a second frame');
@@ -300,19 +254,8 @@ check('closing and reopening works, and a second open while already open is refu
 
 // -------------------------------------------------------------------------------
 
-check('opening the lens leaves the standalone block\'s own stage exactly where it was rendered', () => {
-  const document = loadBoard();
-  const inlineBefore = document.querySelector('.html-block .html-stage');
-  const lens = openStageLens(document);
-  const inlineDuring = document.querySelector('.html-block .html-stage');
-  assert.equal(inlineDuring, inlineBefore, 'the block must keep its own frame -- the lens must not move it');
-  assert.ok(inlineDuring.closest('.stage-wrap'), 'and it must still sit in its own .stage-wrap, beside its pin layer');
-  assert.equal(inlineBefore.closest('.stage-lens'), null, 'the block\'s frame must never end up inside the dialog');
-  assert.notEqual(lens.frame, inlineBefore, 'the lens shows a second mount, never the block\'s own frame');
-});
-
-check('the standalone stage\'s own click-to-comment gesture still works, before and after a trip through the lens', () => {
-  const document = loadBoard();
+check('the standalone stage stays where it was rendered while the lens is open, and its own click-to-comment gesture works before and after a trip through the lens', () => {
+  const document = loadBoard(pageHtml);
   enableCommentMode(document);
   const inline = document.querySelector('.html-block .html-stage');
   inline.loadSrcdoc();
@@ -322,7 +265,13 @@ check('the standalone stage\'s own click-to-comment gesture still works, before 
   assert.equal(form.classList.contains('open'), true, 'setup failure: the inline gesture must work to begin with');
   const refBefore = form.getAttribute('data-anchor-ref');
 
+  // While the lens is open the block keeps its own frame where it was
+  // rendered: the lens shows a second mount, it never moves this one.
   const lens = openStageLens(document);
+  assert.equal(document.querySelector('.html-block .html-stage'), inline, 'the block must keep its own frame -- the lens must not move it');
+  assert.ok(inline.closest('.stage-wrap'), 'and it must still sit in its own .stage-wrap, beside its pin layer');
+  assert.equal(inline.closest('.stage-lens'), null, 'the block\'s frame must never end up inside the dialog');
+  assert.notEqual(lens.frame, inline, 'the lens shows a second mount, never the block\'s own frame');
   document.dispatchEvent(new StandInEvent('keydown', { key: 'Escape' }));
   assert.equal(lens.dlg.hasAttribute('open'), false, 'setup failure: the lens did not close');
 
@@ -481,7 +430,7 @@ check('a historical option\'s lens carries a disabled control, and a read-only a
   // answer to record there -- the send bar is gone and every input is
   // hard-disabled -- and the diagram lens sets the same precedent by hosting no
   // comment form in an archive.
-  const archive = loadBoard(pageHtml, 'file:');
+  const archive = loadBoard(pageHtml, { protocol: 'file:' });
   const cards = archive.querySelectorAll('.choice-variant');
   cards[0].querySelector('.expand-btn').dispatchEvent(new StandInEvent('click'));
   assert.equal(archive.querySelector('.stage-lens').hasAttribute('open'), true,
@@ -489,8 +438,4 @@ check('a historical option\'s lens carries a disabled control, and a read-only a
   assert.equal(archive.querySelector('.stage-lens .lens-pick'), null, 'but it must carry no pick control');
 });
 
-if (failures) {
-  console.error(`\n${failures} stage-lens check(s) failed`);
-  process.exit(1);
-}
-console.log('\nall stage-lens checks ok');
+finish('stage-lens', { failText: n => `${n} stage-lens check(s) failed` });

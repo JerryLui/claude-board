@@ -37,10 +37,10 @@
 // mermaid parse error would). A mock that always redraws unconditionally
 // would stay green even if src/ui.mjs never restored anything.
 //
-// The mock above this comment used to be
+// The mock below this comment used to be
 // `async` in name only -- its body was a fully synchronous forEach, so it
-// could never interleave two calls, and every check up to this point in the
-// file drives exactly one `click(); await flush();` at a time. That is
+// could never interleave two calls, and every check ahead of the D1 and D2
+// sections drives exactly one `click(); await flush();` at a time. That is
 // EXACTLY the shape that let D1 (concurrent redraws corrupt a diagram) and D2
 // (a redraw overlapping the initial render permanently drops a diagram to a
 // '.missing' fallback) ship green: nothing in this file could ever express
@@ -54,47 +54,28 @@
 
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { createBoard, addRound, applySubmit, resolveComment } from '../src/board.mjs';
-import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock } from '../src/render.mjs';
-import { ui, MERMAID_TOKEN_MAP } from '../src/ui.mjs';
-import { themeBootScript, THEME_CHANGE_EVENT } from '../src/theme.mjs';
+import { createBoard, addRound, applySubmit } from '../src/board.mjs';
+import { renderBoardPage } from '../src/render.mjs';
+import { buildRoundPushPayload } from '../src/server.mjs';
+import { MERMAID_TOKEN_MAP } from '../src/ui.mjs';
+import { THEME_CHANGE_EVENT } from '../src/theme.mjs';
 import { palettes } from '../src/styles.mjs';
 import { MERMAID_NODE_SELECTOR, parseMermaidDomId } from '../src/anchor.mjs';
-import { parseHTML, StandInEvent, StandInEventSource, Element } from './dom-stand-in.mjs';
+import { parseHTML, StandInEvent, Element } from './dom-stand-in.mjs';
+import { check, finish, flush, pageHarness } from './support.mjs';
 
-let failures = 0;
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
-
-/** See test/check-mermaid-anchor.mjs's own comment on why this exists: lets a
- * check's async assertions run after renderMermaidBlocks'/redrawMermaidForTheme's
- * own async chain (mermaidMod.run(), or the theme-switch redraw it triggers)
- * has actually settled, not just been kicked off. Now that mockMermaidThemeAware
- * (below) yields for real between and mid-node -- and src/ui.mjs's own
- * queueMermaidTask defers a whole pass's start until every earlier one has
- * resolved -- a single macrotask tick is no longer enough for a multi-node,
- * possibly multi-pass chain to fully settle; this chains many ticks instead
- * of guessing one long delay, so it resolves as soon as everything is
- * actually idle regardless of how many nodes or overlapping passes a given
- * check exercises. */
-function flush(ticks = 40) {
-  return new Promise(resolve => {
-    let n = 0;
-    (function tick() {
-      n++;
-      if (n > ticks) { resolve(); return; }
-      setTimeout(tick, 0);
-    })();
-  });
-}
+// Every page here loads with `theme` and `finish` set: the real boot script
+// runs before the real client script, the order a real page executes them in,
+// and `document.finishParsing()` then wires the theme control's click listener
+// (themeBootScript's `wire()` waits behind `DOMContentLoaded`), which every
+// check that clicks the control depends on.
+//
+// `await flush()` is the default 40 macrotask hops, not one: mockMermaidThemeAware
+// (below) yields for real between and mid-node, and src/ui.mjs's own
+// queueMermaidTask defers a whole pass's start until every earlier one has
+// resolved, so a single hop is not enough for a multi-node, possibly
+// multi-pass chain to settle.
+const { loadBoard, loadBoardWithEventSource, clickThemeToggle } = await pageHarness();
 
 const REAL = JSON.parse(readFileSync(new URL('./fixtures/mermaid-real-ids.json', import.meta.url), 'utf8'));
 const BASE_TS = Number(REAL.svgId.match(/\d+$/)[0]);
@@ -110,18 +91,13 @@ function svgIdFor(call, nodeIndex) {
   return 'mermaid-' + (BASE_TS + call * 1000 + nodeIndex);
 }
 
-/** A real macrotask yield -- the async boundary a concurrent, un-awaited pass
- * can land inside, the same way real mermaid's own internal awaits do. */
-function tick() {
-  return new Promise(resolve => setTimeout(resolve, 0));
-}
-
 /** Unlike the ORIGINAL version of this mock (an
  * `async` function whose body was a fully synchronous forEach, so `run()`
  * always resolved within the same microtask turn it was called in, and two
  * calls could therefore never interleave), this one processes nodes ONE AT A
- * TIME with a real `await tick()` in two places per node -- exactly where
- * real mermaid 11 yields: AFTER claiming 'data-processed' but before doing
+ * TIME with a real macrotask yield (`await flush(1)`: the async boundary a
+ * concurrent, un-awaited pass can land inside) in two places per node -- exactly
+ * where real mermaid 11 yields: AFTER claiming 'data-processed' but before doing
  * any drawing, and AFTER clearing innerHTML but before writing the final
  * svg. Both are read/write seams a differently-scheduled call can land
  * inside if src/ui.mjs does not serialize its own callers first.
@@ -151,7 +127,7 @@ function mockMermaidThemeAware() {
         if (n.getAttribute('data-processed') === 'true') continue; // real mermaid: already-processed node, no-op, no yield
         // Real mermaid 11: claims the node BEFORE its own per-node await.
         n.setAttribute('data-processed', 'true');
-        await tick();
+        await flush(1);
         // Real mermaid's render(): reads the node's CURRENT text fresh right
         // here, not a value captured back when run() was first called.
         const source = String(n.textContent || '');
@@ -163,7 +139,7 @@ function mockMermaidThemeAware() {
         // Real mermaid's render(): innerHTML = '' happens before ITS OWN
         // first await -- the exact seam D1's corruption depends on.
         n.innerHTML = '';
-        await tick();
+        await flush(1);
         n.innerHTML = ''
           + `<svg id="${svgId}">`
           + `<g class="node" id="${svgId}-flowchart-A-12"><rect></rect><text class="nodeLabel">Start</text></g>`
@@ -172,42 +148,6 @@ function mockMermaidThemeAware() {
       }
     },
   };
-}
-
-/** Runs the REAL boot script and the REAL client script together, in the same
- * order a real page executes them (the head boot script first -- it owns
- * THEME_CHANGE_EVENT's dispatch -- then ui's own deferred module script,
- * which listens for it), against a freshly parsed document. A freshly parsed
- * document now starts `readyState === 'loading'`, so
- * `document.finishParsing()` (dom-stand-in.mjs) is needed after both scripts
- * have run to simulate the parser reaching the end of the document -- that is
- * what actually wires the theme control's click listener (themeBootScript's
- * `wire()`, deferred behind a `DOMContentLoaded` listener registered because
- * `readyState` was still 'loading' when it ran); every check below that
- * clicks the control depends on this having happened first.
- *
- * Neither script gets a real EventSource here -- nothing in this file's
- * theme-switch checks dispatches over a stream, only loadBoardWithEventSource
- * further down does that. 'EventSource' is still declared as a named
- * parameter of both `new Function` calls and simply never passed, so each
- * script sees no subscription rather than reaching past its declared scope
- * for whatever the node process itself carries under that name. */
-async function loadBoard(pageHtml, mermaidMock) {
-  const document = parseHTML(pageHtml);
-  const window = document.defaultView;
-  if (mermaidMock) window.mermaid = mermaidMock;
-  const location = { protocol: 'http:' };
-  new Function('document', 'window', 'location', 'EventSource', themeBootScript)(document, window, location, undefined);
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location, undefined);
-  document.finishParsing();
-  await flush();
-  return document;
-}
-
-function clickThemeToggle(document) {
-  const btn = document.getElementById('theme-toggle');
-  assert.ok(btn, 'setup failure: no #theme-toggle rendered');
-  btn.dispatchEvent(new StandInEvent('click'));
 }
 
 // =================================================================================
@@ -245,6 +185,13 @@ check('cascade: every (OS preference, data-theme) combination resolves to the in
     const got = window.getComputedStyle(docEl).getPropertyValue('--panel-2');
     assert.equal(got, palettes[expect]['--panel-2'],
       `OS ${systemDark ? 'dark' : 'light'} + data-theme=${attr || '(none)'} must resolve to ${expect}'s --panel-2, got "${got}"`);
+    // Every token, not one: a later rule restating a single token (say --bg) in
+    // every theme breaks that token alone and leaves --panel-2 right.
+    for (const [token, want] of Object.entries(palettes[expect])) {
+      const value = window.getComputedStyle(docEl).getPropertyValue(token);
+      assert.equal(value, want,
+        `OS ${systemDark ? 'dark' : 'light'} + data-theme=${attr || '(none)'} must resolve ${token} to ${expect}'s, got "${value}"`);
+    }
   }
 });
 
@@ -256,7 +203,8 @@ await check('mermaid: themeVariables are read from live computed style and diffe
   const board = createBoard({ title: 'Theme-aware diagram', blocks: [{ kind: 'mermaid', text: DIAGRAM_SOURCE }] });
   const html = renderBoardPage(board);
   const mock = mockMermaidThemeAware();
-  const document = await loadBoard(html, mock);
+  const document = loadBoard(html, { mermaid: mock, theme: true, finish: true });
+  await flush();
 
   assert.equal(mock.initCalls.length, 1, 'setup failure: initialize must run once at first render');
   assert.equal(mock.initCalls[0].themeVariables.primaryColor, palettes.dark['--panel-2'],
@@ -282,7 +230,8 @@ await check('mermaid: darkMode flips with the theme, not pinned true', async () 
   const board = createBoard({ title: 'darkMode flip', blocks: [{ kind: 'mermaid', text: DIAGRAM_SOURCE }] });
   const html = renderBoardPage(board);
   const mock = mockMermaidThemeAware();
-  const document = await loadBoard(html, mock);
+  const document = loadBoard(html, { mermaid: mock, theme: true, finish: true });
+  await flush();
 
   assert.equal(mock.initCalls[0].themeVariables.darkMode, true, 'setup failure: page must start dark by this stand-in\'s system default');
 
@@ -309,7 +258,8 @@ await check('mermaid: every pre.mermaid on the page is re-run after a switch, no
   });
   const html = renderBoardPage(board);
   const mock = mockMermaidThemeAware();
-  const document = await loadBoard(html, mock);
+  const document = loadBoard(html, { mermaid: mock, theme: true, finish: true });
+  await flush();
 
   const svgsBefore = document.querySelectorAll('pre.mermaid svg').map(svg => svg.getAttribute('id'));
   assert.equal(svgsBefore.length, 2, 'setup failure: both diagrams must render before any switch');
@@ -333,7 +283,8 @@ await check('mermaid: cycling the theme control repeatedly does not stack click 
   const blockId = board.blocks[0].id;
   const html = renderBoardPage(board);
   const mock = mockMermaidThemeAware();
-  const document = await loadBoard(html, mock);
+  const document = loadBoard(html, { mermaid: mock, theme: true, finish: true });
+  await flush();
 
   const preEl = document.querySelector('.mermaid-block pre.mermaid');
   assert.ok(preEl, 'setup failure: no pre.mermaid rendered');
@@ -409,7 +360,8 @@ await check('mermaid (D1): two redraws started before the first settles leave ev
   });
   const html = renderBoardPage(board);
   const mock = mockMermaidThemeAware();
-  const document = await loadBoard(html, mock);
+  const document = loadBoard(html, { mermaid: mock, theme: true, finish: true });
+  await flush();
 
   assert.equal(document.querySelectorAll('pre.mermaid svg').length, 2, 'setup failure: both diagrams must render before either click');
 
@@ -441,7 +393,8 @@ await check('mermaid (D1): three theme clicks queued back to back before any set
   const board = createBoard({ title: 'D1 -- coalescing', blocks: [{ kind: 'mermaid', text: DIAGRAM_SOURCE }] });
   const html = renderBoardPage(board);
   const mock = mockMermaidThemeAware();
-  const document = await loadBoard(html, mock);
+  const document = loadBoard(html, { mermaid: mock, theme: true, finish: true });
+  await flush();
 
   const initCallsBefore = mock.initCalls.length; // 1, from the initial render
   clickThemeToggle(document); // System -> Light
@@ -469,21 +422,11 @@ await check('mermaid (D2): a redraw overlapping the initial render never replace
   });
   const html = renderBoardPage(board);
   const mock = mockMermaidThemeAware();
-  const document = parseHTML(html);
-  const window = document.defaultView;
-  window.mermaid = mock;
-  const location = { protocol: 'http:' };
-  // Inlined rather than calling loadBoard: this check needs to click BEFORE
-  // the `await flush()` loadBoard itself does, to land squarely inside the
-  // still-in-flight initial render. 'EventSource' declared and unpassed on
-  // both calls for the same reason as loadBoard's own -- see that function's
-  // comment.
-  new Function('document', 'window', 'location', 'EventSource', themeBootScript)(document, window, location, undefined);
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location, undefined);
-  // Wires the theme control's click listener (see
-  // loadBoard's own comment) -- synchronous, so it does not disturb the
-  // still-in-flight mermaid render this check depends on below.
-  document.finishParsing();
+  // No `await flush()` after this load, unlike every other check here: the
+  // load itself is synchronous (`finish`, which wires the theme control's
+  // click listener, included), so it does not disturb the still-in-flight
+  // mermaid render this check depends on below.
+  const document = loadBoard(html, { mermaid: mock, theme: true, finish: true });
   // The initial renderMermaidBlocks(document) call the script just kicked off
   // is still mid-flight here (fire-and-forget, not yet past its own first
   // internal yield) -- click NOW, before any flush, to land a redraw request
@@ -507,45 +450,10 @@ await check('mermaid (D2): a redraw overlapping the initial render never replace
 //    very first ever.
 // =================================================================================
 
-/** Same shape as test/check-anchor-push.mjs's own helper of the same name --
- * reimplemented locally (this file has no reason to import a sibling check
- * file) so a check here can push a follow-up round exactly the way a real
- * server broadcast does. */
-function buildRoundPushPayload(board, round, mode, blockIds) {
-  const resolvedComments = board.comments.map(c => resolveComment(board, c));
-  const commentsByBlock = groupCommentsByBlock(resolvedComments);
-  const boardForClient = { ...board, comments: resolvedComments };
-  const html = mode === 'new-round'
-    ? renderRoundSection(board, round, commentsByBlock)
-    : blockIds.map(id => {
-      const block = board.blocks.find(b => b.id === id);
-      return block ? renderBlock(block, board, commentsByBlock, false) : '';
-    }).join('\n');
-  return { round, mode, blockIds, html, board: boardForClient };
-}
-
-/** Like loadBoard above, but declares 'EventSource' as a named parameter of the
- * `ui` call and passes it a captured, stubbed instance (test/check-anchor-push.mjs's
- * loadBoardWithEventSource, reimplemented locally for the same reason as
- * buildRoundPushPayload above) so a check can `.dispatch('round', ...)` a
- * follow-up round. themeBootScript never reads the name at all, so its own
- * call still declares 'EventSource' but never passes anything for it, same as
- * loadBoard above. Does not flush -- callers control that themselves. */
-function loadBoardWithEventSource(pageHtml, mermaidMock) {
-  let captured = null;
-  class CapturingEventSource extends StandInEventSource {
-    constructor(url) { super(url); captured = this; }
-  }
-  const document = parseHTML(pageHtml);
-  const window = document.defaultView;
-  if (mermaidMock) window.mermaid = mermaidMock;
-  const location = { protocol: 'http:' };
-  new Function('document', 'window', 'location', 'EventSource', themeBootScript)(document, window, location, undefined);
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location, CapturingEventSource);
-  document.finishParsing(); // see loadBoard's own comment
-  assert.ok(captured, 'setup failure: the real ui script never constructed an EventSource -- fix the fixture (readonly must be false), not this file');
-  return { document, es: captured, window };
-}
+// The two checks below load through test/support.mjs's loadBoardWithEventSource,
+// which passes the `ui` call a captured, stubbed EventSource so a check can
+// `.dispatch('round', ...)` a follow-up round built by src/server.mjs's own
+// buildRoundPushPayload, the payload a real broadcast sends.
 
 await check('mermaid (M1): initialize runs before EVERY run(), not just the very first ever -- a round pushed after a theme switch, with nothing in between to redraw, still gets the CURRENT palette', async () => {
   // Round 1: a real diagram, rendered by the mock -- mermaidMod is set and
@@ -555,7 +463,7 @@ await check('mermaid (M1): initialize runs before EVERY run(), not just the very
   // "already configured, never again".
   const board = createBoard({ title: 'M1', blocks: [{ kind: 'mermaid', text: DIAGRAM_SOURCE }] });
   const mock = mockMermaidThemeAware();
-  const { document, es } = loadBoardWithEventSource(renderBoardPage(board), mock);
+  const { document, es } = loadBoardWithEventSource(renderBoardPage(board), { mermaid: mock, theme: true, finish: true });
   await flush();
 
   assert.ok(document.querySelector('pre.mermaid svg'), 'setup failure: round 1\'s diagram must actually render');
@@ -618,7 +526,7 @@ await check('the window.mermaid clobber does not permanently poison mermaidMod -
   // clobber check uses -- truthy, no run/initialize.
   const clobber = new Element('div');
   clobber.setAttribute('id', 'mermaid');
-  const { document, es, window } = loadBoardWithEventSource(renderBoardPage(board), clobber);
+  const { document, es, window } = loadBoardWithEventSource(renderBoardPage(board), { mermaid: clobber, theme: true, finish: true });
   await flush();
 
   assert.ok(document.querySelector('.mermaid-block .missing'), 'setup failure: round 1 must take the engine-unavailable fallback against a clobbering element');
@@ -658,7 +566,8 @@ await check('mermaid (M2): an unresolvable/renamed token aborts the redraw befor
   });
   const html = renderBoardPage(board);
   const mock = mockMermaidThemeAware();
-  const document = await loadBoard(html, mock);
+  const document = loadBoard(html, { mermaid: mock, theme: true, finish: true });
+  await flush();
 
   const svgIdsBefore = document.querySelectorAll('pre.mermaid svg').map(svg => svg.getAttribute('id'));
   assert.equal(svgIdsBefore.length, 2, 'setup failure: both diagrams must render before the simulated rename');
@@ -710,7 +619,8 @@ await check('mermaid (H4): the OS preference flipping while System is in force f
   const board = createBoard({ title: 'H4 -- system flip', blocks: [{ kind: 'mermaid', text: DIAGRAM_SOURCE }] });
   const html = renderBoardPage(board);
   const mock = mockMermaidThemeAware();
-  const document = await loadBoard(html, mock);
+  const document = loadBoard(html, { mermaid: mock, theme: true, finish: true });
+  await flush();
   const window = document.defaultView;
 
   assert.equal(document.documentElement.hasAttribute('data-theme'), false, 'setup failure: the page must start in System mode');
@@ -733,7 +643,8 @@ await check('mermaid (H4): the OS preference flipping is correctly ignored while
   const board = createBoard({ title: 'H4 -- ignored while override', blocks: [{ kind: 'mermaid', text: DIAGRAM_SOURCE }] });
   const html = renderBoardPage(board);
   const mock = mockMermaidThemeAware();
-  const document = await loadBoard(html, mock);
+  const document = loadBoard(html, { mermaid: mock, theme: true, finish: true });
+  await flush();
   const window = document.defaultView;
 
   clickThemeToggle(document); // System -> Light: an explicit override now in force
@@ -777,7 +688,8 @@ await check('the lens: a theme switch while the lens is OPEN re-clones the redra
   }, 1);
   const html = renderBoardPage(board);
   const mock = mockMermaidThemeAware();
-  const document = await loadBoard(html, mock);
+  const document = loadBoard(html, { mermaid: mock, theme: true, finish: true });
+  await flush();
   const window = document.defaultView;
 
   const inlineBefore = document.querySelector('.mermaid-block pre.mermaid svg');
@@ -824,8 +736,4 @@ await check('the lens: a theme switch while the lens is OPEN re-clones the redra
     'the pin must be redrawn against the NEW clone: renderLensPins measures positions off the very element the retheme just replaced');
 });
 
-if (failures) {
-  console.error(`\n${failures} check(s) failed`);
-  process.exit(1);
-}
-console.log('\nall mermaid-theme checks ok');
+await finish('mermaid-theme');

@@ -30,46 +30,12 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { createBoard, applySubmit, buildPacket, resolveComment } from '../src/board.mjs';
+import { createBoard, applySubmit, buildPacket } from '../src/board.mjs';
 import { renderBoardPage } from '../src/render.mjs';
-import { ui } from '../src/ui.mjs';
-import { parseHTML, StandInEvent } from './dom-stand-in.mjs';
+import { StandInEvent } from './dom-stand-in.mjs';
+import { check, finish, pageHarness } from './support.mjs';
 
-let failures = 0;
-function check(name, fn) {
-  try {
-    fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
-
-/** Parse a rendered page and run the real `ui` client script against it, exactly
- * like test/check-comment-mode.mjs's loadBoard -- a fresh document every call. */
-function loadBoard(pageHtml) {
-  const document = parseHTML(pageHtml);
-  const window = document.defaultView;
-  const location = { protocol: 'http:' };
-  // 'EventSource' declared, never passed -- see QUIRKS.md "A `new Function` harness
-  // inherits the host's globals".
-  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
-  return document;
-}
-
-function enableCommentMode(document) {
-  const toggle = document.querySelector('button#comment-mode-toggle');
-  assert.ok(toggle, 'setup failure: no #comment-mode-toggle rendered');
-  toggle.dispatchEvent(new StandInEvent('click'));
-  assert.equal(toggle.classList.contains('active'), true, 'setup failure: the toggle did not turn comment mode on');
-}
-
-function directChildPinLayer(section) {
-  return Array.prototype.slice.call(section.children || [])
-    .find(c => c.classList && c.classList.contains('pin-layer')) || null;
-}
+const { loadBoard, enableCommentMode, directChildPinLayer } = await pageHarness();
 
 // --- a page-scoped dom anchor that no longer resolves: named, not vanished ----
 
@@ -125,12 +91,6 @@ check('what the agent reads -- buildPacket reports a lost page-scoped dom anchor
   assert.equal(c.lost, 'a sentence that used to live here', 'the stored hint is what survives when the element does not');
   assert.equal(c.text, 'this used to point at a real sentence', 'the comment text itself is untouched');
   assert.equal(c.blockId, lostBlockId);
-});
-
-check('resolveComment agrees, directly -- its own shape is untouched by the packet-only drop, since src/render.mjs and src/ui.mjs still branch on `.resolved`', () => {
-  const resolved = resolveComment(lostBoard, lostBoard.comments[0]);
-  assert.equal(resolved.resolved, false);
-  assert.equal(resolved.lost, 'a sentence that used to live here');
 });
 
 check('what the reviewer sees -- a lost page-scoped dom anchor draws a pin-lost pin and a "lost: <hint>" comment-list entry, never a silently missing comment', () => {
@@ -296,8 +256,4 @@ check('an archived board carrying stored markdown comments renders without them 
   assert.ok(pageHtml.includes('#4 · A'), 'the mermaid node-id comment must render resolved (its node id, not "lost: ...")');
 });
 
-if (failures) {
-  console.error(`\n${failures} check(s) failed`);
-  process.exit(1);
-}
-console.log('\nall anchor-rerender checks ok');
+finish('anchor-rerender');

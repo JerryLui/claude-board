@@ -73,7 +73,7 @@ function registerStrandedWatch(watch) {
 /** The stranded rule (ADR.md entries 55 and 58). Reads `sse.attendedRemainingMs`, its
  * machine-wide twin `sse.attendedAnywhereRemainingMs` (which of the two the Banner level
  * asks for is `mutedForMs` below), and nothing else the daemon does not already know. It
- * asked `sse.isConfirmedAttended` until ADR.md entry 73 gave the hub a clock: a boolean
+ * asked the hub a yes-or-no question until ADR.md entry 73 gave the hub a clock: a boolean
  * cannot say WHEN a board stops being attended, and this rule has to arm a timer for that
  * moment because nothing fires when a look-away window expires.
  *

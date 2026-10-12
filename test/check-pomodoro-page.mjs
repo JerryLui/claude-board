@@ -10,139 +10,28 @@
 // remaining time end to end -- including across a real daemon
 // restart.
 //
-// Deliberately does NOT touch test/check-http.mjs or test/check-pomodoro.mjs
-// (someone may still be pushing follow-ups to both) or src/pomodoro.mjs
-// -- readDoc/writeDoc are imported read-only, the same ARRANGE-only use
-// test/check-http.mjs's own pomodoro checks already make, never the assertion
-// itself. Registered in test/run.mjs's `checks` array.
+// src/pomodoro.mjs's readDoc/writeDoc are used here, never tested here: writeDoc
+// ARRANGES a document on disk, the same use test/check-http.mjs's own pomodoro
+// checks make, and readDoc reads back what a write through the daemon left there.
+// Registered in test/run.mjs's `checks` array.
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { rmSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { startServer } from '../src/server.mjs';
 import { readDoc as readPomodoroDoc, writeDoc as writePomodoroDoc, defaultDoc, pomodoroDay } from '../src/pomodoro.mjs';
 import { cueNames, NO_CUE } from '../src/cues.mjs';
-import { SESSION_COOKIE, sessionToken } from '../src/secret.mjs';
-import { renderIndexPage, indexScript } from '../src/indexpage.mjs';
-import { parseHTML, StandInEvent, fetchSettler } from './dom-stand-in.mjs';
+import { StandInEvent, fetchSettler } from './dom-stand-in.mjs';
+import { check, runMain, secretHome, sessionCookieHeader, pageHarness } from './support.mjs';
 
-let failures = 0;
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
+const { loadIndexAgainstDaemon } = await pageHarness();
 
-const home = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-page-'));
-const SECRET_FILE = path.join(home, 'secret');
-const SECRET = 'b'.repeat(64);
-writeFileSync(SECRET_FILE, `${SECRET}\n`, { mode: 0o600 });
-process.env.CLAUDE_BOARD_SECRET_FILE = SECRET_FILE;
+// CLAUDE_BOARD_HOME stays unset: every daemon below is handed `home` directly.
+const { home, secret: SECRET } = secretHome('claude-board-pomodoro-page-', { secret: 'b'.repeat(64), setHome: false });
 
-/** The cookie an authorized browser sends back, as a Cookie header value --
- * derived from the secret exactly as src/secret.mjs derives it, matching
- * test/check-http.mjs's own sessionCookieHeader(). This is what stands in here
- * for a real browser having already been through /auth/:token once. */
-function sessionCookieHeader() {
-  return `${SESSION_COOKIE}=${sessionToken(SECRET)}`;
-}
-
-/** Load the REAL renderIndexPage() output and run the REAL indexScript against
- * it, with globalThis.fetch rewritten to turn indexScript's relative
- * '/api/pomodoro...' calls into real requests against the live daemon on
- * 127.0.0.1:port, carrying the session-cookie header a real authorized browser
- * tab already holds. Node's fetch has no cookie jar of its own -- the widget's
- * own `credentials: 'same-origin'` does nothing outside a browser -- so
- * attaching the cookie by hand here is what makes this a faithful stand-in for
- * one. Captures every setInterval registration the same way
- * test/check-pure.mjs's own loadIndexWithPomodoro does, so a check can fire
- * tickPomodoro by hand instead of waiting on a real 1s/15s timer. */
-// Captured ONCE, before anything ever stubs globalThis.fetch -- every install
-// below rewrites relative to THIS, never to whatever happens to be installed
-// at the moment (which would double-prefix the URL the second time two "tabs"
-// are loaded back to back without an intervening restore -- caught by hand
-// running this file: two tabs loaded one after another produced
-// 'http://127.0.0.1:PORThttp://127.0.0.1:PORT/api/pomodoro').
-const REAL_FETCH = globalThis.fetch;
-
-// `pomodoroEnabled`/`hash` default to the values every pre-ADR-103 call site here
-// already relied on (the full widget, no fragment) -- an existing call passing
-// neither argument is unaffected by either one's addition. `pomodoroEnabled` feeds
-// renderIndexPage directly (this helper calls it in-process, the same way every
-// check here always has, never through a real GET / -- proving the SERVER's own
-// gate, src/server.mjs's readPomodoroDoc call, is a different check below that
-// goes through the real route instead of this helper).
-// `failSettingsWrite` drops the session cookie on exactly one route --
-// POST /api/pomodoro/settings -- so that one write gets a REAL 401 back from
-// the real daemon (src/server.mjs's own no-credential refusal) rather than a
-// stubbed rejection: this file's whole discipline is a real round trip, and a
-// bad cookie is a legitimate way to make one actually fail. Every other
-// request (the widget's own initial GET, any other action) keeps the normal
-// cookie, so a check using this can still tell "the settings write itself
-// failed" apart from "the tab was never authorised at all".
-function loadIndexAgainstDaemon(port, { pomodoroEnabled = true, hash = '', failSettingsWrite = false } = {}) {
-  const document = parseHTML(renderIndexPage({ threads: [], pomodoroEnabled }));
-  const intervals = [];
-  const fakeSetInterval = (fn, ms) => { intervals.push({ fn, ms }); return intervals.length; };
-  globalThis.fetch = (url, opts) => {
-    const target = `http://127.0.0.1:${port}${url}`;
-    const dropCookie = failSettingsWrite && url === '/api/pomodoro/settings';
-    const headers = { ...(opts && opts.headers), ...(dropCookie ? {} : { cookie: sessionCookieHeader() }) };
-    return settler.track(REAL_FETCH(target, { ...opts, headers }));
-  };
-  // 'window'/'location'/'history' join the parameters this already passed:
-  // indexScript reads all three for the settings panel's '#pomodoro-settings'
-  // fragment (the one the menu bar item's Settings row opens, and ADR 104's
-  // reopen-after-reload rides), the same
-  // new Function('document', 'window', 'location', 'history', ui) contract
-  // test/check-pure.mjs's own loadIndexWithPomodoro already uses. The window is
-  // the parsed document's OWN defaultView, so a listener the script registers is
-  // reachable from a check; location's `pathname`/`search` default to the plain
-  // index route, `hash` empty unless a check below asks for the fragment
-  // explicitly (ADR 103's own reachability criterion, off included).
-  // `reload` is this file's own minimal seam for ADR 104's repair
-  // (onPomodoroEnabledChange and onStorePruneClick's shared reload idiom,
-  // src/indexpage.mjs): a spy, not a real navigation -- this stand-in has no
-  // document teardown to model, so counting calls is the whole of what a check
-  // needs to prove the repair fired, once. `history` RECORDS every
-  // replaceState call verbatim (same shape as test/check-pure.mjs's own
-  // `history.calls`), and applies the one real side effect
-  // src/indexpage.mjs's own callers depend on -- test/dom-stand-in.mjs's
-  // StandInHistory doc comment gives the same reasoning -- updating `location`'s
-  // bound `hash` to match the replaced URL, so a check can tell "the fragment
-  // landed via a real replaceState" apart from a bare `location.hash =`
-  // assignment, which would never touch `history.calls` at all.
-  // 'EventSource' is DECLARED and never passed, binding the name to undefined inside
-  // this scope so initIndexStream takes its own `typeof` early return by this file's
-  // choice rather than by whether the host node build exposes a global EventSource
-  // (node has had one behind a flag since 22.x). Unflagged, the name would otherwise
-  // resolve to the real constructor and this harness would open a live connection to
-  // the relative URL '/api/events' -- from a check that is about the pomodoro widget.
-  // test/check-index-live.mjs is the one harness that really supplies one.
-  const location = { hash, pathname: '/', search: '', reloadCount: 0, reload() { this.reloadCount++; } };
-  const history = {
-    calls: [],
-    replaceState(state, title, url) {
-      this.calls.push(url);
-      const hashIdx = url.indexOf('#');
-      location.hash = hashIdx === -1 ? '' : url.slice(hashIdx);
-    },
-  };
-  new Function('document', 'setInterval', 'window', 'location', 'history', 'EventSource', indexScript)(document, fakeSetInterval, document.defaultView, location, history);
-  return {
-    document,
-    intervals,
-    location,
-    history,
-    restoreFetch() { globalThis.fetch = REAL_FETCH; },
-  };
-}
+// Captured before any tab load points globalThis.fetch at the daemon: the two checks
+// below that read the real GET / speak through this one.
+const rawFetch = globalThis.fetch;
 
 /** The pomodoro widget's own real markup, isolated out of a full renderIndexPage()
  * (or a real GET / body) -- never a bare `html.includes('name="workMin"')` against
@@ -169,7 +58,18 @@ function pomodoroWidgetMarkup(html) {
 /** Settling, not sleeping: node 26 broke the fixed-sleep version of this
  * (QUIRKS.md "A fixed flush sleep is a bet on node's loopback latency"). */
 const settler = fetchSettler();
-const flush = () => settler.settle();
+const settle = () => settler.settle();
+
+// What a tab below loads with, through test/support.mjs's `loadIndexAgainstDaemon` (the
+// REAL renderIndexPage() output with the REAL indexScript run against it, its relative
+// '/api/pomodoro...' calls turned into real requests against the live daemon, carrying
+// the session cookie an authorized browser tab already holds): this file's secret, its
+// one settler, and the page shape. `pomodoroEnabled` feeds renderIndexPage directly,
+// in-process, never through a real GET / -- proving the SERVER's own gate,
+// src/server.mjs's readPomodoroDoc call, is a different check below that goes through
+// the real route instead.
+const WIDGET_ON = { secret: SECRET, page: { threads: [], pomodoroEnabled: true }, settler };
+const WIDGET_OFF = { secret: SECRET, page: { threads: [], pomodoroEnabled: false }, settler };
 
 async function main() {
   let server = await startServer({ home, port: 0 });
@@ -184,30 +84,18 @@ async function main() {
     const now = Date.now();
     // cycle: 2 (against the default settings' longEvery of 4) so the position half
     // of the status text is actually exercised end to end, not just the countdown --
-    // the "Work 3/4 · 12:34" shape rides on these two checks rather than
-    // earning new ones.
+    // the "Work 3/4 · 12:34" shape rides on the two-tab check below rather than
+    // earning one of its own.
     // ADR 105 flipped the fresh-doc default to off; force enabled: true here since
     // this file's checks below are about the ENABLED widget.
     const running = { ...defaultDoc(), cycle: 2, cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now + 12 * 60_000, paused: false }, settings: { ...defaultDoc().settings, enabled: true } };
     writePomodoroDoc(running, home);
 
-    await check('pomodoro widget: GET /api/pomodoro over real HTTP, authorised by the session cookie alone (no secret header) -- exactly what a browser tab holds, position and all', async () => {
-      const tab = loadIndexAgainstDaemon(server.port);
+    await check('pomodoro widget: GET /api/pomodoro over real HTTP, authorised by the session cookie alone, renders "Work 3/4 · mm:ss" identically in two independently-loaded tabs against the SAME live daemon', async () => {
+      const tabA = loadIndexAgainstDaemon(server.port, WIDGET_ON);
+      const tabB = loadIndexAgainstDaemon(server.port, WIDGET_ON);
       try {
-        await flush();
-        const status = tab.document.querySelector('span#pomodoro-status');
-        assert.ok(status, 'setup failure: no #pomodoro-status rendered');
-        assert.match(status.textContent, /^Work 3\/4 · \d\d:\d\d$/, `expected "Work 3/4 · mm:ss"-shaped text over real HTTP, got: "${status.textContent}"`);
-      } finally {
-        tab.restoreFetch();
-      }
-    });
-
-    await check('pomodoro widget: two independently-loaded "tabs" against the SAME live daemon render the identical remaining time, position included', async () => {
-      const tabA = loadIndexAgainstDaemon(server.port);
-      const tabB = loadIndexAgainstDaemon(server.port);
-      try {
-        await flush();
+        await settle();
         const textA = tabA.document.querySelector('span#pomodoro-status').textContent;
         const textB = tabB.document.querySelector('span#pomodoro-status').textContent;
         assert.equal(textA, textB, 'two tabs independently fetching the same running timer from the same daemon must show the identical remaining time -- each computes its own clock offset from the daemon\'s own "now", so real per-tab timing jitter must not be visible at 1-second resolution');
@@ -221,13 +109,13 @@ async function main() {
     });
 
     await check('pomodoro widget: flipping the switch off while running posts through the cookie-authorised route and actually pauses the real document on disk', async () => {
-      const tab = loadIndexAgainstDaemon(server.port);
+      const tab = loadIndexAgainstDaemon(server.port, WIDGET_ON);
       try {
-        await flush();
+        await settle();
         const toggle = tab.document.querySelector('button#pomodoro-toggle');
         assert.equal(toggle.getAttribute('aria-checked'), 'true', 'setup failure: expected a running timer');
         toggle.dispatchEvent(new StandInEvent('click'));
-        await flush();
+        await settle();
         assert.equal(toggle.getAttribute('aria-checked'), 'false', 'the response must be applied back into the widget');
         const onDisk = readPomodoroDoc(home);
         assert.equal(onDisk.timer.paused, true, 'the click must have actually reached the daemon and paused the real document on disk, not merely repainted the widget');
@@ -237,15 +125,15 @@ async function main() {
       }
     });
 
-    await check('pomodoro widget: flipping the switch back on while paused posts /api/pomodoro/resume and re-arms the daemon\'s own clock', async () => {
-      const tab = loadIndexAgainstDaemon(server.port);
+    await check('pomodoro widget: flipping the switch back on while paused posts /api/pomodoro/resume and the daemon persists a running timer with a fresh deadline', async () => {
+      const tab = loadIndexAgainstDaemon(server.port, WIDGET_ON);
       try {
-        await flush();
+        await settle();
         const toggle = tab.document.querySelector('button#pomodoro-toggle');
         assert.equal(toggle.getAttribute('aria-checked'), 'false', 'setup failure: expected the previous check to have left the timer paused');
         assert.equal(toggle.getAttribute('aria-label'), 'Resume pomodoro', 'paused reads off, but its label must say resume, not start');
         toggle.dispatchEvent(new StandInEvent('click'));
-        await flush();
+        await settle();
         assert.equal(toggle.getAttribute('aria-checked'), 'true');
         const onDisk = readPomodoroDoc(home);
         assert.equal(onDisk.timer.paused, false);
@@ -261,14 +149,14 @@ async function main() {
     // switch posts the right URL; only this proves the daemon accepts it.
     await check('pomodoro widget: flipping the switch on while idle starts a real timer on the daemon, authorised by the session cookie alone', async () => {
       writePomodoroDoc({ ...defaultDoc(), cycleDate: pomodoroDay(Date.now()), settings: { ...defaultDoc().settings, enabled: true } }, home);
-      const tab = loadIndexAgainstDaemon(server.port);
+      const tab = loadIndexAgainstDaemon(server.port, WIDGET_ON);
       try {
-        await flush();
+        await settle();
         const toggle = tab.document.querySelector('button#pomodoro-toggle');
         assert.equal(toggle.getAttribute('aria-checked'), 'false', 'setup failure: expected an idle daemon');
         assert.equal(toggle.getAttribute('aria-label'), 'Start pomodoro');
         toggle.dispatchEvent(new StandInEvent('click'));
-        await flush();
+        await settle();
         assert.equal(toggle.getAttribute('aria-checked'), 'true', 'the started timer must be applied back into the widget');
         const onDisk = readPomodoroDoc(home);
         assert.ok(onDisk.timer, 'a real timer must exist on disk -- the click must have reached the daemon, not merely repainted the switch');
@@ -294,9 +182,9 @@ async function main() {
     // arrangement: a bug that wired the two controls together would show up as a
     // mismatch, not a coincidental pass.
     await check('pomodoro widget: the settings form posts through the cookie-authorised route and the daemon actually persists all eleven fields, the three cues, notify and the Banner level, and the two menu bar preferences independently', async () => {
-      const tab = loadIndexAgainstDaemon(server.port);
+      const tab = loadIndexAgainstDaemon(server.port, WIDGET_ON);
       try {
-        await flush();
+        await settle();
         // Skip NO_CUE at index 0 -- three real, distinct sounds is the stronger
         // arrangement, and `None` gets its own coverage in check-http/check-notify.
         const names = cueNames().filter(n => n !== NO_CUE);
@@ -320,7 +208,7 @@ async function main() {
         form.querySelector('input[name="menubarCountdown"]').checked = false;
         form.querySelector('input[name="menubarHidden"]').checked = false;
         form.dispatchEvent(new StandInEvent('submit'));
-        await flush();
+        await settle();
         const onDisk = readPomodoroDoc(home);
         // Still a WHOLE-object comparison, deliberately: it is what catches a form that
         // drops a stored setting it never displayed.
@@ -353,9 +241,9 @@ async function main() {
       writePomodoroDoc(stale, home);
       const before = readFileSync(path.join(home, 'pomodoro.json'), 'utf8');
 
-      const tab = loadIndexAgainstDaemon(server.port);
+      const tab = loadIndexAgainstDaemon(server.port, WIDGET_ON);
       try {
-        await flush();
+        await settle();
         const status = tab.document.querySelector('span#pomodoro-status');
         assert.match(status.textContent, /idle/i, `last night's paused timer must not be on the page at all, got: "${status.textContent}"`);
         assert.doesNotMatch(status.textContent, /\d\d:\d\d/, 'no countdown -- neither last night\'s remainder nor a fresh interval');
@@ -381,8 +269,8 @@ async function main() {
       const stable = { ...defaultDoc(), cycle: 1, cycleDate: pomodoroDay(now2), timer: { phase: 'break', deadline: now2 + 8 * 60_000, paused: false }, settings: { ...defaultDoc().settings, enabled: true } };
       writePomodoroDoc(stable, home);
 
-      const beforeTab = loadIndexAgainstDaemon(server.port);
-      await flush();
+      const beforeTab = loadIndexAgainstDaemon(server.port, WIDGET_ON);
+      await settle();
       const before = beforeTab.document.querySelector('span#pomodoro-status').textContent;
       beforeTab.restoreFetch();
       assert.match(before, /^Break 2\/4 · \d\d:\d\d$/, `setup failure: expected "Break 2/4 · mm:ss"-shaped text before the restart, got "${before}"`);
@@ -391,8 +279,8 @@ async function main() {
       await new Promise(resolve => server.server.close(resolve));
       server = await startServer({ home, port });
 
-      const afterTab = loadIndexAgainstDaemon(server.port);
-      await flush();
+      const afterTab = loadIndexAgainstDaemon(server.port, WIDGET_ON);
+      await settle();
       const after = afterTab.document.querySelector('span#pomodoro-status').textContent;
       afterTab.restoreFetch();
 
@@ -410,14 +298,14 @@ async function main() {
     await check('pomodoro widget: a Banner level saved through the panel survives a real daemon restart, and the reopened panel shows it back', async () => {
       writePomodoroDoc({ ...defaultDoc(), cycleDate: pomodoroDay(Date.now()), settings: { ...defaultDoc().settings, enabled: true } }, home);
 
-      const beforeTab = loadIndexAgainstDaemon(server.port);
-      await flush();
+      const beforeTab = loadIndexAgainstDaemon(server.port, WIDGET_ON);
+      await settle();
       const form = beforeTab.document.querySelector('form#pomodoro-settings-form');
       const beforeSelect = form.querySelector('select[name="bannerLevel"]');
       assert.equal(beforeSelect.value, 'this-board', 'setup failure: expected the fresh document\'s default Banner level');
       beforeSelect.value = 'off';
       form.dispatchEvent(new StandInEvent('submit'));
-      await flush();
+      await settle();
       assert.equal(readPomodoroDoc(home).settings.bannerLevel, 'off', 'setup failure: the write must actually have reached the daemon');
       beforeTab.restoreFetch();
 
@@ -429,9 +317,9 @@ async function main() {
       // default, exactly the state pomodoroSyncForm is willing to write into. The
       // value below is only right if fetchPomodoro really re-read pomodoro.json off
       // the restarted daemon and pomodoroSyncForm really applied it to this select.
-      const afterTab = loadIndexAgainstDaemon(server.port);
+      const afterTab = loadIndexAgainstDaemon(server.port, WIDGET_ON);
       try {
-        await flush();
+        await settle();
         const afterSelect = afterTab.document.querySelector('select[name="bannerLevel"]');
         assert.equal(afterSelect.value, 'off', 'the saved Banner level must survive a real daemon restart and come back in the settings panel, not merely on disk');
       } finally {
@@ -455,7 +343,7 @@ async function main() {
       const off = { ...defaultDoc(), cycleDate: pomodoroDay(Date.now()), settings: { ...defaultDoc().settings, enabled: false } };
       writePomodoroDoc(off, home);
 
-      const res = await REAL_FETCH(`http://127.0.0.1:${server.port}/`, { headers: { cookie: sessionCookieHeader() } });
+      const res = await rawFetch(`http://127.0.0.1:${server.port}/`, { headers: { cookie: sessionCookieHeader(SECRET) } });
       assert.equal(res.status, 200, 'setup failure: GET / must still answer with the switch off');
       const widget = pomodoroWidgetMarkup(await res.text());
 
@@ -500,9 +388,9 @@ async function main() {
       // URL (bin/menubar.m: cb_open_url(cb_index_url(@"#pomodoro-settings"))) would
       // arrive with, proving criterion 3's other half: the popover gear still
       // lands on the settings panel, off included.
-      const tab = loadIndexAgainstDaemon(server.port, { pomodoroEnabled: false, hash: '#pomodoro-settings' });
+      const tab = loadIndexAgainstDaemon(server.port, { ...WIDGET_OFF, hash: '#pomodoro-settings' });
       try {
-        await flush();
+        await settle();
         const panel = tab.document.querySelector('details#pomodoro-settings');
         assert.ok(panel, 'setup failure: #pomodoro-settings did not render');
         assert.equal(panel.open, true, 'the fragment must open the panel even with the switch off -- settings must stay reachable');
@@ -528,17 +416,18 @@ async function main() {
     // with a one-shot flag that reopens the settings panel after that reload.
     // Unlike the GET-only group above, these round-trip the real POST
     // /api/pomodoro/settings write (TOGGLE_KEYS already knows 'enabled') and
-    // inspect this file's own location seam (loadIndexAgainstDaemon's reload
-    // spy, above) for the repair. The failure check forces a REAL 401 (a
-    // dropped session cookie on that one route, failSettingsWrite) rather than
+    // inspect the `location` and `history` test/support.mjs's
+    // `loadIndexAgainstDaemon` hands back (a reload spy, and a record of every
+    // replaceState) for the repair. The failure check forces a REAL 401 (a
+    // dropped session cookie on that one route, `noCookieFor`) rather than
     // stubbing the daemon, matching this file's own real-HTTP discipline.
     // ---------------------------------------------------------------------------
 
     await check('pomodoro widget: switching the Master switch off, a successful write, repairs with exactly one reload and parks the settings-panel fragment for it to reopen (ADR 104, AC 1 & 2)', async () => {
       writePomodoroDoc({ ...defaultDoc(), cycleDate: pomodoroDay(Date.now()) }, home);
-      const tab = loadIndexAgainstDaemon(server.port);
+      const tab = loadIndexAgainstDaemon(server.port, WIDGET_ON);
       try {
-        await flush();
+        await settle();
         const checkbox = tab.document.querySelector('input[name="enabled"]');
         assert.ok(checkbox, 'setup failure: no Master switch rendered');
         // hasAttribute, not `.checked` -- test/dom-stand-in.mjs deliberately does not
@@ -548,7 +437,7 @@ async function main() {
         assert.equal(checkbox.hasAttribute('checked'), true, 'setup failure: expected the switch to render on');
         checkbox.checked = false; // the native toggle a real browser already applies before 'change' fires
         checkbox.dispatchEvent(new StandInEvent('change'));
-        await flush();
+        await settle();
         assert.equal(readPomodoroDoc(home).settings.enabled, false, 'setup failure: the write must actually have reached the daemon');
         // history.replaceState, not a bare `location.hash =` assignment: the
         // latter would never touch history.calls at all, so this pins the
@@ -564,15 +453,15 @@ async function main() {
 
     await check('pomodoro widget: switching the Master switch back on, a successful write, repairs the same way -- both directions change the page\'s shape (AC 1)', async () => {
       writePomodoroDoc({ ...defaultDoc(), cycleDate: pomodoroDay(Date.now()), settings: { ...defaultDoc().settings, enabled: false } }, home);
-      const tab = loadIndexAgainstDaemon(server.port, { pomodoroEnabled: false });
+      const tab = loadIndexAgainstDaemon(server.port, WIDGET_OFF);
       try {
-        await flush();
+        await settle();
         const checkbox = tab.document.querySelector('input[name="enabled"]');
         assert.ok(checkbox, 'setup failure: no Master switch rendered in the reduced panel');
         assert.equal(checkbox.hasAttribute('checked'), false, 'setup failure: expected the switch to render off');
         checkbox.checked = true;
         checkbox.dispatchEvent(new StandInEvent('change'));
-        await flush();
+        await settle();
         assert.equal(readPomodoroDoc(home).settings.enabled, true, 'setup failure: the write must actually have reached the daemon');
         assert.deepEqual(tab.history.calls, ['/#pomodoro-settings'], 'the fragment must land via history.replaceState here too, exactly once');
         assert.equal(tab.location.reloadCount, 1, 'turning the switch back on must repair with exactly one reload too');
@@ -584,7 +473,15 @@ async function main() {
 
     await check('pomodoro widget: a Master-switch write that fails (a real 401, no session cookie on that one route) reloads nothing and stays visibly failed (AC 3)', async () => {
       writePomodoroDoc({ ...defaultDoc(), cycleDate: pomodoroDay(Date.now()), settings: { ...defaultDoc().settings, enabled: true } }, home);
-      const tab = loadIndexAgainstDaemon(server.port, { failSettingsWrite: true });
+      // `noCookieFor` drops the session cookie on exactly one route, POST
+      // /api/pomodoro/settings, so that one write gets a REAL 401 back from the real
+      // daemon (src/server.mjs's own no-credential refusal) rather than a stubbed
+      // rejection: this file's whole discipline is a real round trip, and a bad cookie
+      // is a legitimate way to make one actually fail. Every other request (the widget's
+      // own initial GET, any other action) keeps the normal cookie, so this can still
+      // tell "the settings write itself failed" apart from "the tab was never authorised
+      // at all".
+      const tab = loadIndexAgainstDaemon(server.port, { ...WIDGET_ON, noCookieFor: ['/api/pomodoro/settings'] });
       // onPomodoroEnabledChange carries no .catch on this write -- deliberately,
       // the same fire-and-forget shape onPomodoroToggleClick/onPomodoroForwardClick/
       // onPomodoroRestartClick already use elsewhere in this file: a real browser
@@ -597,12 +494,12 @@ async function main() {
       const onRejection = err => { rejection = err; };
       process.on('unhandledRejection', onRejection);
       try {
-        await flush();
+        await settle();
         const checkbox = tab.document.querySelector('input[name="enabled"]');
         assert.equal(checkbox.hasAttribute('checked'), true, 'setup failure: expected the switch to render on');
         checkbox.checked = false;
         checkbox.dispatchEvent(new StandInEvent('change'));
-        await flush();
+        await settle();
         assert.ok(rejection, 'setup failure: the forced 401 must actually reject the write');
         assert.equal(readPomodoroDoc(home).settings.enabled, true, 'a failed write must not actually land on disk');
         assert.equal(tab.location.reloadCount, 0, 'a failed write must reload nothing');
@@ -633,7 +530,7 @@ async function main() {
       const onDisk = JSON.parse(readFileSync(path.join(home, 'pomodoro.json'), 'utf8'));
       assert.ok(!('enabled' in onDisk.settings), 'setup failure: the raw on-disk JSON must not carry an enabled key -- readDoc\'s own normalized view of it would carry one regardless, which is exactly why this reads the file instead');
 
-      const res = await REAL_FETCH(`http://127.0.0.1:${server.port}/`, { headers: { cookie: sessionCookieHeader() } });
+      const res = await rawFetch(`http://127.0.0.1:${server.port}/`, { headers: { cookie: sessionCookieHeader(SECRET) } });
       const widget = pomodoroWidgetMarkup(await res.text());
       // ADR 105: a missing key now reads as a FRESH document, and a fresh document
       // ships off -- 103's "missing key reads as on" upgrade path had no users and
@@ -648,16 +545,4 @@ async function main() {
   }
 }
 
-main()
-  .catch(err => {
-    failures++;
-    console.error('FAIL - unexpected error');
-    console.error(err);
-  })
-  .finally(() => {
-    if (failures) {
-      console.error(`\n${failures} check(s) failed`);
-      process.exit(1);
-    }
-    console.log('\nall pomodoro-page checks ok');
-  });
+runMain('pomodoro-page', main);

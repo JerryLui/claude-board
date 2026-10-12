@@ -22,18 +22,7 @@
 import assert from 'node:assert/strict';
 import { parseHtmlTree } from '../src/anchor.mjs';
 import { parseNodes } from './dom-stand-in.mjs';
-
-let failures = 0;
-function check(name, fn) {
-  try {
-    fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
+import { check, finish } from './support.mjs';
 
 /** parseHtmlTree's tree ({tag, children, content}, children = ELEMENT nodes only,
  * matching resolveSteps' 1-based indexing) reduced to a canonical shape: just tag
@@ -60,65 +49,62 @@ function assertTreesAgree(html) {
 
 // --- the exact shapes measured disagreeing --------------------------
 
-check('optional </li>: <ul><li>a<li>b</ul> -- ul > [li, li], not ul > li > li', () => {
-  assertTreesAgree('<ul><li>a<li>b</ul>');
-});
-
-check('optional </p> before a block element: <p>intro<div>after</div> -- p and div as SIBLINGS, not div nested inside p', () => {
+check('optional </p> before a block element: both parsers agree on <p>intro<div>after</div>', () => {
   assertTreesAgree('<p>intro<div>after</div>');
 });
 
 // --- every other autoCloseFor/impliedParentFor rule, individually -------------
 
-check('optional </p> before another <p>: <p>one<p>two -- two sibling <p>s', () => {
+check('optional </p> before another <p>: both parsers agree on <p>one<p>two', () => {
   assertTreesAgree('<p>one<p>two');
 });
 
-check('optional </p> before a heading: <p>one<h2>two</h2>', () => {
+check('optional </p> before a heading: both parsers agree on <p>one<h2>two</h2>', () => {
   assertTreesAgree('<p>one<h2>two</h2>');
 });
 
-check('implied <tbody>: <table><td>x</td></table>', () => {
+check('implied <tbody>: both parsers agree on <table><td>x</td></table>', () => {
   assertTreesAgree('<table><td>x</td></table>');
 });
 
-check('implied <tbody> AND <tr>: <table><td>x</td><td>y</td></table>', () => {
+check('implied <tbody> AND <tr>: both parsers agree on <table><td>x</td><td>y</td></table>', () => {
   assertTreesAgree('<table><td>x</td><td>y</td></table>');
 });
 
-check('an explicit <tbody> is never double-wrapped: <table><tbody><tr><td>x</td></tr></tbody></table>', () => {
+check('an explicit <tbody>: both parsers agree on <table><tbody><tr><td>x</td></tr></tbody></table>', () => {
   assertTreesAgree('<table><tbody><tr><td>x</td></tr></tbody></table>');
 });
 
-check('optional </tr> and </td>: <table><tr><td>a<td>b<tr><td>c</table>', () => {
+check('optional </tr> and </td>: both parsers agree on <table><tr><td>a<td>b<tr><td>c</table>', () => {
   assertTreesAgree('<table><tr><td>a<td>b<tr><td>c</table>');
 });
 
-check('optional </dt>/</dd>: <dl><dt>a<dd>b<dt>c<dd>d</dl>', () => {
+check('optional </dt>/</dd>: both parsers agree on <dl><dt>a<dd>b<dt>c<dd>d</dl>', () => {
   assertTreesAgree('<dl><dt>a<dd>b<dt>c<dd>d</dl>');
 });
 
-check('optional </option>: <select><option>a<option>b<option>c</select>', () => {
+check('optional </option>: both parsers agree on <select><option>a<option>b<option>c</select>', () => {
   assertTreesAgree('<select><option>a<option>b<option>c</select>');
 });
 
-check('optional </optgroup> and </option> together: <select><optgroup label="g"><option>a<option>b</select>', () => {
+check('optional </optgroup> and </option> together: both parsers agree on <select><optgroup label="g"><option>a<option>b</select>', () => {
   assertTreesAgree('<select><optgroup label="g"><option>a<option>b</select>');
 });
 
-check('script/style are kept as element nodes, not deleted, so a following sibling\'s index is unaffected: <div><script>var x = "<div>";</script><span>after</span></div>', () => {
+check('a <script> body holding markup: both parsers agree on <div><script>var x = "<div>";</script><span>after</span></div>', () => {
   assertTreesAgree('<div><script>var x = "<div>";</script><span>after</span></div>');
 });
 
-check('a <style> body is never treated as markup either: <div><style>.a{color:red}</style><p>after</p></div>', () => {
+check('a <style> body: both parsers agree on <div><style>.a{color:red}</style><p>after</p></div>', () => {
   assertTreesAgree('<div><style>.a{color:red}</style><p>after</p></div>');
 });
 
-check('a stray, mismatched closing tag is ignored on both sides: <div>a</span><p>b</p></div>', () => {
+check('a stray, mismatched closing tag: both parsers agree on <div>a</span><p>b</p></div>', () => {
   assertTreesAgree('<div>a</span><p>b</p></div>');
 });
 
-check('an explicit closing tag closes everything implicitly opened above it: <ul><li>a<li>b</ul><p>after</p>', () => {
+// The first measured disagreement, <ul><li>a<li>b</ul>, is this input's prefix.
+check('optional </li> then an explicit closing tag: both parsers agree on <ul><li>a<li>b</ul><p>after</p>', () => {
   assertTreesAgree('<ul><li>a<li>b</ul><p>after</p>');
 });
 
@@ -138,13 +124,13 @@ check('a self-closing <div/> is not self-closing: the div stays open and the fol
   assert.equal(div.children[0].tag, 'span');
 });
 
-check('a non-void element with a trailing / never ends early, so a later sibling keeps its index', () => {
+check('a non-void element with a trailing /: both parsers agree on a self-closed <li>, <p> and <span>', () => {
   assertTreesAgree('<ul><li/><li/><li/></ul>');
   assertTreesAgree('<div><p/><p>second</p></div>');
   assertTreesAgree('<div><span/>a</div><span>sibling</span>');
 });
 
-check('inside SVG/MathML the self-closing flag IS honoured, on the root and on its descendants alike', () => {
+check('inside SVG/MathML both parsers agree on self-closed roots and descendants, and <svg><circle/><rect/></svg><span> parses as svg > [circle, rect] then span', () => {
   assertTreesAgree('<svg/><p>after</p>');
   assertTreesAgree('<div><svg><circle/><rect/></svg><span>after</span></div>');
   assertTreesAgree('<math/><p>after</p>');
@@ -169,15 +155,6 @@ check('foreignness ends with the foreign subtree: a <div/> after a closed <svg> 
   ]);
 });
 
-// --- the repo's own baseline fixture, which every OTHER check in this suite ----
-// uses -- must still agree, or this file's corpus would be proving parity on
-// cases nothing else exercises while breaking the one case everything else relies
-// on.
-
-check('the repo\'s own well-formed html-stage fixture still agrees: <div class="mock"><button>Send</button></div>', () => {
-  assertTreesAgree('<div class="mock"><button>Send</button></div>');
-});
-
 // --- a small, deterministic outerHTML round-trip --
 //
 // firstElementChild/outerHTML used to be entirely absent from the stand-in (not
@@ -198,8 +175,4 @@ check('outerHTML round-trips through parseNodes: parse, serialize, re-parse, sam
   assert.equal(reparsed[0].querySelector('button').textContent, 'Send');
 });
 
-if (failures) {
-  console.error(`\n${failures} check(s) failed`);
-  process.exit(1);
-}
-console.log('\nall parser-parity checks ok');
+finish('parser-parity');

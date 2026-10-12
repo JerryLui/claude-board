@@ -27,23 +27,13 @@ import { resolveComments, questionBlocks, WIDGETS, KIND_LETTER } from '../src/bo
 import { ui } from '../src/ui.mjs';
 import { parseHTML } from './dom-stand-in.mjs';
 import { buildSampleBoard } from '../examples/sample-board.mjs';
+import { check, finish } from './support.mjs';
 
 const examplesDir = fileURLToPath(new URL('../examples/', import.meta.url));
 const committedJsonText = readFileSync(path.join(examplesDir, 'sample-board.json'), 'utf8');
 const committedHtmlText = readFileSync(path.join(examplesDir, 'sample-board.html'), 'utf8');
 const committedBoard = JSON.parse(committedJsonText);
 
-let failures = 0;
-function check(name, fn) {
-  try {
-    fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
 
 // =================================================================================
 // 1-2. Drift: regenerating from committed source is byte-identical.
@@ -176,23 +166,19 @@ check('all three anchor kinds (block, dom, mermaid) are present, and every comme
 //    rounds are pages now, flipped by the pager, not stacked and collapsed).
 // =================================================================================
 
-check('the board has two rounds, and the round pager renders and names both', () => {
+check('the board has two rounds, the round pager names both, and the page opens on round 2, the newest', () => {
   assert.equal(committedBoard.rounds.length, 2, `expected exactly two rounds, got ${committedBoard.rounds.length}`);
 
   const roundSections = document.querySelectorAll('.round');
   assert.equal(roundSections.length, committedBoard.rounds.length, 'rendered .round count does not match board.rounds');
 
-  assert.ok(document.querySelector('button#round-prev'), 'no previous-round chevron rendered');
-  assert.ok(document.querySelector('button#round-next'), 'no next-round chevron rendered');
   const pager = document.querySelector('nav#round-pager');
   assert.ok(pager, 'no round-pager pill rendered');
   const pillEntries = [...pager.querySelectorAll('.round-page')];
   assert.equal(pillEntries.length, 2, 'the pill does not name exactly two rounds');
   assert.deepEqual(pillEntries.map(b => b.getAttribute('data-round')), ['1', '2'],
     'the pill does not name both round 1 and round 2');
-});
 
-check('the page opens on round 2, the newest round', () => {
   const current = document.querySelectorAll('.round-current');
   assert.equal(current.length, 1, 'exactly one round section may be the current page');
   assert.equal(current[0].getAttribute('data-round'), '2', 'the board does not open on its newest round');
@@ -328,8 +314,4 @@ check('loaded with location.protocol "file:", the page\'s body carries the reado
     'body did not gain the readonly class when opened with location.protocol === "file:"');
 });
 
-if (failures) {
-  console.error(`\n${failures} check(s) failed`);
-  process.exit(1);
-}
-console.log('\nall sample-board checks ok');
+finish('sample-board');

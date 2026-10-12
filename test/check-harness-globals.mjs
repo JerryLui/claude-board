@@ -53,20 +53,10 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { check, runMain } from './support.mjs';
 
 const TEST_DIR = fileURLToPath(new URL('.', import.meta.url));
 
-let failures = 0;
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
 
 // --- a small, purpose-built scanner, not a JS parser -----------------------------
 // Just enough to (a) tell real code apart from comments and string/template content,
@@ -414,14 +404,6 @@ async function main() {
     }
   });
 
-  if (failures) {
-    console.error(`\n${failures} check(s) failed`);
-    process.exit(1);
-  }
-  console.log('all harness-globals checks ok');
 }
 
-main().catch(err => {
-  console.error((err && err.stack) || err);
-  process.exit(1);
-});
+await runMain('harness-globals', main, { okLead: '' });

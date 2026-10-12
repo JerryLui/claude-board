@@ -12,23 +12,10 @@
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { check, finish, repoRoot } from './support.mjs';
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const adrDir = path.join(repoRoot, '.agents', 'adr');
 const adrMdPath = path.join(repoRoot, 'ADR.md');
-
-let failures = 0;
-function check(name, fn) {
-  try {
-    fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
 
 const entryFiles = readdirSync(adrDir).filter(f => f.endsWith('.md')).sort();
 const adrMd = readFileSync(adrMdPath, 'utf8');
@@ -64,19 +51,12 @@ check('nothing before the table reads as a per-entry body -- no other heading (#
   assert.deepEqual(headings, [], `ADR.md must carry only its title (a single #), not per-entry headings: ${JSON.stringify(headings)}`);
 });
 
-check('every index row links a file that actually exists under .agents/adr/', () => {
-  const missing = rows
-    .map(m => m[2])
-    .filter(link => !link.startsWith('.agents/adr/'))
-    .concat(
-      rows
-        .map(m => m[2])
-        .filter(link => link.startsWith('.agents/adr/') && !readdirSync(adrDir).includes(path.basename(link)))
-    );
-  assert.deepEqual(missing, [], `index row(s) link to a nonexistent file: ${JSON.stringify(missing)}`);
-});
+check('every .agents/adr/*.md file has exactly one index row, and every row links an existing file under .agents/adr/', () => {
+  // By path, not basename: a row linking `docs/0042-x.md` names an existing basename
+  // and would pass every basename comparison below.
+  const outsideAdrDir = rows.map(m => m[2]).filter(link => !link.startsWith('.agents/adr/'));
+  assert.deepEqual(outsideAdrDir, [], `these index rows link outside .agents/adr/: ${JSON.stringify(outsideAdrDir)}`);
 
-check('every .agents/adr/*.md file has exactly one index row', () => {
   const linkedBasenames = rows.map(m => path.basename(m[2]));
   const counts = new Map();
   for (const name of linkedBasenames) counts.set(name, (counts.get(name) || 0) + 1);
@@ -108,8 +88,4 @@ check('no two rows claim the same entry number', () => {
   assert.deepEqual(dup, [], `entry number(s) with more than one row: ${JSON.stringify(dup)}`);
 });
 
-if (failures) {
-  console.error(`\n${failures} check(s) failed`);
-  process.exit(1);
-}
-console.log('\nall ADR-index checks ok');
+finish('ADR-index');

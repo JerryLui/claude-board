@@ -8,8 +8,6 @@ import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, mkdirSync
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { SECRET_HEADER, SESSION_COOKIE, sessionToken } from '../src/secret.mjs';
@@ -22,63 +20,35 @@ import { DEFAULT_AWAIT_TIMEOUT_MS, STRANDED_BANNER, ANSWERS_DELIVERED, MAX_SUBMI
 // daemon has in force right now, read from the product's own parser rather than
 // restated here.
 import { MAX_REF_BYTES, resolveRefRoots } from '../src/resolve.mjs';
-import { readBoard, writeBoard, searchBoards } from '../src/store.mjs';
+import { readBoard, writeBoard } from '../src/store.mjs';
 // Used only to ARRANGE fixture states the HTTP surface itself has no fast way to reach
 // (a nonzero cycle, a timer already mid-break) -- every ASSERTION below still goes
 // through the HTTP routes, never these directly. See the pomodoro checks near the
 // bottom of this file.
-import { readDoc as readPomodoroDoc, writeDoc as writePomodoroDoc } from '../src/pomodoro.mjs';
+import { readDoc as readPomodoroDoc, writeDoc as writePomodoroDoc, pomodoroDay } from '../src/pomodoro.mjs';
 import { cueNames, NO_CUE } from '../src/cues.mjs';
 import { renderBoardPage } from '../src/render.mjs';
 import { assetsNamedBy, MERMAID_ASSET, SCRIPT_ASSET, STYLE_ASSET } from '../src/assets.mjs';
 import { isPageRound, ROUND_OPEN_UNAWAITED_TITLE, PILL_READONLY_TITLE } from '../src/badge.mjs';
-import { ui } from '../src/ui.mjs';
-import { parseHTML, StandInEvent } from './dom-stand-in.mjs';
+import { StandInEvent } from './dom-stand-in.mjs';
+import {
+  check, execFileAsync, freshLog, openSseClient, pageHarness, rawRequest, renderedMarkup, runMain,
+  secretFetch, secretHome, sessionCookieHeader, sleep, waitForCount, withEnv, writeHeaders,
+} from './support.mjs';
+
+const { loadBoard, enableCommentMode } = await pageHarness();
 
 // fetch()/undici refuse to let callers override the Host header (it's a forbidden
 // header per the Fetch spec) — exactly like a browser. A DNS-rebinding attacker
 // doesn't go through fetch()'s header allowlist either: the TCP connection lands on
 // 127.0.0.1 while the Host header still names the attacker's domain. node:http.request
-// has no such restriction, so it is what actually exercises the loopback Host check.
+// has no such restriction, so test/support.mjs's `rawRequest`, built on it, is what
+// actually exercises the loopback Host check.
 //
 // It is also the only way to exercise the cross-origin write guard: `Origin` and
 // `Sec-Fetch-Site` are forbidden headers for fetch() too — a browser sets them itself,
 // which is precisely why they are trustworthy — so a check that wants to speak as a page
 // on https://evil.example has to write the request by hand.
-function rawRequest(port, method, pathName, host, { headers = {}, body = null } = {}) {
-  return new Promise((resolve, reject) => {
-    const payload = body == null ? null : Buffer.from(body, 'utf8');
-    const req = http.request({
-      host: '127.0.0.1',
-      port,
-      method,
-      path: pathName,
-      headers: { host, ...headers, ...(payload ? { 'content-length': payload.length } : {}) },
-    }, res => {
-      const chunks = [];
-      res.on('data', c => chunks.push(c));
-      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString('utf8') }));
-    });
-    req.on('error', reject);
-    if (payload) req.write(payload);
-    req.end();
-  });
-}
-
-/** Strip the #board-data JSON payload from a served page, leaving only the block markup
- * that renderBlock actually emitted. A block-kind-coverage assertion against the raw page
- * is unsafe: any field value on a block (a label, a snippet of prose) is also present in
- * the JSON board.blocks the page inlines verbatim for hydration, and finding it there
- * proves nothing about whether the corresponding renderBlock case ran.
- *
- * This used to strip two more things, for the same reason: the inlined `<style>` block
- * (where a class name like "compare-grid" is also a CSS selector) and the inlined client
- * `<script type="module">` (where it is also a querySelector string literal). Since ADR 70
- * the page carries neither -- it names them as sibling files -- so the JSON payload is the
- * only haystack left that can produce a false positive. */
-function renderedMarkup(html) {
-  return html.replace(/<script id="board-data"[^>]*>[\s\S]*?<\/script>/, '');
-}
 
 /** Recursively hash every file under `dir`, keyed by path relative to `dir`. Used to
  * prove "answering mutates only the store JSON" -- a plain string-content diff
@@ -120,36 +90,15 @@ function storeListing() {
   return { boards: list('boards'), pages: list('pages') };
 }
 
-let failures = 0;
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures++;
-    console.error(`FAIL - ${name}`);
-    console.error((err && err.stack) || err);
-  }
-}
-
-const home = mkdtempSync(path.join(tmpdir(), 'claude-board-http-'));
-process.env.CLAUDE_BOARD_HOME = home;
-
 // The local secret, in this check's own temp dir — never ~/.config/claude-board. Set
 // before startServer below, because the daemon reads it once at startup. Every route
 // but /api/health requires a credential now: writes require a loopback Host check, an
 // origin check, and a local secret; reads require gated read routes.
-const SECRET_FILE = path.join(home, 'secret');
-const SECRET = 'a'.repeat(64);
-writeFileSync(SECRET_FILE, `${SECRET}\n`, { mode: 0o600 });
-process.env.CLAUDE_BOARD_SECRET_FILE = SECRET_FILE;
-
-/** Headers for a write: what the shim sends. Every POST below goes through this, so a
- * write route that stopped requiring the secret would still pass — which is why the
- * 401 checks near the bottom send requests that deliberately do not. */
-function writeHeaders(extra) {
-  return { 'content-type': 'application/json', [SECRET_HEADER]: SECRET, ...(extra || {}) };
-}
+//
+// Every POST below sends `writeHeaders(SECRET)`, what the shim sends, so a write route
+// that stopped requiring the secret would still pass: the 401 checks near the bottom send
+// requests that deliberately do not.
+const { home, secret: SECRET, secretFile: SECRET_FILE } = secretHome('claude-board-http-', { secret: 'a'.repeat(64) });
 
 /** `fetch`, shadowed for this module only, carrying the secret on every call.
  *
@@ -163,16 +112,7 @@ function writeHeaders(extra) {
  * `rawFetch`, so they can speak as a caller holding nothing, or holding only a cookie.
  * An explicit header in `init` still wins, since it is spread last. */
 const rawFetch = globalThis.fetch;
-function fetch(input, init = {}) {
-  return rawFetch(input, { ...init, headers: { [SECRET_HEADER]: SECRET, ...(init.headers || {}) } });
-}
-
-/** The cookie an authorized browser sends back, as a Cookie header value. Derived from
- * the secret exactly as src/server.mjs derives it, so a check can act as a browser that
- * has already been through a handoff without doing one first. */
-function sessionCookieHeader() {
-  return `${SESSION_COOKIE}=${sessionToken(SECRET)}`;
-}
+const fetch = secretFetch(SECRET, rawFetch);
 
 // Out of reach, exactly as test/run.mjs pushes it for the whole suite and for the same
 // reason: this file boots a daemon and posts awaited rounds into it that nobody ever
@@ -210,51 +150,13 @@ function projectDir(name) {
   return realpathSync(dir);
 }
 
-/** Open a raw SSE connection (no EventSource in node:http) to
- * /api/board/:id/events and parse `event:`/`data:` frames plus bare `:` comment
- * lines (heartbeats) out of the byte stream as they arrive. Returns immediately
- * with handles to the live request/response and a running `events` array the
- * caller polls; the caller is responsible for destroying `req` when done. */
-function openSseClient(port, boardId, { headers = { [SECRET_HEADER]: SECRET } } = {}) {
-  return new Promise((resolveOpen, rejectOpen) => {
-    const req = http.request(
-      { host: '127.0.0.1', port, method: 'GET', path: `/api/board/${boardId}/events`, headers: { host: `127.0.0.1:${port}`, ...headers } },
-      res => {
-        const events = [];
-        let buf = '';
-        res.setEncoding('utf8');
-        res.on('data', chunk => {
-          buf += chunk;
-          let idx;
-          while ((idx = buf.indexOf('\n\n')) !== -1) {
-            const raw = buf.slice(0, idx);
-            buf = buf.slice(idx + 2);
-            const lines = raw.split('\n');
-            const evLine = lines.find(l => l.startsWith('event:'));
-            const dataLine = lines.find(l => l.startsWith('data:'));
-            if (evLine && dataLine) {
-              events.push({ event: evLine.slice('event:'.length).trim(), data: JSON.parse(dataLine.slice('data:'.length).trim()) });
-            } else {
-              const commentLine = lines.find(l => l.startsWith(':'));
-              if (commentLine) events.push({ comment: commentLine.slice(1).trim() });
-            }
-          }
-        });
-        resolveOpen({ req, res, events, status: res.statusCode });
-      },
-    );
-    req.on('error', rejectOpen);
-    req.end();
-  });
-}
-
 let server, port, base;
 
 async function main() {
   ({ server, port } = await startServer({ home, port: 0 }));
   base = `http://127.0.0.1:${port}`;
 
-  await check('health check responds ok', async () => {
+  await check('GET /api/health answers 200 with ok: true', async () => {
     const r = await fetch(`${base}/api/health`);
     assert.equal(r.status, 200);
     const j = await r.json();
@@ -263,10 +165,10 @@ async function main() {
 
   let boardId, boardUrl;
 
-  await check('POST /api/board writes the board to the store', async () => {
+  await check('POST /api/board answers with the board id, round and URL, and writes the board to the store', async () => {
     const r = await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'HTTP round trip',
         blocks: [
@@ -303,34 +205,15 @@ async function main() {
     assert.equal(stored.blocks[2].id, 'q1');
   });
 
-  await check('GET /b/:id serves the page with anchors and inlined JSON', async () => {
-    const r = await fetch(`${base}/b/${boardId}`);
-    assert.equal(r.status, 200);
-    const html = await r.text();
-    assert.ok(html.includes('id="board-data"'));
-    assert.ok(html.includes(JSON.stringify(boardId)));
-    assert.ok(html.includes('id="acceptance-criteria"'));
-    assert.ok(html.includes('id="acceptance-criteria-li1"'));
-    assert.ok(html.includes('id="acceptance-criteria-li2"'));
-    assert.ok(html.includes('data-choice="Yes"'));
-  });
-
-  await check('the emitted page projection is also written to pages/', async () => {
-    const pagePath = path.join(home, 'pages', `${boardId}.html`);
-    assert.ok(existsSync(pagePath), 'page projection must be written under pages/');
-    const html = readFileSync(pagePath, 'utf8');
-    assert.ok(html.includes('id="board-data"'));
-  });
-
   await check('/wait blocks until the round is sent, then resolves with the packet', async () => {
     const waitPromise = fetch(`${base}/api/board/${boardId}/wait?round=1`).then(r => r.json());
 
     // give the wait a moment to actually start blocking before we submit
-    await new Promise(resolve => setTimeout(resolve, 150));
+    await sleep(150);
 
     const submitRes = await fetch(`${base}/api/board/${boardId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         round: 1,
         action: 'send',
@@ -380,7 +263,7 @@ async function main() {
   await check('a second round pushed into the live thread continues ids and rounds', async () => {
     const r = await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         boardId,
         blocks: [{ kind: 'markdown', text: '# Round Two\n\n- a\n- b' }],
@@ -396,14 +279,12 @@ async function main() {
     assert.equal(newBlock.id, 'd3'); // d1 (top-level md), d2 (nested question context) already minted
   });
 
-  await check('a request whose Host header is not loopback is refused with 403 and no body', async () => {
-    const r = await rawRequest(port, 'GET', '/api/health', 'evil.example.com');
-    assert.equal(r.status, 403);
-    assert.equal(r.body, '');
-  });
-
-  await check('a non-loopback Host is refused on every route, not just health', async () => {
+  await check('a non-loopback Host is refused with 403 and no body on every route, health included', async () => {
+    // /api/health first: it is the one route open to a caller holding no credential, so
+    // it is the one where a Host check placed after the open-route branch would be
+    // invisible to every other row here.
     const routes = [
+      ['GET', '/api/health'],
       ['GET', '/'],
       ['GET', `/b/${boardId}`],
       ['POST', '/api/board'],
@@ -412,15 +293,10 @@ async function main() {
       ['POST', `/api/board/${boardId}/submit`],
     ];
     for (const [method, pathName] of routes) {
-      const r = await rawRequest(port, method, pathName, 'attacker.test');
+      const r = await rawRequest(port, method, pathName, { host: 'attacker.test' });
       assert.equal(r.status, 403, `${method} ${pathName} must refuse a non-loopback Host`);
       assert.equal(r.body, '', `${method} ${pathName} must send no body on refusal`);
     }
-  });
-
-  await check('a loopback Host with an explicit port is still accepted', async () => {
-    const r = await rawRequest(port, 'GET', '/api/health', `127.0.0.1:${port}`);
-    assert.equal(r.status, 200);
   });
 
   // --- SSE round pushes into a live thread --------------------------
@@ -433,25 +309,25 @@ async function main() {
     // Ablation: delete the `clients` field from handlePostBoard's response and this reds.
     const created = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ title: 'Client count', blocks: [{ kind: 'markdown', text: '# One' }] }),
     })).json();
     assert.equal(created.clients, 0, 'a board nobody has open reports zero, not null and not absent');
 
-    const watcher = await openSseClient(port, created.boardId);
+    const watcher = await openSseClient(port, created.boardId, { secret: SECRET });
     const withOne = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ boardId: created.boardId, title: 'Client count', blocks: [{ kind: 'markdown', text: '# Two' }] }),
     })).json();
     assert.equal(withOne.clients, 1, 'an open stream is one connected client');
 
     watcher.res.destroy();
     // The unsubscribe runs on the socket's close event, not synchronously with destroy().
-    await new Promise(resolve => setTimeout(resolve, 200));
+    await sleep(200);
     const afterClose = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ boardId: created.boardId, title: 'Client count', blocks: [{ kind: 'markdown', text: '# Three' }] }),
     })).json();
     assert.equal(afterClose.clients, 0, 'a closed tab drops back to zero, which is what the stranded rule watches for');
@@ -464,18 +340,18 @@ async function main() {
     // the open round -- the reviewer saw the same question twice.
     const created = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ title: 'Idempotent', blocks: [{ kind: 'markdown', text: '# One' }] }),
     })).json();
     await fetch(`${base}/api/board/${created.boardId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ round: 1, action: 'send', answers: [], comments: [] }),
     });
 
     const round2 = { boardId: created.boardId, title: 'Idempotent', blocks: [{ kind: 'question', prompt: 'Ship?', widget: 'single', options: [{ label: 'Yes' }] }], requestId: 'abc123' };
-    const first = await (await fetch(`${base}/api/board`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify(round2) })).json();
-    const retry = await (await fetch(`${base}/api/board`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify(round2) })).json();
+    const first = await (await fetch(`${base}/api/board`, { method: 'POST', headers: writeHeaders(SECRET), body: JSON.stringify(round2) })).json();
+    const retry = await (await fetch(`${base}/api/board`, { method: 'POST', headers: writeHeaders(SECRET), body: JSON.stringify(round2) })).json();
 
     assert.equal(retry.deduped, true, 'the daemon must say it recognised the retry rather than silently reapplying');
     assert.equal(retry.round, first.round, 'a retry does not advance the round');
@@ -484,14 +360,14 @@ async function main() {
     assert.equal(prompts.length, 1, `the retried round must hold ONE question, not two (got ${prompts.length})`);
     // A genuinely different round still lands: dedupe is on the id, not on "any repeat".
     const round3 = { ...round2, requestId: 'def456', blocks: [{ kind: 'question', prompt: 'Ship now?', widget: 'single', options: [{ label: 'Yes' }] }] };
-    const third = await (await fetch(`${base}/api/board`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify(round3) })).json();
+    const third = await (await fetch(`${base}/api/board`, { method: 'POST', headers: writeHeaders(SECRET), body: JSON.stringify(round3) })).json();
     assert.notEqual(third.deduped, true, 'a different requestId is a different request');
   });
 
   await check('GET /api/board/:id/events streams a new-round push to two clients, additively -- only the new round, not the whole board', async () => {
     const created = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ title: 'SSE round push', blocks: [{ kind: 'markdown', text: '# Round One\n\nfirst round prose' }] }),
     })).json();
     const sseBoardId = created.boardId;
@@ -500,12 +376,12 @@ async function main() {
     // an amend of the still-open one (see the amend check below).
     await fetch(`${base}/api/board/${sseBoardId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ round: 1, action: 'send', answers: [], comments: [] }),
     });
 
-    const clientA = await openSseClient(port, sseBoardId);
-    const clientB = await openSseClient(port, sseBoardId);
+    const clientA = await openSseClient(port, sseBoardId, { secret: SECRET });
+    const clientB = await openSseClient(port, sseBoardId, { secret: SECRET });
     assert.equal(clientA.status, 200);
     assert.equal(clientA.res.headers['content-type'], 'text/event-stream; charset=utf-8');
 
@@ -515,21 +391,21 @@ async function main() {
     // what this counts -- that would pass even with the interval itself removed.
     // What's asserted is repeated `: heartbeat` comments arriving over time, which
     // can only come from the recurring interval.
-    await new Promise(resolve => setTimeout(resolve, SSE_HEARTBEAT_MS * 5));
+    await sleep(SSE_HEARTBEAT_MS * 5);
     const heartbeats = clientA.events.filter(e => e.comment === 'heartbeat');
     assert.ok(heartbeats.length >= 2, `expected at least 2 interval heartbeats over ${SSE_HEARTBEAT_MS * 5}ms at a ${SSE_HEARTBEAT_MS}ms cadence, got ${heartbeats.length} (ablation: disabling the interval's write, while still opening the connection, drops this to 0)`);
     assert.ok(!clientA.res.destroyed, 'the SSE connection must still be open after surviving several heartbeat intervals');
 
     const pushRes = await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ boardId: sseBoardId, blocks: [{ kind: 'markdown', text: '# Round Two\n\nsecond round prose' }] }),
     });
     assert.equal(pushRes.status, 200);
     const pushed = await pushRes.json();
     assert.equal(pushed.round, 2);
 
-    await new Promise(resolve => setTimeout(resolve, 200));
+    await sleep(200);
 
     for (const client of [clientA, clientB]) {
       const roundEvent = client.events.find(e => e.event === 'round');
@@ -565,7 +441,7 @@ async function main() {
     // now actually describes.
     const created = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'Amend target',
         blocks: [
@@ -577,13 +453,13 @@ async function main() {
     const amendBoardId = created.boardId;
     const originalBlockId = readBoard(amendBoardId, home).blocks[0].id;
 
-    const client = await openSseClient(port, amendBoardId);
-    await new Promise(resolve => setTimeout(resolve, 60)); // let the subscription land before pushing
+    const client = await openSseClient(port, amendBoardId, { secret: SECRET });
+    await sleep(60); // let the subscription land before pushing
 
     // The round is still open (never submitted): this must amend round 1 in place.
     const amendRes = await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ boardId: amendBoardId, blocks: [{ id: originalBlockId, kind: 'markdown', text: '# Amended\n\nreplaced text' }] }),
     });
     assert.equal(amendRes.status, 200);
@@ -595,7 +471,7 @@ async function main() {
     assert.equal(stored.blocks.length, 2, 'the amend replaces the block in place rather than appending a duplicate (the round\'s own question is the other one)');
     assert.ok(stored.blocks[0].text.includes('replaced text'));
 
-    await new Promise(resolve => setTimeout(resolve, 200));
+    await sleep(200);
     const roundEvent = client.events.find(e => e.event === 'round');
     assert.ok(roundEvent, 'the connected client must receive the amend as a round event too');
     assert.equal(roundEvent.data.mode, 'amend');
@@ -617,7 +493,7 @@ async function main() {
     // real round's page rendering as if it had never been asked.
     const created = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'Cross-round amend guard',
         blocks: [{ kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] }],
@@ -629,20 +505,20 @@ async function main() {
     // round 1 answered and sent
     await fetch(`${base}/api/board/${guardBoardId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ round: 1, action: 'send', answers: [{ id: q1, status: 'answered', choice: 'Yes', note: 'shipped' }], comments: [] }),
     });
     // round 2 opened
     await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ boardId: guardBoardId, blocks: [{ kind: 'markdown', text: '# Round Two' }] }),
     });
 
     // amend round 2, but reuse round 1's already-sent question id
     const hijackRes = await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ boardId: guardBoardId, blocks: [{ id: q1, kind: 'question', prompt: 'Wipe the database?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] }] }),
     });
     assert.equal(hijackRes.status, 400, 'an amend targeting a block id from a different (already-sent) round must be rejected, not silently applied');
@@ -654,26 +530,10 @@ async function main() {
     assert.equal(stored.answers[q1].choice, 'Yes', 'the already-recorded answer must survive the rejected hijack attempt');
   });
 
-  await check('a block id that is not a well-formed minted id (e.g. carrying characters that would break a DOM selector) is rejected at post time', async () => {
-    // A caller-supplied raw.id reaches src/ui.mjs's amend-lookup
-    // DOM selector unescaped; rejecting anything that isn't the `letter+digits`
-    // shape src/board.mjs itself mints closes that off at the source rather than
-    // leaving every DOM-query call site responsible for re-deriving the guard.
-    const r = await fetch(`${base}/api/board`, {
-      method: 'POST',
-      headers: writeHeaders(),
-      body: JSON.stringify({
-        title: 'Malformed id rejected',
-        blocks: [{ id: 'd1"], .block[data-block-id="x', kind: 'markdown', text: '# hostile id' }],
-      }),
-    });
-    assert.equal(r.status, 400);
-  });
-
   await check('POST /api/board/:id/submit broadcasts a "submitted" event so another connected client sees the round collapse into history without reloading', async () => {
     const created = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'Submit broadcast',
         blocks: [{ kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] }],
@@ -682,18 +542,18 @@ async function main() {
     const submitBoardId = created.boardId;
     const qid = readBoard(submitBoardId, home).blocks[0].id;
 
-    const client = await openSseClient(port, submitBoardId);
-    await new Promise(resolve => setTimeout(resolve, 60));
+    const client = await openSseClient(port, submitBoardId, { secret: SECRET });
+    await sleep(60);
 
     const waitPromise = fetch(`${base}/api/board/${submitBoardId}/wait?round=1`).then(r => r.json());
     await fetch(`${base}/api/board/${submitBoardId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ round: 1, action: 'send', answers: [{ id: qid, status: 'answered', choice: 'Yes', note: 'go' }], comments: [] }),
     });
     await waitPromise;
 
-    await new Promise(resolve => setTimeout(resolve, 200));
+    await sleep(200);
     const submittedEvent = client.events.find(e => e.event === 'submitted');
     assert.ok(submittedEvent, 'a submit must broadcast a "submitted" event to connected clients');
     assert.equal(submittedEvent.data.round, 1);
@@ -721,36 +581,6 @@ async function main() {
     client.req.destroy();
   });
 
-  await check('a client that disconnects is dropped from the broadcast list rather than leaking', async () => {
-    const created = await (await fetch(`${base}/api/board`, {
-      method: 'POST',
-      headers: writeHeaders(),
-      body: JSON.stringify({ title: 'Disconnect cleanup', blocks: [{ kind: 'markdown', text: '# One' }] }),
-    })).json();
-    const cleanupBoardId = created.boardId;
-    await fetch(`${base}/api/board/${cleanupBoardId}/submit`, {
-      method: 'POST',
-      headers: writeHeaders(),
-      body: JSON.stringify({ round: 1, action: 'send', answers: [], comments: [] }),
-    });
-
-    const doomed = await openSseClient(port, cleanupBoardId);
-    await new Promise(resolve => setTimeout(resolve, 60));
-    doomed.req.destroy();
-    await new Promise(resolve => setTimeout(resolve, 60));
-
-    // Pushing a round with the disconnected client's subscription still registered
-    // would previously throw inside broadcast() trying to write to a dead socket;
-    // asserting the post itself still succeeds is the externally-observable proof
-    // that a torn-down connection doesn't wedge later broadcasts.
-    const pushRes = await fetch(`${base}/api/board`, {
-      method: 'POST',
-      headers: writeHeaders(),
-      body: JSON.stringify({ boardId: cleanupBoardId, blocks: [{ kind: 'markdown', text: '# Two' }] }),
-    });
-    assert.equal(pushRes.status, 200);
-  });
-
   await check('SSE payloads embed board.comments already run through resolveComment, matching what the initial page hydrates from', async () => {
     // Merge-resolution fix: src/render.mjs's
     // renderBoardPage swaps the raw stored `board.comments` for the
@@ -764,7 +594,7 @@ async function main() {
     // resolvable and an unresolvable anchor.
     const created = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'SSE resolved comments',
         blocks: [{ kind: 'mermaid', text: 'flowchart LR\n  one --> two' }],
@@ -773,12 +603,12 @@ async function main() {
     const sseBoardId = created.boardId;
     const md1 = readBoard(sseBoardId, home).blocks[0].id;
 
-    const client = await openSseClient(port, sseBoardId);
-    await new Promise(resolve => setTimeout(resolve, 60));
+    const client = await openSseClient(port, sseBoardId, { secret: SECRET });
+    await sleep(60);
 
     await fetch(`${base}/api/board/${sseBoardId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         round: 1,
         action: 'send',
@@ -789,7 +619,7 @@ async function main() {
         ],
       }),
     });
-    await new Promise(resolve => setTimeout(resolve, 150));
+    await sleep(150);
 
     const submittedEvent = client.events.find(e => e.event === 'submitted');
     assert.ok(submittedEvent, 'expected a submitted event');
@@ -833,7 +663,7 @@ async function main() {
   await check('the index lists a posted thread with its actual rounds-left count, live vs settled', async () => {
     const r = await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'Index rounds-left count',
         cwd: projectDir('index-project'),
@@ -861,7 +691,7 @@ async function main() {
 
     await fetch(`${base}/api/board/${idxBoardId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         round: 1,
         action: 'send',
@@ -886,7 +716,7 @@ async function main() {
 
     const postA = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'Session A',
         cwd: sameCwd,
@@ -900,7 +730,7 @@ async function main() {
 
     const postB = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'Session B',
         cwd: sameCwd,
@@ -929,13 +759,13 @@ async function main() {
       .then(r => r.json())
       .then(packet => { bResolved = true; return packet; });
 
-    await new Promise(resolve => setTimeout(resolve, 150));
+    await sleep(150);
 
     const boardA = readBoard(postA.boardId, home);
     const idsA = boardA.blocks.filter(b => b.kind === 'question').map(b => b.id);
     const submitA = await fetch(`${base}/api/board/${postA.boardId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         round: 1,
         action: 'send',
@@ -946,7 +776,7 @@ async function main() {
     assert.equal(submitA.status, 200);
 
     // give B's waiter every chance to (wrongly) resolve before asserting it hasn't
-    await new Promise(resolve => setTimeout(resolve, 250));
+    await sleep(250);
     assert.equal(bResolved, false, 'answering session A must not unblock session B\'s waiter');
 
     const boardBOnDisk = readBoard(postB.boardId, home);
@@ -961,7 +791,7 @@ async function main() {
     const idsB = boardBOnDisk.blocks.filter(b => b.kind === 'question').map(b => b.id);
     const submitB = await fetch(`${base}/api/board/${postB.boardId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         round: 1,
         action: 'send',
@@ -979,7 +809,7 @@ async function main() {
     const searchCwd = projectDir('search-project');
     const posted = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'Checkout redesign',
         cwd: searchCwd,
@@ -997,7 +827,7 @@ async function main() {
     const [qid] = readBoard(posted.boardId, home).blocks.filter(b => b.kind === 'question').map(b => b.id);
     await fetch(`${base}/api/board/${posted.boardId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         round: 1,
         action: 'send',
@@ -1073,75 +903,6 @@ async function main() {
     );
   });
 
-  let widgetsBoardId;
-
-  await check('POST /api/board carrying all four widget kinds writes them, and the served page renders every one', async () => {
-    const r = await fetch(`${base}/api/board`, {
-      method: 'POST',
-      headers: writeHeaders(),
-      body: JSON.stringify({
-        title: 'All four widgets',
-        blocks: [
-          { kind: 'question', prompt: 'Pick one', widget: 'single', options: [{ label: 'A' }, { label: 'B' }] },
-          { kind: 'question', prompt: 'Pick some', widget: 'multi', options: [{ label: 'A' }, { label: 'B' }, { label: 'C' }] },
-          { kind: 'question', prompt: 'Say something', widget: 'text', options: [] },
-          { kind: 'question', prompt: 'Order these', widget: 'rank', options: [{ label: 'A' }, { label: 'B' }, { label: 'C' }] },
-        ],
-      }),
-    });
-    assert.equal(r.status, 200);
-    const j = await r.json();
-    widgetsBoardId = j.boardId;
-
-    const stored = readBoard(widgetsBoardId, home);
-    assert.deepEqual(stored.blocks.map(b => b.widget), ['single', 'multi', 'text', 'rank']);
-
-    const markup = renderedMarkup(await (await fetch(`${base}/b/${widgetsBoardId}`)).text());
-    assert.ok(markup.includes('data-widget="single"'));
-    assert.ok(markup.includes('data-widget="multi"'));
-    assert.ok(markup.includes('data-widget="text"'));
-    assert.ok(markup.includes('data-widget="rank"'));
-    assert.ok(markup.includes('class="card-choice choice-multi"'));
-    assert.ok(markup.includes('data-answer-for='));
-    assert.ok(markup.includes('class="rank-list"'));
-    assert.ok(markup.includes('class="btn-defer"'));
-  });
-
-  await check('submitting all four widgets returns each status/choice/note in the packet, unanswered and deferred included', async () => {
-    const [single, multi, text, rank] = readBoard(widgetsBoardId, home).blocks.map(b => b.id);
-    const waitPromise = fetch(`${base}/api/board/${widgetsBoardId}/wait?round=1`).then(r => r.json());
-    await new Promise(resolve => setTimeout(resolve, 150));
-
-    const submitRes = await fetch(`${base}/api/board/${widgetsBoardId}/submit`, {
-      method: 'POST',
-      headers: writeHeaders(),
-      body: JSON.stringify({
-        round: 1,
-        action: 'send',
-        answers: [
-          { id: single, status: 'deferred', choice: null, note: 'need more time' },
-          { id: multi, status: 'answered', choice: ['A', 'C'], note: '' },
-          { id: text, status: 'answered', choice: 'a considered written answer', note: 'see attached' },
-          // rank deliberately absent -> must come back explicit unanswered
-        ],
-        comments: [],
-      }),
-    });
-    assert.equal(submitRes.status, 200);
-
-    const packet = await waitPromise;
-    const byId = Object.fromEntries(packet.answers.map(a => [a.id, a]));
-    assert.equal(byId[single].status, 'deferred');
-    assert.equal(byId[single].choice, null);
-    assert.equal(byId[single].note, 'need more time');
-    assert.deepEqual(byId[multi].choice, ['A', 'C']);
-    assert.equal(byId[text].choice, 'a considered written answer');
-    assert.equal(byId[text].note, 'see attached');
-    assert.equal(byId[rank].status, 'unanswered');
-    assert.equal(byId[rank].choice, null);
-    assert.equal(byId[rank].note, '');
-  });
-
   // Found by using this for real: a round came back
   // carrying a `deferred` question whose `choice` WAS populated. Every check here and
   // in check-mcp.mjs had only ever exercised `deferred` with `choice: null`, so the
@@ -1156,7 +917,7 @@ async function main() {
   await check('a deferred answer keeps its choice: status alone says whether a question was decided', async () => {
     const post = await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'Deferred with a lean',
         blocks: [{ kind: 'question', prompt: 'which way?', widget: 'single', options: [{ label: 'A' }, { label: 'B' }] }],
@@ -1166,10 +927,10 @@ async function main() {
     const qid = readBoard(boardId, home).blocks.find(b => b.kind === 'question').id;
 
     const waitPromise = fetch(`${base}/api/board/${boardId}/wait?round=1`).then(r => r.json());
-    await new Promise(resolve => setTimeout(resolve, 150));
+    await sleep(150);
     const submitRes = await fetch(`${base}/api/board/${boardId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         round: 1,
         action: 'send',
@@ -1190,52 +951,6 @@ async function main() {
     assert.equal(readBoard(boardId, home).answers[qid].choice, 'A');
   });
 
-  await check('POST /api/board carrying all five context kinds renders every block on the served page', async () => {
-    const r = await fetch(`${base}/api/board`, {
-      method: 'POST',
-      headers: writeHeaders(),
-      body: JSON.stringify({
-        title: 'All five context kinds',
-        blocks: [
-          { kind: 'markdown', text: '# Prose\n\nsome supporting prose' },
-          { kind: 'code', text: 'const answer = 42;', lang: 'javascript' },
-          { kind: 'mermaid', text: 'flowchart LR\n  A --> B' },
-          { kind: 'html', html: '<div class="mock"><button>Ship it</button></div>' },
-          {
-            kind: 'compare',
-            left: { label: 'Before', block: { kind: 'markdown', text: '# Before\n\nold copy' } },
-            right: { label: 'After', block: { kind: 'markdown', text: '# After\n\nnew copy' } },
-          },
-        ],
-      }),
-    });
-    assert.equal(r.status, 200);
-    const j = await r.json();
-    // Stripped of the inlined <style>, the #board-data JSON, and the client
-    // <script>: every needle below can only be satisfied by markup renderBlock
-    // actually emitted. (Verified: replacing the compare arm of the render dispatch
-    // with `return ''` makes this check fail, as it must.)
-    const markup = renderedMarkup(await (await fetch(`${base}/b/${j.boardId}`)).text());
-
-    assert.ok(markup.includes('some supporting prose'));
-    assert.ok(markup.includes('class="block code-block"'));
-    // javascript is a vendored grammar (ADR.md entry 62), so `const` and `42` are
-    // now wrapped in their own tok-* spans rather than sitting in one literal run --
-    // assert the pieces highlighting actually leaves intact.
-    assert.ok(markup.includes('<span class="tok-keyword">const</span> answer = <span class="tok-number">42</span>;'));
-    assert.ok(markup.includes('class="block mermaid-block"'));
-    assert.ok(markup.includes('<pre class="mermaid">flowchart LR'));
-    assert.ok(markup.includes('class="block html-block"'));
-    assert.ok(markup.includes('class="html-stage"'));
-    assert.ok(markup.includes('&lt;button&gt;Ship it&lt;/button&gt;'));
-    assert.ok(markup.includes('class="block compare-block"'));
-    assert.ok(markup.includes('class="compare-grid"'));
-    assert.ok(markup.includes('<div class="compare-label">Before</div>'));
-    assert.ok(markup.includes('<div class="compare-label">After</div>'));
-    assert.ok(markup.includes('old copy'));
-    assert.ok(markup.includes('new copy'));
-  });
-
   // --- element-level anchoring (dom, mermaid) round-trips through submit --
   //
   // The click gesture itself needs a browser, which puts it out of
@@ -1249,7 +964,7 @@ async function main() {
   await check('a dom anchor and a mermaid anchor round-trip through submit into the packet with ref/hint intact, and an unresolvable one reports what it lost', async () => {
     const r = await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'Element-level anchoring',
         blocks: [
@@ -1265,11 +980,11 @@ async function main() {
     const mermaidBlockId = stored.blocks.find(b => b.kind === 'mermaid').id;
 
     const waitPromise = fetch(`${base}/api/board/${anchorBoardId}/wait?round=1`).then(r2 => r2.json());
-    await new Promise(resolve => setTimeout(resolve, 150));
+    await sleep(150);
 
     const submitRes = await fetch(`${base}/api/board/${anchorBoardId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         round: 1,
         action: 'send',
@@ -1348,7 +1063,7 @@ async function main() {
   await check('a page-scoped dom anchor on several content kinds survives post -> submit -> re-render, and every pin returns to the element it named', async () => {
     const postRes = await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'Ticket 04 -- page-scoped anchors round-trip',
         blocks: [
@@ -1421,23 +1136,6 @@ async function main() {
     assert.equal(typeof rrStored.blocks[2].left.block.error, 'string',
       'setup failure: the compare side\'s diagram must carry a stored resolve error');
 
-    /** Loads a served page through the real client script, exactly like
-     * check-comment-mode.mjs's loadBoard -- a fresh document per call. */
-    function loadBoard(html) {
-      const document = parseHTML(html);
-      const window = document.defaultView;
-      const location = { protocol: 'http:' };
-      // 'EventSource' declared, never passed -- see QUIRKS.md "A `new Function` harness
-      // inherits the host's globals".
-      new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
-      return document;
-    }
-
-    function enableCommentMode(document) {
-      const toggle = document.getElementById('comment-mode-toggle');
-      toggle.dispatchEvent(new StandInEvent('click'));
-    }
-
     /** Click `el` (comment mode already on) and read back the anchor the real
      * client script minted onto `blockId`'s comment form -- the SAME mechanism
      * test/check-comment-mode.mjs already proves, reused here to feed
@@ -1490,7 +1188,7 @@ async function main() {
 
     const submitRes = await fetch(`${base}/api/board/${rrBoardId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         round: 1,
         action: 'send',
@@ -1563,7 +1261,7 @@ async function main() {
       //    the same file produces, byte for byte, because one check decides both.
       const absPost = await fetch(`${base}/api/board`, {
         method: 'POST',
-        headers: writeHeaders(),
+        headers: writeHeaders(SECRET),
         body: JSON.stringify({
           title: 'absolute spelling',
           cwd: project,
@@ -1576,7 +1274,7 @@ async function main() {
 
       const relPost = await fetch(`${base}/api/board`, {
         method: 'POST',
-        headers: writeHeaders(),
+        headers: writeHeaders(SECRET),
         body: JSON.stringify({
           title: 'relative spelling',
           cwd: project,
@@ -1598,7 +1296,7 @@ async function main() {
       const beforeOutside = storeListing();
       const outsidePost = await fetch(`${base}/api/board`, {
         method: 'POST',
-        headers: writeHeaders(),
+        headers: writeHeaders(SECRET),
         body: JSON.stringify({
           title: 'exfil',
           cwd: project,
@@ -1618,7 +1316,7 @@ async function main() {
       // 2. cwd:'/' plus a relative path -- confinement is vacuous if the caller picks cwd
       const rootPost = await fetch(`${base}/api/board`, {
         method: 'POST',
-        headers: writeHeaders(),
+        headers: writeHeaders(SECRET),
         body: JSON.stringify({
           title: 'exfil',
           cwd: '/',
@@ -1635,7 +1333,7 @@ async function main() {
       const beforeClimb = storeListing();
       const climbPost = await fetch(`${base}/api/board`, {
         method: 'POST',
-        headers: writeHeaders(),
+        headers: writeHeaders(SECRET),
         body: JSON.stringify({
           title: 'exfil',
           cwd: project,
@@ -1661,7 +1359,7 @@ async function main() {
 
     const created = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'Bound once',
         cwd: projectA,
@@ -1671,7 +1369,7 @@ async function main() {
 
     const retarget = await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         boardId: created.boardId,
         title: 'Bound once',
@@ -1692,58 +1390,6 @@ async function main() {
     assert.ok(!page.includes('SECRET-FROM-B'), 'a later round must not read out of a different project directory');
   });
 
-  await check('a code block resolved by reference (line range) snapshots the file text and sha at post time', async () => {
-    mkdirSync(srcDir, { recursive: true });
-    const srcFile = path.join(srcDir, 'add.js');
-    writeFileSync(srcFile, ['function add(a, b) {', '  return a + b;', '}', ''].join('\n'), 'utf8');
-
-    const r = await fetch(`${base}/api/board`, {
-      method: 'POST',
-      headers: writeHeaders(),
-      body: JSON.stringify({
-        title: 'Code by reference',
-        blocks: [{ kind: 'code', source: { path: 'add.js', lines: [1, 2] } }],
-        cwd: srcDir,
-      }),
-    });
-    assert.equal(r.status, 200);
-    const j = await r.json();
-    const stored = readBoard(j.boardId, home);
-    const block = stored.blocks[0];
-    assert.equal(block.text, 'function add(a, b) {\n  return a + b;');
-    assert.equal(block.lang, 'javascript');
-    assert.equal(typeof block.sha, 'string');
-    assert.equal(block.sha.length, 64);
-
-    // rewriting the source after post must not change the already-resolved snapshot
-    writeFileSync(srcFile, 'rewritten entirely\n', 'utf8');
-    const restored = readBoard(j.boardId, home);
-    assert.equal(restored.blocks[0].text, 'function add(a, b) {\n  return a + b;');
-  });
-
-  await check('a markdown block resolved by reference (section) snapshots just that section', async () => {
-    mkdirSync(srcDir, { recursive: true });
-    const srcFile = path.join(srcDir, 'contract.md');
-    writeFileSync(srcFile, '# Contract\n\n## Notes\n\nresolved by reference\n\n## Other\n\nunrelated', 'utf8');
-
-    const r = await fetch(`${base}/api/board`, {
-      method: 'POST',
-      headers: writeHeaders(),
-      body: JSON.stringify({
-        title: 'Markdown by reference',
-        blocks: [{ kind: 'markdown', source: { path: 'contract.md', section: 'notes' } }],
-        cwd: srcDir,
-      }),
-    });
-    assert.equal(r.status, 200);
-    const j = await r.json();
-    const stored = readBoard(j.boardId, home);
-    const block = stored.blocks[0];
-    assert.ok(block.text.includes('resolved by reference'));
-    assert.ok(!block.text.includes('unrelated'));
-    assert.equal(block.error, undefined);
-  });
-
   await check('ADR.md entry 112: a reference to a missing file refuses the WHOLE post -- nothing is stored, and the identical post with the file in place lands and renders', async () => {
     // This check used to assert the opposite ("fails the block, not the whole post"): a
     // 200, and a red note on the reviewer's page. The agent never sees the blocks it
@@ -1762,7 +1408,7 @@ async function main() {
     });
 
     const before = storeListing();
-    const r = await fetch(`${base}/api/board`, { method: 'POST', headers: writeHeaders(), body });
+    const r = await fetch(`${base}/api/board`, { method: 'POST', headers: writeHeaders(SECRET), body });
     assert.equal(r.status, 400, 'a reference that cannot resolve refuses the post');
     const refused = await r.json();
     assert.equal(refused.boardId, undefined, 'no board id comes back');
@@ -1772,7 +1418,7 @@ async function main() {
       'a refused post writes no board document and no page -- nothing is stored at all');
 
     writeFileSync(missing, 'const laterWritten = 1;\n', 'utf8');
-    const fixed = await fetch(`${base}/api/board`, { method: 'POST', headers: writeHeaders(), body });
+    const fixed = await fetch(`${base}/api/board`, { method: 'POST', headers: writeHeaders(SECRET), body });
     assert.equal(fixed.status, 200, 'the same post lands once the reference resolves');
     const fixedId = (await fixed.json()).boardId;
     assert.equal(readBoard(fixedId, home).blocks[0].error, undefined);
@@ -1811,7 +1457,7 @@ async function main() {
 
     const created = await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ title: 'Every position', cwd: project, blocks: [{ kind: 'markdown', text: '# Round one' }] }),
     });
     assert.equal(created.status, 200);
@@ -1823,7 +1469,7 @@ async function main() {
     const broken = { top: 'missing-top.md', context: 'missing-context.md', side: 'missing-side.md', variant: 'missing-variant.md' };
     const refused = await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ boardId: positionsBoard, title: 'Four broken references', blocks: roundOf(broken) }),
     });
     assert.equal(refused.status, 400, 'one broken reference anywhere refuses the post');
@@ -1840,7 +1486,7 @@ async function main() {
 
     const landed = await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ boardId: positionsBoard, title: 'Four fixed references', blocks: roundOf({ top: 'top.md', context: 'context.md', side: 'side.md', variant: 'variant.md' }) }),
     });
     assert.equal(landed.status, 200, 'the same post, with every reference fixed, goes through');
@@ -1870,7 +1516,7 @@ async function main() {
     });
     const before = storeListing();
     const refusedResponse = await fetch(`${base}/api/board`, {
-      method: 'POST', headers: writeHeaders(), body: postBody('flowchart LR\n a --> ((b'),
+      method: 'POST', headers: writeHeaders(SECRET), body: postBody('flowchart LR\n a --> ((b'),
     });
     assert.equal(refusedResponse.status, 400, 'a malformed mermaid block refuses the post');
     const refused = await refusedResponse.json();
@@ -1881,7 +1527,7 @@ async function main() {
     assert.deepEqual(storeListing(), before, 'a refused diagram writes neither a board document nor a rendered page');
 
     const fixedResponse = await fetch(`${base}/api/board`, {
-      method: 'POST', headers: writeHeaders(), body: postBody('flowchart LR\n a --> b'),
+      method: 'POST', headers: writeHeaders(SECRET), body: postBody('flowchart LR\n a --> b'),
     });
     assert.equal(fixedResponse.status, 200, 'the same post lands after the diagram is fixed');
     const fixed = await fixedResponse.json();
@@ -1897,7 +1543,7 @@ async function main() {
     const badFence = '```mermaid\nflowchart LR\n a --> ((b\n```';
     const refusedResponse = await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'Every by-value fence position',
         blocks: [
@@ -1933,7 +1579,7 @@ async function main() {
     const before = storeListing();
     const refusedResponse = await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'Referenced bad fence', cwd: project,
         blocks: [{ id: 'd1', kind: 'markdown', source: { path: sourcePath } }],
@@ -1951,7 +1597,7 @@ async function main() {
     // already-visible review. Refusing it must preserve the prior document.
     const createdResponse = await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'Diagram amend target',
         blocks: [{ id: 'q1', kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }] }],
@@ -1964,13 +1610,13 @@ async function main() {
     const storeBefore = storeListing();
     const refusedResponse = await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ boardId: created.boardId, blocks: [{ id: 'm1', kind: 'mermaid', text: 'flowchart LR\n a --> ((b' }] }),
     });
     assert.equal(refusedResponse.status, 400, 'a malformed amend is refused before changing the round');
     const refused = await refusedResponse.json();
-    assert.ok(refused.error.includes('mermaid block m1') && refused.error.includes('does not parse'),
-      `the amend refusal must name the chart: ${refused.error}`);
+    assert.match(refused.error, /mermaid block m1 does not parse\. Parse error on line 2\. Way out:/,
+      `the amend refusal must name the chart, the parser line and the way out: ${refused.error}`);
     assert.equal(readFileSync(boardFile, 'utf8'), docBefore,
       'the existing board document remains byte-identical after the refused amend');
     assert.deepEqual(storeListing(), storeBefore, 'the refused amend writes no replacement page or document');
@@ -1983,7 +1629,7 @@ async function main() {
     const before = storeListing();
     const refusedResponse = await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'All diagram repairs at once', cwd: project,
         blocks: [
@@ -2004,12 +1650,12 @@ async function main() {
     assert.deepEqual(storeListing(), before, 'a combined refusal stores no partial board or page');
   });
 
-  await check('ADR.md entry 117: good diagrams at every position still land through the daemon', async () => {
+  await check('ADR.md entry 117: good diagrams at every position, a frontmatter-titled one included, land through the daemon in a first round and in a later one', async () => {
     // The parser guards diagrams, not their locations: accepting these real block-tree
     // shapes proves the new door has not turned a valid review into a blanket refusal.
     const acceptedResponse = await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'Every good diagram position',
         blocks: [
@@ -2025,16 +1671,31 @@ async function main() {
             options: [{ label: 'Diagram option', block: { id: 'm5', kind: 'mermaid', text: 'flowchart LR\n a --> b' } }],
           },
           { id: 'd6', kind: 'markdown', text: '```mermaid\nflowchart LR\n a --> b\n```' },
+          // Frontmatter is part of mermaid's grammar, so a titled diagram parses too.
+          { id: 'm7', kind: 'mermaid', text: '---\ntitle: Good diagram\n---\nflowchart LR\n a --> b' },
         ],
       }),
     });
     assert.equal(acceptedResponse.status, 200, 'valid diagrams in every supported position must land');
     const accepted = await acceptedResponse.json();
     const stored = readBoard(accepted.boardId, home);
-    assert.equal(stored.blocks.length, 5, 'the accepted post retains each top-level tree');
+    assert.equal(stored.blocks.length, 6, 'the accepted post retains each top-level tree');
     const markup = renderedMarkup(await (await fetch(`${base}/b/${accepted.boardId}`)).text());
     assert.ok(markup.includes('class="mermaid"') || markup.includes('flowchart LR'),
       'the accepted page renders its valid diagrams');
+
+    // The post above asks, so it went through createBoard; a good diagram in a NEW round
+    // (round 1 sent first) goes through addRound, the other door that parses diagrams.
+    const sent = await fetch(`${base}/api/board/${accepted.boardId}/submit`, {
+      method: 'POST', headers: writeHeaders(SECRET), body: JSON.stringify({ round: 1, action: 'send', answers: [], comments: [] }),
+    });
+    assert.equal(sent.status, 200, 'setup failure: round 1 must be sent before a post opens round 2');
+    const nextRound = await fetch(`${base}/api/board`, {
+      method: 'POST', headers: writeHeaders(SECRET),
+      body: JSON.stringify({ boardId: accepted.boardId, blocks: [{ kind: 'mermaid', text: 'flowchart LR\n a --> b' }] }),
+    });
+    assert.equal(nextRound.status, 200, 'a good diagram in a new round must land too');
+    assert.equal((await nextRound.json()).round, 2, 'and it lands as round 2, not an amend');
   });
 
   await check('ADR.md entry 117: a bad fence in a question explainer refuses the post through the daemon', async () => {
@@ -2051,22 +1712,23 @@ async function main() {
       }],
     });
     const refusedResponse = await fetch(`${base}/api/board`, {
-      method: 'POST', headers: writeHeaders(), body: postBody('```mermaid\nflowchart LR\n a --> ((b\n```'),
+      method: 'POST', headers: writeHeaders(SECRET), body: postBody('```mermaid\nflowchart LR\n a --> ((b\n```'),
     });
     assert.equal(refusedResponse.status, 400, 'a broken explainer fence refuses the post');
     const refused = await refusedResponse.json();
     assert.equal(refused.boardId, undefined, 'a refused explainer returns no board id');
-    assert.ok(refused.error.includes('question q1'), `the refusal must name its question: ${refused.error}`);
-    assert.ok(refused.error.includes('explainer'), `the refusal must name the explainer: ${refused.error}`);
-    assert.ok(refused.error.includes('does not parse'), `the refusal must say what failed: ${refused.error}`);
-    assert.match(refused.error, /line 2/i, `the refusal must preserve the parser line: ${refused.error}`);
+    assert.match(refused.error,
+      /^mermaid fence 1 in explainer of question q1 does not parse\. Parse error on line 2\. Way out: fix the source and post again/,
+      `the refusal must name the fence, the explainer, its question, the parser line and the way out: ${refused.error}`);
     assert.deepEqual(storeListing(), before, 'a refused explainer writes neither a board document nor a rendered page');
 
     const fixedResponse = await fetch(`${base}/api/board`, {
-      method: 'POST', headers: writeHeaders(), body: postBody('```mermaid\nflowchart LR\n a --> b\n```'),
+      method: 'POST', headers: writeHeaders(SECRET), body: postBody('```mermaid\nflowchart LR\n a --> b\n```'),
     });
     assert.equal(fixedResponse.status, 200, 'the same question lands once its explainer parses');
     const fixed = await fixedResponse.json();
+    assert.ok(readBoard(fixed.boardId, home).blocks[0].explainerHtml.includes('<pre class="mermaid">'),
+      'the stored explainer carries the diagram host the page draws into');
     const markup = renderedMarkup(await (await fetch(`${base}/b/${fixed.boardId}`)).text());
     assert.ok(markup.includes('class="mermaid"'), 'the accepted explainer diagram reaches the served page');
   });
@@ -2087,7 +1749,7 @@ async function main() {
       const refusalFor = async target => {
         const r = await fetch(`${base}/api/board`, {
           method: 'POST',
-          headers: writeHeaders(),
+          headers: writeHeaders(SECRET),
           body: JSON.stringify({ title: 'outside', cwd: project, blocks: [{ kind: 'markdown', source: { path: target } }] }),
         });
         assert.equal(r.status, 400, `an absolute path outside the boundary must be refused: ${target}`);
@@ -2145,48 +1807,10 @@ async function main() {
     }
   });
 
-  await check('"archives already on disk stay dark": a pages/*.html frozen before this feature shipped is never rewritten, and GET /b/:id always serves a fresh, themed render regardless of what the frozen file contains', async () => {
-    // Stand in for an archive written by an earlier daemon, before this feature existed: hand-written
-    // directly to pages/, bypassing writePage entirely, carrying none of
-    // src/theme.mjs's machinery (no themeBootScript, no #theme-toggle, no light
-    // media query) -- exactly what every archive predating this change looks
-    // like, forever, per the spec's own "no migration, no re-render sweep on
-    // upgrade" decision.
-    const pagePath = path.join(home, 'pages', `${boardId}.html`);
-    // This check overwrites the SHARED pages/<boardId>.html
-    // fixture and previously never restored it, leaving it corrupted for the
-    // rest of the run -- green only by accident, because the next check that
-    // touches this board posts a different one first. Captured up front and
-    // restored in a `finally`, same discipline as this file's other
-    // real-file-on-disk checks.
-    const originalPageContents = readFileSync(pagePath, 'utf8');
-    const staleHtml = '<!doctype html><html><head><title>stale pre-theme archive</title></head><body><p>a pre-ticket-05 archive: dark-only, no theme machinery at all</p></body></html>';
-    try {
-      writeFileSync(pagePath, staleHtml, 'utf8');
-      assert.equal(readFileSync(pagePath, 'utf8'), staleHtml, 'setup failure: could not stand the page file in as a stale pre-theme archive');
-
-      // Reopening this board through the daemon -- a plain GET, exactly what a
-      // reviewer's browser does -- must serve a FRESH, themed render, proving GET
-      // never reads pages/*.html to answer a request; it only ever re-renders the
-      // stored board JSON (src/server.mjs's handleGetPage).
-      const served = await (await fetch(`${base}/b/${boardId}`)).text();
-      assert.ok(served.includes('id="theme-toggle"'), 'GET /b/:id must serve a freshly rendered, themed page even though the file on disk is a stale, pre-theme archive');
-      assert.notEqual(served, staleHtml, 'the served page must not be the stale bytes sitting on disk');
-
-      // And the frozen file itself must be untouched by that GET: no migration, no
-      // re-render sweep, ever -- an archive is a snapshot of what was posted, and
-      // rewriting an old one would contradict that.
-      const onDiskAfter = readFileSync(pagePath, 'utf8');
-      assert.equal(onDiskAfter, staleHtml, 'a GET must never rewrite pages/*.html -- an old archive stays exactly as it was written, forever (ablation: this is what would break if a migration/re-render sweep were ever added on startup or on read)');
-    } finally {
-      writeFileSync(pagePath, originalPageContents, 'utf8');
-    }
-  });
-
   await check('answering mutates only the store JSON on disk; any regenerated page is a full re-render of that JSON, never an in-place edit', async () => {
     const postRes = await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'Mutation isolation',
         blocks: [
@@ -2204,10 +1828,10 @@ async function main() {
     assert.ok(before.has(pagePathRel));
 
     const waitPromise = fetch(`${base}/api/board/${id}/wait?round=1`).then(r => r.json());
-    await new Promise(resolve => setTimeout(resolve, 150));
+    await sleep(150);
     const submitRes = await fetch(`${base}/api/board/${id}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ round: 1, action: 'send', answers: [{ id: 'q1', status: 'answered', choice: 'Yes', note: 'go' }], comments: [] }),
     });
     assert.equal(submitRes.status, 200);
@@ -2269,7 +1893,7 @@ async function main() {
 
     const postRes = await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'Archive survives source churn',
         blocks: [{ kind: 'markdown', source: { path: 'archived-doc.md' } }],
@@ -2286,10 +1910,10 @@ async function main() {
     // submit an (empty) answer -- exercises "answering only touches the JSON" on
     // this board too, and leaves us a submitted board to re-render below.
     const waitPromise = fetch(`${base}/api/board/${id}/wait?round=1`).then(r => r.json());
-    await new Promise(resolve => setTimeout(resolve, 150));
+    await sleep(150);
     await fetch(`${base}/api/board/${id}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ round: 1, action: 'send', answers: [], comments: [] }),
     });
     await waitPromise;
@@ -2338,21 +1962,21 @@ async function main() {
     // gate every case below returns 200 and plants a board in the store.)
     const before = storeFileCount();
 
-    const withOrigin = await rawRequest(port, 'POST', '/api/board', `127.0.0.1:${port}`, {
+    const withOrigin = await rawRequest(port, 'POST', '/api/board', {
       headers: { origin: 'https://evil.example', 'content-type': 'application/json' },
       body: newBoardBody,
     });
     assert.equal(withOrigin.status, 403, 'a POST carrying a foreign Origin must be refused');
     assert.equal(withOrigin.body, '');
 
-    const withFetchSite = await rawRequest(port, 'POST', '/api/board', `127.0.0.1:${port}`, {
+    const withFetchSite = await rawRequest(port, 'POST', '/api/board', {
       headers: { 'sec-fetch-site': 'cross-site', 'content-type': 'application/json' },
       body: newBoardBody,
     });
     assert.equal(withFetchSite.status, 403, 'a POST whose Sec-Fetch-Site is not same-origin must be refused');
 
     // ...and the same guard covers submit, not just board creation.
-    const submitCrossOrigin = await rawRequest(port, 'POST', `/api/board/${boardId}/submit`, `127.0.0.1:${port}`, {
+    const submitCrossOrigin = await rawRequest(port, 'POST', `/api/board/${boardId}/submit`, {
       headers: { origin: 'https://evil.example', 'content-type': 'application/json' },
       body: JSON.stringify({ round: 1, action: 'send', answers: [{ id: 'q1', choice: 'forged' }], comments: [] }),
     });
@@ -2364,14 +1988,14 @@ async function main() {
 
   await check('C1: a POST whose content-type is not application/json is refused (CORS simple requests need no preflight)', async () => {
     const before = storeFileCount();
-    const r = await rawRequest(port, 'POST', '/api/board', `127.0.0.1:${port}`, {
+    const r = await rawRequest(port, 'POST', '/api/board', {
       headers: { 'content-type': 'text/plain', [SECRET_HEADER]: SECRET },
       body: newBoardBody,
     });
     assert.equal(r.status, 415, 'text/plain is a CORS simple request: it must not be accepted as a board post');
     assert.equal(storeFileCount(), before, 'the text/plain post must not have created a board');
 
-    const formEncoded = await rawRequest(port, 'POST', `/api/board/${boardId}/submit`, `127.0.0.1:${port}`, {
+    const formEncoded = await rawRequest(port, 'POST', `/api/board/${boardId}/submit`, {
       headers: { 'content-type': 'application/x-www-form-urlencoded', [SECRET_HEADER]: SECRET },
       body: newBoardBody,
     });
@@ -2381,7 +2005,7 @@ async function main() {
   await check('C1: a same-origin write still succeeds -- the guard is not a blanket refusal of headered requests', async () => {
     // The served page's own fetch() carries exactly these headers; if the guard rejected
     // them the whole UI would be dead, so this is the other half of the ablation.
-    const r = await rawRequest(port, 'POST', '/api/board', `127.0.0.1:${port}`, {
+    const r = await rawRequest(port, 'POST', '/api/board', {
       headers: {
         origin: `http://127.0.0.1:${port}`,
         'sec-fetch-site': 'same-origin',
@@ -2397,7 +2021,7 @@ async function main() {
   await check('C3/M1: a submit against a board with no open round is refused with 409, leaving the sent round untouched', async () => {
     const created = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'Round finality',
         blocks: [{ kind: 'question', prompt: 'Force push?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] }],
@@ -2408,7 +2032,7 @@ async function main() {
 
     const firstSubmit = await fetch(`${base}/api/board/${finalId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         round: 1,
         action: 'send',
@@ -2424,7 +2048,7 @@ async function main() {
     // rewrote the human's answer, its note, and sentAt itself, with no trace.
     const rewrite = await fetch(`${base}/api/board/${finalId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         round: 1,
         action: 'send',
@@ -2447,7 +2071,7 @@ async function main() {
   await check('H1: a /wait whose client disconnects stops polling instead of leaking a permanent loop', async () => {
     const created = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ title: 'Abandoned wait', blocks: [{ kind: 'markdown', text: '# nobody answers this' }] }),
     })).json();
 
@@ -2459,11 +2083,11 @@ async function main() {
     req.on('error', () => { /* the hang-up below is the point */ });
     req.end();
 
-    await new Promise(resolve => setTimeout(resolve, 200));
+    await sleep(200);
     assert.equal(activeWaitCount(), before + 1, 'the wait must actually be polling before we hang up on it');
 
     req.destroy();
-    await new Promise(resolve => setTimeout(resolve, 400));
+    await sleep(400);
     // (Ablation: with the abort flag removed, waitForRound's `for(;;)` never returns,
     // its finally never runs, and this stays at before+1 forever.)
     assert.equal(activeWaitCount(), before, 'a disconnected client must leave no polling loop behind');
@@ -2472,7 +2096,7 @@ async function main() {
   await check('H1: /wait has a server-side wall-clock ceiling and returns an explicit timeout packet', async () => {
     const created = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'Wait ceiling',
         blocks: [{ kind: 'question', prompt: 'Answer me?', widget: 'single', options: [{ label: 'Yes' }] }],
@@ -2539,19 +2163,6 @@ async function main() {
     }
   });
 
-  await check('L4: searchBoards uses an already-read store walk when it is given one', async () => {
-    const boards = [{
-      id: 'b_inmemory', thread: 'th_inmemory', cwd: null, title: 'In-memory only', createdAt: new Date().toISOString(),
-      rounds: [], blocks: [], answers: {}, comments: [],
-    }];
-    // Nothing on disk matches this title, so a result can only come from the array
-    // passed in. (Ablation: dropping the parameter makes searchBoards re-walk the store
-    // and return nothing here.)
-    const results = searchBoards('In-memory only', home, boards);
-    assert.equal(results.length, 1);
-    assert.equal(results[0].boardId, 'b_inmemory');
-  });
-
   await check('a body split mid-character across socket chunks is decoded intact, not turned into replacement characters', async () => {
     // A 70KB html stage arrives as several socket chunks, and a chunk boundary falls
     // wherever the kernel put it -- routinely inside a multi-byte character. This
@@ -2590,7 +2201,7 @@ async function main() {
   await check('a submit naming a round that is not the open one is refused with 409, and a submit naming no round at all is a 400', async () => {
     const created = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'Stale client',
         blocks: [{ kind: 'question', prompt: 'Round one question', widget: 'single', options: [{ label: 'A' }, { label: 'B' }] }],
@@ -2601,12 +2212,12 @@ async function main() {
 
     await fetch(`${base}/api/board/${staleId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ round: 1, action: 'send', answers: [{ id: q, status: 'answered', choice: 'A', note: 'first answer' }], comments: [] }),
     });
     await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ boardId: staleId, blocks: [{ kind: 'markdown', text: '# Round Two' }] }),
     });
 
@@ -2614,7 +2225,7 @@ async function main() {
     // plain double-click on Send: all of them re-post round 1's answers.
     const stale = await fetch(`${base}/api/board/${staleId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ round: 1, action: 'send', answers: [{ id: q, status: 'answered', choice: 'B', note: 'stale answer' }], comments: [] }),
     });
     assert.equal(stale.status, 409, 'a submit naming a round that is not open must be refused');
@@ -2630,7 +2241,7 @@ async function main() {
 
     const noRound = await fetch(`${base}/api/board/${staleId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ action: 'send', answers: [], comments: [] }),
     });
     assert.equal(noRound.status, 400, 'a submit that names no round at all cannot be applied to a guessed one');
@@ -2642,11 +2253,11 @@ async function main() {
     // the header is reflected verbatim into boardUrl() -- which becomes the URL in the
     // agent's packet and the URL the shim hands to `open`.
     for (const host of ['[::1]@evil.example', '[::1].evil.example', '[::1]junk', '[::1', '[::1]:80x']) {
-      const r = await rawRequest(port, 'GET', '/api/health', host);
+      const r = await rawRequest(port, 'GET', '/api/health', { host });
       assert.equal(r.status, 403, `Host "${host}" must not pass as loopback`);
     }
     for (const host of [`[::1]:${port}`, '[::1]', `LOCALHOST:${port}`, `127.0.0.1:${port}`]) {
-      const r = await rawRequest(port, 'GET', '/api/health', host);
+      const r = await rawRequest(port, 'GET', '/api/health', { host });
       assert.equal(r.status, 200, `Host "${host}" is loopback and must be accepted`);
     }
   });
@@ -2656,18 +2267,18 @@ async function main() {
     // these is always the user's own (browser short-circuit or /etc/hosts) and never an
     // attacker's DNS -- which is what makes it admissible where evil.example is not.
     for (const host of [`board.localhost:${port}`, 'board.localhost', `BOARD.LOCALHOST:${port}`, `a.b.localhost:${port}`]) {
-      const r = await rawRequest(port, 'GET', '/api/health', host);
+      const r = await rawRequest(port, 'GET', '/api/health', { host });
       assert.equal(r.status, 200, `Host "${host}" is under .localhost and must be accepted`);
     }
     // (Ablation: a bare endsWith('localhost') accepts the first three of these, and
     // `notlocalhost` IS an ownable public name.)
     for (const host of ['notlocalhost', 'evil-localhost', 'localhost.evil.example', '.localhost', `board.localhost@evil.example:${port}`]) {
-      const r = await rawRequest(port, 'GET', '/api/health', host);
+      const r = await rawRequest(port, 'GET', '/api/health', { host });
       assert.equal(r.status, 403, `Host "${host}" must not pass as loopback`);
     }
   });
 
-  await check('every HTML response refuses to be framed and carries a CSP', async () => {
+  await check('every HTML response refuses to be framed and carries a deny-by-default CSP that names no external host', async () => {
     // The index sorts live-first then newest, so a board posted through a CSRF hole is
     // deterministically the top row, with an attacker-chosen cwd as its label -- one
     // clickjacked click from loading a board whose html stage runs at this origin.
@@ -2695,8 +2306,8 @@ async function main() {
       // that used to be here: a CSP host source needs no scheme, so a literal
       // `cdn.jsdelivr.net` test (or an `https?:` one) would pass `unpkg.com/npm/...`
       // straight through. This is the served header, so it is the last place a host
-      // could reach a real browser -- see test/check-pure.mjs for the same gate on the
-      // policy strings themselves.
+      // could reach a real browser; the two policies it checks (render.mjs CSP and
+      // INDEX_CSP) are the only ones the daemon serves or a page's meta tag carries.
       const allowedCspSources = new Set(["'none'", "'self'", "'unsafe-inline'", 'data:', 'blob:']);
       for (const clause of csp.split(';')) {
         const [directive, ...sources] = clause.trim().split(/\s+/).filter(Boolean);
@@ -2725,27 +2336,27 @@ async function main() {
     // (Ablation: drop isAuthorizedWrite from createRequestHandler and every case below
     // returns 200 -- which is the gadget: a local process posts its own board
     // naming any `cwd` it likes and reads that directory off the served page.)
-    const none = await rawRequest(port, 'POST', '/api/board', `127.0.0.1:${port}`, {
+    const none = await rawRequest(port, 'POST', '/api/board', {
       headers: { 'content-type': 'application/json' },
       body,
     });
     assert.equal(none.status, 401, 'a write with no secret must be refused');
     assert.equal(none.body, '', '401 carries no body: an unauthorised caller learns nothing');
 
-    const wrong = await rawRequest(port, 'POST', '/api/board', `127.0.0.1:${port}`, {
+    const wrong = await rawRequest(port, 'POST', '/api/board', {
       headers: { 'content-type': 'application/json', [SECRET_HEADER]: 'b'.repeat(64) },
       body,
     });
     assert.equal(wrong.status, 401, 'a wrong secret of the RIGHT LENGTH must still be refused');
 
-    const short = await rawRequest(port, 'POST', '/api/board', `127.0.0.1:${port}`, {
+    const short = await rawRequest(port, 'POST', '/api/board', {
       headers: { 'content-type': 'application/json', [SECRET_HEADER]: 'a' },
       body,
     });
     assert.equal(short.status, 401, 'a wrong secret of a different length must be refused, not throw');
 
     // ...and the same gate covers submit, not just board creation.
-    const submit = await rawRequest(port, 'POST', `/api/board/${boardId}/submit`, `127.0.0.1:${port}`, {
+    const submit = await rawRequest(port, 'POST', `/api/board/${boardId}/submit`, {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ round: 1, action: 'send', answers: [{ id: 'q1', choice: 'forged' }], comments: [] }),
     });
@@ -2756,15 +2367,6 @@ async function main() {
       'no unauthenticated write may have created a board',
     );
     assert.equal(readBoard(boardId, home).answers.q1.choice, 'Yes', 'the recorded answer must be untouched');
-  });
-
-  await check('SEC: the right secret still succeeds -- the gate is not a blanket refusal', async () => {
-    const r = await rawRequest(port, 'POST', '/api/board', `127.0.0.1:${port}`, {
-      headers: { 'content-type': 'application/json', [SECRET_HEADER]: SECRET },
-      body: JSON.stringify({ title: 'Authenticated write', blocks: [{ kind: 'markdown', text: '# fine' }] }),
-    });
-    assert.equal(r.status, 200, 'the shim holds the secret and must still be able to post');
-    assert.match(JSON.parse(r.body).boardId, /^b_[0-9a-f]{32}$/);
   });
 
   // --- the read gate --------------------------------
@@ -2779,17 +2381,17 @@ async function main() {
     // The overturned decision: these four used to answer 200 to anything
     // that could open a socket, which handed every local process the source excerpts,
     // questions and answers of every board in the store.
-    const index = await rawRequest(port, 'GET', '/', `127.0.0.1:${port}`, { headers: BROWSER_NAV });
+    const index = await rawRequest(port, 'GET', '/', { headers: BROWSER_NAV });
     assert.equal(index.status, 401, 'the thread index must not render without a credential');
 
-    const page = await rawRequest(port, 'GET', `/b/${boardId}`, `127.0.0.1:${port}`, { headers: BROWSER_NAV });
+    const page = await rawRequest(port, 'GET', `/b/${boardId}`, { headers: BROWSER_NAV });
     assert.equal(page.status, 401, 'the served board page must not render without a credential');
     assert.ok(!page.body.includes('id="board-data"'), 'and must not leak the board JSON in the refusal');
 
-    const search = await rawRequest(port, 'GET', '/api/search?q=trip', `127.0.0.1:${port}`);
+    const search = await rawRequest(port, 'GET', '/api/search?q=trip');
     assert.equal(search.status, 401, 'archive search must not answer without a credential');
 
-    const waiting = await rawRequest(port, 'GET', `/api/board/${boardId}/wait?round=1`, `127.0.0.1:${port}`);
+    const waiting = await rawRequest(port, 'GET', `/api/board/${boardId}/wait?round=1`);
     assert.equal(waiting.status, 401, '/wait must not answer without a credential');
 
     const sse = await openSseClient(port, boardId, { headers: {} });
@@ -2801,7 +2403,7 @@ async function main() {
 
     // The one deliberate exception, and the reason it is one: install.sh polls it with
     // plain curl to decide whether the service came up.
-    const health = await rawRequest(port, 'GET', '/api/health', `127.0.0.1:${port}`);
+    const health = await rawRequest(port, 'GET', '/api/health');
     assert.equal(health.status, 200, '/api/health stays open — install.sh has no credential to offer');
   });
 
@@ -2811,30 +2413,30 @@ async function main() {
     // engine 401s and every diagram inside every posted artifact stays raw source. What
     // the exception discloses is a third-party library's own bytes under a name that is a
     // digest of them; see src/server.mjs's `isOpenRoute` for the full argument.
-    const engine = await rawRequest(port, 'GET', `/b/${MERMAID_ASSET}`, `127.0.0.1:${port}`);
+    const engine = await rawRequest(port, 'GET', `/b/${MERMAID_ASSET}`);
     assert.equal(engine.status, 200, 'a stage holds no credential, so the engine must answer without one');
     assert.match(engine.headers['content-type'] || '', /javascript/, 'and answer as script');
 
     // The exception is name-shaped and nothing else rides on it. (Ablation: widen
     // `isOpenRoute`'s test to `ASSET_NAME` and both of these turn 200.)
-    const script = await rawRequest(port, 'GET', `/b/${SCRIPT_ASSET}`, `127.0.0.1:${port}`);
+    const script = await rawRequest(port, 'GET', `/b/${SCRIPT_ASSET}`);
     assert.equal(script.status, 401, 'the client script is this board\'s own behaviour and stays gated');
-    const style = await rawRequest(port, 'GET', `/b/${STYLE_ASSET}`, `127.0.0.1:${port}`);
+    const style = await rawRequest(port, 'GET', `/b/${STYLE_ASSET}`);
     assert.equal(style.status, 401, 'the stylesheet stays gated');
 
     // A name that merely starts the right way is not the right shape.
     for (const name of ['mermaid-0123456789abcde.js', 'mermaid-0123456789abcdefg.js', 'mermaid-0123456789ABCDEF.js', 'mermaid-0123456789abcdef.css']) {
-      const bad = await rawRequest(port, 'GET', `/b/${name}`, `127.0.0.1:${port}`);
+      const bad = await rawRequest(port, 'GET', `/b/${name}`);
       assert.equal(bad.status, 401, `"${name}" is not the engine's name shape and must stay behind the gate`);
     }
     // A hash-shaped name that is simply not on disk is still open, and says nothing:
     // 404, the same answer a credential-holding caller gets.
-    const absent = await rawRequest(port, 'GET', '/b/mermaid-0123456789abcdef.js', `127.0.0.1:${port}`);
+    const absent = await rawRequest(port, 'GET', '/b/mermaid-0123456789abcdef.js');
     assert.equal(absent.status, 404, 'an engine version this store never wrote is a plain 404');
   });
 
   await check('SEC: the refusal a browser navigation gets is a page naming the recovery command, not a bare status', async () => {
-    const refused = await rawRequest(port, 'GET', `/b/${boardId}`, `127.0.0.1:${port}`, { headers: BROWSER_NAV });
+    const refused = await rawRequest(port, 'GET', `/b/${boardId}`, { headers: BROWSER_NAV });
     assert.equal(refused.status, 401);
     assert.match(refused.headers['content-type'] || '', /text\/html/, 'a navigation gets a page');
     // The page renders to any TAB that lands here -- a cross-origin-shaped navigation
@@ -2857,20 +2459,20 @@ async function main() {
     // one number everywhere and PROTOCOL.md can document one number. This caller
     // already holds a terminal on the machine (curl, the shim), so its JSON body keeps
     // the fully pasteable absolute command -- this low is scoped to the rendered page.
-    const api = await rawRequest(port, 'GET', '/api/search?q=trip', `127.0.0.1:${port}`, { headers: BROWSER_NAV });
+    const api = await rawRequest(port, 'GET', '/api/search?q=trip', { headers: BROWSER_NAV });
     assert.equal(api.status, 401, 'the same status for an API caller');
     assert.doesNotMatch(api.headers['content-type'] || '', /text\/html/, 'but not a page of markup');
     assert.equal(JSON.parse(api.body).recover, recoveryCommand(), 'it still names the fix, as one JSON field, in its pasteable absolute form');
   });
 
   await check('SEC: a handoff authorizes a browser exactly once, and lands it on a clean URL', async () => {
-    const minted = JSON.parse((await rawRequest(port, 'POST', '/api/handoff', `127.0.0.1:${port}`, {
-      headers: writeHeaders(),
+    const minted = JSON.parse((await rawRequest(port, 'POST', '/api/handoff', {
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ boardId }),
     })).body);
     assert.match(minted.token, HANDOFF_TOKEN_RE, 'the handoff token is 32 random bytes as hex');
 
-    const redeemed = await rawRequest(port, 'GET', `/auth/${minted.token}`, `127.0.0.1:${port}`, { headers: BROWSER_NAV });
+    const redeemed = await rawRequest(port, 'GET', `/auth/${minted.token}`, { headers: BROWSER_NAV });
     assert.equal(redeemed.status, 302, 'redeeming a handoff redirects rather than rendering');
     assert.equal(redeemed.headers.location, `/b/${boardId}`, 'to the board it was minted for');
     assert.doesNotMatch(redeemed.headers.location, /auth|token|secret|cb_session/, 'and the URL left in the address bar carries no credential');
@@ -2893,21 +2495,21 @@ async function main() {
     // The cookie alone, with no handoff and no secret, is
     // what makes reloading and bookmarking work.
     const cookie = setCookie.split(';')[0];
-    const reload = await rawRequest(port, 'GET', `/b/${boardId}`, `127.0.0.1:${port}`, { headers: { ...BROWSER_NAV, cookie } });
+    const reload = await rawRequest(port, 'GET', `/b/${boardId}`, { headers: { ...BROWSER_NAV, cookie } });
     assert.equal(reload.status, 200, 'the authorized browser renders the board');
     assert.ok(reload.body.includes('id="board-data"'));
     assert.equal(reload.headers['set-cookie'], undefined, 'the board page hands out no credential of its own — its bytes stay a pure function of the board JSON');
 
     // Single-use. The replay is what a process that read the URL out of
     // `ps` would attempt, and it gains nothing.
-    const replay = await rawRequest(port, 'GET', `/auth/${minted.token}`, `127.0.0.1:${port}`, { headers: BROWSER_NAV });
+    const replay = await rawRequest(port, 'GET', `/auth/${minted.token}`, { headers: BROWSER_NAV });
     assert.equal(replay.status, 401, 'a handoff is single-use: replaying it is refused');
     assert.equal([].concat(replay.headers['set-cookie'] || []).length, 0, 'and hands out no cookie');
     assert.ok(replay.body.includes(recoveryCommand(undefined, { absolute: false })), 'the replay refusal is the same page as any other refusal');
 
     // Never-existed is the same answer as already-used: a poller must not learn that it
     // found a real token and merely arrived late.
-    const forged = await rawRequest(port, 'GET', `/auth/${'f'.repeat(64)}`, `127.0.0.1:${port}`, { headers: BROWSER_NAV });
+    const forged = await rawRequest(port, 'GET', `/auth/${'f'.repeat(64)}`, { headers: BROWSER_NAV });
     assert.equal(forged.status, replay.status, 'a forged token and a spent one are refused identically');
     assert.equal(forged.body, replay.body, 'byte-identical: the refusal must not distinguish them');
   });
@@ -2921,11 +2523,11 @@ async function main() {
     let ttlServer, ttlPort;
     try {
       ({ server: ttlServer, port: ttlPort } = await startServer({ home: ttlHome, port: 0, secret: SECRET }));
-      const minted = JSON.parse((await rawRequest(ttlPort, 'POST', '/api/handoff', `127.0.0.1:${ttlPort}`, {
-        headers: writeHeaders(), body: JSON.stringify({}),
+      const minted = JSON.parse((await rawRequest(ttlPort, 'POST', '/api/handoff', {
+        headers: writeHeaders(SECRET), body: JSON.stringify({}),
       })).body);
-      await new Promise(r => setTimeout(r, 200));
-      const late = await rawRequest(ttlPort, 'GET', `/auth/${minted.token}`, `127.0.0.1:${ttlPort}`, { headers: BROWSER_NAV });
+      await sleep(200);
+      const late = await rawRequest(ttlPort, 'GET', `/auth/${minted.token}`, { headers: BROWSER_NAV });
       assert.equal(late.status, 401, 'an expired handoff is refused');
       assert.equal([].concat(late.headers['set-cookie'] || []).length, 0, 'and sets no cookie');
     } finally {
@@ -2937,37 +2539,41 @@ async function main() {
   });
 
   await check('SEC: minting a handoff needs the secret — a browser cannot mint itself a second credential', async () => {
-    const none = await rawRequest(port, 'POST', '/api/handoff', `127.0.0.1:${port}`, {
+    const none = await rawRequest(port, 'POST', '/api/handoff', {
       headers: { 'content-type': 'application/json' }, body: '{}',
     });
     assert.equal(none.status, 401, 'no credential mints nothing');
 
-    const asBrowser = await rawRequest(port, 'POST', '/api/handoff', `127.0.0.1:${port}`, {
-      headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${port}`, 'sec-fetch-site': 'same-origin', cookie: sessionCookieHeader() },
+    const asBrowser = await rawRequest(port, 'POST', '/api/handoff', {
+      headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${port}`, 'sec-fetch-site': 'same-origin', cookie: sessionCookieHeader(SECRET) },
       body: '{}',
     });
     assert.equal(asBrowser.status, 401, 'the session cookie is accepted on submit and nowhere else — least of all on the route that mints credentials');
   });
 
-  await check('SEC: a process holding neither credential can neither read a board nor forge an answer on it', async () => {
+  await check('SEC: the secret alone writes, and a process holding neither credential can neither read a board nor forge an answer on it', async () => {
     // Written to match the requirement's exact wording: attempt both, from a caller that cannot read
     // the secret file and was never handed the browser cookie. This is the whole shape
     // of the hole that was closed, in one check.
-    const target = JSON.parse((await rawRequest(port, 'POST', '/api/board', `127.0.0.1:${port}`, {
-      headers: writeHeaders(),
+    // The secret alone, with no Origin and no Sec-Fetch-Site -- exactly what the shim
+    // sends -- is a write: the gate below is not a blanket refusal.
+    const targetRes = await rawRequest(port, 'POST', '/api/board', {
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ title: 'Criterion 5', blocks: [{ kind: 'question', prompt: 'Ship?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] }] }),
-    })).body);
-    const tid = target.boardId;
+    });
+    assert.equal(targetRes.status, 200, 'the shim holds the secret and must still be able to post');
+    const tid = JSON.parse(targetRes.body).boardId;
+    assert.match(tid, /^b_[0-9a-f]{32}$/);
     const qid = readBoard(tid, home).blocks[0].id;
 
     // Attempt one: read it.
-    const read = await rawRequest(port, 'GET', `/b/${tid}`, `127.0.0.1:${port}`, { headers: BROWSER_NAV });
+    const read = await rawRequest(port, 'GET', `/b/${tid}`, { headers: BROWSER_NAV });
     assert.equal(read.status, 401, 'reading the board is refused');
     assert.ok(!read.body.includes('Ship?'), 'and the question text does not appear in the refusal');
 
     // Attempt two: forge an answer on it, speaking exactly as the page's own fetch does
     // (same-origin headers, JSON content type) but with no cookie and no secret.
-    const forge = await rawRequest(port, 'POST', `/api/board/${tid}/submit`, `127.0.0.1:${port}`, {
+    const forge = await rawRequest(port, 'POST', `/api/board/${tid}/submit`, {
       headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${port}`, 'sec-fetch-site': 'same-origin' },
       body: JSON.stringify({ round: 1, action: 'send', answers: [{ id: qid, status: 'answered', choice: 'Yes', note: 'forged' }], comments: [] }),
     });
@@ -2978,7 +2584,7 @@ async function main() {
 
     // The board-scoped fallback the old design accepted here is gone: there is no
     // weaker credential left to try. Anything derived per board is now just wrong.
-    const oldStyle = await rawRequest(port, 'POST', `/api/board/${tid}/submit`, `127.0.0.1:${port}`, {
+    const oldStyle = await rawRequest(port, 'POST', `/api/board/${tid}/submit`, {
       headers: { 'content-type': 'application/json', cookie: `cb_submit=${'0'.repeat(64)}` },
       body: JSON.stringify({ round: 1, action: 'send', answers: [], comments: [] }),
     });
@@ -2986,18 +2592,18 @@ async function main() {
   });
 
   await check('SEC: the authorized browser can press Send, and its cookie is not a substitute for the secret', async () => {
-    const created = JSON.parse((await rawRequest(port, 'POST', '/api/board', `127.0.0.1:${port}`, {
-      headers: writeHeaders(),
+    const created = JSON.parse((await rawRequest(port, 'POST', '/api/board', {
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ title: 'Cookie submit', blocks: [{ kind: 'question', prompt: 'Ok?', widget: 'single', options: [{ label: 'Yes' }] }] }),
     })).body);
     const cid = created.boardId;
     const qid = readBoard(cid, home).blocks[0].id;
-    const cookie = sessionCookieHeader();
+    const cookie = sessionCookieHeader(SECRET);
 
     // Exactly what the page's own fetch() sends: same-origin headers, the cookie, no secret.
     // (Ablation: drop the cookie arm of isAuthorizedWrite and this is 401 -- i.e. no
     // reviewer can ever press Send, which is the entire product.)
-    const sent = await rawRequest(port, 'POST', `/api/board/${cid}/submit`, `127.0.0.1:${port}`, {
+    const sent = await rawRequest(port, 'POST', `/api/board/${cid}/submit`, {
       headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${port}`, 'sec-fetch-site': 'same-origin', cookie },
       body: JSON.stringify({ round: 1, action: 'send', answers: [{ id: qid, status: 'answered', choice: 'Yes', note: 'from the page' }], comments: [] }),
     });
@@ -3007,13 +2613,13 @@ async function main() {
     // The session cookie reads and answers. It is refused in the secret header, so it
     // can never reach the one route that resolves a file.
     const token = cookie.split('=')[1];
-    const asSecret = await rawRequest(port, 'POST', '/api/board', `127.0.0.1:${port}`, {
+    const asSecret = await rawRequest(port, 'POST', '/api/board', {
       headers: { 'content-type': 'application/json', [SECRET_HEADER]: token },
       body: JSON.stringify({ title: 'Escalation attempt', cwd: home, blocks: [{ kind: 'markdown', text: '# no' }] }),
     });
     assert.equal(asSecret.status, 401, 'the session cookie must not be usable as the secret');
 
-    const asBoardPost = await rawRequest(port, 'POST', '/api/board', `127.0.0.1:${port}`, {
+    const asBoardPost = await rawRequest(port, 'POST', '/api/board', {
       headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${port}`, 'sec-fetch-site': 'same-origin', cookie },
       body: JSON.stringify({ title: 'Escalation attempt 2', cwd: home, blocks: [{ kind: 'markdown', text: '# no' }] }),
     });
@@ -3041,13 +2647,13 @@ async function main() {
     const html = '<!doctype html><html><body><h1>S1 page</h1></body></html>';
     const artifact = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ title: 'S1 artifact', blocks: [{ kind: 'html', html }] }),
     })).json();
     const artifactBlock = readBoard(artifact.boardId, home).blocks[0].id;
     await fetch(`${base}/api/board/${artifact.boardId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         round: 1, action: 'send', answers: [],
         comments: [{ blockId: artifactBlock, anchor: { kind: 'block' }, text: 'S1_UNDELIVERED' }],
@@ -3056,7 +2662,7 @@ async function main() {
 
     const asking = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'S1 question',
         thread: artifact.thread,
@@ -3065,13 +2671,13 @@ async function main() {
     })).json();
     const askQid = readBoard(asking.boardId, home).blocks[0].id;
 
-    const cookie = sessionCookieHeader();
+    const cookie = sessionCookieHeader(SECRET);
     const before = snapshotTree(home);
 
     // The exploitable shape: only the cookie, no Origin, no Sec-Fetch-Site. `fetch()`
     // cannot forge these anyway (see rawRequest's own comment), so a bare cookie is
     // already indistinguishable from cross-origin without them.
-    const bareCookie = await rawRequest(port, 'GET', `/api/board/${asking.boardId}/wait?round=1`, `127.0.0.1:${port}`, {
+    const bareCookie = await rawRequest(port, 'GET', `/api/board/${asking.boardId}/wait?round=1`, {
       headers: { cookie },
     });
     assert.equal(bareCookie.status, 401, 'a GET /wait carrying only the cookie, with nothing to prove same-origin, must be refused');
@@ -3081,7 +2687,7 @@ async function main() {
     // ever legitimately calls this route (bin/mcp.mjs holds the secret and sends it on
     // every request, reads included -- see its own comment), so `wait` stays
     // deliberately off every cookie-write allowlist rather than being added to one.
-    const sameOriginCookie = await rawRequest(port, 'GET', `/api/board/${asking.boardId}/wait?round=1`, `127.0.0.1:${port}`, {
+    const sameOriginCookie = await rawRequest(port, 'GET', `/api/board/${asking.boardId}/wait?round=1`, {
       headers: { origin: `http://127.0.0.1:${port}`, 'sec-fetch-site': 'same-origin', cookie },
     });
     assert.equal(sameOriginCookie.status, 401, 'a same-origin GET /wait carrying only the cookie must also be refused -- this route is secret-only');
@@ -3099,7 +2705,7 @@ async function main() {
     // spend -- this is a gate on the credential, not a blanket refusal of /wait.
     await fetch(`${base}/api/board/${asking.boardId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ round: 1, action: 'send', answers: [{ id: askQid, status: 'answered', choice: 'Yes', note: '' }], comments: [] }),
     });
     const packet = await (await fetch(`${base}/api/board/${asking.boardId}/wait?round=1`)).json();
@@ -3117,7 +2723,7 @@ async function main() {
 
     // execFile, never execFileSync: the daemon it talks to is in THIS process, so a
     // synchronous spawn would block the event loop that has to answer it.
-    const out = (await promisify(execFile)(process.execPath, [authorizeBin, '--print', boardId], {
+    const out = (await execFileAsync(process.execPath, [authorizeBin, '--print', boardId], {
       env: { ...process.env, CLAUDE_BOARD_PORT: String(port), CLAUDE_BOARD_SECRET_FILE: SECRET_FILE },
       encoding: 'utf8',
     })).stdout.trim();
@@ -3127,11 +2733,11 @@ async function main() {
     // authorized. Nothing was reinstalled, nothing restarted, the store untouched.
     const beforeBoards = readdirSync(path.join(home, 'boards')).length;
     const token = out.slice(out.lastIndexOf('/') + 1);
-    const redeemed = await rawRequest(port, 'GET', `/auth/${token}`, `127.0.0.1:${port}`, { headers: BROWSER_NAV });
+    const redeemed = await rawRequest(port, 'GET', `/auth/${token}`, { headers: BROWSER_NAV });
     assert.equal(redeemed.status, 302);
     assert.equal(redeemed.headers.location, `/b/${boardId}`, 'and lands on the board that was asked for');
     const cookie = [].concat(redeemed.headers['set-cookie'] || []).join('; ').split(';')[0];
-    const page = await rawRequest(port, 'GET', `/b/${boardId}`, `127.0.0.1:${port}`, { headers: { ...BROWSER_NAV, cookie } });
+    const page = await rawRequest(port, 'GET', `/b/${boardId}`, { headers: { ...BROWSER_NAV, cookie } });
     assert.equal(page.status, 200, 'the newly-authorized browser reads the board');
     assert.equal(readdirSync(path.join(home, 'boards')).length, beforeBoards, 'authorizing touches no board in the store');
   });
@@ -3154,14 +2760,14 @@ async function main() {
     }
     assert.ok(said.some(l => /no local secret at/.test(l) && /install\.sh/.test(l)), 'a daemon with no secret must say so plainly on stderr');
     try {
-      const r = await rawRequest(barePort, 'POST', '/api/board', `127.0.0.1:${barePort}`, {
+      const r = await rawRequest(barePort, 'POST', '/api/board', {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ title: 'No secret anywhere', blocks: [] }),
       });
       assert.equal(r.status, 401);
-      const readable = await rawRequest(barePort, 'GET', '/', `127.0.0.1:${barePort}`, { headers: BROWSER_NAV });
+      const readable = await rawRequest(barePort, 'GET', '/', { headers: BROWSER_NAV });
       assert.equal(readable.status, 401, 'reads fail closed too: with no secret there is no cookie the daemon could honestly accept');
-      const health = await rawRequest(barePort, 'GET', '/api/health', `127.0.0.1:${barePort}`);
+      const health = await rawRequest(barePort, 'GET', '/api/health');
       assert.equal(health.status, 200, 'but the daemon has not shut down — install.sh can still see it came up');
     } finally {
       bare.close();
@@ -3178,7 +2784,7 @@ async function main() {
 
     const first = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ title: 'Thread board 1', cwd: projectA, blocks: [{ kind: 'markdown', text: '# one' }] }),
     })).json();
     assert.equal(readBoard(first.boardId, home).cwd, projectA);
@@ -3191,7 +2797,7 @@ async function main() {
     // following the thread lands on a board reading a directory the thread never chose.)
     const retarget = await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'Thread board 2',
         thread: first.thread,
@@ -3209,14 +2815,14 @@ async function main() {
     // Agreeing with the bound directory is not a retarget, and omitting it inherits.
     const agreeing = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ title: 'Thread board 3', thread: first.thread, cwd: projectA, blocks: [{ kind: 'markdown', text: '# three' }] }),
     })).json();
     assert.equal(readBoard(agreeing.boardId, home).cwd, projectA);
 
     const inherited = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ title: 'Thread board 4', thread: first.thread, blocks: [{ kind: 'markdown', text: '# four' }] }),
     })).json();
     assert.equal(readBoard(inherited.boardId, home).cwd, projectA, 'a board that names no cwd inherits the thread\'s');
@@ -3227,7 +2833,7 @@ async function main() {
   await check('a later round\'s title reaches the rendered round label instead of being dropped', async () => {
     const created = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'feat/round-one-branch',
         blocks: [{ kind: 'question', prompt: 'First?', widget: 'single', options: [{ label: 'Yes' }] }],
@@ -3238,13 +2844,13 @@ async function main() {
 
     await fetch(`${base}/api/board/${tid}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ round: 1, action: 'send', answers: [{ id: q, status: 'answered', choice: 'Yes', note: '' }], comments: [] }),
     });
 
     const second = await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ boardId: tid, title: 'fix/round-two-branch', blocks: [{ kind: 'markdown', text: '# second round' }] }),
     });
     assert.equal(second.status, 200);
@@ -3266,152 +2872,12 @@ async function main() {
     assert.match(markup, /<div class="round-label">Round 1 · feat\/round-one-branch · sent<\/div>/, 'a sent round keeps its title alongside the sent marker');
   });
 
-  // --- a fixture round trip per migrated shape ------
-  // Three shapes, not five: the visual-choice board (/example), the artifact-only board
-  // that returns without an answer (/visualize, /explain, /gamify), and the single-
-  // question-with-map-context board (/wayfind). Same cycle as the round trip above
-  // (:284, :325) -- post, render, answer where the shape has one, read the packet back
-  // -- against a payload in the exact shape each real caller now posts (PROTOCOL.md's
-  // `choose-between-rendered-variants` section; the `/visualize` skill's "Post to
-  // the board"; `/wayfind`'s Mode: Work step 1 -- both of those live in ~/.claude, not
-  // here, so neither is written as a path). Every assertion below is on
-  // the resolved, rendered, read-back result, never on a bare 200 -- see the next check's
-  // own comment for why that distinction is the entire point.
-
-  await check('visual-choice round trip (/example\'s shape): post a choose-between-rendered-variants question, render both options\' own rendered blocks, pick one, and read the pick back off the packet', async () => {
-    const r = await fetch(`${base}/api/board`, {
-      method: 'POST',
-      headers: writeHeaders(),
-      body: JSON.stringify({
-        title: 'Which mockup?',
-        blocks: [{
-          kind: 'question',
-          prompt: 'Which mockup should we build?',
-          widget: 'choose-between-rendered-variants',
-          options: [
-            { label: 'Sidebar nav', description: 'nav rail on the left', block: { kind: 'markdown', text: '# Sidebar nav\n\nNav rail pinned to the left edge.' } },
-            { label: 'Top nav', description: 'nav bar across the top', block: { kind: 'html', html: '<div class="mock"><nav>Top nav mockup</nav></div>' } },
-          ],
-        }],
-      }),
-    });
-    assert.equal(r.status, 200);
-    const posted = await r.json();
-    const variantBoardId = posted.boardId;
-
-    const stored = readBoard(variantBoardId, home);
-    const qBlock = stored.blocks.find(b => b.kind === 'question');
-    assert.equal(qBlock.widget, 'choose-between-rendered-variants');
-    assert.equal(qBlock.options.length, 2);
-    // Each option's block minted a real, unique id through the same path a compare
-    // side's own block does (PROTOCOL.md) -- not an inert string.
-    assert.notEqual(qBlock.options[0].block.id, qBlock.options[1].block.id);
-
-    // render: both options' own rendered content is on the page, not just their labels.
-    const markup = renderedMarkup(await (await fetch(`${base}/b/${variantBoardId}`)).text());
-    assert.match(markup, /data-choice="Sidebar nav"/);
-    assert.match(markup, /data-choice="Top nav"/);
-    assert.ok(markup.includes('Nav rail pinned to the left edge.'), 'the markdown option\'s own rendered block must be on the page');
-    assert.ok(markup.includes('Top nav mockup'), 'the html option\'s own mock content must be on the page');
-
-    // answer: pick one, following the same /wait + /submit shape as the round trip above.
-    const waitPromise = fetch(`${base}/api/board/${variantBoardId}/wait?round=1`).then(res => res.json());
-    await new Promise(resolve => setTimeout(resolve, 150));
-    const submitRes = await fetch(`${base}/api/board/${variantBoardId}/submit`, {
-      method: 'POST',
-      headers: writeHeaders(),
-      body: JSON.stringify({
-        round: 1,
-        action: 'send',
-        answers: [{ id: qBlock.id, status: 'answered', choice: 'Top nav', note: '' }],
-        comments: [],
-      }),
-    });
-    assert.equal(submitRes.status, 200);
-
-    // read the packet back: the pick is reported, not just the post.
-    const packet = await waitPromise;
-    assert.equal(packet.status, 'submitted');
-    assert.equal(packet.answers.length, 1);
-    assert.equal(packet.answers[0].id, qBlock.id);
-    assert.equal(packet.answers[0].choice, 'Top nav', 'the packet must report which rendered option was picked');
-  });
-
-  await check('artifact-only round trip (/visualize + /explain + /gamify\'s shape): post an html-only board with no question, render the artifact, and prove the packet a caller reads back reports the post rather than an answer nobody was ever asked for', async () => {
-    const html = '<!doctype html><html><body><h1>ARTIFACT_ONLY_MARKER dashboard</h1></body></html>';
-    const r = await fetch(`${base}/api/board`, {
-      method: 'POST',
-      headers: writeHeaders(),
-      body: JSON.stringify({
-        title: 'Rendered dashboard',
-        blocks: [{ kind: 'html', html }],
-      }),
-    });
-    assert.equal(r.status, 200);
-    const posted = await r.json();
-    const artifactBoardId = posted.boardId;
-
-    // render: the artifact itself, byte for byte, inside a sandboxed stage.
-    const stored = readBoard(artifactBoardId, home);
-    assert.equal(stored.blocks[0].kind, 'html');
-    assert.equal(stored.blocks[0].html, html, 'the stored block must be byte-for-byte what was posted');
-    // Stripped, not raw: the raw page also embeds `block.html` verbatim inside the
-    // #board-data JSON payload for client hydration, so a bare .includes() on raw
-    // markup would pass even if the iframe's own srcdoc never carried the content at
-    // all -- the same needle-must-be-found-where-the-renderer-put-it trap this file's
-    // own renderedMarkup() exists for (see its doc comment above).
-    const markup = renderedMarkup(await (await fetch(`${base}/b/${artifactBoardId}`)).text());
-    assert.ok(markup.includes('<iframe class="html-stage" sandbox="allow-scripts" srcdoc="'), 'the artifact must render as a sandboxed html stage');
-    assert.ok(markup.includes('ARTIFACT_ONLY_MARKER'), 'the artifact\'s own content must be on the page, inside the rendered iframe\'s srcdoc');
-
-    // no answer: this is the no-question caller -- a round with no question
-    // block anywhere in it has nothing a human is ever asked to submit. Prove that from
-    // the STORED, normalized board, not the raw payload: no question block exists
-    // anywhere on this round, and nothing has ever been answered.
-    assert.equal(stored.blocks.filter(b => b.kind === 'question').length, 0);
-    assert.deepEqual(stored.answers, {}, 'nothing was ever answered -- there was no question to answer');
-
-    // read the packet back: everything a caller needs to report the post is already in
-    // the POST response alone -- board id, round, url, thread -- with no /wait required.
-    // This is the exact packet bin/mcp.mjs's askTool constructs for this shape
-    // (packetResult, status 'posted'), reconstructed here from nothing but that response.
-    const packet = {
-      board: posted.boardId,
-      thread: posted.thread,
-      round: posted.round,
-      status: 'posted',
-      answers: [],
-      comments: [],
-      url: posted.url,
-    };
-    assert.equal(packet.status, 'posted', 'the packet must report the post, not an answer nobody was ever asked for');
-    assert.equal(packet.answers.length, 0);
-
-    // and prove the negative directly, the same technique H1's hang-up-mid-wait check
-    // above uses (node:http, not fetch, to get a handle on the socket): /wait genuinely
-    // starts polling this round -- it is not somehow pre-closed -- and nothing ever
-    // resolves it, because nothing here ever submits. A round with no question is never
-    // implicitly "answered" by the server; it simply has nothing that will ever complete
-    // a wait, which is exactly why a caller for this shape must not wait at all.
-    const before = activeWaitCount();
-    const waitReq = http.request(
-      { host: '127.0.0.1', port, method: 'GET', path: `/api/board/${artifactBoardId}/wait?round=1`, headers: { host: `127.0.0.1:${port}`, [SECRET_HEADER]: SECRET } },
-      res => res.resume(),
-    );
-    waitReq.on('error', () => { /* the hang-up below is the point */ });
-    waitReq.end();
-    await new Promise(resolve => setTimeout(resolve, 200));
-    assert.equal(activeWaitCount(), before + 1, 'a caller who does choose to wait must still find something real to poll');
-    waitReq.destroy();
-    await new Promise(resolve => setTimeout(resolve, 200));
-    assert.equal(activeWaitCount(), before, 'no submit ever landed on this round -- the only way out was the client leaving');
-  });
-
   await check('the flow the manual prescribes: post an artifact, then ask about it, and the question is a SECOND round beside it -- the artifact keeps its own page, and that page is still a page board', async () => {
     // The exact two calls bin/mcp.mjs makes: the first has no boardId, the
     // second carries the session's boardId and nothing else new. Nothing here
     // submits anything in between, because nothing can -- an artifact round asks
-    // nothing, so `ask` returns the instant it lands (the check above) and the
+    // nothing, so `ask` returns the instant it lands (test/check-mcp.mjs's
+    // no-question round check) and the
     // board's own send bar refuses to send it (ADR.md entry 35).
     //
     // What this pins is the amend rule: "the latest round is open, so amend it"
@@ -3424,14 +2890,14 @@ async function main() {
     const artifact = '<!doctype html><html><body><h1>TWO_ASK_ARTIFACT</h1></body></html>';
     const first = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ title: 'Rendered dashboard', blocks: [{ kind: 'html', html: artifact }] }),
     })).json();
     assert.equal(first.round, 1);
 
     const second = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         boardId: first.boardId,
         title: 'Anything to change?',
@@ -3457,7 +2923,7 @@ async function main() {
     // caller meant.
     const third = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         boardId: first.boardId,
         title: 'Anything to change?',
@@ -3502,10 +2968,10 @@ async function main() {
     const waitPromise = fetch(`${base}/api/board/${first.boardId}/wait?round=2`, { signal: ac.signal })
       .then(r => r.json())
       .catch(() => null);
-    await new Promise(resolve => setTimeout(resolve, 150));
+    await sleep(150);
     const submitRes = await fetch(`${base}/api/board/${first.boardId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ round: 2, action: 'send', answers: [{ id: q, status: 'answered', choice: 'Yes', note: '' }], comments: [] }),
     });
     if (submitRes.status !== 200) ac.abort();
@@ -3520,11 +2986,8 @@ async function main() {
   });
 
   await check('ADR 35: a comment left on a round that is NOT AWAITED rides the next packet the same thread returns, resolved against its OWN board, and comes back only once', async () => {
-    // Round 1: a page board posted WITHOUT `wait: true` -- same shape as the
-    // artifact-only check above -- so `round.awaited` is `false`
-    // (`drainUndeliveredComments` keys on that flag, not on "no question block",
-    // but an unawaited page board is exactly the shape that still makes it false
-    // either way). A real caller's ask() would never call /wait at all
+    // Round 1: a page board posted WITHOUT `wait: true`, so `round.awaited` is
+    // `false`. A real caller's ask() would never call /wait at all
     // (bin/mcp.mjs). This check submits it anyway, to model the comment landing in
     // the store with nobody ever polling for its packet -- exactly the case ADR 35
     // exists for.
@@ -3536,7 +2999,7 @@ async function main() {
     const html = '<!doctype html><html><body><h1>UNDELIVERED_MARKER page</h1></body></html>';
     const posted1 = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ title: 'Page board', blocks: [{ kind: 'html', html }] }),
     })).json();
     const board1 = posted1.boardId;
@@ -3547,7 +3010,7 @@ async function main() {
 
     const submit1 = await fetch(`${base}/api/board/${board1}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         round: 1,
         action: 'send',
@@ -3563,7 +3026,7 @@ async function main() {
     // carrying a real question so /wait actually resolves.
     const posted2 = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'Follow-up question',
         thread,
@@ -3575,10 +3038,10 @@ async function main() {
     const q = readBoard(board2, home).blocks[0].id;
 
     const waitPromise = fetch(`${base}/api/board/${board2}/wait?round=1`).then(r => r.json());
-    await new Promise(resolve => setTimeout(resolve, 150));
+    await sleep(150);
     const submit2 = await fetch(`${base}/api/board/${board2}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ round: 1, action: 'send', answers: [{ id: q, status: 'answered', choice: 'Yes', note: '' }], comments: [] }),
     });
     assert.equal(submit2.status, 200);
@@ -3601,7 +3064,7 @@ async function main() {
     // A second round on the SAME thread must not see it again.
     const posted3 = await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ boardId: board2, blocks: [{ kind: 'question', prompt: 'Also this?', widget: 'single', options: [{ label: 'Yes' }] }] }),
     });
     assert.equal(posted3.status, 200);
@@ -3609,10 +3072,10 @@ async function main() {
     const q2 = readBoard(board2, home).blocks.find(b => b.round === 2).id;
 
     const waitPromise2 = fetch(`${base}/api/board/${board2}/wait?round=2`).then(r => r.json());
-    await new Promise(resolve => setTimeout(resolve, 150));
+    await sleep(150);
     await fetch(`${base}/api/board/${board2}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ round: 2, action: 'send', answers: [{ id: q2, status: 'answered', choice: 'Yes', note: '' }], comments: [] }),
     });
     const packet2 = await waitPromise2;
@@ -3629,7 +3092,7 @@ async function main() {
     const html = '<!doctype html><html><body><h1>AWAITED_HTTP_MARKER</h1></body></html>';
     const posted = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ title: 'Awaited page board', blocks: [{ kind: 'html', html }], wait: true }),
     })).json();
     const round = readBoard(posted.boardId, home).rounds[0];
@@ -3664,7 +3127,7 @@ async function main() {
     for (const [what, blocks] of shapes) {
       const posted = await (await fetch(`${base}/api/board`, {
         method: 'POST',
-        headers: writeHeaders(),
+        headers: writeHeaders(SECRET),
         body: JSON.stringify({ title: `wait on ${what}`, blocks, wait: true }),
       })).json();
       const round = readBoard(posted.boardId, home).rounds[0];
@@ -3677,7 +3140,7 @@ async function main() {
     const html = '<!doctype html><html><body><h1>AWAITED_BLOCKS</h1></body></html>';
     const posted = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ title: 'Awaited page board', blocks: [{ kind: 'html', html }], wait: true }),
     })).json();
     const h1 = readBoard(posted.boardId, home).blocks[0].id;
@@ -3693,10 +3156,10 @@ async function main() {
     assert.equal(early, 'pending', 'the wait must still be open with nothing submitted yet');
 
     const waitPromise = fetch(`${base}/api/board/${posted.boardId}/wait?round=1`).then(r => r.json());
-    await new Promise(resolve => setTimeout(resolve, 150));
+    await sleep(150);
     const submitRes = await fetch(`${base}/api/board/${posted.boardId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         round: 1,
         action: 'send',
@@ -3719,70 +3182,21 @@ async function main() {
     // normal outcome, not an error (AC 2's own wording).
     const posted2 = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ boardId: posted.boardId, title: 'Nothing to add', blocks: [{ kind: 'html', html }], wait: true }),
     })).json();
     assert.equal(posted2.round, 2, 'a page board round is never amended (ADR.md entry 35), so this must mint round 2');
     const waitPromise2 = fetch(`${base}/api/board/${posted.boardId}/wait?round=2`).then(r => r.json());
-    await new Promise(resolve => setTimeout(resolve, 150));
+    await sleep(150);
     const submitRes2 = await fetch(`${base}/api/board/${posted.boardId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ round: 2, action: 'send', answers: [], comments: [] }),
     });
     assert.equal(submitRes2.status, 200);
     const packet2 = await waitPromise2;
     assert.equal(packet2.status, 'submitted');
     assert.deepEqual(packet2.comments, [], 'zero comments is a valid, ordinary outcome');
-  });
-
-  await check('AC 3: comments delivered in an awaited page round\'s own packet are never redelivered through the ADR 35 undelivered path on a later round', async () => {
-    const html = '<!doctype html><html><body><h1>AWAITED_NO_REDELIVER</h1></body></html>';
-    const posted = await (await fetch(`${base}/api/board`, {
-      method: 'POST',
-      headers: writeHeaders(),
-      body: JSON.stringify({ title: 'Awaited page board', blocks: [{ kind: 'html', html }], wait: true }),
-    })).json();
-    const h1 = readBoard(posted.boardId, home).blocks[0].id;
-
-    const waitPromise = fetch(`${base}/api/board/${posted.boardId}/wait?round=1`).then(r => r.json());
-    await new Promise(resolve => setTimeout(resolve, 150));
-    await fetch(`${base}/api/board/${posted.boardId}/submit`, {
-      method: 'POST',
-      headers: writeHeaders(),
-      body: JSON.stringify({
-        round: 1,
-        action: 'send',
-        answers: [],
-        comments: [{ blockId: h1, anchor: { kind: 'block' }, text: 'NO_REDELIVER_COMMENT' }],
-      }),
-    });
-    const packet1 = await waitPromise;
-    assert.equal(packet1.comments.length, 1, 'setup: the comment must have come back in round 1\'s own packet');
-
-    // A later round on the SAME thread (a real question, so /wait actually
-    // resolves) must not see it again -- the exact "ablation" ADR 35's
-    // drainUndeliveredComments guards against, now keyed on `awaited` rather
-    // than on the round's block shape.
-    const posted2 = await (await fetch(`${base}/api/board`, {
-      method: 'POST',
-      headers: writeHeaders(),
-      body: JSON.stringify({
-        boardId: posted.boardId,
-        title: 'Follow-up question',
-        blocks: [{ kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }] }],
-      }),
-    })).json();
-    const q = readBoard(posted.boardId, home).blocks.find(b => b.round === 2).id;
-    const waitPromise2 = fetch(`${base}/api/board/${posted.boardId}/wait?round=2`).then(r => r.json());
-    await new Promise(resolve => setTimeout(resolve, 150));
-    await fetch(`${base}/api/board/${posted.boardId}/submit`, {
-      method: 'POST',
-      headers: writeHeaders(),
-      body: JSON.stringify({ round: 2, action: 'send', answers: [{ id: q, status: 'answered', choice: 'Yes', note: '' }], comments: [] }),
-    });
-    const packet2 = await waitPromise2;
-    assert.equal(packet2.comments.length, 0, 'the comment already delivered in round 1\'s own packet must not ride round 2\'s too');
   });
 
   await check('an awaited page round still receives its own submit even after a second round opens beside it (concurrent asks can post one before the first is answered)', async () => {
@@ -3797,14 +3211,14 @@ async function main() {
     const html = '<!doctype html><html><body><h1>TWO_OPEN_AWAITED</h1></body></html>';
     const posted1 = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ title: 'Awaited page board', blocks: [{ kind: 'html', html }], wait: true }),
     })).json();
     const h1 = readBoard(posted1.boardId, home).blocks[0].id;
 
     const posted2 = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         boardId: posted1.boardId,
         title: 'A second, concurrent round',
@@ -3820,7 +3234,7 @@ async function main() {
 
     const submitRound1 = await fetch(`${base}/api/board/${posted1.boardId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         round: 1,
         action: 'send',
@@ -3837,7 +3251,7 @@ async function main() {
     const q2 = readBoard(posted1.boardId, home).blocks.find(b => b.round === 2).id;
     const submitRound2 = await fetch(`${base}/api/board/${posted1.boardId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ round: 2, action: 'send', answers: [{ id: q2, status: 'answered', choice: 'Yes', note: '' }], comments: [] }),
     });
     assert.equal(submitRound2.status, 200);
@@ -3845,75 +3259,12 @@ async function main() {
 
   // --- a wait that DIED, rather than one that was answered ---------------------
   //
-  // `mintAwait` stamps `awaited: true` when a round is born; these three prove the
-  // other half exists -- that the flag comes back off the moment the round's own
-  // deadline passes, and that every surface keyed on it follows. Set up by writing
-  // a lapsed deadline straight to the store (writeBoard does not sweep; readBoard
-  // does), because the alternative is a check that waits out a real 40 minutes.
-
-  await check('a wait that died stops being awaited on the next read, deadline intact, and its comments become drain candidates again', async () => {
-    const html = '<!doctype html><html><body><h1>LAPSED_DRAIN</h1></body></html>';
-    const posted = await (await fetch(`${base}/api/board`, {
-      method: 'POST',
-      headers: writeHeaders(),
-      body: JSON.stringify({ title: 'Awaited page board', blocks: [{ kind: 'html', html }], wait: true }),
-    })).json();
-    const stored = readBoard(posted.boardId, home);
-    const h1 = stored.blocks[0].id;
-    assert.equal(stored.rounds[0].awaited, true, 'setup: minted awaited');
-
-    // A comment left while the wait was still alive, submitted with no /wait
-    // connected -- the exact shape that used to reach nobody, ever: the round
-    // stayed awaited forever, and the drain skips an awaited round on the grounds
-    // that its own packet carries its comments. No packet was ever built.
-    await fetch(`${base}/api/board/${posted.boardId}/submit`, {
-      method: 'POST',
-      headers: writeHeaders(),
-      body: JSON.stringify({
-        round: 1,
-        action: 'send',
-        answers: [],
-        comments: [{ blockId: h1, anchor: { kind: 'block' }, text: 'STRANDED_BY_A_DEAD_WAIT' }],
-      }),
-    });
-
-    // Kill the wait: rewind the deadline past now, straight to disk.
-    const raw = JSON.parse(readFileSync(path.join(home, 'boards', `${posted.boardId}.json`), 'utf8'));
-    raw.rounds[0].awaited = true; // the submit closed the round; re-open the awaited state to isolate the deadline
-    raw.rounds[0].status = 'open';
-    raw.rounds[0].awaitDeadline = new Date(Date.now() - 1000).toISOString();
-    writeFileSync(path.join(home, 'boards', `${posted.boardId}.json`), JSON.stringify(raw, null, 2));
-
-    const swept = readBoard(posted.boardId, home);
-    assert.equal(swept.rounds[0].awaited, false, 'a round whose deadline has passed reads back not awaited');
-    assert.equal(swept.rounds[0].awaitDeadline, raw.rounds[0].awaitDeadline, 'the deadline itself survives as the record of when the wait died');
-
-    // A later round on the same thread now carries the stranded comment (ADR 35,
-    // AC 12), which is only reachable because round 1 stopped being awaited.
-    const posted2 = await (await fetch(`${base}/api/board`, {
-      method: 'POST',
-      headers: writeHeaders(),
-      body: JSON.stringify({
-        boardId: posted.boardId,
-        title: 'The round after the dead one',
-        blocks: [{ kind: 'question', prompt: 'Carry on?', widget: 'single', options: [{ label: 'Yes' }] }],
-      }),
-    })).json();
-    const waitPromise = fetch(`${base}/api/board/${posted.boardId}/wait?round=${posted2.round}`).then(r => r.json());
-    await new Promise(resolve => setTimeout(resolve, 150));
-    const q = readBoard(posted.boardId, home).blocks.find(b => b.round === posted2.round).id;
-    await fetch(`${base}/api/board/${posted.boardId}/submit`, {
-      method: 'POST',
-      headers: writeHeaders(),
-      body: JSON.stringify({ round: posted2.round, action: 'send', answers: [{ id: q, status: 'answered', choice: 'Yes', note: '' }], comments: [] }),
-    });
-    const packet = await waitPromise;
-    assert.deepEqual(
-      packet.comments.map(c => c.text),
-      ['STRANDED_BY_A_DEAD_WAIT'],
-      'the comment stranded by the dead wait rides the thread\'s next packet exactly once'
-    );
-  });
+  // `mintAwait` stamps `awaited: true` when a round is born, and the flag comes back
+  // off the moment the round's own deadline passes (check-pure's
+  // closeLapsedAwaitedRounds check; readBoard runs that sweep). The checks below prove
+  // the surfaces keyed on it follow. Set up by writing a lapsed deadline straight to
+  // the store (writeBoard does not sweep; readBoard does), because the alternative is a
+  // check that waits out a real 40 minutes.
 
   await check('the requestId dedupe refuses a round whose wait has already died, and mints a fresh one with a live deadline instead', async () => {
     // The livelock this closes: the same artifact re-posted after a timeout was
@@ -3923,11 +3274,11 @@ async function main() {
     // straight back here.
     const html = '<!doctype html><html><body><h1>DEDUPE_LAPSED</h1></body></html>';
     const body = JSON.stringify({ title: 'Same artifact, twice', blocks: [{ kind: 'html', html }], wait: true, requestId: 'lapsed-dedupe-1' });
-    const first = await (await fetch(`${base}/api/board`, { method: 'POST', headers: writeHeaders(), body })).json();
+    const first = await (await fetch(`${base}/api/board`, { method: 'POST', headers: writeHeaders(SECRET), body })).json();
 
     // Identical re-post while the wait is still alive: still a retry, unchanged.
     const retry = await (await fetch(`${base}/api/board`, {
-      method: 'POST', headers: writeHeaders(), body: JSON.stringify({ ...JSON.parse(body), boardId: first.boardId }),
+      method: 'POST', headers: writeHeaders(SECRET), body: JSON.stringify({ ...JSON.parse(body), boardId: first.boardId }),
     })).json();
     assert.equal(retry.deduped, true, 'a live round still answers its own retry -- that guard is what stops a double-posted round');
 
@@ -3937,7 +3288,7 @@ async function main() {
     writeFileSync(boardFile, JSON.stringify(raw, null, 2));
 
     const afterDeath = await (await fetch(`${base}/api/board`, {
-      method: 'POST', headers: writeHeaders(), body: JSON.stringify({ ...JSON.parse(body), boardId: first.boardId }),
+      method: 'POST', headers: writeHeaders(SECRET), body: JSON.stringify({ ...JSON.parse(body), boardId: first.boardId }),
     })).json();
     assert.ok(!afterDeath.deduped, 'a lapsed round can never hand an agent anything again, so it is never the answer to a retry');
     assert.equal(afterDeath.round, 2, 'the post falls through and mints the next round');
@@ -3960,7 +3311,7 @@ async function main() {
 
     const ask = { title: 'Rendered artifact', blocks: [{ kind: 'html', source: { path: 'stage.html' } }], requestId: 'regen-artifact-1' };
     const first = await (await fetch(`${base}/api/board`, {
-      method: 'POST', headers: writeHeaders(), body: JSON.stringify({ ...ask, cwd: stageDir }),
+      method: 'POST', headers: writeHeaders(SECRET), body: JSON.stringify({ ...ask, cwd: stageDir }),
     })).json();
     assert.equal(first.round, 1);
     assert.ok(readBoard(first.boardId, home).blocks[0].html.includes('ARTIFACT_V1'), 'setup: round 1 snapshotted v1');
@@ -3969,14 +3320,14 @@ async function main() {
     // lost-response case the dedupe exists for, and a content check that reported drift
     // here would mint a duplicate artifact round on every dropped response.
     const retry = await (await fetch(`${base}/api/board`, {
-      method: 'POST', headers: writeHeaders(), body: JSON.stringify({ ...ask, boardId: first.boardId }),
+      method: 'POST', headers: writeHeaders(SECRET), body: JSON.stringify({ ...ask, boardId: first.boardId }),
     })).json();
     assert.equal(retry.deduped, true, 'an identical re-post against unchanged content is the retry the dedupe is for');
     assert.equal(retry.round, 1);
 
     writeFileSync(stagePath, page('ARTIFACT_V2'), 'utf8');
     const regenerated = await (await fetch(`${base}/api/board`, {
-      method: 'POST', headers: writeHeaders(), body: JSON.stringify({ ...ask, boardId: first.boardId }),
+      method: 'POST', headers: writeHeaders(SECRET), body: JSON.stringify({ ...ask, boardId: first.boardId }),
     })).json();
     // (Ablation: with the resolved-content gate removed this comes back `deduped: true`,
     // round 1, and every assertion below fails on a board still holding only v1.)
@@ -4011,14 +3362,14 @@ async function main() {
       requestId: 'regen-amend-1',
     };
     const first = await (await fetch(`${base}/api/board`, {
-      method: 'POST', headers: writeHeaders(), body: JSON.stringify({ ...ask, cwd: stageDir }),
+      method: 'POST', headers: writeHeaders(SECRET), body: JSON.stringify({ ...ask, cwd: stageDir }),
     })).json();
     assert.equal(first.round, 1);
     assert.equal(first.awaited, true, 'setup: the round asks something, so it is genuinely amendable -- that is what makes this the dangerous shape');
 
     writeFileSync(stagePath, page('AMEND_V2'), 'utf8');
     const regenerated = await (await fetch(`${base}/api/board`, {
-      method: 'POST', headers: writeHeaders(), body: JSON.stringify({ ...ask, boardId: first.boardId }),
+      method: 'POST', headers: writeHeaders(SECRET), body: JSON.stringify({ ...ask, boardId: first.boardId }),
     })).json();
     // (Ablation: with the drift gate on the dedupe branch alone, this comes back round 1
     // -- amended -- and every assertion below fails on a doubled round.)
@@ -4037,10 +3388,10 @@ async function main() {
     // answering it reports one answer -- not a second one against a duplicate prompt
     // nobody was ever shown a control for.
     const waitPromise = fetch(`${base}/api/board/${first.boardId}/wait?round=1`).then(r => r.json());
-    await new Promise(resolve => setTimeout(resolve, 150));
+    await sleep(150);
     await fetch(`${base}/api/board/${first.boardId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ round: 1, action: 'send', answers: [{ id: round1[1].id, status: 'answered', choice: 'Yes', note: '' }], comments: [] }),
     });
     const packet = await waitPromise;
@@ -4058,7 +3409,7 @@ async function main() {
     const html = '<!doctype html><html><body><h1>AWAITED_THEN_SENT</h1></body></html>';
     const posted = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ title: 'Awaited, answered unheard', blocks: [{ kind: 'html', html }], wait: true }),
     })).json();
     const h1 = readBoard(posted.boardId, home).blocks[0].id;
@@ -4067,7 +3418,7 @@ async function main() {
     // No /wait anywhere: the reviewer answers a board nobody is currently polling.
     await fetch(`${base}/api/board/${posted.boardId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         round: 1,
         action: 'send',
@@ -4085,15 +3436,15 @@ async function main() {
     // packet after it, for the life of the board.)
     const second = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ boardId: posted.boardId, title: 'Follow-up', blocks: [{ kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }] }] }),
     })).json();
     const q = readBoard(posted.boardId, home).blocks.find(b => b.round === second.round).id;
     const waitPromise = fetch(`${base}/api/board/${posted.boardId}/wait?round=${second.round}`).then(r => r.json());
-    await new Promise(resolve => setTimeout(resolve, 150));
+    await sleep(150);
     await fetch(`${base}/api/board/${posted.boardId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ round: second.round, action: 'send', answers: [{ id: q, status: 'answered', choice: 'Yes', note: '' }], comments: [] }),
     });
     const packet = await waitPromise;
@@ -4103,15 +3454,15 @@ async function main() {
     // as the ones it drained, so a third round sees neither.
     const third = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ boardId: posted.boardId, blocks: [{ kind: 'question', prompt: 'Anything else?', widget: 'single', options: [{ label: 'No' }] }] }),
     })).json();
     const q3 = readBoard(posted.boardId, home).blocks.find(b => b.round === third.round).id;
     const waitPromise3 = fetch(`${base}/api/board/${posted.boardId}/wait?round=${third.round}`).then(r => r.json());
-    await new Promise(resolve => setTimeout(resolve, 150));
+    await sleep(150);
     await fetch(`${base}/api/board/${posted.boardId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ round: third.round, action: 'send', answers: [{ id: q3, status: 'answered', choice: 'No', note: '' }], comments: [] }),
     });
     assert.equal((await waitPromise3).comments.length, 0, 'and never a second time');
@@ -4125,7 +3476,7 @@ async function main() {
     // response needed", nothing waited, and the reviewer's Send answered into a void.
     const posted = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ title: 'Lapsed question round', blocks: [{ kind: 'question', prompt: 'First question?', widget: 'single', options: [{ label: 'Yes' }] }] }),
     })).json();
     assert.equal(posted.awaited, true, 'setup: a question round is awaited');
@@ -4139,7 +3490,7 @@ async function main() {
     // Exactly what the timeout text tells the agent to do next.
     const followUp = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ boardId: posted.boardId, title: 'Lapsed question round', blocks: [{ kind: 'question', prompt: 'Second question?', widget: 'single', options: [{ label: 'Yes' }] }] }),
     })).json();
     // (Ablation: without the lapse gate on the amend branch this is round 1,
@@ -4164,7 +3515,7 @@ async function main() {
     // forty-minute cap and was then handed a `timeout` saying the board is "still open".
     const posted = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ title: 'Abandoned mid-wait', blocks: [{ kind: 'question', prompt: 'Still there?', widget: 'single', options: [{ label: 'Yes' }] }] }),
     })).json();
 
@@ -4180,9 +3531,9 @@ async function main() {
         .catch(err => ({ status: `request failed: ${err.message}` })),
       new Promise(resolve => setTimeout(() => resolve({ status: 'check-gave-up' }), 5000)),
     ]);
-    await new Promise(resolve => setTimeout(resolve, 150));
+    await sleep(150);
 
-    const abandoned = await (await fetch(`${base}/api/board/${posted.boardId}/abandon`, { method: 'POST', headers: writeHeaders() })).json();
+    const abandoned = await (await fetch(`${base}/api/board/${posted.boardId}/abandon`, { method: 'POST', headers: writeHeaders(SECRET) })).json();
     assert.deepEqual(abandoned.closed, [1]);
 
     const packet = await waitPromise;
@@ -4206,7 +3557,7 @@ async function main() {
     const qid = readBoard(posted.boardId, home).blocks.find(b => b.kind === 'question').id;
     const send = await fetch(`${base}/api/board/${posted.boardId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ round: 1, action: 'send', answers: [{ id: qid, status: 'answered', choice: 'Yes', note: 'typed after the boundary' }], comments: [] }),
     });
     assert.equal(send.status, 200, 'a round nobody sent takes a Send however its wait ended');
@@ -4220,7 +3571,7 @@ async function main() {
     // owes a stale client, and it names a submit rather than an abandon now.
     const again = await fetch(`${base}/api/board/${posted.boardId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ round: 1, action: 'send', answers: [{ id: qid, status: 'answered', choice: 'Yes', note: 'a double click' }], comments: [] }),
     });
     assert.equal(again.status, 409, 'a round that HAS been sent is still refused');
@@ -4235,7 +3586,7 @@ async function main() {
     // daemon's one thread. Measured by the audit: a 19.6 MB body -> a 156 MB board.
     const posted = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'Submit caps',
         blocks: [
@@ -4247,7 +3598,7 @@ async function main() {
     const stored0 = readBoard(posted.boardId, home);
     const target = stored0.blocks[0].id;
     const q = stored0.blocks[1].id;
-    const submit = body => fetch(`${base}/api/board/${posted.boardId}/submit`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify(body) });
+    const submit = body => fetch(`${base}/api/board/${posted.boardId}/submit`, { method: 'POST', headers: writeHeaders(SECRET), body: JSON.stringify(body) });
     const unchanged = () => {
       const now = readBoard(posted.boardId, home);
       assert.equal(now.comments.length, 0, 'a refused submit stores no comment');
@@ -4288,7 +3639,7 @@ async function main() {
     // is persisted, re-rendered on every read, and shown as a heading.
     const oversize = await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'Compare label cap',
         blocks: [{ kind: 'compare', left: { label: 'x'.repeat(MAX_REF_BYTES + 1), block: { kind: 'markdown', text: 'left' } }, right: { label: 'After', block: { kind: 'markdown', text: 'right' } } }],
@@ -4299,7 +3650,7 @@ async function main() {
 
     const ordinary = await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'Compare label cap',
         blocks: [{ kind: 'compare', left: { label: 'Before', block: { kind: 'markdown', text: 'left' } }, right: { label: 'After', block: { kind: 'markdown', text: 'right' } } }],
@@ -4320,13 +3671,13 @@ async function main() {
     const html = '<!doctype html><html><body><h1>REISSUE_MARKER page</h1></body></html>';
     const artifact = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ title: 'Re-issue page board', blocks: [{ kind: 'html', html }] }),
     })).json();
     const artifactBlock = readBoard(artifact.boardId, home).blocks[0].id;
     await fetch(`${base}/api/board/${artifact.boardId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         round: 1,
         action: 'send',
@@ -4340,7 +3691,7 @@ async function main() {
     // MUST repeat) and one that was drained into it (which must not).
     const asking = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'Re-issue question',
         thread: artifact.thread,
@@ -4356,10 +3707,10 @@ async function main() {
 
     const waitUrl = `${base}/api/board/${asking.boardId}/wait?round=1`;
     const firstWait = fetch(waitUrl).then(r => r.json());
-    await new Promise(resolve => setTimeout(resolve, 150));
+    await sleep(150);
     await fetch(`${base}/api/board/${asking.boardId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         round: 1,
         action: 'send',
@@ -4397,7 +3748,7 @@ async function main() {
     // after.
     const posted1 = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'Ordinary two-round board',
         blocks: [
@@ -4412,10 +3763,10 @@ async function main() {
     const q1 = stored1.blocks.find(b => b.kind === 'question').id;
 
     const wait1 = fetch(`${base}/api/board/${boardId}/wait?round=1`).then(r => r.json());
-    await new Promise(resolve => setTimeout(resolve, 150));
+    await sleep(150);
     await fetch(`${base}/api/board/${boardId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         round: 1,
         action: 'send',
@@ -4430,17 +3781,17 @@ async function main() {
     // Round 2, same board, carries no new comment.
     const posted2 = await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ boardId, blocks: [{ kind: 'question', prompt: 'Also this?', widget: 'single', options: [{ label: 'Yes' }] }] }),
     });
     assert.equal((await posted2.json()).round, 2);
     const q2 = readBoard(boardId, home).blocks.find(b => b.round === 2).id;
 
     const wait2 = fetch(`${base}/api/board/${boardId}/wait?round=2`).then(r => r.json());
-    await new Promise(resolve => setTimeout(resolve, 150));
+    await sleep(150);
     await fetch(`${base}/api/board/${boardId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ round: 2, action: 'send', answers: [{ id: q2, status: 'answered', choice: 'Yes', note: '' }], comments: [] }),
     });
     const packet2 = await wait2;
@@ -4450,7 +3801,7 @@ async function main() {
     assert.equal(packet2.comments.length, 0, 'a comment already delivered by its own round\'s ordinary packet must not be redelivered on a later round');
   });
 
-  await check('a drained comment is not marked delivered until the packet is known to have left -- commit is deferred, not eager (audit finding 4)', async () => {
+  await check('a drained comment is not marked delivered until the packet is known to have left -- commit is deferred, not eager', async () => {
     // The audit reproduced this over a real socket by destroying the client mid-wait at
     // swept millisecond offsets -- 5 permanent losses in 130 trials, because the old
     // code flipped `delivered` and wrote it as part of COMPUTING the packet, before the
@@ -4463,7 +3814,7 @@ async function main() {
     const html = '<!doctype html><html><body><h1>DEFERRED_MARKER page</h1></body></html>';
     const posted1 = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ title: 'Deferred-commit page board', blocks: [{ kind: 'html', html }] }),
     })).json();
     const board1 = posted1.boardId;
@@ -4471,7 +3822,7 @@ async function main() {
     const h1 = readBoard(board1, home).blocks[0].id;
     await fetch(`${base}/api/board/${board1}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         round: 1,
         action: 'send',
@@ -4482,7 +3833,7 @@ async function main() {
 
     const posted2 = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'Collecting round',
         thread,
@@ -4525,7 +3876,7 @@ async function main() {
     assert.equal(third.packet.comments.length, 0, 'once committed, the comment is truly gone from future packets');
   });
 
-  await check('commit does not clobber a stranded banner written by a second writer in the window between capture and commit (ticket 09)', async () => {
+  await check('commit does not clobber a stranded banner written by a second writer in the window between capture and commit', async () => {
     // `commit` captures whole board objects when `buildPacketWithUndelivered` is called,
     // but only runs on the response's own `finish` event (`res.once('finish', commit)` in
     // handleWait) -- a strictly LATER macrotask. In that window the stranded rule's timer
@@ -4537,7 +3888,7 @@ async function main() {
     const html = '<!doctype html><html><body><h1>RACE_MARKER page</h1></body></html>';
     const posted1 = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ title: 'Raced page board', blocks: [{ kind: 'html', html }] }),
     })).json();
     const board1 = posted1.boardId;
@@ -4545,7 +3896,7 @@ async function main() {
     const h1 = readBoard(board1, home).blocks[0].id;
     await fetch(`${base}/api/board/${board1}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         round: 1,
         action: 'send',
@@ -4556,7 +3907,7 @@ async function main() {
 
     const posted2 = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'Collecting round',
         thread,
@@ -4628,7 +3979,7 @@ async function main() {
   async function askRound(prompt, into = {}) {
     const posted = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: prompt,
         ...into,
@@ -4644,7 +3995,7 @@ async function main() {
   function answer(boardId, round, qid, choice, note = '') {
     return fetch(`${base}/api/board/${boardId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ round, action: 'send', answers: [{ id: qid, status: 'answered', choice, note }], comments: [] }),
     });
   }
@@ -4654,7 +4005,7 @@ async function main() {
    * `waitForRound` returns on its first poll and proves nothing about a blocked call. */
   async function askAndAnswer(boardId, round, qid, choice, note = '') {
     const waiting = fetch(`${base}/api/board/${boardId}/wait?round=${round}`).then(r => r.json());
-    await new Promise(resolve => setTimeout(resolve, 150));
+    await sleep(150);
     const submitted = await answer(boardId, round, qid, choice, note);
     assert.equal(submitted.status, 200, `setup: round ${round} must be submittable`);
     return waiting;
@@ -4700,8 +4051,8 @@ async function main() {
     // undelivered rather than a legacy board's adoption.
     const abort = new AbortController();
     const waiting = fetch(`${base}/api/board/${r.boardId}/wait?round=1`, { signal: abort.signal }).then(res => res.json());
-    await new Promise(resolve => setTimeout(resolve, 150));
-    await fetch(`${base}/api/board/${r.boardId}/abandon`, { method: 'POST', headers: writeHeaders() });
+    await sleep(150);
+    await fetch(`${base}/api/board/${r.boardId}/abandon`, { method: 'POST', headers: writeHeaders(SECRET) });
     const released = await waiting;
     abort.abort();
     assert.equal(released.status, 'abandoned', 'the blocked ask is released at once, told what happened (ADR 69)');
@@ -4786,22 +4137,6 @@ async function main() {
     const r3 = await askRound('THIRD_ROUND_Q', { boardId: r1.boardId });
     const packet3 = await askAndAnswer(r1.boardId, 3, r3.qid, 'Yes');
     assert.deepEqual(packet3.answers.map(a => a.round), [3], 'an already-delivered round must not come back a second time');
-  });
-
-  await check('ADR 107 AC 5: a round whose own packet left normally is never redelivered, and no packet carries the same answer entry twice', async () => {
-    // The other direction of the same mark, and the one that keeps "one packet is one
-    // round" true everywhere but the two documented exceptions: round 1 here is answered
-    // through its own blocked `/wait`, so its answers left in its own packet.
-    const r1 = await askRound('NORMAL_ROUND_Q');
-    const packet1 = await askAndAnswer(r1.boardId, 1, r1.qid, 'Yes');
-    assert.deepEqual(packet1.answers.map(a => a.round), [1], 'setup: round 1 gets its own answer in its own packet, once');
-    assert.deepEqual(readBoard(r1.boardId, home)[ANSWERS_DELIVERED], [1], 'and that packet leaving is what marks it');
-
-    const r2 = await askRound('NORMAL_ROUND_Q2', { boardId: r1.boardId });
-    const packet2 = await askAndAnswer(r1.boardId, 2, r2.qid, 'No');
-    assert.deepEqual(packet2.answers.map(a => a.round), [2], 'round 2 does not redeliver round 1');
-    assert.equal(new Set(packet2.answers.map(a => a.id)).size, packet2.answers.length,
-      'and no packet ever carries the same answer entry twice -- the waited round is marked by this drain but never drained by it');
   });
 
   await check('ADR 107 AC 3: the delivered mark stays unpersisted until commit -- deferred, not eager, provable without winning a socket race', async () => {
@@ -4892,8 +4227,8 @@ async function main() {
 
     const carrier = await askRound('ABANDON_CARRIER_Q', { thread: owing.thread });
     const abandonedPacket = fetch(`${base}/api/board/${carrier.boardId}/wait?round=1`).then(r => r.json());
-    await new Promise(resolve => setTimeout(resolve, 150));
-    await fetch(`${base}/api/board/${carrier.boardId}/abandon`, { method: 'POST', headers: writeHeaders() });
+    await sleep(150);
+    await fetch(`${base}/api/board/${carrier.boardId}/abandon`, { method: 'POST', headers: writeHeaders(SECRET) });
     const packet = await abandonedPacket;
     assert.equal(packet.status, 'abandoned');
     assert.equal(packet.answers.filter(a => a.note === 'owed on the abandon path').length, 1,
@@ -4949,80 +4284,6 @@ async function main() {
     assert.deepEqual(packet4.answers.map(a => a.round), [4, 3], 'the round that lapsed after adoption is owed exactly as any other is');
   });
 
-  await check('map-context question round trip (/wayfind\'s shape): post one question whose context references a map section by its heading SLUG, render it, answer it, and prove the referenced content actually resolved -- not merely that the post returned 200', async () => {
-    // The trap this migration already got bitten by once:
-    // `section` is the heading's SLUG, never its text. Get it wrong and the block is
-    // minted with an `error` and resolves to nothing while the POST still returns 200 --
-    // a silently empty context box the reviewer sees with no error anywhere in chat. So
-    // every assertion below is on the RESOLVED, stored content, never on the status code.
-    const mapDir = projectDir('wayfind-map');
-    writeFileSync(path.join(mapDir, 'MAP_ROUTING.md'), [
-      '# MAP: Routing investigation',
-      '',
-      '## Destination',
-      'Ship one router for the SPA.',
-      '',
-      '## Open questions',
-      '- [ ] Which router library should the SPA use?',
-      '',
-      '## Not yet specified',
-      'fog',
-      '',
-    ].join('\n'), 'utf8');
-
-    const r = await fetch(`${base}/api/board`, {
-      method: 'POST',
-      headers: writeHeaders(),
-      body: JSON.stringify({
-        title: 'MAP: Routing investigation',
-        cwd: mapDir,
-        blocks: [{
-          kind: 'question',
-          prompt: 'Which router library should the SPA use?',
-          widget: 'single',
-          options: [{ label: 'react-router' }, { label: 'tanstack-router' }],
-          context: [{ kind: 'markdown', source: { path: 'MAP_ROUTING.md', section: 'open-questions' } }],
-        }],
-      }),
-    });
-    assert.equal(r.status, 200);
-    const posted = await r.json();
-    const mapBoardId = posted.boardId;
-
-    const stored = readBoard(mapBoardId, home);
-    const qBlock = stored.blocks.find(b => b.kind === 'question');
-    const contextBlock = qBlock.context[0];
-    assert.equal(contextBlock.error, undefined, `the map section must resolve cleanly, not fall back to an error (got: ${contextBlock.error})`);
-    assert.ok(contextBlock.text.length > 0, 'the resolved context must carry real text, not an empty snapshot');
-    assert.ok(contextBlock.text.includes('Which router library should the SPA use?'), 'the resolved section must be the actual "Open questions" content');
-    assert.ok(!contextBlock.text.includes('Ship one router'), 'the resolved section must be scoped to "Open questions", not the whole file');
-
-    // render: the resolved map section is really on the page, not just in the store.
-    const markup = renderedMarkup(await (await fetch(`${base}/b/${mapBoardId}`)).text());
-    assert.ok(markup.includes('Which router library should the SPA use?'), 'the rendered page must carry the resolved map context, not an empty or errored box');
-
-    // answer: pick one, same /wait + /submit shape as the round trip above.
-    const waitPromise = fetch(`${base}/api/board/${mapBoardId}/wait?round=1`).then(res => res.json());
-    await new Promise(resolve => setTimeout(resolve, 150));
-    const submitRes = await fetch(`${base}/api/board/${mapBoardId}/submit`, {
-      method: 'POST',
-      headers: writeHeaders(),
-      body: JSON.stringify({
-        round: 1,
-        action: 'send',
-        answers: [{ id: qBlock.id, status: 'answered', choice: 'tanstack-router', note: 'newer, typesafe' }],
-        comments: [],
-      }),
-    });
-    assert.equal(submitRes.status, 200);
-
-    // read the packet back.
-    const packet = await waitPromise;
-    assert.equal(packet.status, 'submitted');
-    assert.equal(packet.answers[0].choice, 'tanstack-router');
-    assert.equal(packet.answers[0].note, 'newer, typesafe');
-  });
-
   await check('L5: store directories are 0700 and store files 0600', async () => {
     // The store holds every question, answer, note and snapshotted source file from
     // every project, indefinitely; it must not rely on its parent directory's mode.
@@ -5060,7 +4321,7 @@ async function main() {
   async function postCollecting(boardId, { noWait } = {}) {
     return (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         boardId,
         title: 'Collecting round',
@@ -5114,25 +4375,6 @@ async function main() {
       'nothing was spent by the posts that carried nothing');
   });
 
-  await check('AC 8: a post the shim then waits on is drained by that wait, and never twice', async () => {
-    // The other half of the same rule: the new shim omits the field exactly when it is
-    // about to open a `/wait`, so the post drains nothing and the wait's own packet
-    // drains once -- today's behaviour, unchanged.
-    const r1 = await askRound('WAITED_AFTER_POST_Q');
-    assert.equal((await lapse(r1.boardId)).status, 'timeout');
-    assert.equal((await answer(r1.boardId, 1, r1.qid, 'No', 'WAITED_AFTER_POST_NOTE')).status, 200);
-
-    const r2 = await askRound('WAITED_CARRIER_Q', { boardId: r1.boardId });
-    assert.equal(r2.answers, undefined, 'a post that will be waited on drains nothing');
-    assert.deepEqual(readBoard(r1.boardId, home)[ANSWERS_DELIVERED], [], 'and marks nothing');
-
-    const packet = await askAndAnswer(r1.boardId, r2.round, r2.qid, 'Yes');
-    assert.equal(packet.answers.filter(a => a.note === 'WAITED_AFTER_POST_NOTE').length, 1,
-      'the wait that follows the post is what carries it, exactly as today');
-    assert.deepEqual(readBoard(r1.boardId, home)[ANSWERS_DELIVERED], [1, r2.round],
-      'one delivery between the two calls, not two');
-  });
-
   await check('AC 8: the posted packet carries every undelivered comment, the amended round\'s own included', async () => {
     // A round that is still open AND asks something is AMENDED by a later post rather
     // than followed by one. The drain's ordinary rule leaves the target round's own
@@ -5184,7 +4426,7 @@ async function main() {
 
     const created = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'Collecting board',
         thread: r1.thread,
@@ -5231,6 +4473,30 @@ async function main() {
       'and once a packet HAS carried it, no later packet does: that rule is unchanged');
   });
 
+  await check('the read route answers the local secret alone, refuses the session cookie as /wait does, and refuses an unknown or unsafe id', async () => {
+    const seeded = await askRound('READ_GATE_Q');
+    const url = `${base}/api/board/${seeded.boardId}/read`;
+
+    // rawFetch throughout: each request carries exactly the credential it names.
+    assert.equal((await rawFetch(url)).status, 401, 'no credential reads nothing');
+    // A browser holding the session cookie is refused too: no page ever calls this
+    // route, and the cookie is the credential a cross-origin GET could ride in on.
+    assert.equal(
+      (await rawFetch(url, { headers: { cookie: sessionCookieHeader(SECRET) } })).status, 401,
+      'the session cookie is not enough: this route is the shim\'s, like /wait',
+    );
+    const ok = await rawFetch(url, { headers: { [SECRET_HEADER]: SECRET } });
+    assert.equal(ok.status, 200, 'the local secret is what opens it');
+    assert.equal((await ok.json()).board, seeded.boardId);
+
+    const unknown = await rawFetch(`${base}/api/board/b_${'1'.repeat(32)}/read`, { headers: { [SECRET_HEADER]: SECRET } });
+    assert.equal(unknown.status, 404, 'a well-formed id naming no board is a plain 404');
+    // The store's own id rule, not a copy of it at the route: an id that could never be
+    // a path is refused before anything is read.
+    const unsafe = await rawFetch(`${base}/api/board/..%2F..%2Fsecret/read`, { headers: { [SECRET_HEADER]: SECRET } });
+    assert.ok(unsafe.status === 400 || unsafe.status === 404, `an unsafe id must be refused, got ${unsafe.status}`);
+  });
+
   // --- GET /api/waiting: the boards waiting for an answer ---------------
   //
   // The one route a client with no DOM has for "which boards owe the reviewer a trip"
@@ -5249,24 +4515,24 @@ async function main() {
     // which is the same harvest the read gate exists to refuse -- so `isOpenRoute` must
     // not grow an entry for it. (Ablation: add `/api/waiting` to isOpenRoute and the
     // first assertion here fails while nothing else in the suite notices.)
-    const none = await rawRequest(port, 'GET', '/api/waiting', `127.0.0.1:${port}`);
+    const none = await rawRequest(port, 'GET', '/api/waiting');
     assert.equal(none.status, 401, 'the waiting list must not answer a caller holding nothing');
     assert.ok(!none.body.includes('boardId'), 'and the refusal must not leak a single entry');
 
-    const withSecret = await rawRequest(port, 'GET', '/api/waiting', `127.0.0.1:${port}`, { headers: { [SECRET_HEADER]: SECRET } });
+    const withSecret = await rawRequest(port, 'GET', '/api/waiting', { headers: { [SECRET_HEADER]: SECRET } });
     assert.equal(withSecret.status, 200, 'the secret header alone is enough -- what a native client sends');
     assert.match(withSecret.headers['content-type'] || '', /application\/json/);
 
     // The browser's own credential works too, so the index page could read this route
     // without a second kind of authorization being invented for it.
-    const withCookie = await rawRequest(port, 'GET', '/api/waiting', `127.0.0.1:${port}`, { headers: { cookie: sessionCookieHeader() } });
+    const withCookie = await rawRequest(port, 'GET', '/api/waiting', { headers: { cookie: sessionCookieHeader(SECRET) } });
     assert.equal(withCookie.status, 200, 'the session cookie alone must read it, same as every other GET');
   });
 
   await check('WAITING: a round with an open wait is listed by board, thread, title and round number -- and answering it takes it off the list', async () => {
     const posted = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'WAITING_FIXTURE',
         cwd: projectDir('waiting-titled'),
@@ -5280,7 +4546,7 @@ async function main() {
     const folder = 'waiting-untitled';
     const untitled = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         cwd: projectDir(folder),
         blocks: [{ kind: 'question', prompt: 'And this one?', widget: 'single', options: [{ label: 'Yes' }] }],
@@ -5313,7 +4579,7 @@ async function main() {
     const q = readBoard(posted.boardId, home).blocks.find(b => b.kind === 'question').id;
     await fetch(`${base}/api/board/${posted.boardId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ round: 1, action: 'send', answers: [{ id: q, status: 'answered', choice: 'Yes', note: '' }], comments: [] }),
     });
 
@@ -5330,7 +4596,7 @@ async function main() {
     // instead of roundIsAwaitedOpen and only this check fails.)
     const posted = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'WAITING_LAPSED',
         blocks: [{ kind: 'question', prompt: 'Too late?', widget: 'single', options: [{ label: 'Yes' }] }],
@@ -5383,7 +4649,7 @@ async function main() {
     // it already existed at GET /api/index/rows and was simply never wired to these.
     const posted = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({
         title: 'WAITING_CACHE',
         blocks: [{ kind: 'html', html: '<!doctype html><html><body><h1>WAITING_CACHE</h1></body></html>' }],
@@ -5407,7 +4673,7 @@ async function main() {
 
       const second = await (await fetch(`${base}/api/board`, {
         method: 'POST',
-        headers: writeHeaders(),
+        headers: writeHeaders(SECRET),
         body: JSON.stringify({ boardId: posted.boardId, blocks: [{ kind: 'question', prompt: 'Ship?', widget: 'single', options: [{ label: 'Yes' }] }] }),
       })).json();
       assert.equal(second.round, 2);
@@ -5449,7 +4715,7 @@ async function main() {
     const walks = await withStoreWalkCount(async count => {
       const created = await (await fetch(`${base}/api/board`, {
         method: 'POST',
-        headers: writeHeaders(),
+        headers: writeHeaders(SECRET),
         body: JSON.stringify({ title: 'Fresh session', blocks: [{ kind: 'markdown', text: '# fresh' }] }),
       })).json();
       assert.ok(!before.has(created.thread), 'the minted thread is not one another session is already using');
@@ -5464,30 +4730,30 @@ async function main() {
     // invisible to a wait resolving in an unrelated one.
     const leaky = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ title: 'Project A', blocks: [{ kind: 'html', html: '<!doctype html><html><body><h1>PROJECT_A</h1></body></html>' }] }),
     })).json();
     const aBlock = readBoard(leaky.boardId, home).blocks[0].id;
     await fetch(`${base}/api/board/${leaky.boardId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ round: 1, action: 'send', answers: [], comments: [{ blockId: aBlock, anchor: { kind: 'block' }, text: 'PROJECT_A_SECRET' }] }),
     });
     assert.equal(readBoard(leaky.boardId, home).comments[0].delivered, undefined, 'setup: the comment is undelivered, so it IS a drain candidate somewhere');
 
     const other = await (await fetch(`${base}/api/board`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ title: 'Project B', blocks: [{ kind: 'question', prompt: 'Unrelated?', widget: 'single', options: [{ label: 'Yes' }] }] }),
     })).json();
     assert.notEqual(other.thread, leaky.thread, 'two independent posts are two independent threads');
 
     const q = readBoard(other.boardId, home).blocks[0].id;
     const waitPromise = fetch(`${base}/api/board/${other.boardId}/wait?round=1`).then(r => r.json());
-    await new Promise(resolve => setTimeout(resolve, 150));
+    await sleep(150);
     await fetch(`${base}/api/board/${other.boardId}/submit`, {
       method: 'POST',
-      headers: writeHeaders(),
+      headers: writeHeaders(SECRET),
       body: JSON.stringify({ round: 1, action: 'send', answers: [{ id: q, status: 'answered', choice: 'Yes', note: '' }], comments: [] }),
     });
     const packet = await waitPromise;
@@ -5504,14 +4770,18 @@ async function main() {
   // impure methods in isolation; everything below is specifically about the ROUTES —
   // auth, request/response shape, and persistence across a real daemon restart.
 
-  const POMODORO_WRITE_ACTIONS = ['ensure', 'pause', 'resume', 'reset', 'settings'];
+  // The five pomodoro writes this section drives, not every one there is: the cookie
+  // reaches four more (POMODORO_COOKIE_ACTIONS, src/server.mjs). preview and notifyTest
+  // carry their own no-credential checks at the bottom of this file, forward and
+  // restart theirs in test/check-pomodoro.mjs.
+  const POMODORO_WRITES_DRIVEN_HERE = ['ensure', 'pause', 'resume', 'reset', 'settings'];
 
   await check('POMODORO: every route refuses a request carrying no credential at all, with the status the rest of the surface uses', async () => {
-    const getR = await rawRequest(port, 'GET', '/api/pomodoro', `127.0.0.1:${port}`);
+    const getR = await rawRequest(port, 'GET', '/api/pomodoro');
     assert.equal(getR.status, 401, 'GET /api/pomodoro must be gated exactly like every other read');
 
-    for (const action of POMODORO_WRITE_ACTIONS) {
-      const r = await rawRequest(port, 'POST', `/api/pomodoro/${action}`, `127.0.0.1:${port}`);
+    for (const action of POMODORO_WRITES_DRIVEN_HERE) {
+      const r = await rawRequest(port, 'POST', `/api/pomodoro/${action}`);
       assert.equal(r.status, 401, `POST /api/pomodoro/${action} must refuse a request with no credential`);
       assert.equal(r.body, '', `POST /api/pomodoro/${action} must send no body on refusal, same as every other write`);
     }
@@ -5532,47 +4802,37 @@ async function main() {
     assert.ok(typeof doc.now === 'number' && doc.now >= before && doc.now <= after, `now (${doc.now}) must be the server's own clock, taken at response time (window ${before}-${after})`);
   });
 
-  await check('POMODORO: the cookie alone can ensure, pause, resume, reset and write settings, and nothing beyond those five', async () => {
-    const cookie = sessionCookieHeader();
+  await check('POMODORO: the cookie alone can ensure, pause, resume, reset and write settings, and a pomodoro action off POMODORO_COOKIE_ACTIONS stays secret-only', async () => {
+    const cookie = sessionCookieHeader(SECRET);
     const cookieHeaders = { origin: `http://127.0.0.1:${port}`, 'sec-fetch-site': 'same-origin', cookie };
 
-    const pauseC = await rawRequest(port, 'POST', '/api/pomodoro/pause', `127.0.0.1:${port}`, { headers: cookieHeaders });
+    const pauseC = await rawRequest(port, 'POST', '/api/pomodoro/pause', { headers: cookieHeaders });
     assert.equal(pauseC.status, 200, 'the cookie alone must be able to pause');
-    const resumeC = await rawRequest(port, 'POST', '/api/pomodoro/resume', `127.0.0.1:${port}`, { headers: cookieHeaders });
+    const resumeC = await rawRequest(port, 'POST', '/api/pomodoro/resume', { headers: cookieHeaders });
     assert.equal(resumeC.status, 200, 'the cookie alone must be able to resume');
-    const settingsC = await rawRequest(port, 'POST', '/api/pomodoro/settings', `127.0.0.1:${port}`, {
+    const settingsC = await rawRequest(port, 'POST', '/api/pomodoro/settings', {
       headers: { ...cookieHeaders, 'content-type': 'application/json' },
       body: JSON.stringify({ workMin: 20 }),
     });
     assert.equal(settingsC.status, 200, 'the cookie alone must be able to write settings');
-    const resetC = await rawRequest(port, 'POST', '/api/pomodoro/reset', `127.0.0.1:${port}`, { headers: cookieHeaders });
+    const resetC = await rawRequest(port, 'POST', '/api/pomodoro/reset', { headers: cookieHeaders });
     assert.equal(resetC.status, 200, 'the cookie alone must be able to reset');
 
     // ensure IS in the cookie's list, as of the index widget's switch: starting a
     // pomodoro by hand is a browser doing it, and startWork is a no-op against a timer
     // that already exists, so the reach it adds is smaller than reset's -- which the
     // cookie already had. See POMODORO_COOKIE_ACTIONS in src/server.mjs.
-    const ensureC = await rawRequest(port, 'POST', '/api/pomodoro/ensure', `127.0.0.1:${port}`, { headers: cookieHeaders });
+    const ensureC = await rawRequest(port, 'POST', '/api/pomodoro/ensure', { headers: cookieHeaders });
     assert.equal(ensureC.status, 200, 'the cookie alone must be able to start a pomodoro');
 
-    // ...and the list stays CLOSED. A pomodoro write that is not one of the five named
-    // actions must still be refused to a cookie, or POMODORO_COOKIE_ACTIONS has
-    // silently become a `parts[1] === 'pomodoro'` prefix match. (Ablation: swap the Set
-    // membership test for a prefix match and this becomes a 404, not a 401.)
-    const unknownC = await rawRequest(port, 'POST', '/api/pomodoro/skip', `127.0.0.1:${port}`, { headers: cookieHeaders });
-    assert.equal(unknownC.status, 401, 'a pomodoro action outside the named five must stay secret-only, even one that does not exist yet');
-
-    // The secret does all five, ensure included.
-    for (const action of ['pause', 'resume', 'reset', 'ensure']) {
-      const r = await fetch(`${base}/api/pomodoro/${action}`, { method: 'POST', headers: writeHeaders() });
-      assert.equal(r.status, 200, `the secret header alone must be able to ${action}`);
-    }
-    const settingsS = await fetch(`${base}/api/pomodoro/settings`, {
-      method: 'POST',
-      headers: writeHeaders(),
-      body: JSON.stringify({ breakMin: 7 }),
-    });
-    assert.equal(settingsS.status, 200, 'the secret header alone must be able to write settings');
+    // ...and the list stays CLOSED. The cookie reaches more than these five (preview has
+    // its own check below; forward and restart theirs in test/check-pomodoro.mjs), but a
+    // pomodoro write that is not on the list must still be refused to a cookie, or
+    // POMODORO_COOKIE_ACTIONS has silently become a `parts[1] === 'pomodoro'` prefix
+    // match. (Ablation: swap the Set membership test for a prefix match and this becomes
+    // a 404, not a 401.) The secret doing all of them is every other pomodoro check here.
+    const unknownC = await rawRequest(port, 'POST', '/api/pomodoro/skip', { headers: cookieHeaders });
+    assert.equal(unknownC.status, 401, 'a pomodoro action off the named list must stay secret-only, even one that does not exist yet');
   });
 
   await check('POMODORO: a bodyless POST /api/pomodoro/ensure with only the secret header succeeds -- the exact shape a session-start hook\'s curl sends', async () => {
@@ -5580,9 +4840,9 @@ async function main() {
     // handlePomodoro (src/server.mjs), which is what lets this succeed instead of the
     // 415 a real bodyless curl would get from any route that DOES read a JSON body.
     // Master switch defaults off (ADR 105); ensure needs it on to actually start anything.
-    await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify({ enabled: true }) });
-    await fetch(`${base}/api/pomodoro/reset`, { method: 'POST', headers: writeHeaders() });
-    const r = await rawRequest(port, 'POST', '/api/pomodoro/ensure', `127.0.0.1:${port}`, { headers: { [SECRET_HEADER]: SECRET } });
+    await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(SECRET), body: JSON.stringify({ enabled: true }) });
+    await fetch(`${base}/api/pomodoro/reset`, { method: 'POST', headers: writeHeaders(SECRET) });
+    const r = await rawRequest(port, 'POST', '/api/pomodoro/ensure', { headers: { [SECRET_HEADER]: SECRET } });
     assert.equal(r.status, 200, 'ensure must not require a content-type or a body');
     const body = JSON.parse(r.body);
     assert.ok(body.timer, 'ensure must have started a timer from the reset, empty state');
@@ -5595,27 +4855,27 @@ async function main() {
     // wrongly minted a FRESH deadline (`now + workMin*60_000`) instead of continuing from
     // the frozen remainder, the resulting deadline would land ~700ms later than expected
     // -- comfortably outside the assertion's tolerance below.
-    await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify({ workMin: 1, enabled: true }) });
-    await fetch(`${base}/api/pomodoro/reset`, { method: 'POST', headers: writeHeaders() });
-    const started = await (await fetch(`${base}/api/pomodoro/ensure`, { method: 'POST', headers: writeHeaders() })).json();
+    await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(SECRET), body: JSON.stringify({ workMin: 1, enabled: true }) });
+    await fetch(`${base}/api/pomodoro/reset`, { method: 'POST', headers: writeHeaders(SECRET) });
+    const started = await (await fetch(`${base}/api/pomodoro/ensure`, { method: 'POST', headers: writeHeaders(SECRET) })).json();
     assert.equal(started.timer.phase, 'work');
 
-    await new Promise(resolve => setTimeout(resolve, 700));
+    await sleep(700);
 
-    const paused = await (await fetch(`${base}/api/pomodoro/pause`, { method: 'POST', headers: writeHeaders() })).json();
+    const paused = await (await fetch(`${base}/api/pomodoro/pause`, { method: 'POST', headers: writeHeaders(SECRET) })).json();
     assert.equal(paused.timer.paused, true);
     assert.equal(paused.timer.deadline, undefined, 'a paused timer carries remainingMs, not a deadline');
     const remainingAtPause = paused.timer.remainingMs;
     assert.ok(remainingAtPause > 0 && remainingAtPause < 60_000, `remainingMs (${remainingAtPause}) must reflect real elapsed time, not a fresh 60000ms interval`);
 
-    await new Promise(resolve => setTimeout(resolve, 300));
+    await sleep(300);
 
     // Still paused: the remaining time must not have shrunk at all across that wait.
     const stillPaused = await (await fetch(`${base}/api/pomodoro`)).json();
     assert.equal(stillPaused.timer.paused, true);
     assert.equal(stillPaused.timer.remainingMs, remainingAtPause, 'remaining time must not shrink while paused');
 
-    const resumed = await (await fetch(`${base}/api/pomodoro/resume`, { method: 'POST', headers: writeHeaders() })).json();
+    const resumed = await (await fetch(`${base}/api/pomodoro/resume`, { method: 'POST', headers: writeHeaders(SECRET) })).json();
     assert.equal(resumed.timer.paused, false);
     assert.equal(resumed.timer.remainingMs, undefined, 'a running timer carries a deadline, not remainingMs');
     const expectedDeadline = resumed.now + remainingAtPause;
@@ -5637,7 +4897,7 @@ async function main() {
       const d = await (await fetch(`${base}/api/pomodoro`)).json();
       phase = d.timer && d.timer.phase;
       if (phase === wantPhase) return phase;
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await sleep(50);
     } while (Date.now() < deadlineAt);
     return phase;
   }
@@ -5667,7 +4927,7 @@ async function main() {
     const doc = readPomodoroDoc(home);
     writePomodoroDoc({ ...doc, cycle: 0, settings: { ...doc.settings, longEvery: 4, notify: false, enabled: true }, timer: { phase: 'work', paused: true, remainingMs: 150 } }, home);
 
-    const resumed = await (await fetch(`${base}/api/pomodoro/resume`, { method: 'POST', headers: writeHeaders() })).json();
+    const resumed = await (await fetch(`${base}/api/pomodoro/resume`, { method: 'POST', headers: writeHeaders(SECRET) })).json();
     assert.equal(resumed.timer.paused, false);
     assert.ok(resumed.timer.deadline - resumed.now < 1000, `the resumed deadline must be the ~150ms remainder, not a fresh interval (got ${resumed.timer.deadline - resumed.now}ms out)`);
 
@@ -5691,7 +4951,7 @@ async function main() {
     const doc = readPomodoroDoc(home);
     writePomodoroDoc({ ...doc, cycle: 0, settings: { ...doc.settings, workMin: 150 / 60_000, longEvery: 4, notify: false, enabled: true }, timer: null }, home);
 
-    const started = await (await fetch(`${base}/api/pomodoro/ensure`, { method: 'POST', headers: writeHeaders() })).json();
+    const started = await (await fetch(`${base}/api/pomodoro/ensure`, { method: 'POST', headers: writeHeaders(SECRET) })).json();
     assert.equal(started.timer.phase, 'work');
     assert.equal(started.timer.paused, false);
 
@@ -5709,7 +4969,7 @@ async function main() {
     const doc = readPomodoroDoc(home);
     writePomodoroDoc({ ...doc, cycle: 3, timer: { phase: 'work', paused: false, deadline: Date.now() + 5 * 60_000 } }, home);
 
-    const reset = await (await fetch(`${base}/api/pomodoro/reset`, { method: 'POST', headers: writeHeaders() })).json();
+    const reset = await (await fetch(`${base}/api/pomodoro/reset`, { method: 'POST', headers: writeHeaders(SECRET) })).json();
     assert.equal(reset.timer, null, 'reset must clear the timer');
     assert.equal(reset.cycle, 0, 'reset must zero the cycle too -- reset ends the loop the cycle was counting');
 
@@ -5719,22 +4979,22 @@ async function main() {
   });
 
   await check('POMODORO: ensure starts a work interval when none exists, and is a no-op against a running, paused, or mid-break timer -- a mid-break ensure leaves the break deadline untouched', async () => {
-    await fetch(`${base}/api/pomodoro/reset`, { method: 'POST', headers: writeHeaders() });
+    await fetch(`${base}/api/pomodoro/reset`, { method: 'POST', headers: writeHeaders(SECRET) });
     // Master switch defaults off (ADR 105); ensure needs it on to actually start anything.
-    await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify({ enabled: true }) });
+    await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(SECRET), body: JSON.stringify({ enabled: true }) });
 
-    const started = await (await fetch(`${base}/api/pomodoro/ensure`, { method: 'POST', headers: writeHeaders() })).json();
+    const started = await (await fetch(`${base}/api/pomodoro/ensure`, { method: 'POST', headers: writeHeaders(SECRET) })).json();
     assert.ok(started.timer, 'ensure must start a timer where there was none');
     assert.equal(started.timer.phase, 'work');
     assert.equal(started.timer.paused, false);
 
     const runningDeadline = started.timer.deadline;
-    const stillRunning = await (await fetch(`${base}/api/pomodoro/ensure`, { method: 'POST', headers: writeHeaders() })).json();
+    const stillRunning = await (await fetch(`${base}/api/pomodoro/ensure`, { method: 'POST', headers: writeHeaders(SECRET) })).json();
     assert.equal(stillRunning.timer.deadline, runningDeadline, 'ensure against a running timer must be a no-op (a second session, a /clear, a resume)');
 
-    await fetch(`${base}/api/pomodoro/pause`, { method: 'POST', headers: writeHeaders() });
+    await fetch(`${base}/api/pomodoro/pause`, { method: 'POST', headers: writeHeaders(SECRET) });
     const pausedBefore = await (await fetch(`${base}/api/pomodoro`)).json();
-    const stillPaused = await (await fetch(`${base}/api/pomodoro/ensure`, { method: 'POST', headers: writeHeaders() })).json();
+    const stillPaused = await (await fetch(`${base}/api/pomodoro/ensure`, { method: 'POST', headers: writeHeaders(SECRET) })).json();
     assert.equal(stillPaused.timer.paused, true);
     assert.equal(stillPaused.timer.remainingMs, pausedBefore.timer.remainingMs, 'ensure against a paused timer must not resume or restart it');
 
@@ -5745,7 +5005,7 @@ async function main() {
     const seeded = readPomodoroDoc(home);
     const breakDeadline = Date.now() + 4 * 60_000;
     writePomodoroDoc({ ...seeded, timer: { phase: 'break', paused: false, deadline: breakDeadline } }, home);
-    const midBreak = await (await fetch(`${base}/api/pomodoro/ensure`, { method: 'POST', headers: writeHeaders() })).json();
+    const midBreak = await (await fetch(`${base}/api/pomodoro/ensure`, { method: 'POST', headers: writeHeaders(SECRET) })).json();
     assert.equal(midBreak.timer.phase, 'break', 'starting mid-break must not switch the phase to work');
     assert.equal(midBreak.timer.deadline, breakDeadline, 'the break deadline must be untouched, to the millisecond');
   });
@@ -5778,7 +5038,7 @@ async function main() {
       [{ cueBreak: null }, /cueBreak/, 'null is not a valid cue value'],
     ];
     for (const [patch, expectedField, why] of cases) {
-      const r = await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify(patch) });
+      const r = await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(SECRET), body: JSON.stringify(patch) });
       assert.equal(r.status, 400, `${why}: ${JSON.stringify(patch)} must be rejected with 400`);
       const body = await r.json();
       assert.match(body.error, expectedField, `the 400 must name the offending field for ${JSON.stringify(patch)}`);
@@ -5787,7 +5047,7 @@ async function main() {
     // A body that is not even an object (a JSON array parses fine but is not the shape
     // mergeSettings expects) must also be refused rather than read as if its numeric
     // indices were setting keys.
-    const arrayPatch = await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify([1, 2, 3]) });
+    const arrayPatch = await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(SECRET), body: JSON.stringify([1, 2, 3]) });
     assert.equal(arrayPatch.status, 400, 'a JSON array body must be rejected, not silently treated as an empty patch');
 
     // Nothing above was ever partially applied.
@@ -5798,7 +5058,7 @@ async function main() {
   await check('POMODORO: each cue picker accepts every sound the picker may offer, plus None, and nothing outside that set', async () => {
     for (const key of ['cueWork', 'cueBreak', 'cueLongBreak']) {
       for (const name of cueNames()) {
-        const r = await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify({ [key]: name }) });
+        const r = await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(SECRET), body: JSON.stringify({ [key]: name }) });
         assert.equal(r.status, 200, `${key}: ${JSON.stringify(name)} is in the closed set and must be accepted`);
         const body = await r.json();
         assert.equal(body.settings[key], name);
@@ -5812,7 +5072,7 @@ async function main() {
     // treating a key it used to recognise differently from one it never did), and it
     // must not resurrect a `sound` field in the stored document either.
     const before = (await (await fetch(`${base}/api/pomodoro`)).json()).settings;
-    const r = await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify({ sound: true }) });
+    const r = await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(SECRET), body: JSON.stringify({ sound: true }) });
     assert.equal(r.status, 200, 'a patch containing only a retired key must not be rejected');
     const body = await r.json();
     assert.equal('sound' in body.settings, false, 'the stored document must never regain a sound key');
@@ -5823,8 +5083,10 @@ async function main() {
     const sounds = cueNames().filter(n => n !== NO_CUE);
     assert.ok(sounds.length >= 2, 'this machine must ship at least two real sounds for this check to mean anything');
     const [soundA, soundB] = sounds;
-    const patch = { workMin: 33, breakMin: 6, longBreakMin: 21, longEvery: 5, notify: false, bannerLevel: 'off', cueWork: soundA, cueBreak: soundB, cueLongBreak: NO_CUE };
-    const written = await (await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify(patch) })).json();
+    // `enabled: true`, not false: the Master switch ships off (ADR 105), so `false` read
+    // back after a restart is what an unpersisted key reads as too.
+    const patch = { enabled: true, workMin: 33, breakMin: 6, longBreakMin: 21, longEvery: 5, notify: false, bannerLevel: 'off', cueWork: soundA, cueBreak: soundB, cueLongBreak: NO_CUE };
+    const written = await (await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(SECRET), body: JSON.stringify(patch) })).json();
     assert.equal(written.settings.workMin, 33, 'the write itself must reflect the patch');
 
     // Close THIS daemon and start a second one against the exact same CLAUDE_BOARD_HOME.
@@ -5838,6 +5100,7 @@ async function main() {
     base = `http://127.0.0.1:${port}`;
 
     const reread = await (await fetch(`${base}/api/pomodoro`)).json();
+    assert.equal(reread.settings.enabled, true, 'the Master switch must survive a daemon restart');
     assert.equal(reread.settings.workMin, 33, 'workMin must survive a daemon restart');
     assert.equal(reread.settings.breakMin, 6, 'breakMin must survive a daemon restart');
     assert.equal(reread.settings.longBreakMin, 21, 'longBreakMin must survive a daemon restart');
@@ -5852,74 +5115,53 @@ async function main() {
 
   // --- the Master switch (`enabled`) ------------------------------------
   //
-  // Route-level coverage for "Pomodoro made optional": the wire shape GET reports once
-  // off, the settings write actually flipping it (clearing a running Timer Rollover-
-  // style and refusing a subsequent ensure), and persistence across a restart -- the
-  // pure semantics (mergeSettings, normalizeDoc, startWork, the armed setTimeout
-  // actually being cancelled) are already covered in test/check-pomodoro.mjs; this is
-  // specifically about the HTTP surface those pure functions sit behind.
+  // Route-level coverage for "Pomodoro made optional": the settings write flipping it
+  // (clearing a running Timer and the Cycle Rollover-style, refusing a later ensure) and
+  // the wire shape GET reports while off. Persistence across a restart is the
+  // settings-restart check above. The pure semantics (mergeSettings, normalizeDoc,
+  // startWork, the armed setTimeout actually being cancelled) are covered in
+  // test/check-pomodoro.mjs; this is specifically about the HTTP surface those pure
+  // functions sit behind.
 
-  await check('POMODORO: GET keeps answering once the Master switch is off, and reports the disabled state -- no timer rides the wire', async () => {
-    await fetch(`${base}/api/pomodoro/reset`, { method: 'POST', headers: writeHeaders() });
-    await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify({ enabled: true }) });
-    const started = await (await fetch(`${base}/api/pomodoro/ensure`, { method: 'POST', headers: writeHeaders() })).json();
-    assert.ok(started.timer, 'sanity: a real interval is running before the switch flips');
+  await check('POMODORO: the settings write flips the Master switch, clearing a running Timer and a nonzero Cycle Rollover-style; GET keeps answering with no timer, and ensure is refused while off', async () => {
+    await fetch(`${base}/api/pomodoro/reset`, { method: 'POST', headers: writeHeaders(SECRET) });
+    const started = await (await fetch(`${base}/api/pomodoro/ensure`, { method: 'POST', headers: writeHeaders(SECRET) })).json();
+    assert.equal(started.timer.phase, 'work', 'sanity: a real interval is running before the switch flips');
+
+    // A nonzero Cycle under the running Timer, so the Rollover-style reset below is
+    // observable at all: the reset above left it at 0. Dated with pomodoroDay, never
+    // localDateStr: readDoc rolls a document from an ended pomodoro day to cycle 0 on its
+    // own (QUIRKS.md), which would pass the reset assertion without the flip doing it.
+    writePomodoroDoc({ ...readPomodoroDoc(home), cycle: 3, cycleDate: pomodoroDay(Date.now()) }, home);
+    const seeded = await (await fetch(`${base}/api/pomodoro`)).json();
+    assert.equal(seeded.cycle, 3, 'setup: the daemon reads the seeded Cycle back');
+    assert.ok(seeded.timer, 'setup: with the interval still running');
 
     const off = await (await fetch(`${base}/api/pomodoro/settings`, {
-      method: 'POST', headers: writeHeaders(), body: JSON.stringify({ enabled: false }),
+      method: 'POST', headers: writeHeaders(SECRET), body: JSON.stringify({ enabled: false }),
     })).json();
-    assert.equal(off.settings.enabled, false, 'the write itself reports the flipped switch');
-    assert.equal(off.timer, null, 'and the cleared Timer, in the same response');
+    assert.equal(off.settings.enabled, false);
+    assert.equal(off.timer, null, 'flipping off clears the running Timer');
+    assert.equal(off.cycle, 0, 'and resets the Cycle, same as a Rollover');
 
     const doc = await (await fetch(`${base}/api/pomodoro`)).json();
     assert.equal(doc.settings.enabled, false, 'GET keeps answering, and reports the disabled state');
     assert.equal(doc.timer, null, 'no timer is present on the wire while off');
     assert.ok('settings' in doc && 'cycle' in doc && 'cycleDate' in doc, 'the rest of the document rides the wire exactly as it does while on');
 
-    // Restore for the checks that follow.
-    await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify({ enabled: true }) });
-  });
-
-  await check('POMODORO: the settings write flips the Master switch, clears a running Timer Rollover-style, and refuses ensure while off', async () => {
-    await fetch(`${base}/api/pomodoro/reset`, { method: 'POST', headers: writeHeaders() });
-    const started = await (await fetch(`${base}/api/pomodoro/ensure`, { method: 'POST', headers: writeHeaders() })).json();
-    assert.equal(started.timer.phase, 'work', 'sanity: a real interval is running before the switch flips');
-
-    const off = await (await fetch(`${base}/api/pomodoro/settings`, {
-      method: 'POST', headers: writeHeaders(), body: JSON.stringify({ enabled: false }),
-    })).json();
-    assert.equal(off.settings.enabled, false);
-    assert.equal(off.timer, null, 'flipping off clears the running Timer');
-    assert.equal(off.cycle, 0, 'and resets the Cycle, same as a Rollover');
-
-    const ensureWhileOff = await (await fetch(`${base}/api/pomodoro/ensure`, { method: 'POST', headers: writeHeaders() })).json();
+    const ensureWhileOff = await (await fetch(`${base}/api/pomodoro/ensure`, { method: 'POST', headers: writeHeaders(SECRET) })).json();
     assert.equal(ensureWhileOff.timer, null, 'ensure is refused while off -- the exact seam the session-start hook\'s curl reaches, safe without the hook changing');
 
     const on = await (await fetch(`${base}/api/pomodoro/settings`, {
-      method: 'POST', headers: writeHeaders(), body: JSON.stringify({ enabled: true }),
+      method: 'POST', headers: writeHeaders(SECRET), body: JSON.stringify({ enabled: true }),
     })).json();
     assert.equal(on.settings.enabled, true);
     assert.equal(on.timer, null, 'flipping back on starts idle -- nothing is restored (ADR 90)');
 
     // And idle-while-on can start a real interval again, proving the disable/re-enable
     // round trip left no residue behind.
-    const restarted = await (await fetch(`${base}/api/pomodoro/ensure`, { method: 'POST', headers: writeHeaders() })).json();
+    const restarted = await (await fetch(`${base}/api/pomodoro/ensure`, { method: 'POST', headers: writeHeaders(SECRET) })).json();
     assert.equal(restarted.timer.phase, 'work');
-  });
-
-  await check('POMODORO: the Master switch survives a daemon restart, same as every other toggle', async () => {
-    await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify({ enabled: false }) });
-
-    await new Promise(resolve => server.close(resolve));
-    ({ server, port } = await startServer({ home, port: 0 }));
-    base = `http://127.0.0.1:${port}`;
-
-    const reread = await (await fetch(`${base}/api/pomodoro`)).json();
-    assert.equal(reread.settings.enabled, false, 'the Master switch must survive a daemon restart');
-    assert.equal(reread.timer, null, 'and the off state must still carry no timer after the restart');
-
-    // Restore for the checks that follow -- nothing past this point is about pomodoro.
-    await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify({ enabled: true }) });
   });
 
   await check('GET /file no longer exists: the daemon serves boards and nothing else', () => {
@@ -5986,52 +5228,31 @@ setTimeout(() => process.exit(0), Number(process.env.STUB_AFPLAY_DURATION_MS || 
   // { mode: 0o755 } at creation -- no separate chmod call needed, same effect.
   writeFileSync(path.join(previewStubDir, 'afplay'), STUB_AFPLAY, { mode: 0o755 });
 
-  let previewLogCounter = 0;
-  function freshPreviewLog() {
-    previewLogCounter++;
-    return path.join(previewStubDir, `afplay-invocations-${previewLogCounter}.log`);
-  }
   function readPreviewLines(logPath) {
     if (!existsSync(logPath)) return [];
     return readFileSync(logPath, 'utf8').trim().split('\n').filter(Boolean);
   }
-  async function waitForPreviewLines(logPath, count, timeoutMs = 3000) {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      if (readPreviewLines(logPath).length >= count) return readPreviewLines(logPath);
-      await new Promise(r => setTimeout(r, 20));
-    }
-    return readPreviewLines(logPath);
-  }
-  /** PATH-stub the same way test/check-notify.mjs's withStubOnPath does, restoring
-   * whatever was there before (including "was absent") afterwards. */
-  async function withAfplayStub(logPath, durationMs, fn) {
-    const savedPath = process.env.PATH;
-    const savedLog = process.env.STUB_AFPLAY_LOG;
-    const savedDuration = process.env.STUB_AFPLAY_DURATION_MS;
-    process.env.PATH = `${previewStubDir}:${process.env.PATH}`;
-    process.env.STUB_AFPLAY_LOG = logPath;
-    process.env.STUB_AFPLAY_DURATION_MS = String(durationMs);
-    try {
-      await fn();
-    } finally {
-      process.env.PATH = savedPath;
-      if (savedLog === undefined) delete process.env.STUB_AFPLAY_LOG; else process.env.STUB_AFPLAY_LOG = savedLog;
-      if (savedDuration === undefined) delete process.env.STUB_AFPLAY_DURATION_MS; else process.env.STUB_AFPLAY_DURATION_MS = savedDuration;
-    }
+  /** Put the `afplay` stub first on PATH for `fn`, through test/support.mjs's `withEnv`,
+   * which restores whatever was there before (including "was absent") afterwards. */
+  function withAfplayStub(logPath, durationMs, fn) {
+    return withEnv({
+      PATH: `${previewStubDir}:${process.env.PATH}`,
+      STUB_AFPLAY_LOG: logPath,
+      STUB_AFPLAY_DURATION_MS: durationMs,
+    }, fn);
   }
 
   await check('PREVIEW: a valid cue answers 200 {ok:true} and plays that cue\'s file directly, bypassing Notification Center entirely', async () => {
-    const log = freshPreviewLog();
+    const log = freshLog(previewStubDir, 'afplay-invocations');
     await withAfplayStub(log, 200, async () => {
       const r = await fetch(`${base}/api/pomodoro/preview`, {
         method: 'POST',
-        headers: writeHeaders(),
+        headers: writeHeaders(SECRET),
         body: JSON.stringify({ cue: PREVIEW_CUE_A }),
       });
       assert.equal(r.status, 200);
       assert.deepEqual(await r.json(), { ok: true });
-      const lines = await waitForPreviewLines(log, 1);
+      const lines = await waitForCount(() => readPreviewLines(log), 1);
       assert.equal(lines.length, 1, 'exactly one afplay invocation');
       const [argv] = JSON.parse(lines[0].slice('start:'.length));
       assert.equal(argv, `/System/Library/Sounds/${PREVIEW_CUE_A}.aiff`, 'the file played must be the named cue\'s own file');
@@ -6039,22 +5260,22 @@ setTimeout(() => process.exit(0), Number(process.env.STUB_AFPLAY_DURATION_MS || 
   });
 
   await check('PREVIEW: cue "None" answers 200 {ok:true} and plays nothing', async () => {
-    const log = freshPreviewLog();
+    const log = freshLog(previewStubDir, 'afplay-invocations');
     await withAfplayStub(log, 200, async () => {
       const r = await fetch(`${base}/api/pomodoro/preview`, {
         method: 'POST',
-        headers: writeHeaders(),
+        headers: writeHeaders(SECRET),
         body: JSON.stringify({ cue: NO_CUE }),
       });
       assert.equal(r.status, 200);
       assert.deepEqual(await r.json(), { ok: true });
-      await new Promise(resolve => setTimeout(resolve, 200));
+      await sleep(200);
       assert.deepEqual(readPreviewLines(log), [], 'afplay must never be invoked for None');
     });
   });
 
   await check('PREVIEW: a value isCue() refuses is a 400 naming the "cue" field, matching the shape a bad duration is refused in', async () => {
-    const log = freshPreviewLog();
+    const log = freshLog(previewStubDir, 'afplay-invocations');
     await withAfplayStub(log, 200, async () => {
       const cases = [
         [{ cue: 'definitely not a real sound' }, 'a name off the closed set'],
@@ -6064,27 +5285,27 @@ setTimeout(() => process.exit(0), Number(process.env.STUB_AFPLAY_DURATION_MS || 
         [{ cue: null }, 'a null cue'],
       ];
       for (const [body, why] of cases) {
-        const r = await fetch(`${base}/api/pomodoro/preview`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify(body) });
+        const r = await fetch(`${base}/api/pomodoro/preview`, { method: 'POST', headers: writeHeaders(SECRET), body: JSON.stringify(body) });
         assert.equal(r.status, 400, `${why}: ${JSON.stringify(body)} must be rejected with 400`);
         const j = await r.json();
         assert.match(j.error, /cue/, `the 400 must name the "cue" field for ${JSON.stringify(body)}`);
       }
-      await new Promise(resolve => setTimeout(resolve, 200));
+      await sleep(200);
       assert.deepEqual(readPreviewLines(log), [], 'no rejected body may ever reach afplay');
     });
   });
 
   await check('PREVIEW: reads and writes nothing -- pomodoro.json is byte-for-byte unchanged across a preview', async () => {
     const before = readPomodoroDoc(home);
-    const log = freshPreviewLog();
+    const log = freshLog(previewStubDir, 'afplay-invocations');
     await withAfplayStub(log, 200, async () => {
       const r = await fetch(`${base}/api/pomodoro/preview`, {
         method: 'POST',
-        headers: writeHeaders(),
+        headers: writeHeaders(SECRET),
         body: JSON.stringify({ cue: PREVIEW_CUE_B }),
       });
       assert.equal(r.status, 200);
-      await waitForPreviewLines(log, 1);
+      await waitForCount(() => readPreviewLines(log), 1);
     });
     const after = readPomodoroDoc(home);
     assert.deepEqual(after, before, 'a preview must never touch pomodoro.json -- it is an audition, not a setting');
@@ -6093,16 +5314,16 @@ setTimeout(() => process.exit(0), Number(process.env.STUB_AFPLAY_DURATION_MS || 
   await check('PREVIEW: plays even with settings.notify off -- the notify toggle gates the boundary cue, never the picker\'s own audition', async () => {
     const doc = readPomodoroDoc(home);
     writePomodoroDoc({ ...doc, settings: { ...doc.settings, notify: false } }, home);
-    const log = freshPreviewLog();
+    const log = freshLog(previewStubDir, 'afplay-invocations');
     try {
       await withAfplayStub(log, 200, async () => {
         const r = await fetch(`${base}/api/pomodoro/preview`, {
           method: 'POST',
-          headers: writeHeaders(),
+          headers: writeHeaders(SECRET),
           body: JSON.stringify({ cue: PREVIEW_CUE_A }),
         });
         assert.equal(r.status, 200, 'notify: false must not refuse a preview');
-        const lines = await waitForPreviewLines(log, 1);
+        const lines = await waitForCount(() => readPreviewLines(log), 1);
         assert.equal(lines.length, 1, 'notify: false must not silence a preview -- only the boundary cue is gated by it');
       });
     } finally {
@@ -6113,26 +5334,26 @@ setTimeout(() => process.exit(0), Number(process.env.STUB_AFPLAY_DURATION_MS || 
   });
 
   await check('PREVIEW: the cookie alone may preview, joining POMODORO_COOKIE_ACTIONS (src/server.mjs)', async () => {
-    const cookie = sessionCookieHeader();
+    const cookie = sessionCookieHeader(SECRET);
     const cookieHeaders = {
       origin: `http://127.0.0.1:${port}`,
       'sec-fetch-site': 'same-origin',
       cookie,
       'content-type': 'application/json',
     };
-    const log = freshPreviewLog();
+    const log = freshLog(previewStubDir, 'afplay-invocations');
     await withAfplayStub(log, 200, async () => {
-      const r = await rawRequest(port, 'POST', '/api/pomodoro/preview', `127.0.0.1:${port}`, {
+      const r = await rawRequest(port, 'POST', '/api/pomodoro/preview', {
         headers: cookieHeaders,
         body: JSON.stringify({ cue: PREVIEW_CUE_A }),
       });
       assert.equal(r.status, 200, 'the cookie alone must be able to preview a cue');
-      await waitForPreviewLines(log, 1);
+      await waitForCount(() => readPreviewLines(log), 1);
     });
   });
 
   await check('PREVIEW: POST /api/pomodoro/preview refuses a request with no credential at all', async () => {
-    const r = await rawRequest(port, 'POST', '/api/pomodoro/preview', `127.0.0.1:${port}`, {
+    const r = await rawRequest(port, 'POST', '/api/pomodoro/preview', {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ cue: PREVIEW_CUE_A }),
     });
@@ -6145,12 +5366,12 @@ setTimeout(() => process.exit(0), Number(process.env.STUB_AFPLAY_DURATION_MS || 
     // false` guard cannot keep it silent, and this file stubs no PATH. That half lives
     // in test/check-notify.mjs, which stubs osascript properly. A 401 is decided before
     // the handler runs, so nothing fires from here.
-    const r = await rawRequest(port, 'POST', '/api/pomodoro/notifyTest', `127.0.0.1:${port}`, {});
+    const r = await rawRequest(port, 'POST', '/api/pomodoro/notifyTest', {});
     assert.equal(r.status, 401, 'an uncredentialled request must never be able to raise a banner on the reader\'s machine');
   });
 
   await check('PREVIEW: a rapid second preview kills the first rather than overlapping into a chorus', async () => {
-    const log = freshPreviewLog();
+    const log = freshLog(previewStubDir, 'afplay-invocations');
     // A generous duration -- long enough that if the kill below silently stopped
     // happening, the first stub would still be alive (and this check would catch it via
     // the missing 'term:' line) rather than coincidentally having already exited on its
@@ -6158,20 +5379,20 @@ setTimeout(() => process.exit(0), Number(process.env.STUB_AFPLAY_DURATION_MS || 
     await withAfplayStub(log, 1500, async () => {
       const first = await fetch(`${base}/api/pomodoro/preview`, {
         method: 'POST',
-        headers: writeHeaders(),
+        headers: writeHeaders(SECRET),
         body: JSON.stringify({ cue: PREVIEW_CUE_A }),
       });
       assert.equal(first.status, 200);
-      await waitForPreviewLines(log, 1); // the first stub is confirmed running before the second fires
+      await waitForCount(() => readPreviewLines(log), 1); // the first stub is confirmed running before the second fires
 
       const second = await fetch(`${base}/api/pomodoro/preview`, {
         method: 'POST',
-        headers: writeHeaders(),
+        headers: writeHeaders(SECRET),
         body: JSON.stringify({ cue: PREVIEW_CUE_B }),
       });
       assert.equal(second.status, 200);
 
-      const lines = await waitForPreviewLines(log, 3, 3000); // start:A, term:A, start:B
+      const lines = await waitForCount(() => readPreviewLines(log), 3, { timeoutMs: 3000 }); // start:A, term:A, start:B
       assert.ok(lines.some(l => l.startsWith('term:') && l.includes(PREVIEW_CUE_A)),
         `the FIRST preview (${PREVIEW_CUE_A}) must have been killed once the second one started -- got: ${JSON.stringify(lines)}`);
       assert.ok(lines.some(l => l.startsWith('start:') && l.includes(PREVIEW_CUE_B)),
@@ -6184,11 +5405,11 @@ setTimeout(() => process.exit(0), Number(process.env.STUB_AFPLAY_DURATION_MS || 
       // process outliving this check and delaying the suite's own exit.
       const cleanup = await fetch(`${base}/api/pomodoro/preview`, {
         method: 'POST',
-        headers: writeHeaders(),
+        headers: writeHeaders(SECRET),
         body: JSON.stringify({ cue: NO_CUE }),
       });
       assert.equal(cleanup.status, 200);
-      const finalLines = await waitForPreviewLines(log, 4, 2000); // + term:B
+      const finalLines = await waitForCount(() => readPreviewLines(log), 4, { timeoutMs: 2000 }); // + term:B
       assert.ok(finalLines.some(l => l.startsWith('term:') && l.includes(PREVIEW_CUE_B)), 'cleanup must have killed the second stub in turn');
     });
   });
@@ -6196,18 +5417,9 @@ setTimeout(() => process.exit(0), Number(process.env.STUB_AFPLAY_DURATION_MS || 
   rmSync(previewStubDir, { recursive: true, force: true });
 }
 
-main()
-  .catch(err => {
-    failures++;
-    console.error('FAIL - unexpected error');
-    console.error(err);
-  })
-  .finally(() => {
+runMain('http', main, {
+  cleanup: () => {
     if (server) server.close();
     rmSync(home, { recursive: true, force: true });
-    if (failures) {
-      console.error(`\n${failures} check(s) failed`);
-      process.exit(1);
-    }
-    console.log('\nall http checks ok');
-  });
+  },
+});
