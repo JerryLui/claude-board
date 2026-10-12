@@ -96,7 +96,7 @@ link where it is worth reading.
 | 107 | [Answers a packet never carried ride the next packet](.agents/adr/0107-answers-a-packet-never-carried-ride-the-next-packet.md) | 2026-08-17 | widens 35; relates to 50, 115 |
 | 108 | [The board lends its engine to a marked stage](.agents/adr/0108-the-board-lends-its-engine-to-a-marked-stage.md) | 2026-08-19 | widens 95; relates to 70 |
 | 109 | [The positions payload is answered in frame viewport coordinates](.agents/adr/0109-positions-are-answered-in-frame-viewport-coordinates.md) | 2026-08-20 | relates to 99 |
-| 110 | [A question's context is one panel, and long prose folds](.agents/adr/0110-a-questions-context-is-one-panel-and-long-prose-folds.md) | 2026-09-03 | widens 26; relates to 28, 111 |
+| 110 | [A question's context is one panel, and long prose folds](.agents/adr/0110-a-questions-context-is-one-panel-and-long-prose-folds.md) | 2026-09-03 | widens 26; relates to 28, 111; widened by 119 |
 | 111 | [A question carries an explainer of its own](.agents/adr/0111-a-question-carries-an-explainer-of-its-own.md) | 2026-09-03 | relates to 26, 110 |
 | 112 | [A post with a failed reference is refused](.agents/adr/0112-a-post-with-a-failed-reference-is-refused.md) | 2026-09-03 | relates to 3; widened by 117 |
 | 113 | [A stage link is handled by the board, and an outbound address opens at once](.agents/adr/0113-a-stage-link-is-handled-by-the-board.md) | 2026-09-10 | relates to 95, 59 |
@@ -105,3 +105,5 @@ link where it is worth reading.
 | 116 | [One daemon, three clients: the registration declares the human](.agents/adr/0116-one-daemon-three-clients-the-registration-declares-the-human.md) | 2026-09-10 | relates to 5, 68, 100 |
 | 117 | [A post with a diagram that does not parse is refused](.agents/adr/0117-a-post-with-a-diagram-that-does-not-parse-is-refused.md) | 2026-09-18 | widens 112; relates to 62 |
 | 118 | [Remote review rides an SSH tunnel; the daemon stays loopback-only](.agents/adr/0118-remote-review-rides-an-ssh-tunnel.md) | 2026-09-28 | relates to 116 |
+| 119 | [A stage fits its content and folds past 600px](.agents/adr/0119-a-stage-fits-its-content-and-folds-past-600px.md) | 2026-10-12 | widens 110 |
+| 120 | [One Pull-out in the corner of every rendered block](.agents/adr/0120-one-pull-out-in-the-corner-of-every-rendered-block.md) | 2026-10-12 | relates to 22, 110 |

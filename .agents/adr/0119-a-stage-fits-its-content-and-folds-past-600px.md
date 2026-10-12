@@ -1,0 +1,5 @@
+# 119. A stage fits its content and folds past 600px
+
+2026-10-12 · widens 110
+
+**Context:** a stage outside a rendered-variant option sat in a fixed 320px box with inner scrollbars and a drag grip, its height never following its content, so a mock inside a question was judged through a keyhole; the alternatives were always growing to full height (a long mock pushes the options a screen down) or keeping the box and relying on the Lens alone. **Decision:** every stage outside a page board takes its reported content height up to 600px, the rendered-variant cap; past that it folds: it stays 600px tall and scrolls inside, with Show full height in a bar under the frame, which grows it in place to the whole artifact, and Show less folds it back; the drag grip goes. A fold that clips under a fade, as prose does, was rejected: it breaks in-page links, keyboard focus and fixed footers inside the mock. **Consequences:** ADR 110's "a mock never folds" no longer holds for stages; a variant option keeps its 600px clip without Show full height, since a click on its card picks it.

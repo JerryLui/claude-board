@@ -119,8 +119,10 @@ prose, items in posted order, no card and no kind label per item. _Avoid_: conte
 Content block), attachment, sidebar.
 
 **Fold**: a prose item clipped at about a dozen lines under a fade, opened in place by Show
-more — per item, wherever the item sits, decided by a count of its source; a code excerpt keeps
-its own scroll box, and a diagram or a mock never folds. _Avoid_: collapse, truncate, clamp.
+more — per item, wherever the item sits, decided by a count of its source. A Stage outside a
+page board or a variant option folds too, past 600px: it scrolls inside at that height, and
+Show full height under the frame opens it in place. A code
+excerpt keeps its own scroll box, and a diagram never folds. _Avoid_: collapse, truncate, clamp.
 
 **Commentable**: carrying the comment control and the click-to-anchor gesture — only the
 rendered content kinds, `mermaid` and `html`, wherever they appear; `markdown` and `code` never
@@ -145,8 +147,11 @@ theme control and the state label, in that order, on a floating centred band. Al
 pager dock and the unanswered-count chip elsewhere in this codebase, a collision left
 unresolved. _Avoid_: capsule, chip, bar, collapse, minimize, shrink.
 
-**Lens**: the full-viewport surface a stage or a diagram opens into, reached only by its own
-expand control. _Avoid_: overlay, modal, lightbox.
+**Lens**: the full-viewport surface a stage or a diagram opens into, reached only by its
+Pull-out. _Avoid_: overlay, modal, lightbox.
+
+**Pull-out**: the always-visible control in the top-right corner of a Stage or a diagram, the
+one way into the Lens. _Avoid_: expand pill, expand button, pop-out, corner button.
 
 **Packet**: what `ask` returns when a round closes — the round's answers, its comments, and a
 status. _Avoid_: response, result, reply.
