@@ -22,10 +22,10 @@ import { mdToHtml, mdToHtmlAndAnchors, slugify } from '../src/markdown.mjs';
 // by golden strings re-derived from the current source. See the fixture's header.
 import { mdToHtmlAndAnchors as legacyMdToHtmlAndAnchors } from './fixtures/markdown-pre-marked.mjs';
 import { createBoard, addRound, amendRound, applySubmit, buildPacket, resolveComment, findBlock, questionBlocks, normalizeBlock } from '../src/board.mjs';
-import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, stageAgentScript, STAGE_ACCENT_HEX, STAGE_MARGIN_RESET, isPageBoard, renderRefusalPage, COMMENT_ICON, highlightFenceHtml, FOLD_CAP } from '../src/render.mjs';
+import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, stageAgentScript, STAGE_ACCENT_HEX, STAGE_MARGIN_RESET, isPageBoard, renderRefusalPage, COMMENT_ICON, highlightFenceHtml, FOLD_CAP, CSP, INDEX_CSP } from '../src/render.mjs';
 import { sessionToken, sessionCookieMatches, SESSION_COOKIE } from '../src/secret.mjs';
 import { createHandoffStore, handoffTarget, recoveryCommand, shellQuote } from '../src/handoff.mjs';
-import { resolveRef, langForPath, resolvePath, resolveRefRoots, resolveBoardCwd, DEFAULT_REF_ROOTS, MAX_REF_BYTES } from '../src/resolve.mjs';
+import { resolveRef, langForPath, resolvePath, resolveRefRoots, resolveBoardCwd, DEFAULT_REF_ROOTS, MAX_REF_BYTES, MAX_HTML_BYTES } from '../src/resolve.mjs';
 import { SUPPORTED_LANGUAGES } from '../src/vendor/prism/index.mjs';
 // Both used only by the reference-boundary checks. The descriptor
 // discipline inside resolveRef is asserted by swapping the file out BETWEEN the check
@@ -1281,6 +1281,19 @@ check('resolveDomAnchor resolves across nested markup and HTML entities in the h
   const html = '<div><button>Click <span>me</span></button><p>A &amp; B</p></div>';
   assert.ok(resolveDomAnchor(html, '1.1', 'Click me')); // button, text spans a nested <span>
   assert.ok(resolveDomAnchor(html, '1.2', 'A & B')); // p, text contains a real entity
+  // The hint is the browser's textContent with whitespace collapsed (extractHint), and
+  // the resolver builds it from the tree a run at a time, joining runs across elements
+  // (ADR 121): a gap spanning two text runs is one space, no gap stays none, a
+  // whitespace-only element is a gap, and leading and trailing whitespace drop.
+  for (const [markup, hint] of [
+    ['<button>  Save\n <b>and</b>   exit </button>', 'Save and exit'],
+    ['<p>Don\'t<b>stop</b>now</p>', 'Don\'tstopnow'],
+    ['<div><span> </span>Send<i></i></div>', 'Send'],
+    ['<div>Go<span> </span><b>now</b> <i> </i></div>', 'Go now'],
+    ['<p>A&nbsp;<b>&nbsp;B</b></p>', 'A B'],
+  ]) {
+    assert.ok(resolveDomAnchor(markup, '1', hint), `${JSON.stringify(markup)} resolves under ${JSON.stringify(hint)}`);
+  }
 });
 
 check('resolveDomAnchor tolerates extractHint\'s own truncation ellipsis on a long hint', () => {
@@ -1289,6 +1302,10 @@ check('resolveDomAnchor tolerates extractHint\'s own truncation ellipsis on a lo
   const truncated = extractHint(longText); // ends in an ellipsis, per extractHint's own contract
   assert.ok(truncated.endsWith('…'));
   assert.ok(resolveDomAnchor(html, '1.1', truncated));
+  // Cut where the browser cuts, whether the text is one visible run past the resolver's
+  // 128-character read or many runs across elements, and however long the rest is.
+  assert.ok(resolveDomAnchor(`<p>${'a'.repeat(300)}</p>`, '1', `${'a'.repeat(79)}…`));
+  assert.ok(resolveDomAnchor(`<p>${'<b>word</b> '.repeat(40)}${'x'.repeat(100_000)}</p>`, '1', `${'word '.repeat(15)}word…`));
 });
 
 check('a `/`-suffixed non-void start tag anchors the element the BROWSER resolves, not one the resolver invented', () => {
@@ -2233,7 +2250,7 @@ check('isPageBoard: a failed reference is never a page board -- there is no stag
   assert.ok(html.includes('resolve-error'), 'setup failure: the error card is what such a block renders');
 });
 
-check('a page board renders the stage edge to edge -- no card, no kicker, no 1120px column, and the header floats over the frame', () => {
+check('a page board renders the stage edge to edge -- no card, no kicker, no column, and the header floats over the frame', () => {
   const { document, body, shell, head, section, frame } = renderedPage(pageBoard());
   // The LAYOUT is still one class, which is what the whole stylesheet keys off.
   // 'page-uncommentable' rides alongside it on this fixture and is orthogonal to
@@ -2242,7 +2259,7 @@ check('a page board renders the stage edge to edge -- no card, no kicker, no 112
   assert.ok(body.classList.contains('page-board'), 'the layout is one class on <body>, which is what the whole stylesheet keys off');
 
   // no column
-  assert.equal(resolveComputedProperty(styles, shell, true, 'max-width'), 'none', 'the shell must stop being a 1120px column');
+  assert.equal(resolveComputedProperty(styles, shell, true, 'max-width'), 'none', 'the shell must stop being a capped column');
   assert.equal(resolveComputedProperty(styles, shell, true, 'padding'), '0', 'and must carry no side gutter, or the frame is not edge to edge');
 
   // no card: the block's panel, border, radius, padding and hover lift all go
@@ -2298,7 +2315,7 @@ check('a post carrying a question, or any second block, renders exactly as a boa
   });
   const { document, body, shell, head, frame, sendBar } = renderedPage(withQuestion);
   assert.equal(body.className, '', 'an ordinary board carries no page-board class');
-  assert.equal(resolveComputedProperty(styles, shell, true, 'max-width'), '1120px', 'the artifact is back in the column');
+  assert.equal(resolveComputedProperty(styles, shell, true, 'max-width'), '2560px', 'the artifact is back in the column, which runs as wide as the window up to 2560px');
   assert.equal(resolveComputedProperty(styles, head, true, 'position'), 'sticky');
   assert.equal(resolveComputedProperty(styles, frame, true, 'height'), '320px', 'and the stage is back at its ordinary placeholder, to fit its content from its first report (ADR.md entry 119)');
   assert.equal(resolveComputedProperty(styles, frame, true, 'min-height'), '', 'with no floor that would stop it fitting a short mock');
@@ -2313,6 +2330,106 @@ check('a post carrying a question, or any second block, renders exactly as a boa
   const ordinary = renderBoardPage(secondBlock);
   assert.ok(ordinary.includes('<body>'), 'a two-block board opens <body> with no class at all');
   assert.ok(ordinary.includes('<div class="block-kicker">HTML stage '), 'and renders the stage in its usual card');
+});
+
+// The stylesheet a window `width` CSS px wide applies, for the stand-in's cascade
+// resolver, which has no viewport and so reads every width @media block as not
+// holding: such a block is unwrapped where its condition holds and dropped where
+// it does not. Any other @media block is left for the resolver.
+function stylesAtWindow(css, width) {
+  const src = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  const head = /@media\s*([^{]*)\{/g;
+  let out = '';
+  let from = 0;
+  for (let m; (m = head.exec(src));) {
+    const terms = m[1].trim().split(/\s+and\s+/).map(t => /^\((min|max)-width:\s*(\d+(?:\.\d+)?)px\)$/.exec(t));
+    if (terms.some(t => !t)) continue;
+    let end = head.lastIndex;
+    for (let depth = 1; depth && end < src.length; end++) depth +=src[end] === '{' ? 1 : src[end] === '}' ? -1 : 0;
+    const holds = terms.every(([, side, px]) => (side === 'min' ? width >= Number(px) : width <= Number(px)));
+    out += src.slice(from, m.index) + (holds ? stylesAtWindow(src.slice(head.lastIndex, end - 1), width) : '');
+    from = head.lastIndex = end;
+  }
+  return out + src.slice(from);
+}
+
+// `prop` on `el` as that window's cascade leaves it, every var() substituted by
+// the custom property `el` inherits (from the nearest element that sets it).
+function resolvedAtWindow(sheet, el, prop) {
+  const inherited = name => {
+    for (let n = el; n; n = n.parentElement) {
+      const v = resolveComputedProperty(sheet, n, true, name);
+      if (v) return v;
+    }
+    return '';
+  };
+  let value = resolveComputedProperty(sheet, el, true, prop);
+  for (let i = 0; i < 8 && /var\(/.test(value); i++) {
+    value = value.replace(/var\(\s*(--[\w-]+)\s*(?:,[^()]*)?\)/g, (_, name) => inherited(name));
+  }
+  return value;
+}
+
+// The widths themselves are layout, which the stand-in has none of:
+// test/browser-check-round-width.mjs measures them in Chrome. What a machine with
+// no Chrome can still hold is what the cascade gives each element: at a wide
+// window every prose element on a round holds a measure of its own of at most
+// 80ch, and no rendered block, whose width is the whole point, holds any.
+check("on a wide window a round's prose holds a measure of at most 80ch and none of its rendered blocks holds one -- a page board's Tray keeps its own width", () => {
+  const board = createBoard({
+    title: 'measure',
+    blocks: [
+      { kind: 'markdown', text: 'Prose.\n\n- an item\n\n1. a step\n\n> a quote\n\n## A heading\n\n##### A small heading\n\n###### A smaller heading\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\n```js\nconst x = 1;\n```\n\n---' },
+      { kind: 'html', html: PAGE_ARTIFACT },
+      { kind: 'mermaid', text: 'flowchart LR\n  a --> b' },
+      { kind: 'compare', left: { label: 'Before', block: { kind: 'html', html: PAGE_ARTIFACT } }, right: { label: 'After', block: { kind: 'markdown', text: 'after' } } },
+      {
+        kind: 'question', prompt: 'Which?', explainer: 'Why it matters.', widget: 'single',
+        options: [{ label: 'A', description: 'the first' }, { label: 'B' }],
+        context: [{ kind: 'markdown', text: 'Context prose.' }, { kind: 'mermaid', text: 'flowchart LR\n  c --> d' }],
+      },
+      {
+        kind: 'question', prompt: 'Which mock?', widget: 'choose-between-rendered-variants',
+        options: [{ label: 'Mock A', description: 'dense', block: { kind: 'html', html: PAGE_ARTIFACT } }, { label: 'Note B', block: { kind: 'markdown', text: 'b' } }],
+      },
+      { kind: 'question', prompt: 'Say more', widget: 'text' },
+      { kind: 'question', prompt: 'Order these', widget: 'rank', options: [{ label: 'one' }, { label: 'two' }] },
+    ],
+  });
+  const { document } = renderedPage(board);
+  const wide = stylesAtWindow(styles, 1920);
+  const maxWidth = (el, sheet = wide) => resolvedAtWindow(sheet, el, 'max-width');
+  const inCh = value => (/^\d+(\.\d+)?ch$/.test(value) ? parseFloat(value) : null);
+  const each = sel => {
+    const found = [...document.querySelectorAll(sel)];
+    assert.ok(found.length, `setup: the fixture renders no ${sel}`);
+    return found;
+  };
+
+  // Every element a markdown block renders at its top level reads as lines,
+  // except rendered content: a code fence, a diagram, a table's scroll box, a rule.
+  const markdown = each('.md-content').flatMap(md => md.children)
+    .filter(el => el.tagName !== 'PRE' && el.tagName !== 'HR' && !el.querySelector('pre, table'));
+  const kinds = new Set(markdown.map(el => el.tagName));
+  assert.deepEqual(['P', 'UL', 'OL', 'BLOCKQUOTE', 'H2', 'H5', 'H6'].filter(tag => !kinds.has(tag)), [],
+    'setup: the fixture renders every kind of markdown prose');
+  const prose = [...markdown.map(el => [`markdown ${el.tagName.toLowerCase()}`, el]),
+    ...['.question-prompt', '.card-choice', '.variant-label', '.opt-label', '.opt-desc', '.note-field', '.answer-textarea',
+      '.rank-list', '.comment-list', '.comment-form'].flatMap(sel => each(sel).map(el => [sel, el]))];
+  const unheld = prose.filter(([, el]) => !(inCh(maxWidth(el)) > 0 && inCh(maxWidth(el)) <= 80))
+    .map(([name, el]) => `${name} (${maxWidth(el) || 'unset'})`);
+  assert.deepEqual(unheld, [], 'every prose element holds a measure of at most 80ch, resolved in its own font');
+
+  const rendered = ['.html-stage', '.stage-wrap', 'pre.mermaid', '.compare-grid', '.compare-side', '.options-variants', '.variant-card',
+    '.question-context', '.table-scroll', '.md-content table', '.md-content pre', '.block', '.round', '.blocks'];
+  for (const [label, sheet] of [['wide', wide], ['1280px', stylesAtWindow(styles, 1280)]]) {
+    const held = rendered.flatMap(sel => each(sel).filter(el => !['', 'none'].includes(maxWidth(el, sheet))).map(el => `${sel} (${maxWidth(el, sheet)})`));
+    assert.deepEqual(held, [], `at a ${label} window no rendered block, and nothing around one, is capped: it takes the column`);
+  }
+
+  const tray = renderedPage(pageBoard()).document.querySelector('.page-comments .comment-list');
+  assert.ok(tray, 'setup: a page board renders its Tray with a comment list');
+  assert.equal(maxWidth(tray), '', "the Tray's list is the Tray's width (640px), not a measure narrower than it");
 });
 
 check('a page board offers no way to send -- no Send, no Discuss, no unanswered count', () => {
@@ -2566,10 +2683,20 @@ check('lines or section on an html source refuses the post, naming markup slicin
   assert.ok(renderedMarkup(renderBoardPage(stored)).includes('class="resolve-error"'));
 });
 
-check('a referenced html file over the 512 KiB cap refuses the post, and the same post without it lands', () => {
+check('a referenced html file at the post limit lands, one byte over refuses the post whole, and the stages in one post share the limit (ADR 121)', () => {
+  // The html block's reference cap is MAX_HTML_BYTES, the post limit; every other kind
+  // keeps MAX_REF_BYTES (the by-value check below drives both caps' refusals).
+  const atCap = path.join(fixturesDir, 'at-cap-stage.html');
   const big = path.join(fixturesDir, 'oversize-stage.html');
-  writeFileSync(big, 'x'.repeat(MAX_REF_BYTES + 1), 'utf8');
+  const half = path.join(fixturesDir, 'half-cap-stage.html');
+  writeFileSync(atCap, 'x'.repeat(MAX_HTML_BYTES), 'utf8');
+  writeFileSync(big, 'x'.repeat(MAX_HTML_BYTES + 1), 'utf8');
+  writeFileSync(half, 'x'.repeat(MAX_HTML_BYTES / 2 + 1), 'utf8');
   try {
+    const landed = createBoard({ title: 'html source, at the cap', cwd: fixturesDir, blocks: [{ kind: 'html', source: { path: 'at-cap-stage.html' } }] });
+    assert.equal(landed.blocks[0].error, undefined);
+    assert.equal(landed.blocks[0].html.length, MAX_HTML_BYTES, 'a stage at the cap is stored whole');
+
     const refusal = refusedPost(() => createBoard({
       title: 'html source, over cap',
       cwd: fixturesDir,
@@ -2578,7 +2705,7 @@ check('a referenced html file over the 512 KiB cap refuses the post, and the sam
         { kind: 'markdown', text: 'still here' },
       ],
     }));
-    assert.match(refusal, /exceeds the .* cap/);
+    assert.match(refusal, new RegExp(`exceeds the ${MAX_HTML_BYTES}-byte reference cap`));
     // Refused whole: the by-value sibling does not land on its own, and nothing about
     // this post reaches a board.
     assert.equal(refusal.split('\n').length, 1);
@@ -2591,8 +2718,23 @@ check('a referenced html file over the 512 KiB cap refuses the post, and the sam
     assert.equal(board.blocks.length, 1);
     assert.equal(board.blocks[0].error, undefined);
     assert.equal(board.blocks[0].text, 'still here'); // the same post minus the refusal is ordinary
+
+    // Two stages each over half the limit fit their own cap and not the post's: a
+    // reference is the one way past the body limit, so the post's stages share it. The
+    // second one sits in a compare side, so the allowance reaches nested stages too.
+    const halfBlock = { kind: 'html', source: { path: 'half-cap-stage.html' } };
+    const shared = refusedPost(() => createBoard({
+      title: 'two half-cap stages',
+      cwd: fixturesDir,
+      blocks: [halfBlock, { kind: 'compare', left: { label: 'A', block: halfBlock }, right: { label: 'B', block: null } }],
+    }));
+    assert.match(shared, new RegExp(`html block h2 takes this post's html past the ${MAX_HTML_BYTES}-byte cap`));
+    const alone = createBoard({ title: 'one half-cap stage', cwd: fixturesDir, blocks: [halfBlock] });
+    assert.equal(alone.blocks[0].html.length, MAX_HTML_BYTES / 2 + 1, 'either stage alone lands');
   } finally {
+    unlinkSync(atCap);
     unlinkSync(big);
+    unlinkSync(half);
   }
 });
 
@@ -3890,25 +4032,27 @@ function namedFunctionBody(src, name) {
 
 check('mode detection is synchronous, from the document\'s own protocol -- never a network probe to the daemon', () => {
   assert.ok(/var readonly\s*=\s*\(location\.protocol === 'file:'\)/.test(ui));
-  // Exactly four fetches, all accounted for: the ordinary send bar's submit,
+  // Exactly five fetches, all accounted for: the ordinary send bar's submit,
   // the resync that catches this client up on anything broadcast while it was
   // disconnected, submitPageRound's own submit -- a second POST to the same
   // route, since an awaited page round's Send control names its OWN round
   // rather than sharing submitBoard's openRoundNumber()-targeted path (ticket
-  // 01's own note left for this one) -- and (ADR.md entry 58) reportAttended's
+  // 01's own note left for this one) -- (ADR.md entry 58) reportAttended's
   // POST to /attended, the tab telling the daemon whether it is being looked
-  // at. Any fifth is a
+  // at, and fillHeldStages' read of the page, for a stage a push sent held to a
+  // tab that does not hold it. Any sixth is a
   // network call nobody has justified -- in particular, mode detection must
   // never become a probe to the daemon.
   const fetchCalls = [...ui.matchAll(/fetch\(([^)]*)/g)].map(m => m[1]);
-  assert.equal(fetchCalls.length, 4, `expected exactly the two submit fetches, the resync and the attended report, found ${fetchCalls.length}`);
+  assert.equal(fetchCalls.length, 5, `expected exactly the two submit fetches, the two reads of the board and the attended report, found ${fetchCalls.length}`);
   const submitCalls = fetchCalls.filter(c => c.includes('/submit'));
   assert.equal(submitCalls.length, 2, 'both submitBoard and submitPageRound must post to /submit');
-  assert.ok(fetchCalls.some(c => c.includes("'/b/'")), 'one fetch must be the resync read of the board');
+  assert.equal(fetchCalls.filter(c => c.includes("'/b/'")).length, 2, 'two fetches must read the board page: the resync and the held-stage fill');
   assert.ok(fetchCalls.some(c => c.includes('/attended')), 'one fetch must be the attended report');
-  // All four live behind a readonly guard: the standalone file:// archive is
+  // All five live behind a readonly guard: the standalone file:// archive is
   // network-free, period.
   assert.match(namedFunctionBody(ui, 'resync'), /if \(readonly\) return;/);
+  assert.match(namedFunctionBody(ui, 'fillHeldStages'), /^\s*if \(readonly\) return /);
   assert.match(namedFunctionBody(ui, 'submitPageRound'), /^\s*if \(readonly\) return;/);
   assert.match(namedFunctionBody(ui, 'reportAttended'), /if \(readonly \|\| !attendedWatcherId\) return;/);
 });
@@ -4063,8 +4207,8 @@ check('a push wires the freshly-parsed fragment BEFORE inserting it into the liv
   const amendIdx = ui.indexOf("data.mode === 'amend'");
   const amendBlock = ui.slice(amendIdx, ui.indexOf('patch.roundsNowSent.forEach', amendIdx));
   const wireIdxB = amendBlock.indexOf('wireRoot(frag)');
-  const replaceIdxB = amendBlock.indexOf('.replaceWith(blockEl)');
-  assert.ok(wireIdxB !== -1 && replaceIdxB !== -1, 'expected wireRoot(frag) and .replaceWith(blockEl) in the amend push branch');
+  const replaceIdxB = amendBlock.indexOf('swapKeepingStages(existing, blockEl)');
+  assert.ok(wireIdxB !== -1 && replaceIdxB !== -1, 'expected wireRoot(frag) and swapKeepingStages(existing, blockEl) in the amend push branch');
   assert.ok(wireIdxB < replaceIdxB, 'wireRoot(frag) must run before the amended blocks replace/join the live round section');
 });
 
@@ -5265,36 +5409,40 @@ check('H5: a file over the byte cap is refused by stat, before any of it is read
   unlinkSync(big);
 });
 
-check('a by-value html or text block over the cap is refused, and the message names no source reference as the remedy, because a reference that size is refused too', () => {
+check('a by-value html or text block over its cap is refused, and the message names no source reference as the remedy, because a reference that size is refused too', () => {
   // Ablation: revert the message in src/board.mjs's byValueText to "use a source
   // reference instead" and this fails -- a reference to content this size is refused
-  // by resolveRef's own whole-file fstat check (src/resolve.mjs) before any slicing,
-  // so that phrasing names a remedy that does not work for ANY kind, html included.
+  // by resolveRef's own whole-file fstat check (src/resolve.mjs) against the same cap
+  // per kind, before any slicing, so that phrasing names a remedy that does not work
+  // for ANY kind, html included.
   // Ablation: drop byValueText from either field and a multi-megabyte string posted
   // by value is stored verbatim and re-parsed on every render, SSE fragment and
   // packet -- the file cap does not cover by-value content. `text` and `html` are two
-  // separate call sites, so both are driven.
-  const oversize = 'x'.repeat(MAX_REF_BYTES + 1);
-  assert.throws(() => createBoard({ title: 't', blocks: [{ kind: 'markdown', text: oversize }] }), /over the .*-byte cap/,
-    'a by-value markdown text over the cap must be refused like an html block');
-  let caught = null;
-  try {
-    createBoard({ title: 't', blocks: [{ kind: 'html', html: oversize }] });
-  } catch (err) {
-    caught = err;
-  }
-  assert.ok(caught, 'an over-cap by-value block must still throw');
-  assert.match(caught.message, /over the .*-byte cap/);
-  assert.ok(!/use a source reference instead/i.test(caught.message), 'must not name a remedy that does not raise the cap');
-  // What the message says instead must actually be true: a reference to a file this
-  // size is refused too, proven end to end rather than merely asserted in prose.
-  const big = path.join(fixturesDir, 'criterion5-oversize.html');
-  writeFileSync(big, oversize, 'utf8');
-  try {
-    const refusal = refusedPost(() => createBoard({ title: 't', cwd: fixturesDir, blocks: [{ kind: 'html', source: { path: 'criterion5-oversize.html' } }] }));
-    assert.match(refusal, /exceeds the .* cap/);
-  } finally {
-    unlinkSync(big);
+  // separate call sites with two caps (ADR 121), so both are driven.
+  for (const [kind, field, cap, file] of [
+    ['markdown', 'text', MAX_REF_BYTES, 'criterion5-oversize.md'],
+    ['html', 'html', MAX_HTML_BYTES, 'criterion5-oversize.html'],
+  ]) {
+    const oversize = 'x'.repeat(cap + 1);
+    let caught = null;
+    try {
+      createBoard({ title: 't', blocks: [{ kind, [field]: oversize }] });
+    } catch (err) {
+      caught = err;
+    }
+    assert.ok(caught, `an over-cap by-value ${kind} block must throw`);
+    assert.match(caught.message, new RegExp(`block ${field} is over the ${cap}-byte cap`));
+    assert.ok(!/use a source reference instead/i.test(caught.message), 'must not name a remedy that does not raise the cap');
+    // What the message says instead must actually be true: a reference to a file this
+    // size is refused too, proven end to end rather than merely asserted in prose.
+    const big = path.join(fixturesDir, file);
+    writeFileSync(big, oversize, 'utf8');
+    try {
+      const refusal = refusedPost(() => createBoard({ title: 't', cwd: fixturesDir, blocks: [{ kind, source: { path: file } }] }));
+      assert.match(refusal, new RegExp(`exceeds the ${cap}-byte reference cap`));
+    } finally {
+      unlinkSync(big);
+    }
   }
 });
 
@@ -9545,6 +9693,29 @@ check('src/ui.mjs makes no dynamic import(<url>) call: the vendored mermaid engi
   // 'import()' in prose, which must not trip a check about real code.
   const ui = readFileSync(path.join(repoRoot, 'src/ui.mjs'), 'utf8');
   assert.ok(!/import\(\s*['"`]/.test(ui), `src/ui.mjs must contain no dynamic import(<url>) call any more, found one: ${ui.match(/.{0,40}import\(\s*['"`].{0,40}/)?.[0]}`);
+});
+
+check('the board and index content policies are exactly their clause lists: media from data: and blob: only, every other clause as it was', () => {
+  // Written out, not derived from src/render.mjs: this is the security boundary an
+  // untrusted html stage inherits through its srcdoc, on the live header and in an
+  // archive's meta tag alike, so a widened, narrowed, dropped or added clause has to
+  // turn something red rather than ride through. `media-src data: blob:` is what lets
+  // a stage's inlined <video> play (test/browser-check-video.mjs watches it in Chrome);
+  // without it `default-src 'none'` refuses every clip. The two policies differ in
+  // form-action alone (src/render.mjs's INDEX_CSP says why).
+  const clauses = [
+    "default-src 'none'",
+    "script-src 'self' 'unsafe-inline'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    'font-src data:',
+    'media-src data: blob:',
+    "connect-src 'self'",
+    "frame-ancestors 'none'",
+    "base-uri 'none'",
+  ];
+  assert.deepEqual(CSP.split('; '), [...clauses, "form-action 'none'"]);
+  assert.deepEqual(INDEX_CSP.split('; '), [...clauses, "form-action 'self'"]);
 });
 
 // =================================================================================

@@ -42,7 +42,7 @@
 import { computeBoardPatch } from './patch.mjs';
 import {
   composeHint, parseMermaidDomId, MERMAID_NODE_SELECTOR,
-  findPendingCommentForAnchor, removePendingComment,
+  findPendingCommentForAnchor, removePendingComment, videoSecond, videoTimeSuffix,
 } from './anchor.mjs';
 import {
   roundPageLabel, roundNumberLabel, isPageRound, roundHasCommentable,
@@ -227,6 +227,11 @@ export const ui = `
   var findPendingCommentForAnchor = ${findPendingCommentForAnchor.toString()};
   var removePendingComment = ${removePendingComment.toString()};
 
+  // A video comment's second and its label suffix, spliced the same way: the
+  // rule the stage, this page and the server's anchor sanitizer agree on.
+  var videoSecond = ${videoSecond.toString()};
+  var videoTimeSuffix = ${videoTimeSuffix.toString()};
+
   // Two pure round facts from src/badge.mjs, spliced the same way: the
   // pager names a round with the SAME function src/render.mjs printed that
   // round's own label with, and it asks whether the page it is flipping to is a
@@ -380,13 +385,17 @@ export const ui = `
   // document.body -- both stay in THIS document, so a document-rooted qualified
   // selector still finds exactly one of each while the lens is open (what it
   // leaves behind is a <span class="lens-slot">, which carries no id at all).
-  function openCommentForm(blockId, anchorKind, anchorRef, anchorHint, anchorDomRef, editing) {
+  function openCommentForm(blockId, anchorKind, anchorRef, anchorHint, anchorDomRef, editing, anchorTime) {
     var form = document.querySelector('form#comment-form-' + blockId);
     if (!form) return;
     form.setAttribute('data-anchor-kind', anchorKind);
     form.setAttribute('data-anchor-ref', anchorRef || '');
     form.setAttribute('data-anchor-label', anchorHint || '');
     form.setAttribute('data-anchor-domref', anchorDomRef || '');
+    // A video comment's second (handleStageClick), cleared on every other
+    // open so it never rides along to an anchor that is not that video's.
+    if (typeof anchorTime === 'number') form.setAttribute('data-anchor-time', String(anchorTime));
+    else form.removeAttribute('data-anchor-time');
     if (editing) form.setAttribute('data-editing-id', String(editing.id));
     else form.removeAttribute('data-editing-id');
     var target = document.querySelector('div#comment-target-' + blockId);
@@ -476,9 +485,23 @@ export const ui = `
   // stageAgentScript, which names this side as the one that has to make that
   // call.
   function sentDomRefsForBlock(blockId) {
+    // A timed anchor is one second of a video, not the video: another second
+    // is still open to comment (findPendingCommentForAnchor), so its ref is
+    // not de-affordanced. Its second travels in sentVideoSecondsForBlock's
+    // list instead.
     return liveSentComments()
-      .filter(function (c) { return c.blockId === blockId && c.anchor && c.anchor.kind === 'dom'; })
+      .filter(function (c) { return c.blockId === blockId && c.anchor && c.anchor.kind === 'dom' && c.anchor.time == null; })
       .map(function (c) { return c.anchor.ref; });
+  }
+
+  // The seconds of blockId's videos already carrying a SENT comment, as the
+  // '{ ref, time }' pairs the stage's 'mode' message carries as 'sentTimes':
+  // the stage marks a video sent only while it shows one of them, so a click
+  // this page would drop at isSentAnchor reads as already commented first.
+  function sentVideoSecondsForBlock(blockId) {
+    return liveSentComments()
+      .filter(function (c) { return c.blockId === blockId && c.anchor && c.anchor.kind === 'dom' && typeof c.anchor.time === 'number'; })
+      .map(function (c) { return { ref: c.anchor.ref, time: c.anchor.time }; });
   }
 
   // The 'dom'-anchored comments on blockId that currently need a pin -- the
@@ -979,6 +1002,7 @@ export const ui = `
         type: 'mode',
         commentMode: commentMode && pageRoundCommentsAllowed(section),
         sentRefs: blockId ? sentDomRefsForBlock(blockId) : [],
+        sentTimes: blockId ? sentVideoSecondsForBlock(blockId) : [],
         theme: activeTheme(),
       });
     });
@@ -1056,7 +1080,7 @@ export const ui = `
     // function at all, and would hand a non-awaited (or since-expired) page
     // round's stage 'commentMode: true' straight from the global toggle with
     // no gate in the way.
-    postToStage(frame, { type: 'mode', commentMode: commentMode && pageRoundCommentsAllowed(section), sentRefs: sentDomRefsForBlock(blockId), theme: activeTheme() });
+    postToStage(frame, { type: 'mode', commentMode: commentMode && pageRoundCommentsAllowed(section), sentRefs: sentDomRefsForBlock(blockId), sentTimes: sentVideoSecondsForBlock(blockId), theme: activeTheme() });
     // A stage that has just announced itself is
     // exactly the moment its own padding is still whatever its markup alone
     // gave it -- the first (and often only) chance to top it up before the
@@ -1076,7 +1100,14 @@ export const ui = `
     // all (a resync that skipped straight to an already-expired round).
     if (!pageRoundCommentsAllowed(section)) return;
     if (typeof data.ref !== 'string' || !data.ref) return;
+    var text = typeof data.text === 'string' ? data.text : '';
+    var tag = typeof data.tag === 'string' ? data.tag : '';
+    // A video's second, only on a click naming a video and only as
+    // videoSecond accepts it: a forged string, NaN or out-of-range value is
+    // dropped, never coerced, and the anchor is then an ordinary one.
+    var time = tag.toLowerCase() === 'video' ? videoSecond(data.time) : null;
     var anchor = { kind: 'dom', ref: data.ref };
+    if (time !== null) anchor.time = time;
     if (isSentAnchor(blockId, anchor)) return;
     // A stage message is ATTACKER-CONTROLLED input, not a user gesture: the
     // sandboxed document runs agent-supplied script in the same document as
@@ -1095,8 +1126,6 @@ export const ui = `
     var openForm = document.querySelector('form#comment-form-' + blockId);
     var openInput = openForm && openForm.querySelector('input[type=text]');
     if (openForm && openForm.classList.contains('open') && openInput && String(openInput.value || '').trim()) return;
-    var text = typeof data.text === 'string' ? data.text : '';
-    var tag = typeof data.tag === 'string' ? data.tag : '';
     // buildHint(section, {textContent, tagName}): section (the OUTER-document
     // .html-block) is what supplies context ("After stage") if this stage
     // happens to sit inside a compare side -- the plain object stands in for
@@ -1108,6 +1137,9 @@ export const ui = `
     // plain extractHint(el.textContent) -- see src/anchor.mjs's design
     // comment.
     var hint = buildHint(section, { textContent: text, tagName: tag });
+    // The label names the second too ("Criterion 2 clip at 0:07"), beside the
+    // anchor's own 'time'.
+    if (time !== null) hint += videoTimeSuffix(time);
     // No 'editing' argument, deliberately, and unlike every OTHER caller of
     // openCommentForm on this page. The
     // second-click-edits behaviour is driven by matching a queued comment
@@ -1131,7 +1163,7 @@ export const ui = `
     // fail in. Passing no editing target also CLEARS any stale
     // data-editing-id left on the form by an earlier, trusted gesture, so a
     // stage message can never inherit one either.
-    openCommentForm(blockId, 'dom', anchor.ref, hint, '');
+    openCommentForm(blockId, 'dom', anchor.ref, hint, '', null, time);
   }
 
   // --- stage height: fit, fold, open (ADR.md entry 119) ---------------------
@@ -3002,6 +3034,29 @@ export const ui = `
     postToStage(l.frame, { type: 'mode', commentMode: false, sentRefs: [], theme: activeTheme() });
   }
 
+  var STAGE_LOADING_NOTE = 'This stage is still loading. Open it full size once it shows.';
+  var STAGE_UNLOADED_NOTE = 'This stage did not load. Press again to retry, or reload the page.';
+
+  /** A Pull-out pressed on a held frame (fillHeldStages) has no stage to copy yet:
+   * the frame waits for a fill, or one failed. The press starts a fill, or joins the
+   * one out, and the control says why nothing opened, then, once the fill settles,
+   * either goes back to what it said or says the stage did not load. */
+  function pullOutHeldStage(frame, opener) {
+    var settled = fillHeldStages();
+    if (!opener || !opener.setAttribute) return;
+    var was = opener.__cbPullOutLabel;
+    if (!was) was = opener.__cbPullOutLabel = { title: opener.getAttribute('title'), label: opener.getAttribute('aria-label') };
+    function put(name, value) {
+      if (value == null) opener.removeAttribute(name); else opener.setAttribute(name, value);
+    }
+    function say(note) {
+      put('title', note || was.title);
+      put('aria-label', note || was.label);
+    }
+    say(STAGE_LOADING_NOTE);
+    settled.then(function () { say(frame.hasAttribute('data-held') ? STAGE_UNLOADED_NOTE : null); });
+  }
+
   /** Mount 'section''s stage in the lens. 'opener' is the control that asked for
    * it, kept so this can hand focus back to it -- passed in rather than
    * read off document.activeElement, since whether a click focuses a button at
@@ -3009,6 +3064,7 @@ export const ui = `
   function stageLensOpen(section, blockId, opener) {
     var inline = section.querySelector('iframe.html-stage');
     if (!inline || !inline.getAttribute) return;
+    if (inline.hasAttribute('data-held')) { pullOutHeldStage(inline, opener); return; }
     var srcdoc = inline.getAttribute('srcdoc');
     var sandbox = inline.getAttribute('sandbox');
     // Fail closed on both: with no srcdoc there is nothing to show, and with no
@@ -3205,7 +3261,11 @@ export const ui = `
     btn.__cbPullOutWired = true;
     btn.addEventListener('click', function (ev) {
       if (ev && ev.preventDefault) ev.preventDefault();
-      stageLensOpen(section, section.getAttribute('data-block-id'), btn);
+      // The block the control sits in NOW, not the one it was wired in: a push that
+      // keeps this stage's frame puts the push's control into the live block and
+      // drops the block it came in (swapKeepingStages).
+      var block = btn.closest('.html-block') || section;
+      stageLensOpen(block, block.getAttribute('data-block-id'), btn);
     });
   }
 
@@ -4005,6 +4065,11 @@ export const ui = `
       var anchor = anchorKind === 'dom' ? { kind: 'dom', ref: anchorRef, hint: anchorLabel }
         : anchorKind === 'mermaid' ? { kind: 'mermaid', ref: anchorRef, domRef: anchorDomRef, hint: anchorLabel }
         : { kind: 'block' };
+      // A video comment's second, written by openCommentForm and present only
+      // on a 'dom' anchor minted by a click on a video.
+      var anchorTimeAttr = form.getAttribute('data-anchor-time');
+      var anchorTime = anchorTimeAttr ? videoSecond(Number(anchorTimeAttr)) : null;
+      if (anchorKind === 'dom' && anchorTime !== null) anchor.time = anchorTime;
       // A form reopened on an anchor that
       // already has a comment queued (openCommentForm's 'editing' argument
       // stamped data-editing-id when it did) REPLACES that entry's anchor/text
@@ -6387,6 +6452,227 @@ export const ui = `
   var resyncIssued = 0;
   var resyncNewest = 0;
 
+  // --- a push leaves a stage it does not change alone (ADR 122) -----------------
+  //
+  // A stage's frame holds its mock's whole running state, in a document this page
+  // cannot reach: a paused video's second, a scrolled pane, a form half filled in.
+  // A frame that is replaced, or taken out of the document and put back, loads
+  // again and loses all of it, and a Send's push replaces the whole round it went
+  // out from. So markup a push brings in keeps the live frame wherever it names, in
+  // the same place, a stage this tab already holds: the same 'data-sha'
+  // (src/render.mjs's stageFrame, keyed on the block's stored sha, not its id, which
+  // an amend re-mints for a block nested in the one it re-posts). The push's markup
+  // goes in around the frame, which never leaves the document. A push that changes
+  // a stage names a new sha, and its frame goes in as it came.
+  //
+  // The daemon sends such a frame empty, marked 'data-held' (src/render.mjs's
+  // holdStages), so a push re-sends no stage a tab already holds; it does so only
+  // to a tab whose event stream says this script can fill one ('?stages=held',
+  // src/server.mjs's handleEvents). A held frame that finds no live frame to stand
+  // for it, in a tab that missed what it holds, is filled from the page
+  // (fillHeldStages).
+
+  // A stage block's classes that describe its frame's box rather than the
+  // server's markup (applyStageHeight): a kept frame keeps the box it had, so its
+  // block keeps these whatever the push's markup says.
+  var STAGE_BOX_CLASSES = ['stage-folded', 'stage-opened', 'stage-scrolls'];
+
+  /** The live frames under 'live' that can stand for frames in 'next', and the
+   * element under 'live' that stands for each element on the way down to them. A
+   * frame in 'next' takes the first live frame not yet taken that names the same
+   * non-empty 'data-sha' and sits in the same place: the two paths down to them
+   * name the same tags at every step and agree with every path already taken,
+   * since graftAround walks both trees in step. Kept elements must also stand in
+   * the order their counterparts do, since graftAround moves none of them; a push
+   * that reorders stages keeps none. */
+  function keptStages(live, next) {
+    var none = { frames: [], nextNodes: [], liveNodes: [] };
+    var kept = { frames: [], nextNodes: [], liveNodes: [] };
+    if (live.tagName !== next.tagName) return none;
+    var liveFrames = qsa('iframe.html-stage', live);
+    qsa('iframe.html-stage', next).forEach(function (frame) {
+      var sha = frame.getAttribute('data-sha');
+      if (!sha) return;
+      for (var k = 0; k < liveFrames.length; k++) {
+        if (liveFrames[k].getAttribute('data-sha') !== sha || kept.frames.indexOf(liveFrames[k]) !== -1) continue;
+        if (stepTogether(liveFrames[k], live, frame, next, kept)) { kept.frames.push(liveFrames[k]); return; }
+      }
+    });
+    return keptInOrder(kept) ? kept : none;
+  }
+
+  /** Walks from 'liveFrame' up to 'live' and from 'frame' up to 'next' in step; when
+   * every step names the same tag and agrees with the steps 'kept' already holds
+   * (one live element per element of 'next', and back), records the steps and
+   * answers true. */
+  function stepTogether(liveFrame, live, frame, next, kept) {
+    var a = liveFrame, b = frame, liveSteps = [], nextSteps = [];
+    while (a && b && a !== live && b !== next && a.tagName === b.tagName) {
+      liveSteps.push(a);
+      nextSteps.push(b);
+      a = a.parentElement;
+      b = b.parentElement;
+    }
+    if (a !== live || b !== next) return false;
+    for (var i = 0; i < nextSteps.length; i++) {
+      var at = kept.nextNodes.indexOf(nextSteps[i]);
+      if (at !== -1 ? kept.liveNodes[at] !== liveSteps[i] : kept.liveNodes.indexOf(liveSteps[i]) !== -1) return false;
+    }
+    nextSteps.forEach(function (n, j) {
+      if (kept.nextNodes.indexOf(n) !== -1) return;
+      kept.nextNodes.push(n);
+      kept.liveNodes.push(liveSteps[j]);
+    });
+    return true;
+  }
+
+  /** True when any two kept siblings stand in the order their counterparts in the
+   * push's markup do. */
+  function keptInOrder(kept) {
+    function at(n) { return Array.prototype.indexOf.call(n.parentElement.childNodes, n); }
+    for (var i = 0; i < kept.nextNodes.length; i++) {
+      for (var j = i + 1; j < kept.nextNodes.length; j++) {
+        if (kept.nextNodes[i].parentElement !== kept.nextNodes[j].parentElement) continue;
+        if ((at(kept.nextNodes[i]) < at(kept.nextNodes[j])) !== (at(kept.liveNodes[i]) < at(kept.liveNodes[j]))) return false;
+      }
+    }
+    return true;
+  }
+
+  /** Puts 'next' (wired, detached) where 'live' is, and answers whichever of the
+   * two is in the document afterwards: 'next', by a plain swap, when it names no
+   * stage 'live' can keep; 'live' otherwise, made over into 'next' around the
+   * frames it keeps. */
+  function swapKeepingStages(live, next) {
+    if (live === next) return live;
+    var kept = keptStages(live, next);
+    if (!kept.frames.length) { live.replaceWith(next); return next; }
+    graftAround(live, next, kept);
+    // The bar under a kept stage arrived with the push's markup; it is told the
+    // fold its block kept.
+    kept.frames.forEach(function (frame) {
+      var block = frame.closest('.html-block');
+      if (!block) return;
+      setStageFoldState(block, block.classList.contains('stage-opened') ? 'opened'
+        : block.classList.contains('stage-folded') ? 'folded' : null);
+    });
+    return live;
+  }
+
+  /** Makes 'live' over into 'next' without taking a kept frame out of the
+   * document: 'live' takes 'next''s attributes, a kept frame's own block keeping
+   * its STAGE_BOX_CLASSES; each child of 'live' that stands for none of 'next''s
+   * goes; each child of 'next' that has no stand-in goes in, in its place; and a
+   * child that has one is made over the same way, down to the kept frame, which
+   * is left exactly as it is. Listeners on what 'live' keeps are its own from
+   * when it was wired, and every listener in this script reads such an element's
+   * attributes when it fires (selectVariant, wireStagePullOut). */
+  function graftAround(live, next, kept) {
+    var ownsKept = kept.frames.some(function (f) { return f.closest('.html-block') === live; });
+    var box = ownsKept ? STAGE_BOX_CLASSES.filter(function (c) { return live.classList.contains(c); }) : [];
+    live.getAttributeNames().forEach(function (name) { if (!next.hasAttribute(name)) live.removeAttribute(name); });
+    next.getAttributeNames().forEach(function (name) { live.setAttribute(name, next.getAttribute(name)); });
+    if (ownsKept) STAGE_BOX_CLASSES.forEach(function (c) { live.classList.toggle(c, box.indexOf(c) !== -1); });
+    var kids = Array.prototype.slice.call(next.childNodes);
+    var stands = kids.map(function (kid) {
+      var at = kept.nextNodes.indexOf(kid);
+      return at === -1 ? null : kept.liveNodes[at];
+    });
+    Array.prototype.slice.call(live.childNodes).forEach(function (child) {
+      if (stands.indexOf(child) === -1) child.replaceWith();
+    });
+    kids.forEach(function (kid, i) {
+      if (stands[i]) {
+        if (kept.frames.indexOf(stands[i]) === -1) graftAround(stands[i], kid, kept);
+        return;
+      }
+      var before = null;
+      for (var j = i + 1; j < stands.length && !before; j++) before = stands[j];
+      live.insertBefore(kid, before);
+    });
+  }
+
+  /** The fill in flight, or about to go out, that a later call joins
+   * (fillHeldStages): the shas it has asked for ('asked') and the promise it answers
+   * ('settled'); null when there is none. */
+  var stageFill = null;
+
+  /** The sha of each held frame on the page, once each, but those in 'skip'. */
+  function heldStageShas(skip) {
+    var shas = [];
+    qsa('iframe.html-stage[data-held]', document).forEach(function (frame) {
+      var sha = frame.getAttribute('data-sha');
+      if (sha && shas.indexOf(sha) === -1 && skip.indexOf(sha) === -1) shas.push(sha);
+    });
+    return shas;
+  }
+
+  /** Fills each held frame on the page that no live frame stood in for: a tab that
+   * missed a push holds a stage older than the one a later push sends held, or none
+   * at all, and a catch-up holds every stage it brings in. It reads the page with
+   * those stages alone whole ('?stages=' naming their shas, src/server.mjs's
+   * handleGetPage) and puts each stage into the held frames that name its sha, never
+   * into a frame by its block: a push that made the frame over under another sha
+   * while the read was out has put another stage there.
+   *
+   * One fill at a time: a call while one is out joins it, and the read goes out once
+   * the work in hand is done, so a catch-up that replays several missed rounds, each
+   * ending in a call, reads once, for every frame the replays left held. When a read
+   * settles, the held frames it has not asked for (a push landed meanwhile) are read
+   * next. A call that joins has the fill ask again for every stage still held: since
+   * the fill read it, a push may have held it again where no live frame stands in
+   * (keptStages keeps a frame in the same place only), or its read failed. A stage
+   * asked for and not got waits for that next call (a later push, a catch-up on
+   * reconnect, a Pull-out on that frame), so a read that fails is not retried in a
+   * loop. Answers a promise settled once nothing more is to be read. */
+  function fillHeldStages() {
+    if (readonly) return Promise.resolve();
+    if (stageFill) {
+      var held = heldStageShas([]);
+      stageFill.asked = stageFill.asked.filter(function (sha) { return held.indexOf(sha) === -1; });
+      return stageFill.settled;
+    }
+    var fill = { asked: [], settled: null };
+    function readNext() {
+      var shas = heldStageShas(fill.asked);
+      // Nothing left to read, so a call from here on starts a fill of its own rather
+      // than joining one that reads no more.
+      if (!shas.length) { done(); return null; }
+      fill.asked = fill.asked.concat(shas);
+      return fetch('/b/' + encodeURIComponent(boardId) + '?stages=' + shas.map(encodeURIComponent).join(',')).then(function (r) {
+        if (!r.ok) throw new Error('stage fill failed: ' + r.status);
+        return r.text();
+      }).then(function (text) {
+        // Inert, as resync's own parse below is: DOMParser runs no script.
+        var doc = new DOMParser().parseFromString(text, 'text/html');
+        var whole = {};
+        qsa('iframe.html-stage[srcdoc]', doc).forEach(function (f) {
+          var sha = f.getAttribute('data-sha');
+          if (sha) whole[sha] = f.getAttribute('srcdoc');
+        });
+        qsa('iframe.html-stage[data-held]', document).forEach(function (frame) {
+          var sha = frame.getAttribute('data-sha');
+          if (!sha || !Object.prototype.hasOwnProperty.call(whole, sha)) return;
+          frame.removeAttribute('data-held');
+          frame.setAttribute('srcdoc', whole[sha]);
+        });
+      }).catch(function () { /* the frame stays empty until the next call */ }).then(readNext);
+    }
+    function done() { if (stageFill === fill) stageFill = null; }
+    stageFill = fill;
+    fill.settled = Promise.resolve().then(readNext).then(done, done);
+    return fill.settled;
+  }
+
+  /** A block in 'frag' that sits inside another of its blocks, and so arrives
+   * with that block's own markup rather than on its own. */
+  function nestedInFragment(el, frag) {
+    for (var n = el.parentElement; n && n !== frag; n = n.parentElement) {
+      if (n.classList && n.classList.contains('block')) return true;
+    }
+    return false;
+  }
+
   function applyRoundPush(data) {
     pushGeneration++;
     lensClose();
@@ -6504,15 +6790,23 @@ export const ui = `
         // Before the rail, not after it: .round-end closes an open round, and a
         // block appended past it renders outside the round it belongs to.
         var rail = roundSection.querySelector('.round-end');
+        // What is in the document once each block has landed: a block that kept a
+        // stage is its old element made over (swapKeepingStages), so the diagrams
+        // to draw are looked for there, not in the fragment it came in.
+        var placed = [];
         blockEls.forEach(function (blockEl) {
+          // A block nested in another of this fragment's blocks (a compare side, a
+          // variant option's block) lands with that block's markup, not on its own.
+          if (nestedInFragment(blockEl, frag)) return;
           var id = blockEl.getAttribute('data-block-id');
           var existing = findBlockEl(roundSection, id);
-          if (existing) { existing.replaceWith(blockEl); return; }
+          if (existing) { placed.push(swapKeepingStages(existing, blockEl)); return; }
           var topLevel = (data.board.blocks || []).some(function (b) { return b.id === id; });
           if (!topLevel) return;
           if (rail) { roundSection.insertBefore(blockEl, rail); } else { roundSection.appendChild(blockEl); }
+          placed.push(blockEl);
         });
-        blockEls.forEach(function (blockEl) { renderMermaidBlocks(blockEl); });
+        placed.forEach(function (el) { renderMermaidBlocks(el); });
       }
     }
 
@@ -6570,6 +6864,7 @@ export const ui = `
     // went out, not the one that just arrived -- left alone, it would sit next
     // to the freshly re-enabled send bar until the reviewer submitted again.
     if (sendStatus && openRoundNumber() !== null) sendStatus.textContent = '';
+    fillHeldStages();
   }
 
   function applySubmittedPush(data) {
@@ -6608,7 +6903,10 @@ export const ui = `
       var replacement = wrap.firstElementChild;
       if (replacement) {
         wireRoot(replacement);
-        if (section) { section.replaceWith(replacement); } else {
+        // The round's stages are the one thing the swap keeps: a Send changes no
+        // block, so each frame goes out held and the live one stays where it is
+        // (swapKeepingStages), the round made over around it.
+        if (section) { replacement = swapKeepingStages(section, replacement); } else {
           // This client's DOM never had the round at all (e.g. it missed an
           // earlier 'round' push while disconnected): insert it now rather than
           // silently having no record of it, so a straggler still ends up
@@ -6653,6 +6951,7 @@ export const ui = `
     // because "a sent round is never submittable twice" is not a fact that
     // should depend on the pager's internals.
     setSendBarEnabled(openRoundNumber() !== null && currentRound === openRoundNumber());
+    fillHeldStages();
   }
 
   // --- resync: catch up on whatever landed while this client was not listening --
@@ -6675,7 +6974,8 @@ export const ui = `
   // own because that page already inlines exactly the payload this needs
   // ('#board-data', resolveComment already run over it) AND the server-rendered
   // markup for every round — so the catch-up reuses the same fragments a live
-  // push would have carried, instead of the client inventing its own markup.
+  // push would have carried, instead of the client inventing its own markup. It
+  // reads that page with every stage held, as a push sends a stage the tab holds.
   /** The rounds this snapshot says closed WITHOUT being sent -- the one board
    * change computeBoardPatch cannot report, and the reason applyResync's own
    * early return could not be trusted alone.
@@ -6837,7 +7137,12 @@ export const ui = `
     // whichever happens to land second (dropping by arrival would throw away the
     // FRESHER snapshot whenever the older one answered first).
     var issued = ++resyncIssued;
-    fetch('/b/' + encodeURIComponent(boardId)).then(function (r) {
+    // With every stage held (src/server.mjs's handleGetPage): this tab holds its
+    // stages already, and this runs on every connect, the first one included, so
+    // reading them again would load every page twice. A stage the catch-up brings in
+    // that this tab does not hold is filled by fillHeldStages, and so is one a fill
+    // left empty before the stream dropped.
+    fetch('/b/' + encodeURIComponent(boardId) + '?stages=held').then(function (r) {
       if (!r.ok) throw new Error('resync failed: ' + r.status);
       return r.text();
     }).then(function (text) {
@@ -6854,6 +7159,9 @@ export const ui = `
       var node = doc.querySelector('script#board-data[type="application/json"]');
       if (!node) return;
       applyResync(JSON.parse(node.textContent), doc);
+      // On every path through it, the ones that change nothing included: a fill that
+      // failed before the stream dropped is tried again on its reconnect.
+      fillHeldStages();
     }).catch(function () {
       // A failed catch-up must never break the page: the live subscription is
       // still open, and the next reconnect tries again.
@@ -6861,7 +7169,10 @@ export const ui = `
   }
 
   if (!readonly && typeof EventSource !== 'undefined') {
-    var es = new EventSource('/api/board/' + boardId + '/events');
+    // '?stages=held': this script fills a held stage frame (fillHeldStages), so the
+    // daemon may send one; a tab still running a script from before that gets every
+    // stage whole (src/server.mjs's handleEvents).
+    var es = new EventSource('/api/board/' + boardId + '/events?stages=held');
     // 'open' fires on the first connection AND on every automatic reconnect,
     // which is exactly the set of moments this client may have missed something.
     es.addEventListener('open', function () { resync(); });

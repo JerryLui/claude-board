@@ -401,8 +401,15 @@ svg { flex: none; }
    runs under, and the reservation near '.round-pager-dock' below carves that
    room back out. Pinned by test/check-round-end.mjs, which fails if this
    padding grows a bottom value here and if the reservation there ever stops
-   matching the expression the Tray clears the dock with. */
-.board-shell { position: relative; z-index: 1; max-width: 1120px; margin: 0 auto; padding: 0 var(--space-5); }
+   matching the expression the Tray clears the dock with.
+
+   The column is as wide as the window, up to 2560px, the widest common display
+   in CSS px: a round's mocks, diagrams and before-and-after pairs stand for
+   whole screens and render at the width they get. It used to stop at 1120px,
+   which drew a wide screen's mocks smaller than the screens they stood for.
+   Prose does not follow it out: '--prose' (the width section near the end of
+   this file) holds every line of it to a reading measure. */
+.board-shell { position: relative; z-index: 1; max-width: 2560px; margin: 0 auto; padding: 0 var(--space-5); }
 
 /* the board's identity stays on screen: a long board scrolls for a while, and
    "which board am I in, how many rounds deep" is the first thing you lose */
@@ -2341,9 +2348,9 @@ body:not(.page-board) .board-head::before {
 /* Full-bleed, not 'inset: 0' -- the page-board rule above uses 'inset: 0'
    safely because THAT header is itself full-bleed (position: fixed over a
    100vh frame with no document scrollbar at all, body.page-board sets
-   overflow: hidden). This one is 'position: sticky' inside the 1120px
-   column, so 'inset: 0' would size the wash to the COLUMN, not the
-   viewport -- a ~1072px rounded blur-plus-gradient rectangle sitting on the
+   overflow: hidden). This one is 'position: sticky' inside the board's
+   centred column, so 'inset: 0' would size the wash to the COLUMN, not the
+   viewport -- a column-wide rounded blur-plus-gradient rectangle sitting on the
    page's own plain background outside it, with a visible seam at both edges
    against the page background beyond the column.
    'width: 100vw' (the usual full-bleed escape) is unsafe here specifically:
@@ -2359,7 +2366,7 @@ body:not(.page-board) .board-head::before {
    translateX(-50%)' centres a box of that measured width on '.board-head''s
    OWN horizontal centre, which is also the viewport's -- '.board-shell'
    ('margin: 0 auto') centres the column at every width, including one
-   narrower than 1120px where the column simply fills 100% and the centring
+   narrower than its 2560px cap, where the column simply fills 100% and the centring
    is a no-op -- so this lands flush with both real edges at any viewport,
    with no vw-based overflow risk. */
 body:not(.page-board) .board-head::after {
@@ -2418,6 +2425,57 @@ body.page-board .back-to-top.visible {
   opacity: clamp(0, (var(--stage-p) - 0.6) * 2.5, 1);
   transform: translateY(calc((1 - var(--stage-p)) * var(--space-2))); }
 .back-to-top:hover:not(:disabled) { border-color: var(--hairline-2); color: var(--ink); }
+
+/* --- width: a round's rendered blocks take the window, its prose keeps a measure ---
+   '.board-shell' runs as wide as the window (up to 2560px), and every block
+   with it: a stage, a diagram, a compare, a rendered-variant card, at top level
+   and in a question's context. Prose does not: each element a reader reads as
+   lines carries 'max-width: var(--prose)', resolved in its OWN font, so a 16px
+   prompt and a 14px paragraph each hold their own measure. That is why an
+   option's label and description carry it themselves rather than inheriting
+   their card's: a 12.5px description in a card held to 72ch of 14px runs to
+   81ch of its own. The option card and a variant's label row carry it too:
+   a pick is then not a window-wide button with its words at one end (a card
+   carrying a preview is the one exception, below), and a
+   variant's label, an inline span on which 'max-width' does nothing, wraps at
+   its row's measure. A table or a code fence
+   inside markdown is not prose here and keeps the full width.
+
+   '--prose' has two values. Up to 1440px it is '--column-1120', the widest
+   line the old 1120px column gave a block's prose (the column less its
+   gutters, the card's padding and its border: 1022px). A line set straight in
+   a block, a paragraph or a prompt, so keeps its old length while a window
+   between 1120 and 1440 widens the rendered blocks. A line in a box that
+   splits a block's width, a question's options or context panel or a compare
+   side, still widens with its box: the options column runs from 523px in the
+   old column to about 680px just under 1440. From 1440px '--prose' is 72ch,
+   the longest comfortable line, and the jump happens once, at the width where
+   a stage has gained a third over the old column. Below 1120px neither value
+   binds and the board is as it always was.
+
+   The comment list and form are held only on an ordinary board's own blocks:
+   a page board's Tray already sets its own width (640px, '.page-comments'),
+   and the Lens adopts the form into a dialog outside '.blocks'. */
+:root { --column-1120: calc(1120px - 4 * var(--space-5) - 2px); --prose: var(--column-1120); }
+.md-content p, .md-content ul, .md-content ol, .md-content blockquote,
+.md-content h1, .md-content h2, .md-content h3, .md-content h4, .md-content h5, .md-content h6,
+.question-prompt, .card-choice, .variant-label, .opt-label, .opt-desc, .rank-list, .answer-textarea, .note-field, .resolve-error,
+body:not(.page-board) .blocks .comment-list, body:not(.page-board) .blocks .comment-form { max-width: var(--prose); }
+/* An option's preview image or code is rendered content, not prose, and the
+   card's measure would draw it narrower than the old column did (605px for
+   992px at 1920). A card carrying one keeps the old column's width instead;
+   its label and description still hold their own measure. */
+.card-choice:has(.opt-preview) { max-width: var(--column-1120); }
+@media (min-width: 1440px) {
+  :root { --prose: 72ch; }
+  /* A question with a context panel: the options keep exactly the width the
+     old column gave them (its 1.1fr share of '--column-1120' less the gap,
+     523px), so neither an option nor its preview draws narrower than it did,
+     and the panel beside them, where the diagrams and compares sit, takes
+     everything the window adds. The one-column rule for a question with no
+     panel outranks this (':not(:has())' carries a class). */
+  .question-block { grid-template-columns: minmax(0, calc((var(--column-1120) - var(--space-5)) * 1.1 / 2.1)) minmax(0, 1fr); }
+}
 
 /* --- responsive: the board is a laptop surface first, but it has to survive a
    phone-width window without a horizontal scrollbar or a two-column squeeze --- */

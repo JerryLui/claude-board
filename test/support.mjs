@@ -384,12 +384,13 @@ export async function postBoard(port, secret, body) {
 /** `openSseClient(port, boardId, opts)` opens `GET /api/board/<boardId>/events` and collects
  * its frames. opts: `secret` (sends the secret header), `headers` (sent instead of that),
  * `comments` (true: a `: heartbeat`-style comment frame is collected as `{ comment }`; false:
- * skipped). Resolves `{ req, res, events, status }` once the response head arrives; `events`
- * keeps filling with `{ event, data }` (data parsed as JSON). */
-export function openSseClient(port, boardId, { secret, headers = secret ? { [SECRET_HEADER]: secret } : {}, comments = true } = {}) {
+ * skipped), `query` (appended to the path, as in '?stages=held'). Resolves
+ * `{ req, res, events, status }` once the response head arrives; `events` keeps filling with
+ * `{ event, data }` (data parsed as JSON). */
+export function openSseClient(port, boardId, { secret, headers = secret ? { [SECRET_HEADER]: secret } : {}, comments = true, query = '' } = {}) {
   return new Promise((resolveOpen, rejectOpen) => {
     const req = http.request(
-      { host: '127.0.0.1', port, method: 'GET', path: `/api/board/${boardId}/events`, headers: { host: `127.0.0.1:${port}`, ...headers } },
+      { host: '127.0.0.1', port, method: 'GET', path: `/api/board/${boardId}/events${query}`, headers: { host: `127.0.0.1:${port}`, ...headers } },
       res => {
         const events = [];
         let buf = '';
@@ -437,6 +438,14 @@ export async function waitForHealthy(port, deadlineMs) {
  * board's raw text sits verbatim, so "it must not render" can be asserted on what remains. */
 export function renderedMarkup(html) {
   return html.replace(/<script id="board-data"[^>]*>[\s\S]*?<\/script>/, '');
+}
+
+/** `boardDataOf(page)` is the text of the `#board-data` script `page` inlines, the page's own
+ * copy of the board. Asserts there is one. */
+export function boardDataOf(page) {
+  const m = /<script id="board-data" type="application\/json">([\s\S]*?)<\/script>/.exec(page);
+  assert.ok(m, 'setup failure: the page inlines no #board-data');
+  return m[1];
 }
 
 // --- the MCP shim -------------------------------------------------------------------------

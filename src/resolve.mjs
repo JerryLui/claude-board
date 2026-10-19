@@ -70,12 +70,32 @@ import path from 'node:path';
 import { scanHeadings } from './markdown.mjs';
 
 /** Byte cap on one block's content, whether read from disk here or supplied by
- * value (src/board.mjs applies the same number to `text`/`html`). Generous next to
- * any file a human would put on a review board, small enough that a hostile or
- * accidental reference cannot exhaust the daemon's heap — and small enough to bound
- * every downstream scanner (markdown block parsing, src/anchor.mjs's html tree)
- * that runs inline on the request thread. */
+ * value (src/board.mjs applies the same number to `text` and to every by-value label,
+ * prompt, answer and comment). Generous next to any file a human would put on a review
+ * board, small enough that a hostile or accidental reference cannot exhaust the
+ * daemon's heap — and small enough to bound every downstream scanner (markdown block
+ * parsing, mermaid, Prism) that runs inline on the request thread. An `html` block
+ * alone has the larger `MAX_HTML_BYTES` below. */
 export const MAX_REF_BYTES = 512 * 1024;
+
+/** Byte cap on one `html` block, by value or by reference, and on the html one post
+ * carries in total (src/board.mjs): the post limit itself, the 25,000,000 bytes
+ * `readJsonBody` (src/server.mjs) reads before it drops the connection, so a stage may
+ * carry an inlined video as large as any post can (ADR 121). Measured safe at that size
+ * because every pass over a stage's html is linear and none is per keystroke: the
+ * anchor tree (src/anchor.mjs's parseHtmlTree), the srcdoc escape and the page and push
+ * renders, the packet (which carries no block html) and the store's JSON. */
+export const MAX_HTML_BYTES = 25_000_000;
+
+/** The byte cap on one block of `kind`'s own content, by value or by reference:
+ * `MAX_HTML_BYTES` for an `html` stage, `MAX_REF_BYTES` for every other kind (ADR 121).
+ * The one place a kind's cap is chosen. src/board.mjs reads it both where a post resolves
+ * a block and where `roundContentDrifted` re-reads that block's file on a retry, so the
+ * two reads cannot disagree: a file between two caps read under the smaller one would
+ * hash as drifted on every retry. */
+export function refCapFor(kind) {
+  return kind === 'html' ? MAX_HTML_BYTES : MAX_REF_BYTES;
+}
 
 /** The allowlist `install.sh` writes into the launchd plist when the user names none.
  * Exported so `test/check-install.mjs` can pin the installer's default against the one
@@ -564,8 +584,11 @@ function sliceSection(text, section) {
  * won that race ~1.2% of the time and read a file outside every root. So the name is
  * resolved to a descriptor once, with symlinks refused at open, and the guards and the
  * read all interrogate that descriptor: whatever passes the checks is what is read,
- * because there is only one thing left to read. */
-export function resolveRef(ref, { cwd, roots } = {}) {
+ * because there is only one thing left to read.
+ *
+ * `maxBytes` is the whole file's cap, checked from fstat before a byte is read: the
+ * caller passes `refCapFor` above, applied to the block's kind. */
+export function resolveRef(ref, { cwd, roots, maxBytes = MAX_REF_BYTES } = {}) {
   if (!ref || !ref.path) return { error: 'reference has no path' };
   const confined = resolvePath(ref, cwd, roots ?? resolveRefRoots(process.env.CLAUDE_BOARD_REF_ROOTS));
   if (confined.error) return { error: confined.error };
@@ -591,8 +614,8 @@ export function resolveRef(ref, { cwd, roots } = {}) {
     if (!st.isFile()) {
       return { error: `refusing ${ref.path}: not a regular file` };
     }
-    if (st.size > MAX_REF_BYTES) {
-      return { error: `refusing ${ref.path}: ${st.size} bytes exceeds the ${MAX_REF_BYTES}-byte reference cap` };
+    if (st.size > maxBytes) {
+      return { error: `refusing ${ref.path}: ${st.size} bytes exceeds the ${maxBytes}-byte reference cap` };
     }
     raw = readFileSync(fd, 'utf8');
   } catch (err) {

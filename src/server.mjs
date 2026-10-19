@@ -52,8 +52,8 @@ import { readBoard, writeBoard, writePage, readAsset, boardHome, listBoards, sto
 import { ASSET_NAME, MERMAID_ASSET_NAME, SHARED_ASSETS, assetContentType } from './assets.mjs';
 import { readSecret, secretPath, secretMatches, sessionToken, sessionCookieMatches, SECRET_HEADER, SESSION_COOKIE, SESSION_MAX_AGE_S } from './secret.mjs';
 import { createHandoffStore, handoffTarget, recoveryCommand, HANDOFF_TOKEN_RE, DEFAULT_PORT } from './handoff.mjs';
-import { createBoard, addRound, amendRound, abandonOpenRounds, applySubmit, buildPacket, roundAnswers, dropResolved, resolveComments, questionBlocks, stripDaemonOnly, SUPPRESSED, ANSWERS_DELIVERED, roundContentDrifted } from './board.mjs';
-import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, renderRefusalPage, CSP, INDEX_CSP } from './render.mjs';
+import { createBoard, addRound, amendRound, abandonOpenRounds, applySubmit, buildPacket, roundAnswers, dropResolved, resolveComments, questionBlocks, SUPPRESSED, ANSWERS_DELIVERED, roundContentDrifted } from './board.mjs';
+import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, renderRefusalPage, boardForClient, holdStages, holdAllStages, stageShas, CSP, INDEX_CSP } from './render.mjs';
 import { buildThreadIndex, renderIndexPage, renderThreadRows, folderName } from './indexpage.mjs';
 // The one shape rule for "is this round a full-viewport page" (ADR.md entry 33),
 // imported rather than restated so the push path and the page path can never
@@ -116,7 +116,7 @@ function attendedWindowMs() {
  * Exported for the checks: `res` is never inspected here, only held and later
  * `.write()`n, so a stand-in carrying a `write` method (or none) is enough. */
 export function createSseHub() {
-  const subs = new Map(); // boardId -> Map<watcherId, { res, attended, seq, focusedAt }>
+  const subs = new Map(); // boardId -> Map<watcherId, { res, attended, seq, focusedAt, fillsHeld }>
 
   /** How much longer this board counts as Attended. See the `attendedRemainingMs` entry
    * on the returned object for what the three answers mean. A plain function rather than
@@ -134,7 +134,9 @@ export function createSseHub() {
   }
 
   return {
-    subscribe(boardId, res) {
+    /** `fillsHeld`: the tab's page script declared it can fill a held stage frame
+     * (`handleEvents`), so `broadcast` may send it one. */
+    subscribe(boardId, res, { fillsHeld = false } = {}) {
       let board = subs.get(boardId);
       if (!board) { board = new Map(); subs.set(boardId, board); }
       const watcherId = randomBytes(16).toString('hex');
@@ -146,7 +148,7 @@ export function createSseHub() {
       // neither end an absence nor hold a banner back (`attendedRemainingMs` below, which
       // the stranded rule asks, answers 0 for it); and it is not evidence they are gone
       // either, so `anyWatcher` and `clientCount` still count it as an open tab.
-      board.set(watcherId, { res, attended: null, seq: -1, focusedAt: 0 });
+      board.set(watcherId, { res, attended: null, seq: -1, focusedAt: 0, fillsHeld });
       return watcherId;
     },
     unsubscribe(boardId, watcherId) {
@@ -155,11 +157,30 @@ export function createSseHub() {
       board.delete(watcherId);
       if (board.size === 0) subs.delete(boardId);
     },
+    /** `data` is the payload, or a function of whether the subscriber fills held stage
+     * frames that answers it: a push renders a stage the tab holds held, and a tab whose
+     * script cannot fill one gets every stage whole (ADR 122). Each answer is built once,
+     * and only when a subscriber needs it, before any write: an answer that throws is
+     * logged and its subscribers miss this push, while a write that throws is a dead
+     * connection. The post or Send that pushes has already been stored by then, so it
+     * still answers its caller. */
     broadcast(boardId, eventName, data) {
       const board = subs.get(boardId);
       if (!board || board.size === 0) return;
-      const payload = `event: ${eventName}\ndata: ${JSON.stringify(data)}\n\n`;
-      for (const { res } of board.values()) {
+      const payloads = new Map();
+      for (const { fillsHeld } of board.values()) {
+        if (payloads.has(fillsHeld)) continue;
+        try {
+          const body = typeof data === 'function' ? data(fillsHeld) : data;
+          payloads.set(fillsHeld, `event: ${eventName}\ndata: ${JSON.stringify(body)}\n\n`);
+        } catch (err) {
+          payloads.set(fillsHeld, null);
+          console.error(`claude-board: could not build the ${eventName} push for board ${boardId}: ${(err && err.message) || err}`);
+        }
+      }
+      for (const { res, fillsHeld } of board.values()) {
+        const payload = payloads.get(fillsHeld);
+        if (payload === null) continue;
         try { res.write(payload); } catch { /* dead connection; the 'close' handler cleans it up */ }
       }
     },
@@ -806,35 +827,38 @@ async function waitForRound(boardId, round, home, { intervalMs = 120, isAborted 
   }
 }
 
-/** Every comment run through resolveComment (src/board.mjs) exactly once, same
- * as renderBoardPage: `commentsByBlock` for whatever gets rendered here, and
- * `boardForClient` -- `board` with resolved-shape comments -- for whatever gets
- * embedded for the client to hydrate `board` from. Pin rendering
- * reads `.resolved`/`.lost` off `board.comments` directly rather than
- * re-deriving them; if an SSE payload's `board` field carried the raw stored
- * comment shape instead (no `.resolved`, no `.lost`), a client's local `board`
- * variable would go stale-shaped the moment ANY push landed, and every pin
- * placed after that would silently stop knowing whether its anchor still
- * resolves. See this same reasoning in src/render.mjs's file header. */
-function resolveBoardComments(board) {
+/** Every comment resolved once, for the markup (`commentsByBlock`) and the page's own
+ * copy of the board (src/render.mjs's boardForClient says what it carries and why). */
+function resolveBoardComments(board, { stageHtml = false } = {}) {
   const resolvedComments = resolveComments(board, board.comments);
   return {
     commentsByBlock: groupCommentsByBlock(resolvedComments),
-    // `stripDaemonOnly` for the same reason renderBoardPage applies it (see its own
-    // comment in src/board.mjs): a field present in the rendered payload and absent from
-    // these pushes shows up as a spurious `computeBoardPatch` diff on the client.
-    boardForClient: stripDaemonOnly({ ...board, comments: resolvedComments }),
+    boardForClient: boardForClient(board, resolvedComments, { stageHtml }),
   };
 }
 
-/** Render the SSE payload for a live push: the full board (so a subscriber's local
- * `computeBoardPatch(prevBoard, nextBoard)` can diff against it) plus a pre-rendered
- * HTML fragment covering exactly the blocks this push touched -- never the whole
- * page -- so the client only ever inserts/replaces that much DOM. `mode` is
- * 'new-round' (a fresh round section, rendered via renderRoundSection so a later
- * full reload is byte-identical to what the push already inserted) or 'amend' (the
- * round is unchanged, only specific blocks inside it were added or replaced, so the
- * fragment is just those blocks via renderBlock, with no round wrapper).
+/** Render the SSE payload for a live push: the page's copy of the board (so a
+ * subscriber's local `computeBoardPatch(prevBoard, nextBoard)` can diff against it)
+ * plus a pre-rendered HTML fragment covering exactly the blocks this push touched --
+ * never the whole page -- so the client only ever inserts/replaces that much DOM.
+ * `mode` is 'new-round' (a fresh round section, rendered via renderRoundSection so a
+ * later full reload is byte-identical to what the push already inserted) or 'amend'
+ * (the round is unchanged, only specific blocks inside it were added or replaced, so
+ * the fragment is just those blocks via renderBlock, with no round wrapper).
+ *
+ * `before` is the board's top-level blocks as they stood before the amend (read before
+ * amendRound replaced anything). A touched block that already sat in the round holds
+ * each stage it held then (src/render.mjs's holdStages): the same sha renders held, its
+ * frame sent empty because every tab showing the round holds it in that block, and
+ * src/ui.mjs keeps that tab's live frame in its place. A block the amend adds holds
+ * none, since a tab keeps a frame only inside the block it was in. So the one
+ * difference a push may have from a later full reload is a held frame, empty in the
+ * push and full in the reload; the `board` is the same bytes. With no `before`, every
+ * stage in the fragment renders whole.
+ *
+ * `wholeStages` builds the push for a tab whose page script cannot fill a held frame (one
+ * opened before ADR 122, which declares nothing on its event stream, see handleEvents):
+ * every stage whole, and the board with each stage's html, the copy that script holds.
  *
  * Both modes derive `fullpage` from the round's own shape rather than being told
  * it, and the amend branch has to do so explicitly because it renders blocks
@@ -848,20 +872,37 @@ function resolveBoardComments(board) {
  * applyRoundPush replaces the block outright, so nothing repairs it short of a
  * reload.
  *
- * Exported for test/check-page-board.mjs; the daemon's own call site is one line
- * below. */
-export function buildRoundPushPayload(board, round, mode, blockIds) {
-  const { commentsByBlock, boardForClient } = resolveBoardComments(board);
+ * Exported for test/check-page-board.mjs; the daemon's own call site is in
+ * handlePostBoard. */
+export function buildRoundPushPayload(board, round, mode, blockIds, before = null, { wholeStages = false } = {}) {
+  const { commentsByBlock, boardForClient } = resolveBoardComments(board, { stageHtml: wholeStages });
   const fullpage = isPageRound(board.blocks.filter(b => b.round === round));
+  const heldBy = id => {
+    const was = !wholeStages && before && before.find(b => b.id === id && b.round === round);
+    return was ? stageShas([was]) : null;
+  };
   const html = mode === 'new-round'
     ? renderRoundSection(board, round, commentsByBlock)
     : blockIds
       .map(id => {
         const block = board.blocks.find(b => b.id === id);
-        return block ? renderBlock(block, board, commentsByBlock, false, fullpage) : '';
+        return block ? renderBlock(holdStages([block], heldBy(id))[0], board, commentsByBlock, false, fullpage) : '';
       })
       .join('\n');
   return { round, mode, blockIds, html, board: boardForClient };
+}
+
+/** Render the SSE payload for a Send: the page's copy of the board and `round`
+ * re-rendered from it, which every connected tab swaps in for the round it shows
+ * (src/ui.mjs's applySubmittedPush). A Send changes answers, comments and the round's
+ * status, never a block, so every stage in the round renders held (holdAllStages): the
+ * push carries no stage, and each tab keeps its live frames, a paused video at its
+ * second. `wholeStages` as for buildRoundPushPayload. Exported for the checks that
+ * drive a Send's push through the page. */
+export function buildSubmittedPushPayload(board, round, { wholeStages = false } = {}) {
+  const { commentsByBlock, boardForClient } = resolveBoardComments(board, { stageHtml: wholeStages });
+  const html = renderRoundSection(wholeStages ? board : holdAllStages(board), round, commentsByBlock);
+  return { round, board: boardForClient, html };
 }
 
 /** The project directory already bound to `thread`, or null when this is a thread
@@ -891,6 +932,7 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting) {
   let round;
   let pushMode = null; // null: a brand-new board, nothing live to push to yet
   let touchedBlockIds = [];
+  let blocksBefore = null; // an amend's: the board's top-level blocks before it
   // The whole store, parsed at most ONCE per post and only if something below actually
   // needs it. Two places do: minting a board (thread binding and the taken-thread set,
   // below) and draining what the thread is owed (`drainOwedForPost` at the end, which
@@ -1009,6 +1051,10 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting) {
         // The open round hasn't been sent yet: amend it in place rather than
         // minting round N+1.
         //
+        // The round as every tab showing it holds it, read before the amend replaces
+        // anything: a stage a block keeps as it was goes out held, not again
+        // (buildRoundPushPayload).
+        blocksBefore = board.blocks.slice();
         // `title` is passed through on both paths: `ask` requires a non-empty title on
         // every call and commands/grill.md tells the agent to make it the branch name,
         // so dropping it on every round after the first leaves the reviewer looking at
@@ -1115,7 +1161,9 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting) {
   const html = renderBoardPage(board);
   writeBoard(board, home);
   writePage(board.id, html, home);
-  if (pushMode) sse.broadcast(board.id, 'round', buildRoundPushPayload(board, round, pushMode, touchedBlockIds));
+  if (pushMode) {
+    sse.broadcast(board.id, 'round', fillsHeld => buildRoundPushPayload(board, round, pushMode, touchedBlockIds, blocksBefore, { wholeStages: !fillsHeld }));
+  }
   // Unconditionally, unlike the board-scoped push above: `pushMode` is only set when
   // appending to a board that already exists (a second round in a thread), but a BRAND
   // NEW board's first round is the commonest way the waiting count moves at all -- every
@@ -1207,11 +1255,34 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting) {
  * credential in the markup. That keeps the served page's bytes a pure function of the
  * board JSON, which is what makes the standalone `pages/*.html` archive byte-identical
  * to what the daemon serves — and what makes an archived board openable from disk with
- * no daemon and no credential at all. */
-function handleGetPage(req, res, id, home) {
+ * no daemon and no credential at all.
+ *
+ * `?stages=` serves the same page with every stage held but those it names by sha,
+ * comma-separated (src/render.mjs's holdAllStages): each held frame empty, the
+ * `#board-data` the same bytes. `?stages=held` names none. It is what a tab's own reads
+ * ask for: its catch-up (src/ui.mjs's resync, on every connect of its event stream, the
+ * first included) holds every stage, since the tab already holds them and wants the
+ * board and the markup around them, so a page loads once, not twice; a fill
+ * (fillHeldStages) names the stages a push left held that the tab does not hold, and
+ * reads those alone.
+ *
+ * The plain route is the page the archive is byte-identical to, but for one reader: a
+ * fetch of it from a page script, not a navigation (`Sec-Fetch-Dest: empty`), is the
+ * catch-up of a script from before ADR 122, which asks for nothing (today's script never
+ * reads the plain route). That script sees a stage change through its html, so it gets
+ * the board with each stage's html, the copy it holds, and its catch-up replaces no
+ * stage that did not change. A browser that sends no `Sec-Fetch-Dest` gets the page as
+ * served, and such a tab reloads each stage once. */
+function handleGetPage(req, res, id, home, url) {
   const board = readBoard(id, home);
   if (!board) return sendText(res, 404, 'board not found');
-  return sendHtml(res, 200, renderBoardPage(board));
+  const stages = url.searchParams.get('stages');
+  if (stages !== null) {
+    const whole = stages === 'held' ? null : new Set(stages.split(','));
+    return sendHtml(res, 200, renderBoardPage(holdAllStages(board, whole)));
+  }
+  const oldScript = req.headers['sec-fetch-dest'] === 'empty';
+  return sendHtml(res, 200, renderBoardPage(board, { stageHtml: oldScript }), { vary: 'Sec-Fetch-Dest' });
 }
 
 /** The daemon's one static route: `GET /b/<ui|styles>-<hash>.<js|css>`, the shared script
@@ -1920,10 +1991,10 @@ async function handleSubmit(req, res, id, home, sse, stranded, stream, waiting) 
   // the sent round as if they were would show every reviewer a different,
   // wrong "what was answered". A round that just became sent carries no more
   // in-progress state worth preserving, so replacing its markup outright here is
-  // correct, not merely convenient.
-  const { commentsByBlock, boardForClient } = resolveBoardComments(board);
-  const html = renderRoundSection(board, round, commentsByBlock);
-  sse.broadcast(id, 'submitted', { round, board: boardForClient, html });
+  // correct, not merely convenient. Its stages are the exception, and carry no state
+  // of the reviewer's answer: a Send changes no block, so each goes out held and every
+  // tab keeps the frame it has (buildSubmittedPushPayload).
+  sse.broadcast(id, 'submitted', fillsHeld => buildSubmittedPushPayload(board, round, { wholeStages: !fillsHeld }));
   // Answered is the other way off the waiting list -- an open round this same call just
   // closed, mirroring `handleWait`'s timeout branch and `handleAbandon` above.
   broadcastWaiting(stream, waiting, board);
@@ -2012,8 +2083,14 @@ async function handleAttended(req, res, id, sse, stranded) {
  * by the caller. Heartbeat comment lines keep it alive through idle timers and
  * proxies (see DEFAULT_SSE_HEARTBEAT_MS); `req`/`res` close/error tear the
  * subscription and the interval down so a disconnected client is never broadcast
- * to. See PROTOCOL.md "SSE events". */
-function handleEvents(req, res, id, home, sse, stranded) {
+ * to. See PROTOCOL.md "SSE events".
+ *
+ * `?stages=held` is the page script declaring it fills a held stage frame (src/ui.mjs,
+ * ADR 122), so its pushes hold each stage the tab already holds. A stream that declares
+ * nothing is a tab opened before that script, still running it, and its pushes carry
+ * every stage whole (buildRoundPushPayload's `wholeStages`): a held frame would leave
+ * its stage blank until a reload. */
+function handleEvents(req, res, id, home, sse, stranded, url) {
   const board = readBoard(id, home);
   if (!board) return sendJson(res, 404, { error: 'board not found' });
   // Captured while the socket is unambiguously alive, because the cleanup below runs
@@ -2028,7 +2105,7 @@ function handleEvents(req, res, id, home, sse, stranded) {
     'connection': 'keep-alive',
   });
   res.write(': connected\n\n');
-  const watcherId = sse.subscribe(id, res);
+  const watcherId = sse.subscribe(id, res, { fillsHeld: url.searchParams.get('stages') === 'held' });
   // Handed to the client as a real event, not a comment, because the page has to
   // read it as data: it is what an `attended` report (below) names to say which
   // Watcher it is updating. Sent before anything else so a report the page fires
@@ -2659,7 +2736,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
         // Ahead of the board route, and disjoint from it by construction — see
         // handleGetAsset on why the two share a prefix at all.
         if (ASSET_NAME.test(parts[1])) return handleGetAsset(res, parts[1], home);
-        return handleGetPage(req, res, parts[1], home);
+        return handleGetPage(req, res, parts[1], home, url);
       }
 
       if (parts[0] === 'api' && parts[1] === 'board' && parts.length === 4) {
@@ -2707,7 +2784,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
           return handleReadBoard(req, res, boardId, home);
         }
         if (req.method === 'GET' && action === 'events') {
-          return handleEvents(req, res, boardId, home, sse, stranded);
+          return handleEvents(req, res, boardId, home, sse, stranded, url);
         }
         if (req.method === 'POST' && action === 'submit') {
           return await handleSubmit(req, res, boardId, home, sse, stranded, streamHub, waitingCache);

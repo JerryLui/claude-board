@@ -1,8 +1,10 @@
 // Board JSON -> complete HTML page, as a pure function of the JSON. The page
-// inlines its own board JSON in a script tag: served through the daemon it hydrates
-// and subscribes over SSE (see renderRoundSection and src/server.mjs);
-// opened from Finder it hydrates from the embedded copy and renders read-only
-// (src/ui.mjs decides based on `location.protocol`).
+// inlines its own copy of the board JSON in a script tag (boardForClient: every
+// html stage left out, since the page carries each stage once, in its frame):
+// served through the daemon it hydrates and subscribes over SSE (see
+// renderRoundSection and src/server.mjs); opened from Finder it hydrates from the
+// embedded copy and renders read-only (src/ui.mjs decides based on
+// `location.protocol`).
 //
 // The board JSON is the only payload still inlined. The client script and the stylesheet
 // are REFERENCED, by the bare content-addressed sibling filenames src/assets.mjs names
@@ -17,7 +19,8 @@
 // a sent round renders as history, still fully readable, its widgets disabled; the
 // open round renders live. src/server.mjs reuses renderRoundSection and renderBlock
 // directly to render the fragment for an SSE push, so a full page load and a live
-// push of the same round are byte-identical.
+// push of the same round are byte-identical, but for a stage the tab already holds,
+// whose frame the push sends empty (holdStages).
 //
 // All four answer widgets (single, multi, text, rank), all five context kinds
 // (markdown, code, mermaid, html, compare), and comments anchored at block and at
@@ -38,7 +41,7 @@ import { palettes, faviconLink, markSvg } from './styles.mjs';
 import { SCRIPT_ASSET, STYLE_ASSET } from './assets.mjs';
 import { themeBootScript, themeToggle } from './theme.mjs';
 import { resolveComments, stripDaemonOnly } from './board.mjs';
-import { buildSteps, stepsToPath, pathToSteps, resolveSteps } from './anchor.mjs';
+import { buildSteps, stepsToPath, pathToSteps, resolveSteps, videoIdentity, videoSecond } from './anchor.mjs';
 import { grammarFor, Prism } from './vendor/prism/index.mjs';
 import { MERMAID_ASSET } from './vendor/mermaid/index.mjs';
 import {
@@ -91,13 +94,24 @@ import {
  * this policy through its `srcdoc` (see above), and the manual
  * (skills/claude-board/SKILL.md) tells artifact authors to inline every font as a
  * `data:` URI for exactly that reason. Without this clause `default-src 'none'` leaves
- * a `data:` font with no source at all. */
+ * a `data:` font with no source at all.
+ *
+ * `media-src` is `data:` and `blob:` and nothing else, so an `html` stage can carry a
+ * `<video controls>` that plays, pauses and scrubs on a live board and on an archive
+ * opened from disk. A clip arrives inside the stage like every other stage asset: a
+ * `data:` URI in its markup, or a `blob:` URL its own script builds from inlined bytes.
+ * The daemon serves no media, so there is no `'self'` here (nothing same-origin to
+ * fetch, and over `file://` it would name the reader's disk), no `file:` (the sandboxed
+ * stage is an opaque origin that Chrome never grants a `file:` subresource anyway), and
+ * no host: a stage `<video>` pointed at the network loads nothing. Without this clause
+ * `default-src 'none'` refuses every video, inlined or not. */
 const CSP_CLAUSES = [
   "default-src 'none'",
   "script-src 'self' 'unsafe-inline'",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
   "font-src data:",
+  "media-src data: blob:",
   "connect-src 'self'",
   "frame-ancestors 'none'",
   "base-uri 'none'",
@@ -709,7 +723,7 @@ function renderContextInner(block, board, commentsByBlock, historical, fold = NO
       return block.error ? resolveErrorNote(block) : stageWrap(block.id, `<pre class="mermaid">${escHtml(block.text)}</pre>`, 'diagram');
     case 'html':
       return block.error ? resolveErrorNote(block)
-        : stageWrap(block.id, `<iframe class="html-stage" sandbox="allow-scripts" srcdoc="${escAttr(buildStageSrcdoc(block))}"></iframe>`, 'stage') + stageFoldBar(opened);
+        : stageWrap(block.id, stageFrame(block), 'stage') + stageFoldBar(opened);
     case 'compare':
       return `<div class="compare-grid">${renderContextCompareSide(block.left, board, commentsByBlock, historical)}${renderContextCompareSide(block.right, board, commentsByBlock, historical)}</div>`;
     default:
@@ -1048,7 +1062,7 @@ function flattenTokens(tokens, cls, out) {
 /** The size above which a code block is rendered plain instead of tokenized.
  *
  * An earlier decision set no size cutoff on highlighting at all, backed by a
- * measurement that Prism tokenizes 512 KB -- the maximum a reference can be
+ * measurement that Prism tokenizes 512 KB -- the most a code block can carry
  * (MAX_REF_BYTES) -- in 15 ms. That measurement is real and reproduces here (512KB
  * of this repo's own source: 20 ms). It is also measured on BENIGN input, and the
  * decision does not survive an adversarial one. Prism's grammars are ordinary
@@ -1589,6 +1603,21 @@ export function stageAgentScript() {
   // board.comments, which lives only in the parent document (the stage's
   // isolation -- this document never sees the board JSON at all).
   var sentRefs = [];
+  // The seconds of this block's videos that already carry a SENT comment, as
+  // '{ ref, time }' pairs from the same 'mode' message. A video comment's
+  // second is part of its anchor (src/anchor.mjs's findPendingCommentForAnchor),
+  // so a video is marked sent only while it shows one of these seconds; a timed
+  // ref is never in 'sentRefs', or the whole video would read as done.
+  var sentTimes = [];
+  // The videos whose native controls comment mode took away (holdVideoControls
+  // below), to give back when it ends.
+  var heldControls = [];
+  // The MutationObserver that takes the controls a video gains while comment
+  // mode is on, or null while it is off.
+  var controlsWatch = null;
+  // The ref of 'hovered', kept so a video's second moving under a resting
+  // pointer can re-mark it without walking the tree again.
+  var hoveredRef = null;
   // The board's own top chrome band, as last reported by the parent's 'band'
   // message (applyBand below). Kept because an in-page anchor has to land
   // BELOW that band rather than under it (scrollToAnchor) -- one measurement,
@@ -1600,6 +1629,8 @@ export function stageAgentScript() {
   var stepsToPath = ${stepsToPath.toString()};
   var pathToSteps = ${pathToSteps.toString()};
   var resolveSteps = ${resolveSteps.toString()};
+  var videoIdentity = ${videoIdentity.toString()};
+  var videoSecond = ${videoSecond.toString()};
 
   function post(msg) {
     try {
@@ -1721,6 +1752,33 @@ export function stageAgentScript() {
       hovered.classList.remove(SENT_CLASS);
     }
     hovered = null;
+    hoveredRef = null;
+  }
+
+  function isVideo(el) {
+    return !!el && el.nodeType === 1 && String(el.tagName).toLowerCase() === 'video';
+  }
+
+  /** Whether a click on 'el' (at 'ref') would name an anchor that already
+   * carries a sent comment: the anchor src/ui.mjs's handleStageClick builds
+   * from this click, matched the way its isSentAnchor matches it. A video
+   * showing a second is that second's anchor; anything else, or a video
+   * showing no valid second, is its bare ref. */
+  function isSentTarget(el, ref) {
+    if (ref === null) return false;
+    var second = isVideo(el) ? videoSecond(el.currentTime) : null;
+    if (second === null) return sentRefs.indexOf(ref) !== -1;
+    for (var i = 0; i < sentTimes.length; i++) {
+      if (sentTimes[i].ref === ref && sentTimes[i].time === second) return true;
+    }
+    return false;
+  }
+
+  function markHovered() {
+    if (!hovered || !hovered.classList) return;
+    var sent = isSentTarget(hovered, hoveredRef);
+    hovered.classList.remove(sent ? HOVER_CLASS : SENT_CLASS);
+    hovered.classList.add(sent ? SENT_CLASS : HOVER_CLASS);
   }
 
   document.body.addEventListener('mouseover', function (ev) {
@@ -1731,6 +1789,7 @@ export function stageAgentScript() {
     hovered = el;
     var steps = buildSteps(document.body, el);
     var ref = (steps && steps.length) ? stepsToPath(steps) : null;
+    hoveredRef = ref;
     // The VISIBILITY half only: an element whose own ref already carries a SENT
     // comment is de-affordanced (SENT_CLASS) rather than marked as an ordinary
     // target (HOVER_CLASS), while the click handler below still posts 'click'
@@ -1739,13 +1798,16 @@ export function stageAgentScript() {
     // ever opening a form), which is the side that holds board.comments and can
     // tell a resolved sent comment from a stale ref this document has no way to
     // distinguish on its own.
-    if (ref !== null && sentRefs.indexOf(ref) !== -1) {
-      hovered.classList.add(SENT_CLASS);
-    } else {
-      hovered.classList.add(HOVER_CLASS);
-    }
+    markHovered();
     post({ type: 'hover', ref: ref, tag: el.tagName, text: el.textContent });
   });
+  // A hovered video's second moves under a resting pointer when it plays
+  // (autoplay or the stage's script), and whether that second is already sent
+  // moves with it. The browser fires 'timeupdate' as it moves; it does not
+  // bubble, so this listens in the capture phase.
+  document.addEventListener('timeupdate', function (ev) {
+    if (commentMode && hovered && ev.target === hovered) markHovered();
+  }, true);
   document.body.addEventListener('mouseout', function () {
     clearHover();
     post({ type: 'hover', ref: null, tag: null, text: null });
@@ -1936,6 +1998,51 @@ export function stageAgentScript() {
     post({ type: 'link', url: href });
   }
 
+  // In comment mode a press on a video comments on the second it shows, so
+  // the video carries no native controls while the mode is on: a press on them
+  // would seek or play it and never reach this document. Measured in headless
+  // Chrome 154 and 155 with a CDP press on the timeline, which
+  // test/browser-check-video.mjs repeats: the video seeked, and no
+  // pointerdown, mousedown or click reached even a capture listener on this
+  // document, so nothing here could cancel it. Without the controls the press
+  // lands on the video itself and the click listener below takes it. A video
+  // the stage's own script gives controls while the mode is on (it adds a
+  // '<video controls>', or a player puts 'controls' back) loses them in the
+  // microtask after, before any press can land: a MutationObserver, connected
+  // only while the mode is on, reads an attribute change or an added element
+  // and nothing else. Only the videos taken get controls back when it ends.
+  function takeVideoControls() {
+    var videos = document.querySelectorAll('video[controls]');
+    for (var i = 0; i < videos.length; i++) {
+      if (heldControls.indexOf(videos[i]) === -1) heldControls.push(videos[i]);
+      videos[i].removeAttribute('controls');
+    }
+  }
+
+  function onControlsMutation(records) {
+    for (var i = 0; i < records.length; i++) {
+      var r = records[i];
+      var gained = r.type === 'attributes'
+        ? isVideo(r.target) && r.target.hasAttribute('controls')
+        : Array.prototype.some.call(r.addedNodes, function (n) { return n.nodeType === 1; });
+      if (gained) { takeVideoControls(); return; }
+    }
+  }
+
+  function holdVideoControls(on) {
+    if (on) {
+      takeVideoControls();
+      if (!controlsWatch && typeof MutationObserver === 'function') {
+        controlsWatch = new MutationObserver(onControlsMutation);
+        controlsWatch.observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ['controls'] });
+      }
+      return;
+    }
+    if (controlsWatch) { controlsWatch.disconnect(); controlsWatch = null; }
+    for (var j = 0; j < heldControls.length; j++) heldControls[j].setAttribute('controls', '');
+    heldControls = [];
+  }
+
   document.body.addEventListener('click', function (ev) {
     // A link inside a stage never navigates this frame, whichever mode is on:
     // 'srcdoc' resolves an href against the BOARD's own address, so the
@@ -1957,7 +2064,20 @@ export function stageAgentScript() {
     var steps = buildSteps(document.body, el);
     if (!steps || !steps.length) return;
     clearHover();
-    post({ type: 'click', ref: stepsToPath(steps), tag: el.tagName, text: el.textContent });
+    var click = { type: 'click', ref: stepsToPath(steps), tag: el.tagName, text: el.textContent };
+    if (isVideo(el)) {
+      // A video comment carries the second it was paused at, and the video's
+      // own name rather than its fallback text (videoIdentity). The click is
+      // cancelled so a browser that plays or pauses a video on a click on its
+      // picture cannot move the second being commented on. Headless Chrome 154
+      // measured no such toggle (a real CDP click, comment mode off): the
+      // video stayed paused either way.
+      if (typeof ev.preventDefault === 'function') ev.preventDefault();
+      click.text = videoIdentity(el.getAttribute('aria-label'), el.getAttribute('title'));
+      var second = videoSecond(el.currentTime);
+      if (second !== null) click.time = second;
+    }
+    post(click);
   });
 
   function resolveRef(ref) {
@@ -2265,6 +2385,14 @@ export function stageAgentScript() {
       if (Array.isArray(data.sentRefs)) {
         sentRefs = data.sentRefs.filter(function (r) { return typeof r === 'string'; });
       }
+      // 'sentTimes' widens it the same way, and is checked the same way: an
+      // entry is kept only as a string ref beside a second videoSecond keeps
+      // unchanged.
+      if (Array.isArray(data.sentTimes)) {
+        sentTimes = data.sentTimes.filter(function (s) {
+          return !!s && typeof s.ref === 'string' && videoSecond(s.time) === s.time;
+        }).map(function (s) { return { ref: s.ref, time: s.time }; });
+      }
       // 'theme' widens this message the same way 'sentRefs' above already does
       // (over the channel that already carries comment mode), rather than
       // minting a type of its own: same tolerance, same
@@ -2273,6 +2401,7 @@ export function stageAgentScript() {
       // whatever its own markup chose.
       if (data.theme === 'light' || data.theme === 'dark') applyTheme(data.theme);
       if (commentMode) ensureHoverStyle(); else clearHover();
+      holdVideoControls(commentMode);
       return;
     }
     if (data.type === 'scroll') {
@@ -2583,6 +2712,107 @@ export function buildStageSrcdoc(block) {
   return STAGE_MARGIN_RESET + prelude + block.html + stageAgentScript();
 }
 
+// --- A page carries each stage once (ADR 122) ------------------------------------
+//
+// A stage's content reaches the page in its frame's `srcdoc` and nowhere else. The
+// page's own copy of the board (`#board-data`, and the `board` every live push
+// carries) leaves the html out (boardForClient), and a push leaves out each stage
+// the tab already holds (holdStages): a 24 MB stage serves a page of about 24 MB, and
+// a Send re-sends no stage.
+
+/** Marks an html block a push renders held (stageFrame). A Symbol, so nothing parsed
+ * from JSON, posted or stored, can carry it: holdStages alone sets it, on a view of
+ * the board built for one push. */
+const HELD_STAGE = Symbol('held stage');
+
+/** An html stage's frame. `data-sha` names its content by the block's stored `sha`
+ * (src/board.mjs), and is what src/ui.mjs keys on to keep a live frame through a push
+ * whose frame in the same place names the same sha: the same element, so the mock
+ * keeps its state (a paused video its second). A held block's frame goes out empty
+ * and marked `data-held`: the tab already holds that stage, and src/ui.mjs puts the
+ * live frame in its place (or, for a tab that turns out not to hold it, fills it
+ * from the page). Only a push and a tab's own reads of the page are rendered from a
+ * held view (src/server.mjs); the page as served and archived carries every stage in
+ * its frame. */
+function stageFrame(block) {
+  const sha = block.sha ? ` data-sha="${escAttr(block.sha)}"` : '';
+  return block[HELD_STAGE]
+    ? `<iframe class="html-stage" sandbox="allow-scripts"${sha} data-held></iframe>`
+    : `<iframe class="html-stage" sandbox="allow-scripts"${sha} srcdoc="${escAttr(buildStageSrcdoc(block))}"></iframe>`;
+}
+
+/** `blocks` with `fn` applied to every html block, wherever it sits: top level, a
+ * question's context, a compare side, a rendered-variant option (the tree
+ * src/patch.mjs's flattenBlocks walks). Every block is a copy; keys keep their order,
+ * so the JSON of what `fn` leaves alone is byte for byte the stored block's. */
+function mapStages(blocks, fn) {
+  const visit = b => {
+    if (!b || typeof b !== 'object') return b;
+    let out = b.kind === 'html' ? fn(b) : { ...b };
+    if (Array.isArray(b.context)) out.context = b.context.map(visit);
+    if (b.left && b.left.block) out.left = { ...b.left, block: visit(b.left.block) };
+    if (b.right && b.right.block) out.right = { ...b.right, block: visit(b.right.block) };
+    if (Array.isArray(b.options)) out.options = b.options.map(o => (o && o.block ? { ...o, block: visit(o.block) } : o));
+    return out;
+  };
+  return (blocks || []).map(visit);
+}
+
+/** The page's own copy of the board: what renderBoardPage inlines as `#board-data`
+ * and what every live push carries as `board` (src/server.mjs), one function so a
+ * push and a later reload carry the same bytes. `comments` are `resolvedComments`,
+ * the shape src/ui.mjs places pins from (this file's header comment).
+ *
+ * Left out: `cwd`, the reader's local project path, which nothing in the page reads
+ * and an archive would hand to whoever it is sent to; the stranded rule's daemon-only
+ * bookkeeping (`stripDaemonOnly`, src/board.mjs, says why); and every html block's
+ * `html`, which the page carries once, in the stage's frame. Nothing in src/ui.mjs
+ * reads a stage's html off the board: the Lens copies the frame's own `srcdoc`, and
+ * the push diff (src/patch.mjs) sees a stage change through its `sha`, which stays.
+ *
+ * `stageHtml` keeps the html: the copy a page script from before ADR 122 holds, whose
+ * diff sees a stage change through its html, so a copy without it would read as every
+ * stage changed (src/server.mjs serves it only to such a script). */
+export function boardForClient(board, resolvedComments, { stageHtml = false } = {}) {
+  const { cwd: _cwd, ...client } = stripDaemonOnly({ ...board, comments: resolvedComments });
+  if (!stageHtml) client.blocks = mapStages(client.blocks, ({ html: _html, ...stage }) => stage);
+  return client;
+}
+
+/** The sha of every html stage in `blocks`, wherever it sits. */
+export function stageShas(blocks) {
+  const shas = new Set();
+  mapStages(blocks, b => { if (b.sha) shas.add(b.sha); return b; });
+  return shas;
+}
+
+/** `blocks` as a push renders them: each html stage whose sha is in `held` renders
+ * held (stageFrame), since the tab the push goes to already holds that stage. Keyed on
+ * the content, not the block: an amend that re-posts a question re-mints the ids of the
+ * blocks nested in it (src/board.mjs's resolveBlockId), so a stage in its context comes
+ * back under a new id with the same sha. src/server.mjs passes the stages the same
+ * block held before the amend it pushes, so an amend that changes a stage still
+ * carries it, and one that leaves it as it was carries none. */
+export function holdStages(blocks, held) {
+  if (!held || !held.size) return blocks;
+  return mapStages(blocks, b => (b.sha && held.has(b.sha) ? { ...b, [HELD_STAGE]: true } : b));
+}
+
+/** `board` with every html stage held but those whose sha is in `whole`: what a Send's
+ * push renders (a Send changes no block), and what a tab's own reads of the page ask
+ * for (src/server.mjs's handleGetPage): its catch-up holds every stage, and a fill of
+ * the frames a push left held asks for those stages alone. `board` itself when no
+ * stage is held. */
+export function holdAllStages(board, whole = null) {
+  let held = false;
+  const blocks = mapStages(board.blocks, b => {
+    if (!b.sha || (whole && whole.has(b.sha))) return b;
+    held = true;
+    return { ...b, [HELD_STAGE]: true };
+  });
+  return held ? { ...board, blocks } : board;
+}
+
 /** The awaited page's own send control (ADR.md
  * entries 45, 46, 40). `.page-comments` (renderHtmlBlock's fullpage branch,
  * below) carries an entirely different surface depending on whether `round` is
@@ -2731,7 +2961,7 @@ function renderHtmlBlock(block, board, commentsByBlock, historical, fullpage = f
   }
   // A referenced file's resolved text lands in `block.html` exactly where a
   // hand-mocked stage's by-value text always did (src/board.mjs's normalizeBlock),
-  // so the srcdoc built here is the SAME for both.
+  // so the srcdoc stageFrame builds here is the SAME for both.
   //
   // STAGE_MARGIN_RESET carries no colour at all, only the margin/padding reset, so
   // html/body stay transparent and the parent-controlled `--stage-bg`
@@ -2755,13 +2985,13 @@ function renderHtmlBlock(block, board, commentsByBlock, historical, fullpage = f
   // itself the first element of that same head-only run, so it hoists out of body
   // alongside a mock's own leading `<style>`, in encounter order, and a <style>
   // element's rules apply wherever it ends up in the tree regardless.
-  const srcdocContent = buildStageSrcdoc(block);
+  const frame = stageFrame(block);
   if (fullpage) {
     const round = board.rounds.find(r => r.n === block.round);
     return `
 <section class="block html-block" data-block-id="${escAttr(block.id)}" data-block-kind="html">
   <div class="stage-wrap">
-    <iframe class="html-stage" sandbox="allow-scripts" srcdoc="${escAttr(srcdocContent)}"></iframe>
+    ${frame}
     <div class="pin-layer" data-block-id="${escAttr(block.id)}"></div>
   </div>
   <div class="page-comments">${renderPageCommentPanel(block, round, commentsByBlock)}</div>
@@ -2772,7 +3002,7 @@ function renderHtmlBlock(block, board, commentsByBlock, historical, fullpage = f
 <section class="block html-block${opened ? ' stage-opened' : ''}" data-block-id="${escAttr(block.id)}" data-block-kind="html">
   <div class="block-kicker">HTML stage ${commentButton(block.id)}</div>
   <div class="stage-wrap">
-    <iframe class="html-stage" sandbox="allow-scripts" srcdoc="${escAttr(srcdocContent)}"></iframe>
+    ${frame}
     <div class="pin-layer" data-block-id="${escAttr(block.id)}"></div>
     ${pullOut(block.id, 'stage')}
   </div>
@@ -3077,7 +3307,7 @@ function roundPagerMarkup(board, currentN) {
  * feeds both the server-rendered per-block comment list AND the `#board-data`
  * payload src/ui.mjs hydrates pins from — one source of truth for "does this
  * anchor still resolve", not two independently-computed ones that could disagree.
- * src/server.mjs's SSE push payloads build `boardForClient` the same way, for the
+ * src/server.mjs's SSE push payloads carry the same `boardForClient`, for the
  * same reason — see "SSE events" in PROTOCOL.md.
  *
  * The send bar carries BOTH ways out of a round: `#send-btn` posts
@@ -3117,16 +3347,20 @@ function roundPagerMarkup(board, currentN) {
  * padding land the bar's lower edge on the document's (test/check-round-end.mjs
  * pins exactly that). Costs nothing: the control is `position: fixed`, so it is
  * out of flow and its source position decides only tab order. Emitted on every
- * board and turned on by src/ui.mjs's `.visible` class alone. */
-export function renderBoardPage(board) {
+ * board and turned on by src/ui.mjs's `.visible` class alone.
+ *
+ * `stageHtml` inlines the board with each stage's html (boardForClient), for a page
+ * script from before ADR 122 (src/server.mjs's handleGetPage); the page as served,
+ * pushed and archived never carries it. */
+export function renderBoardPage(board, { stageHtml = false } = {}) {
   const resolvedComments = resolveComments(board, board.comments);
   const commentsByBlock = groupCommentsByBlock(resolvedComments);
   // The page-board layout (ADR.md entries 32 and 33) is carried two ways: down
   // into the round/block markup (no round label, no kicker -- renderRoundSection
   // decides that per round), and out onto <body> as a single class the whole
   // stylesheet keys off. One class rather than a per-element modifier because
-  // what changes is the page's own geometry -- the shell stops being a 1120px
-  // column, the header stops pushing and starts floating, the frame becomes a
+  // what changes is the page's own geometry -- the shell stops being a capped,
+  // padded column, the header stops pushing and starts floating, the frame becomes a
   // constant 100vh and the document itself stops scrolling -- and because it is
   // exactly the switch src/ui.mjs adds and drops as the reviewer flips between
   // an artifact page and a question page (goToRound).
@@ -3141,18 +3375,10 @@ export function renderBoardPage(board) {
   // here and keeps all three in step for every later flip.
   const initialRoundInView = board.rounds.length ? board.rounds[board.rounds.length - 1].n : 1;
   const roundsHtml = board.rounds.map(r => renderRoundSection(board, r.n, commentsByBlock)).join('\n');
-  // `cwd` is dropped rather than spread: the archive (criterion 7) is a single
-  // self-contained file that IS the artifact, so it is the natural thing to
-  // attach to a ticket or hand to a colleague — and `board.cwd` is the realpath'd
-  // local project directory (src/board.mjs), i.e. the reader's username and their
-  // whole directory layout, riding along inside a document nobody reads it out
-  // of. Nothing in src/ui.mjs touches it; the index page reads `cwd` off the
-  // stored board, never off this payload.
-  // `stripDaemonOnly` (src/board.mjs) drops the stranded rule's own bookkeeping for a
-  // second, independent reason: the daemon writes that record WITHOUT re-rendering the
-  // page, so anything of it that reached this payload would make the served markup
-  // disagree with `pages/<id>.html` on disk. See that function's own comment.
-  const { cwd: _cwd, ...boardForClient } = stripDaemonOnly({ ...board, comments: resolvedComments });
+  // The page's own copy of the board, the same bytes every live push carries
+  // (boardForClient): no `cwd`, no daemon-only bookkeeping, and no stage's html,
+  // which the page carries once, in the stage's frame.
+  const clientBoard = boardForClient(board, resolvedComments, { stageHtml });
   // The page-board layout follows the PAGE on screen, not the board: a thread
   // whose first round was an artifact and whose second asks a question is one
   // board with one full-viewport page and one ordinary one, and flipping between
@@ -3286,7 +3512,7 @@ ${roundPagerMarkup(board, initialRoundInView)}
     <button type="button" class="btn-send" id="send-btn"${hasOpenRound(board) ? '' : ' disabled'}>Send</button>
   </div>
 </div>
-<script id="board-data" type="application/json">${safeJson(boardForClient)}</script>
+<script id="board-data" type="application/json">${safeJson(clientBoard)}</script>
 <script defer src="${SCRIPT_ASSET}"></script>
 </body>
 </html>

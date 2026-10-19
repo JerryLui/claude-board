@@ -121,6 +121,18 @@ class TextNode {
     this.parentElement = null;
   }
   get textContent() { return this.data; }
+  // ChildNode's replaceWith, which a browser gives a text node as it gives an
+  // element: src/ui.mjs's graftAround takes every child it does not keep out of a
+  // block it makes over, the whitespace between elements included.
+  replaceWith(...nodes) {
+    const parent = this.parentElement;
+    if (!parent) return;
+    const idx = parent.childNodes.indexOf(this);
+    if (idx === -1) return;
+    nodes.forEach(node => { node.parentElement = parent; });
+    parent.childNodes.splice(idx, 1, ...nodes);
+    if (!nodes.includes(this)) this.parentElement = null;
+  }
 }
 
 /** Parse an attribute list starting at `state.i`, mutating `el.attributes` and
@@ -1092,6 +1104,9 @@ export class Element extends EventTarget {
   setAttribute(name, value) { this.attributes.set(name, String(value)); }
   removeAttribute(name) { this.attributes.delete(name); }
   hasAttribute(name) { return this.attributes.has(name); }
+  // The real one, in attribute order: src/ui.mjs's graftAround hands a kept
+  // element the attributes of the markup it is made over into.
+  getAttributeNames() { return [...this.attributes.keys()]; }
   get id() { return this.getAttribute('id') || ''; }
   // `disabled` is a boolean IDL-reflected attribute -- narrowly, deliberately
   // narrower than a claim that this stand-in reflects attributes onto

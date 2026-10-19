@@ -18,8 +18,12 @@
 
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { parseHtmlTree } from '../src/anchor.mjs';
-import { createBoard, resolveComment, resolveComments } from '../src/board.mjs';
+import v8 from 'node:v8';
+import vm from 'node:vm';
+import { parseHtmlTree, htmlBodyRootFrom, extractHint } from '../src/anchor.mjs';
+import { createBoard, resolveComment, resolveComments, buildPacket } from '../src/board.mjs';
+import { renderBoardPage } from '../src/render.mjs';
+import { MAX_HTML_BYTES } from '../src/resolve.mjs';
 import { check, finish } from './support.mjs';
 
 function timeMs(fn) {
@@ -142,5 +146,105 @@ check('resolveComments on 300 comments against the SAME block renders+parses tha
   }
   assert.deepEqual(resolved.filter(c => c.resolved).map(c => c.n), [151], 'only the comment naming a real node resolves');
 });
+
+// --- a stage may carry the post limit (ADR 121) ---------------------------------
+//
+// An html stage may carry up to MAX_HTML_BYTES (25,000,000), where the 512 KiB block
+// cap used to bound every pass over it. The rows below hold the four shapes that cap
+// was hiding, each measured before its fix on an M-series Mac, then the passes the
+// daemon makes over a ~24 MB stage, benign and adversarial, each under a deadline set
+// for a 2-core CI box running several checks at once.
+
+// A `<!` declaration and a close tag both run over `<` to their `>`. With no `>`
+// anywhere, each one scanned to the end of the input, failed, and the next `<!` or `</`
+// scanned to the end again: 11.2 s for 250 K chars of `<!`, 188 s for 1 M. Fixed, 250 K
+// takes about 1 ms. (250 K, not more: the unfixed run must fail inside the runner's
+// per-check deadline rather than be killed by it.)
+for (const [what, unit] of [['`<!` declarations', '<!'], ['close tags', '</a']]) {
+  check(`parseHtmlTree on 250 K chars of unterminated ${what} completes within 2,000ms (no rescan to the end from every start)`, () => {
+    const html = unit.repeat(Math.floor(250_000 / unit.length));
+    const ms = timeMs(() => parseHtmlTree(html));
+    console.log(`    250K chars of ${unit} -> ${ms.toFixed(1)}ms`);
+    assert.ok(ms < 2_000, `parseHtmlTree took ${ms.toFixed(1)}ms, expected under 2000ms`);
+  });
+}
+
+// An unmatched close tag used to walk the whole stack looking for its element, so deep
+// nesting followed by unmatched closes is O(n^2): 1.4 s for 250 K chars, 14 s for 1 M.
+// Fixed, 1 M takes about 20 ms.
+check('parseHtmlTree on 1 MB of nesting then unmatched close tags completes within 2,000ms (a close never walks the stack)', () => {
+  const html = '<div>'.repeat(100_000) + '</x>'.repeat(125_000);
+  const ms = timeMs(() => parseHtmlTree(html));
+  console.log(`    100K <div> then 125K </x> -> ${ms.toFixed(1)}ms`);
+  assert.ok(ms < 2_000, `parseHtmlTree took ${ms.toFixed(1)}ms, expected under 2000ms`);
+});
+
+// A stage's tree costs about 400 bytes of heap an element, so 24 MB of `<div>` built
+// 4.8 M elements and a 1.8 GB tree for one resolve pass, against the daemon's 4.4 GB
+// heap. The tree stops at MAX_STAGE_NODES (src/anchor.mjs), the most a stage under the
+// old cap could produce; bounded, the same input holds about 250 MB.
+check('the tree of a ~24 MB html stage of nested elements holds under 1 GB of heap', () => {
+  v8.setFlagsFromString('--expose_gc');
+  const gc = vm.runInNewContext('gc');
+  const html = '<div>'.repeat(24_000_000 / 5);
+  gc();
+  const before = process.memoryUsage().heapUsed;
+  const root = htmlBodyRootFrom(html);
+  gc();
+  const grew = process.memoryUsage().heapUsed - before;
+  console.log(`    24 MB of <div> -> tree of ${(grew / 1e6).toFixed(0)} MB`);
+  assert.ok(root.children.length === 1, 'setup: the stage parsed to one outer element');
+  assert.ok(grew < 1e9, `the tree held ${(grew / 1e6).toFixed(0)} MB, expected under 1000 MB`);
+});
+
+// The ~24 MB stage shapes. Benign is what the cap was raised for: a video inlined as one
+// data URI, and an evidence page of ten full-size screenshots as data: images beside a
+// clip. The rest are the adversarial shapes: unterminated quoted attributes, deep
+// nesting, one tag with millions of attributes, an unterminated comment and tag, and
+// one element holding 24 MB of text, which 50 comments name (the hint check used to
+// read an element's whole text once a comment: 240 ms each, 12 s a pass for these 50).
+const STAGE_BYTES = 24_000_000;
+const fill = (unit, bytes) => unit.repeat(Math.floor(bytes / unit.length));
+const STAGES = [
+  ['benign: a video as one data URI', `<video controls aria-label="Criterion 2 clip"><source type="video/mp4" src="data:video/mp4;base64,${fill('QUFB', STAGE_BYTES)}"></video>`, '1'],
+  ['benign: ten screenshots as data: images and a clip', Array.from({ length: 10 }, (_, i) => `<figure><img alt="Shot ${i}" width="1280" src="data:image/png;base64,${fill('iVBO', STAGE_BYTES / 10 - 300)}"><figcaption>Shot ${i}</figcaption></figure>`).join('') + `<video controls aria-label="Criterion 2 clip" src="data:video/mp4;base64,${fill('QUFB', 2_000)}"></video>`, '1'],
+  ['unterminated quoted attributes', fill('<a b="', STAGE_BYTES), '1'],
+  ['deep nesting', fill('<div>', STAGE_BYTES), '1'],
+  ['one tag, millions of attributes', `<div ${fill('a=1 ', STAGE_BYTES)}>x</div>`, '1'],
+  ['an unterminated comment', `<p>x</p><!--${fill('x', STAGE_BYTES)}`, '1'],
+  ['an unterminated tag', `<p>x</p><div${fill(' a', STAGE_BYTES)}`, '1'],
+  ['one element holding 24 MB of text', `<main><pre>${fill('lorem ipsum dolor sit amet ', STAGE_BYTES)}</pre></main>`, '1.1'],
+];
+
+// Measured on jerry-m6 at the fix (2026-10-19), per pass, worst shape (deep nesting):
+// parse 150 ms, render 1,320 ms, anchor resolve 300 ms, packet 280 ms. The deadlines
+// leave a 2-core CI box running other checks room to be several times slower; each
+// regression above costs seconds to hours past them.
+const PASS_DEADLINE_MS = { parse: 3_000, render: 10_000, resolve: 3_000, packet: 3_000 };
+
+for (const [what, html, ref] of STAGES) {
+  check(`every daemon-thread pass over a ~24 MB html stage stays within its deadline: ${what}`, () => {
+    assert.ok(html.length >= STAGE_BYTES * 0.99 && html.length <= MAX_HTML_BYTES, `setup: the stage is ${html.length} bytes`);
+    const board = createBoard({ title: 'a stage at the post limit', blocks: [{ kind: 'html', html }], wait: true });
+    const block = board.blocks[0];
+    const hint = ref === '1.1' ? extractHint('lorem ipsum dolor sit amet '.repeat(4)) : 'x';
+    for (let i = 0; i < 50; i++) {
+      board.comments.push({ n: i + 1, blockId: block.id, anchor: { kind: 'dom', ref, hint }, text: `comment ${i}`, createdAt: new Date().toISOString(), round: 1 });
+    }
+    const ms = {
+      parse: timeMs(() => htmlBodyRootFrom(html)),
+      render: timeMs(() => renderBoardPage(board)),
+      resolve: timeMs(() => resolveComments(board, board.comments)),
+      packet: timeMs(() => buildPacket(board, 1, 'http://127.0.0.1/b/x')),
+    };
+    console.log(`    ${Object.entries(ms).map(([k, v]) => `${k} ${v.toFixed(0)}ms`).join(', ')}`);
+    for (const [pass, deadline] of Object.entries(PASS_DEADLINE_MS)) {
+      assert.ok(ms[pass] < deadline, `${pass} took ${ms[pass].toFixed(0)}ms, expected under ${deadline}ms`);
+    }
+    if (ref === '1.1') {
+      assert.equal(resolveComments(board, board.comments).filter(c => c.resolved).length, 50, 'and every comment on the text still resolves');
+    }
+  });
+}
 
 finish('anchor-perf');

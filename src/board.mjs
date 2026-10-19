@@ -4,8 +4,8 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { mdToHtmlAndAnchors } from './markdown.mjs';
 import { checkDiagram, MERMAID_MAX_TEXT } from './mermaid-parse.mjs';
-import { resolveRef, langForPath, resolveBoardCwd, MAX_REF_BYTES } from './resolve.mjs';
-import { resolveAtRoot, sectionRootFrom, resolveMermaidAnchorAtRoot, htmlBodyRootFrom } from './anchor.mjs';
+import { resolveRef, langForPath, resolveBoardCwd, refCapFor, MAX_REF_BYTES, MAX_HTML_BYTES } from './resolve.mjs';
+import { resolveAtRoot, sectionRootFrom, resolveMermaidAnchorAtRoot, htmlBodyRootFrom, videoSecond } from './anchor.mjs';
 // Circular with render.mjs (which imports resolveComment from here): safe because
 // neither module calls the other at module-evaluation time, only from inside a
 // function body invoked later (renderBlock here, resolveComment there) — see
@@ -130,8 +130,9 @@ function emptyIdLedger() {
   // spent by `recordDiagramRefusal` below. Null here on purpose: a ledger nobody made
   // for a post -- the default of the exported one-block `normalizeBlock`, which a
   // renderer or a check calls on its own -- parses no diagrams at all, which is what
-  // that path did before the door existed.
-  return { taken: new Map(), replaceable: new Set(), minted: new Set(), openRound: null, refusals: [], diagrams: null };
+  // that path did before the door existed. `html` is the post's html allowance on the
+  // same terms (`spendHtmlAllowance`): null bounds nothing past each block's own cap.
+  return { taken: new Map(), replaceable: new Set(), minted: new Set(), openRound: null, refusals: [], diagrams: null, html: null };
 }
 
 /** Resolve a block's id: the caller's `raw.id` when present, well-formed and
@@ -322,6 +323,10 @@ function normalizePost(blocks, round, counters, cwd, ids) {
   // is normalising a post at all, so a `mermaid` block or a ```mermaid fence anywhere in
   // the tree is parsed whether or not its container remembered to name its position.
   ids.diagrams = { remaining: MAX_POST_DIAGRAM_CHARS, spent: false };
+  // The post's html allowance, spent by every html stage at any depth
+  // (`spendHtmlAllowance`): the stages in one post share the post limit, however they
+  // arrived.
+  ids.html = { remaining: MAX_HTML_BYTES, spent: false };
   const normalized = (blocks || []).map(b => normalizeBlock(b, round, counters, cwd, ids));
   if (ids.refusals.length) throw new Error(ids.refusals.join('\n'));
   return normalized;
@@ -339,10 +344,14 @@ function normalizePost(blocks, round, counters, cwd, ids) {
  *
  * `ids` is optional so a caller normalising one block on its own (never the daemon: see
  * `normalizePost`) keeps the pre-ADR-112 shape, a block carrying its own `error`, which
- * is also what an already-stored board holds and what src/render.mjs renders. */
+ * is also what an already-stored board holds and what src/render.mjs renders.
+ *
+ * The cap, on the file by reference and on `raw.text` by value, is src/resolve.mjs's
+ * `refCapFor` of `raw.kind`, the kind `normalizeBlock` dispatched on. */
 function resolveContent(raw, cwd, ids = null) {
+  const cap = refCapFor(raw.kind);
   if (raw.source) {
-    const result = resolveRef(raw.source, { cwd });
+    const result = resolveRef(raw.source, { cwd, maxBytes: cap });
     if (result.error) return refuse(result.error, ids, { text: '', sha: sha256('') });
     // `startLine` (1-based) rides along so a code block's gutter can show the file's
     // OWN line numbers for a `section:` slice too, not just a `lines:` range -- only
@@ -351,7 +360,7 @@ function resolveContent(raw, cwd, ids = null) {
     // stored verbatim from the request and a caller could forge it there.
     return { text: result.text, sha: result.sha, startLine: result.startLine };
   }
-  const text = byValueText(raw.text ?? '', 'text');
+  const text = byValueText(raw.text ?? '', 'text', cap);
   return { text, sha: sha256(text) };
 }
 
@@ -361,18 +370,34 @@ function resolveContent(raw, cwd, ids = null) {
  * scanners (markdown block parsing, src/anchor.mjs's html tree, and every re-render and
  * packet build afterwards). Loud (a 400 naming the field and the cap) rather than
  * truncated: silently dropping half a block's content would be a paraphrase, the one
- * thing content-by-reference exists to prevent. */
-function byValueText(value, field) {
+ * thing content-by-reference exists to prevent.
+ *
+ * `cap` is `MAX_REF_BYTES` for every field but a block's own content (`text`, or an html
+ * stage's `html`), which gets src/resolve.mjs's `refCapFor` of its kind (ADR 121). */
+function byValueText(value, field, cap = MAX_REF_BYTES) {
   const text = typeof value === 'string' ? value : String(value ?? '');
-  if (Buffer.byteLength(text, 'utf8') > MAX_REF_BYTES) {
+  if (Buffer.byteLength(text, 'utf8') > cap) {
     // Not "use a source reference instead": a reference
     // does not raise this cap for any kind. src/resolve.mjs's resolveRef checks the
-    // whole file's size from fstat BEFORE any slicing, so a reference to content this
-    // size is refused exactly as this by-value payload is -- there is no remedy here,
-    // only a smaller payload.
-    throw new Error(`block ${field} is over the ${MAX_REF_BYTES}-byte cap; a source reference to content this size would be refused the same way`);
+    // whole file's size from fstat BEFORE any slicing, against the same cap per kind, so
+    // a reference to content this size is refused exactly as this by-value payload is --
+    // there is no remedy here, only a smaller payload.
+    throw new Error(`block ${field} is over the ${cap}-byte cap; a source reference to content this size would be refused the same way`);
   }
   return text;
+}
+
+/** Spend `html`'s bytes from the post's html allowance (`ids.html`, opened by
+ * `normalizePost`), refusing the post once its stages together pass `MAX_HTML_BYTES`.
+ * By value the body limit already holds a post's html under it; a reference is the way
+ * past it -- a three-line post naming ten 20 MB files would otherwise store 200 MB, and
+ * every later read, render and push of that board would pay for all of it (ADR 121). */
+function spendHtmlAllowance(html, id, ids) {
+  if (!ids?.html) return null;
+  ids.html.remaining -= Buffer.byteLength(html, 'utf8');
+  if (ids.html.remaining >= 0 || ids.html.spent) return null;
+  ids.html.spent = true;
+  return refuse(`html block ${id} takes this post's html past the ${MAX_HTML_BYTES}-byte cap, which every html stage in one post shares; split the stages across posts`, ids, { html: '', sha: sha256('') });
 }
 
 /** Normalise one content block (markdown/mermaid/code/html/compare) or question
@@ -492,12 +517,16 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
       }
       if (raw.source) {
         // Routed through the exact same resolveContent -> resolveRef path every other
-        // referenced kind uses: same confinement, same 512 KiB whole-file cap, same
-        // sha snapshot, same never-throws error shape. `html` (not `text`) is the field
-        // every consumer of an html block already reads (render.mjs's renderHtmlBlock,
-        // src/anchor.mjs's htmlBodyRootFrom) -- renamed here so a referenced file
-        // reaches the stage through the identical field a by-value mock always used.
+        // referenced kind uses: same confinement, same sha snapshot, same never-throws
+        // error shape. The whole-file cap is `refCapFor('html')`, the post limit, not
+        // the 512 KiB every other kind keeps (ADR 121). `html` (not
+        // `text`) is the field every consumer of an html block already reads
+        // (render.mjs's renderHtmlBlock, src/anchor.mjs's htmlBodyRootFrom) -- renamed
+        // here so a referenced file reaches the stage through the identical field a
+        // by-value mock always used.
         const { text, sha, error } = resolveContent(raw, cwd, ids);
+        const overspent = error ? null : spendHtmlAllowance(text, id, ids);
+        if (overspent) return { ...base, id, kind: 'html', source: raw.source, ...overspent };
         return {
           ...base,
           id,
@@ -514,7 +543,9 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
       // block should not have to know which branch minted it. This branch cannot just
       // call resolveContent, because that reads `raw.text` and an html block's
       // by-value field is `raw.html`.
-      const html = byValueText(raw.html ?? '', 'html');
+      const html = byValueText(raw.html ?? '', 'html', refCapFor('html'));
+      const overspent = spendHtmlAllowance(html, id, ids);
+      if (overspent) return { ...base, id, kind: 'html', source: null, ...overspent };
       return { ...base, id, kind: 'html', source: null, html, sha: sha256(html) };
     }
     case 'compare': {
@@ -994,7 +1025,9 @@ function roundBlocks(board, n) {
  *
  * Called only on a candidate retry, never on the ordinary post path -- it re-reads every
  * referenced file, which is the same read the post itself would do (and bounded by the
- * same `MAX_REF_BYTES`), so a retry pays one extra pass and nothing else does.
+ * same cap, src/resolve.mjs's `refCapFor` of the block's kind: a stage file over 512 KiB
+ * read under the smaller cap would read as drifted on every retry), so a retry pays one
+ * extra pass and nothing else does.
  *
  * An html block whose `source` carries `lines`/`section` is skipped: `normalizeBlock`
  * refuses that shape outright and stores `sha256('')` for it, a value no file will ever
@@ -1004,7 +1037,7 @@ export function roundContentDrifted(board, n) {
     const source = block.source;
     if (!source) continue;
     if (block.kind === 'html' && (source.lines || source.section)) continue;
-    const result = resolveRef(source, { cwd: board.cwd });
+    const result = resolveRef(source, { cwd: board.cwd, maxBytes: refCapFor(block.kind) });
     const sha = result.error ? sha256('') : result.sha;
     if (sha !== block.sha) return true;
   }
@@ -1095,6 +1128,11 @@ function sanitizeAnchor(anchor) {
   // chain, so it would resolve confidently against the wrong element. Absent is
   // honest -- resolveMermaidAnchorAtRoot just falls through to the id scan.
   if (kind === 'mermaid' && typeof anchor.domRef === 'string' && anchor.domRef.length <= MAX_ANCHOR_FIELD) out.domRef = anchor.domRef;
+  // A video comment's second: kept on a `dom` anchor only as videoSecond accepts it
+  // (a whole number 0..86400, floored), dropped otherwise and never coerced from a
+  // string. The hint already reads "<identity> at m:ss"; this is the number beside it.
+  const second = kind === 'dom' ? videoSecond(anchor.time) : null;
+  if (second !== null) out.time = second;
   return out;
 }
 
@@ -1294,7 +1332,12 @@ function sectionRootForBlock(blockCache, block, board) {
   let entry = blockCache.get(block.id);
   if (!entry) { entry = {}; blockCache.set(block.id, entry); }
   if (!('sectionRoot' in entry)) {
-    entry.sectionRoot = sectionRootFrom(renderBlock(block, board, NO_COMMENTS, false));
+    // An html stage's markup reaches its section only inside the iframe's escaped
+    // `srcdoc`, one attribute value the tree never looks into, so the section's tree is
+    // the same whatever the stage carries. Rendering it from an empty stage spares the
+    // escape of up to 25 MB of markup, 0.6 s a pass on dense markup (ADR 121).
+    const shell = block.kind === 'html' ? { ...block, html: '' } : block;
+    entry.sectionRoot = sectionRootFrom(renderBlock(shell, board, NO_COMMENTS, false));
   }
   return entry.sectionRoot;
 }
@@ -1318,6 +1361,7 @@ function stageRootForBlock(blockCache, block) {
  *  - `dom` on an html stage: `ref` must address an element in that block's snapshotted
  *    markup AND that element's own identity must back the stored `hint`
  *    (resolveDomAnchor) — both, never just the hint appearing somewhere in the block.
+ *    A `time` beside them must name a `<video>` (resolveAtRoot, src/anchor.mjs).
  *  - `dom` on any other kind: the same check against the block RE-RENDERED from its own
  *    stored content (src/render.mjs's `renderBlock`, exported for exactly this), rooted
  *    at the block's own section rather than a synthetic document root, and matching the
@@ -1401,10 +1445,11 @@ export function resolveComment(board, comment, blockCache = new Map()) {
     // inside an html block that is not `.html-stage`/chrome). If a future
     // postMessage rewrite changes what root an in-stage click mints against,
     // this fallback needs to change to match, in the same direction.
+    const { ref, hint, time } = comment.anchor;
     const found = !kindDrifted && (block.kind === 'html'
-      ? resolveAtRoot(stageRootForBlock(blockCache, block), comment.anchor.ref, comment.anchor.hint)
-        || resolveAtRoot(sectionRootForBlock(blockCache, block, board), comment.anchor.ref, comment.anchor.hint)
-      : resolveAtRoot(sectionRootForBlock(blockCache, block, board), comment.anchor.ref, comment.anchor.hint));
+      ? resolveAtRoot(stageRootForBlock(blockCache, block), ref, hint, time)
+        || resolveAtRoot(sectionRootForBlock(blockCache, block, board), ref, hint, time)
+      : resolveAtRoot(sectionRootForBlock(blockCache, block, board), ref, hint, time));
     if (!found) {
       out.resolved = false;
       out.lost = lostLabel(comment.anchor, '(unknown)');

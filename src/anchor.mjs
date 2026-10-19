@@ -106,6 +106,44 @@ export function composeHint(text, tagName, insideCompare, compareLabel, blockKin
   return String(context ? identity + ' in ' + context : identity);
 }
 
+/** A `<video>`'s identity: its `aria-label`, else its `title`, whitespace collapsed,
+ * else '' -- never its fallback content, which a browser that plays the video never
+ * shows. '' leaves composeHint's tag fallback to name it ('video'), the rule every
+ * other text-less element already gets. One rule for both sides that read it: the
+ * stage reads it off the clicked element (src/render.mjs's stageAgentScript embeds
+ * this via `.toString()`, so it stays self-contained), and resolution re-derives it
+ * from the snapshot (the `label` parseHtmlTree records on a video node). */
+export function videoIdentity(ariaLabel, title) {
+  var label = String(ariaLabel == null ? '' : ariaLabel).replace(/\s+/g, ' ').trim();
+  if (label) return label;
+  return String(title == null ? '' : title).replace(/\s+/g, ' ').trim();
+}
+
+/** The whole second a video comment records, or null. Valid only as a finite number
+ * from 0 to 86400 (a day); a string, NaN, a negative or a larger value is null,
+ * dropped rather than coerced, because the stage's message and a submit body are both
+ * untrusted. A valid value is floored: paused at 7.4s is second 7. Embedded by the
+ * stage and the page via `.toString()`, and called by src/board.mjs's sanitizeAnchor,
+ * so all three agree on what a time is. */
+export function videoSecond(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 86400) return null;
+  return Math.floor(value);
+}
+
+/** What a video comment's hint ends with: `" at m:ss"`, or `" at h:mm:ss"` from an
+ * hour on. The page appends it to the composed hint, so the label the page and the
+ * packet show reads "Criterion 2 clip at 0:07" beside the anchor's `time: 7`;
+ * resolution strips it only when it equals this, before matching the identity.
+ * Embedded by the page via `.toString()`, so it stays self-contained. */
+export function videoTimeSuffix(second) {
+  var s = Math.floor(second);
+  var h = Math.floor(s / 3600);
+  var m = Math.floor((s % 3600) / 60);
+  var sec = s % 60;
+  function two(n) { return (n < 10 ? '0' : '') + n; }
+  return ' at ' + (h ? h + ':' + two(m) : String(m)) + ':' + two(sec);
+}
+
 /** Serialise a root-to-element chain of 1-based child indices into the stored ref
  * string. */
 export function stepsToPath(steps) {
@@ -352,15 +390,59 @@ export function decodeEntities(s) {
  * this is a bounded secondary scan over a few dozen characters at most -- not
  * a second backtracking-capable pass over attacker-controlled input, which is
  * what `tokenRe`'s own comment below warns against. The only attribute
- * value this otherwise attribute-blind parser reads -- added so
+ * value this parser reads on every element -- added so
  * resolveDomAnchorInSection can recognise the board's own rendered chrome and
  * refuse to resolve a ref that lands there. */
 function parseClassAttr(attrs) {
+  const raw = attrValue(attrs, 'class');
+  return raw == null ? null : raw.split(/\s+/).filter(Boolean);
+}
+
+/** Whether char code `c` is HTML's ASCII whitespace (tab, LF, FF, CR, space), what a
+ * browser's tokenizer separates attributes with. */
+function isAttrSpace(c) {
+  return c === 9 || c === 10 || c === 12 || c === 13 || c === 32;
+}
+
+/** Attribute `name`'s entity-decoded value from one tag's already-captured attribute
+ * substring, or null when the tag has none. Walks the attributes one at a time the way
+ * a browser's tokenizer does (a name, then an optional `=` and a quoted or bare value),
+ * so a name spelled inside another attribute's quoted value is never read as an
+ * attribute: `<video title="Demo aria-label=x">` has a title and no aria-label, as the
+ * stage's own getAttribute sees it. The first of a repeated name wins, as in a browser.
+ * One pass: every index is visited once and a quoted value ends at an indexOf, so
+ * nothing backtracks over attacker-supplied markup. */
+function attrValue(attrs, name) {
   if (!attrs) return null;
-  const m = /(?:^|\s)class\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]*))/i.exec(attrs);
-  if (!m) return null;
-  const raw = m[1] ?? m[2] ?? m[3] ?? '';
-  return decodeEntities(raw).split(/\s+/).filter(Boolean);
+  const s = String(attrs);
+  const n = s.length;
+  let i = 0;
+  while (i < n) {
+    while (i < n && (isAttrSpace(s.charCodeAt(i)) || s[i] === '/')) i++;
+    if (i >= n) break;
+    const nameStart = i++;
+    while (i < n && !isAttrSpace(s.charCodeAt(i)) && s[i] !== '/' && s[i] !== '=' && s[i] !== '>') i++;
+    const attrName = s.slice(nameStart, i).toLowerCase();
+    while (i < n && isAttrSpace(s.charCodeAt(i))) i++;
+    let value = '';
+    if (s[i] === '=') {
+      i++;
+      while (i < n && isAttrSpace(s.charCodeAt(i))) i++;
+      const quote = s[i];
+      if (quote === '"' || quote === "'") {
+        const close = s.indexOf(quote, i + 1);
+        const end = close === -1 ? n : close;
+        value = s.slice(i + 1, end);
+        i = end + 1;
+      } else {
+        const valueStart = i;
+        while (i < n && !isAttrSpace(s.charCodeAt(i)) && s[i] !== '>') i++;
+        value = s.slice(valueStart, i);
+      }
+    }
+    if (attrName === name) return decodeEntities(value);
+  }
+  return null;
 }
 
 /** Strip HTML comments with a linear `indexOf` scan. The obvious
@@ -402,13 +484,44 @@ function stripComments(src) {
  *
  * Runs in time linear in the input: no backtracking-capable pattern anywhere on this
  * path. Never throws — an html string too broken to make sense of just yields a
- * sparse or empty tree, which resolveSteps then reports unresolvable. */
-export function parseHtmlTree(html) {
+ * sparse or empty tree, which resolveSteps then reports unresolvable.
+ *
+ * `maxNodes` stops the parse once that many nodes (elements and text runs alike) are
+ * in the tree, which keeps everything parsed so far exactly as a whole parse has it
+ * and leaves out only what comes after. An html stage passes `MAX_STAGE_NODES`. */
+export function parseHtmlTree(html, { maxNodes = Infinity } = {}) {
   const root = { tag: '#root', children: [], content: [] };
   const stack = [root];
   const src = stripComments(String(html ?? ''));
   const lower = src.toLowerCase(); // computed once: used to find script/style ends
+  // Per tag, the stack index of every element of that tag pushed so far, innermost
+  // last, so a close tag finds its element without walking the stack. Walking it made
+  // every unmatched close O(depth): `<div>` repeated, then `</x>` repeated, is O(n^2),
+  // measured at 1.4 s for 250 K chars and 14 s for 1 M (ADR 121). An index goes stale
+  // when its element is popped (by a close, an auto-close or a truncation), and a stale
+  // one no longer holds an element of its tag; the lookup drops stale indices off the
+  // end as it meets them, so each is dropped once. The last index still holding its tag
+  // is the innermost open element of that tag: one pushed later sits higher on the
+  // stack for as long as both are open.
+  const openAt = new Map();
+  const push = node => {
+    let at = openAt.get(node.tag);
+    if (!at) { at = []; openAt.set(node.tag, at); }
+    at.push(stack.length);
+    stack.push(node);
+  };
+  const innermostOpen = tag => {
+    const at = openAt.get(tag);
+    if (!at) return 0;
+    while (at.length) {
+      const i = at[at.length - 1];
+      if (i < stack.length && stack[i].tag === tag) return i;
+      at.pop();
+    }
+    return 0;
+  };
 
+  let nodes = 0;
   const open = (tag, attrs) => {
     // `cls`: the one attribute value this otherwise attribute-blind
     // parser reads, so resolveDomAnchorInSection can recognise the board's own
@@ -416,7 +529,11 @@ export function parseHtmlTree(html) {
     // resolve a ref that lands there -- see isChromeNode below. Scoped to one
     // already-captured tag's attribute substring, never a second scan over the
     // whole document.
+    nodes++;
     const node = { tag, children: [], content: [], cls: parseClassAttr(attrs) };
+    // `label`: a video's identity (videoIdentity), read from its own two
+    // attributes because its text is fallback content the stage never names it by.
+    if (tag === 'video') node.label = videoIdentity(attrValue(attrs, 'aria-label'), attrValue(attrs, 'title'));
     const top = stack[stack.length - 1];
     top.children.push(node);
     top.content.push(node);
@@ -424,7 +541,7 @@ export function parseHtmlTree(html) {
   };
 
   // Alternation is unambiguous (each branch is anchored on a distinct prefix) and
-  // every quantifier is over a negated class that excludes both `>` and `<`, so an
+  // every open-tag quantifier is over a negated class that excludes both `>` and `<`, so an
   // unterminated tag fails at the next `<` instead of rescanning to end-of-input
   // from every start position. Single linear scan, no backtracking blowup.
   //
@@ -449,7 +566,14 @@ export function parseHtmlTree(html) {
   // confident resolve against the WRONG element. `onclick="if(a<b)f()"` and
   // `aria-label="< Back"` are ordinary agent markup, not hostile. Still unambiguously
   // terminated by the closing quote, so no backtracking is reintroduced.
-  const tokenRe = /<![^>]*>|<\/([a-zA-Z][\w-]*)(?![\w-])[^>]*>|<([a-zA-Z][\w-]*)(?![\w-])((?:"[^"]*"|'[^']*'|[^><"'])*?)(\/?)>|([^<]+)|(<)/g;
+  // The `<!` declaration and the close tag end at `>` or at the end of the input. Their
+  // bodies run over `<` (a browser reads `<!x<y>` as one bogus comment and `</a <b>`
+  // as one end tag), so a body with no `>` used to scan to the end, fail, leave a
+  // literal `<`, and scan to the end again from the next `<!` or `</`: O(n^2), measured
+  // at 11.2 s for 250 K chars of `<!` and 188 s for 1 M (ADR 121). Ending at the input's
+  // end is also what a browser does, which swallows the rest into the unclosed comment
+  // or tag.
+  const tokenRe = /<![^>]*(?:>|$)|<\/([a-zA-Z][\w-]*)(?![\w-])[^>]*(?:>|$)|<([a-zA-Z][\w-]*)(?![\w-])((?:"[^"]*"|'[^']*'|[^><"'])*?)(\/?)>|([^<]+)|(<)/g;
   // Stack index of the open <svg>/<math> we are inside, or -1. Only the OUTERMOST
   // one is recorded (foreignness is inherited, so a nested one changes nothing),
   // and it goes stale exactly when the stack is truncated to at or below it -- by a
@@ -457,11 +581,10 @@ export function parseHtmlTree(html) {
   // test below catches without any bookkeeping on the pop paths.
   let foreignAt = -1;
   let m;
-  while ((m = tokenRe.exec(src)) != null) {
+  while (nodes < maxNodes && (m = tokenRe.exec(src)) != null) {
     if (m[1]) {
       const tag = m[1].toLowerCase();
-      let i = stack.length - 1;
-      while (i > 0 && stack[i].tag !== tag) i--;
+      const i = innermostOpen(tag);
       if (i > 0) stack.length = i; // unmatched close: ignored, never throws
     } else if (m[2]) {
       const tag = m[2].toLowerCase();
@@ -480,7 +603,7 @@ export function parseHtmlTree(html) {
       for (let guard = 0; guard < 4; guard++) {
         const implied = impliedParentFor(stack[stack.length - 1].tag, tag);
         if (!implied) break;
-        stack.push(open(implied));
+        push(open(implied));
       }
       const node = open(tag, m[3]);
       if (tag === 'script' || tag === 'style') {
@@ -493,11 +616,13 @@ export function parseHtmlTree(html) {
       const foreign = foreignAt !== -1 || FOREIGN_ROOTS.has(tag);
       if (VOID_ELEMENTS.has(tag) || (selfClosed && foreign)) continue;
       if (foreignAt === -1 && foreign) foreignAt = stack.length;
-      stack.push(node);
+      push(node);
     } else if (m[5]) {
+      nodes++;
       stack[stack.length - 1].content.push({ tag: '#text', text: decodeEntities(m[5]) });
     } else if (m[6]) {
       // A bare '<' that starts nothing tag-shaped is literal text, as in a browser.
+      nodes++;
       stack[stack.length - 1].content.push({ tag: '#text', text: '<' });
     }
   }
@@ -527,6 +652,79 @@ export function elementText(node) {
     for (let k = content.length - 1; k >= 0; k--) stack.push(content[k]);
   }
   return parts.join('');
+}
+
+/** What an element's hint needs from one run of its text, or from a whole subtree:
+ * `visible` (any non-whitespace at all), `head` (the visible text with whitespace
+ * collapsed and trimmed, cut once it passes `max`), and whether whitespace comes
+ * before its first visible character (`lead`) and after its last (`trail`). A run with
+ * nothing visible carries only `ws`, whether it holds any whitespace. Two summaries
+ * side by side join into one, a gap between them collapsing to a single space. */
+function textSummary(text, max) {
+  if (!text) return { visible: false, ws: false };
+  const visibleRun = /\S{1,128}/g;
+  let head = '';
+  let end = 0;
+  let m;
+  while (head.length <= max && (m = visibleRun.exec(text)) !== null) {
+    if (head && m.index > end) head += ' ';
+    head += m[0];
+    end = visibleRun.lastIndex;
+  }
+  if (!head) return { visible: false, ws: true };
+  return { visible: true, head, lead: /\s/.test(text[0]), trail: /\s/.test(text[text.length - 1]) };
+}
+
+function joinSummaries(parts, max) {
+  let out = null;
+  let pendingWs = false;
+  for (const part of parts) {
+    if (!part.visible) { pendingWs = pendingWs || part.ws; continue; }
+    if (!out) {
+      out = { visible: true, head: part.head, lead: pendingWs || part.lead, trail: part.trail };
+    } else {
+      if (out.head.length <= max) out.head += (out.trail || pendingWs || part.lead ? ' ' : '') + part.head;
+      out.trail = part.trail;
+    }
+    pendingWs = false;
+  }
+  if (!out) return { visible: false, ws: pendingWs };
+  out.trail = out.trail || pendingWs;
+  return out;
+}
+
+/** `extractHint(elementText(node))`, without reading more of the node's text than the
+ * hint keeps. A comment's identity check asks for one hint per comment, and reading the
+ * element's whole text cost each comment its whole subtree: 240 ms a comment on a
+ * `<pre>` holding 24 MB, now that a stage may be that large (ADR 121), and 30 ms a
+ * comment on an element over half a million empty ones. So each text run is read only
+ * until its collapsed text passes `max` (at most 128 visible characters a step), and
+ * each element's summary is kept for as long as its tree lives (`summaries`, keyed by
+ * node), built children first without recursion: one walk over a tree, however many
+ * comments land in it. */
+const summaries = new WeakMap();
+export function elementHint(node, max = DEFAULT_HINT_MAX) {
+  if (!node) return '';
+  const summaryOf = el => {
+    const kept = summaries.get(el);
+    return kept && kept.max === max ? kept.summary : null;
+  };
+  const stack = [node];
+  while (stack.length) {
+    const el = stack[stack.length - 1];
+    if (summaryOf(el)) { stack.pop(); continue; }
+    const content = el.content || [];
+    let ready = true;
+    for (const child of content) {
+      if (child.tag !== '#text' && !summaryOf(child)) { stack.push(child); ready = false; }
+    }
+    if (!ready) continue;
+    stack.pop();
+    const parts = content.map(child => (child.tag === '#text' ? textSummary(child.text, max) : summaryOf(child)));
+    summaries.set(el, { max, summary: joinSummaries(parts, max) });
+  }
+  const summary = summaryOf(node);
+  return summary.visible ? extractHint(summary.head, max) : '';
 }
 
 /** Common-prefix length of two strings, ordinal comparison. Helper for
@@ -560,9 +758,9 @@ function roleAwareInPrefix(text, tag) {
 /** Whether `node`'s own live content still backs a stored `hint`. Content is
  * snapshotted at post time, so a still-live element's text has not changed since mint
  * time: re-deriving the IDENTITY half of composeHint's rule from it (extractHint of the
- * element's own text, or -- with no text at all, e.g. an image -- composeHint's
- * role-word/tag fallback) reproduces exactly what composeHint started the stored hint
- * with.
+ * element's own text, a video's label (videoIdentity) in place of its text, or -- with
+ * no text at all, e.g. an image -- composeHint's role-word/tag fallback) reproduces
+ * exactly what composeHint started the stored hint with.
  *
  * Matched by EQUALITY against one of the exact shapes composeHint can produce --
  * `identity`, `identity + ' in ' + <anything>`, or `identity + ' ' + role + ' in ' +
@@ -570,11 +768,15 @@ function roleAwareInPrefix(text, tag) {
  * comment onto the WRONG element and reports it resolved: `<button>S</button>` satisfies
  * it against a stored hint `'Send'`, and ANY empty element satisfies it against a hint
  * beginning with its bare tag name (`'div is broken'` against an empty `<div>`, whose
- * fallback identity is the string `'div'`). */
-function domIdentityHintMatches(node, hint) {
+ * fallback identity is the string `'div'`).
+ *
+ * `ownHint`, when given, is the extracted hint that stands in for the node's own
+ * (resolveAtRoot passes the hint of a video's fallback text, for an anchor minted
+ * before a video was named by its label). */
+function domIdentityHintMatches(node, hint, ownHint) {
   const normalizedHint = String(hint ?? '').replace(/\s+/g, ' ').trim();
   if (!normalizedHint) return false;
-  const text = extractHint(elementText(node));
+  const text = ownHint !== undefined ? ownHint : node.tag === 'video' ? extractHint(node.label) : elementHint(node);
   const tag = String(node.tag || '');
   const identity = String(text || composeHint('', tag, false, '', '')).replace(/\s+/g, ' ').trim();
   if (!identity) return false;
@@ -696,14 +898,37 @@ function resolveStepsRejectingChrome(root, steps) {
  *
  * Walks via `resolveStepsRejectingChrome` (above) rather than plain `resolveSteps`, so
  * every caller that bottoms out here refuses to resolve into the board's own rendered
- * chrome, the same exclusion src/ui.mjs's click listener applies before minting a ref. */
-export function resolveAtRoot(root, ref, hint) {
+ * chrome, the same exclusion src/ui.mjs's click listener applies before minting a ref.
+ *
+ * `time` is a `dom` anchor's video second, absent on every other anchor. A timed anchor
+ * resolves only onto a `<video>`, and its hint's `" at m:ss"` suffix is stripped before
+ * the identity match only when it equals that second's (videoTimeSuffix). An untimed
+ * anchor on a `<video>` also resolves under the video's fallback text: the name the
+ * stage gave a video before videoIdentity, which comments stored then still carry. */
+export function resolveAtRoot(root, ref, hint, time) {
   const steps = pathToSteps(ref);
   if (!steps.length) return false;
   const node = resolveStepsRejectingChrome(root, steps);
   if (!node) return false;
-  return domIdentityHintMatches(node, hint);
+  if (time == null && node.tag === 'video' && domIdentityHintMatches(node, hint, elementHint(node))) return true;
+  if (time == null) return domIdentityHintMatches(node, hint);
+  const second = videoSecond(time);
+  if (second === null || node.tag !== 'video') return false;
+  const timedHint = String(hint ?? '').replace(/\s+/g, ' ').trim();
+  const suffix = videoTimeSuffix(second);
+  return domIdentityHintMatches(node, timedHint.endsWith(suffix) ? timedHint.slice(0, -suffix.length) : timedHint);
 }
+
+/** How many nodes an html stage's tree holds at most: one per byte of the 512 KiB
+ * block cap, as many as a stage under that cap could ever produce (one text run per
+ * bare `<`), so no stage that fit the old cap loses a node. A stage may now carry up
+ * to 25,000,000 bytes (src/resolve.mjs's MAX_HTML_BYTES, ADR 121), and its tree costs
+ * about 400 bytes of heap an element: measured unbounded at 24 MB, `<div>` repeated
+ * built 4.8 M elements, a 1.8 GB tree in 1.2 s, against the daemon's 4.4 GB heap;
+ * bounded, 250 MB in 180 ms. Bounding the nodes keeps every pass at the old cap's worst
+ * case; a stage carrying video or screenshots spends its bytes in a few attributes and
+ * needs a handful of nodes. An anchor on an element past the bound resolves lost. */
+export const MAX_STAGE_NODES = 512 * 1024;
 
 /** The root a `dom` anchor rooted at an html stage's iframe body resolves
  * against, given the block's own snapshotted `html` string -- modelled as a
@@ -716,7 +941,7 @@ export function resolveAtRoot(root, ref, hint) {
  * cached-but-unhoisted root would silently undo it for every comment after
  * the first. */
 export function htmlBodyRootFrom(html) {
-  return { children: bodyRootChildren(parseHtmlTree(html)) };
+  return { children: bodyRootChildren(parseHtmlTree(html, { maxNodes: MAX_STAGE_NODES })) };
 }
 
 /** Whether a `dom` anchor rooted at an html stage's iframe body still
@@ -898,9 +1123,12 @@ export function resolveMermaidAnchor(sectionHtml, source, anchor) {
  * question "does this element already carry a SENT comment", reusing the one
  * match rule rather than a second copy of it. */
 export function findPendingCommentForAnchor(pendingComments, blockId, anchor) {
+  // A video comment's second is part of its target: another second on the same
+  // video is a different anchor, never a duplicate of this one.
   function sameTarget(a, b) {
     if (!a || !b) return false;
-    return a.kind === b.kind && (a.ref || '') === (b.ref || '');
+    return a.kind === b.kind && (a.ref || '') === (b.ref || '')
+      && (a.time == null ? null : a.time) === (b.time == null ? null : b.time);
   }
   var list = pendingComments || [];
   for (var i = 0; i < list.length; i++) {

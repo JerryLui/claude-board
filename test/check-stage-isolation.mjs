@@ -1341,7 +1341,7 @@ check('S1: the lens copy is sent the board\'s theme and nothing else -- one mode
   // The control: the same board state reaches the block's own stage as comment
   // mode on and one sent ref, so a lens post built the same way would carry both.
   assert.deepEqual(inline.contentWindow.__heard.filter(m => m && m.type === 'mode'),
-    [{ cb: 'cb-stage', type: 'mode', commentMode: true, sentRefs: [ref], theme: 'dark' }],
+    [{ cb: 'cb-stage', type: 'mode', commentMode: true, sentRefs: [ref], sentTimes: [], theme: 'dark' }],
     'setup failure: the block\'s own stage must be told comment mode is on and which element is sent');
   const heard = lens.contentWindow.__heard;
   assert.deepEqual(heard, [told('dark')],

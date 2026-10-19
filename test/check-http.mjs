@@ -12,14 +12,14 @@ import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { SECRET_HEADER, SESSION_COOKIE, sessionToken } from '../src/secret.mjs';
 import { HANDOFF_TOKEN_RE, recoveryCommand, repoRoot } from '../src/handoff.mjs';
-import { startServer, activeWaitCount, buildPacketWithUndelivered, DEFAULT_WAIT_TIMEOUT_MS } from '../src/server.mjs';
+import { startServer, activeWaitCount, buildPacketWithUndelivered, createSseHub, DEFAULT_WAIT_TIMEOUT_MS } from '../src/server.mjs';
 import { DEFAULT_AWAIT_TIMEOUT_MS, STRANDED_BANNER, ANSWERS_DELIVERED, MAX_SUBMIT_COMMENTS, MAX_ANSWER_CHOICES, createBoard } from '../src/board.mjs';
-// The one cap every by-value string on a board shares (src/resolve.mjs), read rather
-// than restated so a check cannot pass against a number the product no longer uses.
-// `resolveRefRoots` for the same reason: the roots a refusal names are the ones the
-// daemon has in force right now, read from the product's own parser rather than
-// restated here.
-import { MAX_REF_BYTES, resolveRefRoots } from '../src/resolve.mjs';
+// The cap every by-value string on a board shares but an html stage's own markup, and
+// that stage's cap (src/resolve.mjs), read rather than restated so a check cannot pass
+// against a number the product no longer uses. `resolveRefRoots` for the same reason:
+// the roots a refusal names are the ones the daemon has in force right now, read from
+// the product's own parser rather than restated here.
+import { MAX_REF_BYTES, MAX_HTML_BYTES, resolveRefRoots } from '../src/resolve.mjs';
 import { readBoard, writeBoard } from '../src/store.mjs';
 // Used only to ARRANGE fixture states the HTTP surface itself has no fast way to reach
 // (a nonzero cycle, a timer already mid-break) -- every ASSERTION below still goes
@@ -32,7 +32,7 @@ import { assetsNamedBy, MERMAID_ASSET, SCRIPT_ASSET, STYLE_ASSET } from '../src/
 import { isPageRound, ROUND_OPEN_UNAWAITED_TITLE, PILL_READONLY_TITLE } from '../src/badge.mjs';
 import { StandInEvent } from './dom-stand-in.mjs';
 import {
-  check, execFileAsync, freshLog, openSseClient, pageHarness, postBoard, rawRequest, renderedMarkup, runMain,
+  boardDataOf, check, execFileAsync, freshLog, openSseClient, pageHarness, postBoard, rawRequest, renderedMarkup, runMain,
   secretFetch, secretHome, sessionCookieHeader, sleep, waitForCount, withEnv, writeHeaders,
 } from './support.mjs';
 
@@ -645,6 +645,35 @@ async function main() {
   await check('GET /api/board/:id/events on an unknown board reports 404 rather than opening a stream', async () => {
     const r = await fetch(`${base}/api/board/b_deadbeef/events`);
     assert.equal(r.status, 404);
+  });
+
+  await check('a push whose builder throws is logged on stderr, built once for each payload shape rather than once per tab, and the tabs of the shape that built still get theirs', async () => {
+    // A tab whose stream declares '?stages=held' gets one shape, a tab on an older page
+    // script another (ADR 122), so one push may build two payloads; two tabs of each.
+    const hub = createSseHub();
+    const written = {};
+    for (const [name, fillsHeld] of [['held-1', true], ['held-2', true], ['whole-1', false], ['whole-2', false]]) {
+      written[name] = [];
+      hub.subscribe('b_pushbuild', { write: chunk => written[name].push(chunk) }, { fillsHeld });
+    }
+    const built = [];
+    const said = [];
+    const realError = console.error;
+    console.error = (...args) => said.push(args.join(' '));
+    try {
+      hub.broadcast('b_pushbuild', 'round', fillsHeld => {
+        built.push(fillsHeld);
+        if (fillsHeld) throw new Error('render blew up');
+        return { round: 2 };
+      });
+    } finally {
+      console.error = realError;
+    }
+    assert.deepEqual(built.sort(), [false, true], 'the builder runs once for each shape, not once per tab, the shape that throws included');
+    assert.equal(said.length, 1, `one line on stderr: ${JSON.stringify(said)}`);
+    assert.match(said[0], /round push for board b_pushbuild: render blew up/, 'naming the event, the board and the error');
+    assert.deepEqual([written['held-1'], written['held-2']], [[], []], 'the tabs whose payload did not build get nothing');
+    for (const name of ['whole-1', 'whole-2']) assert.deepEqual(written[name], ['event: round\ndata: {"round":2}\n\n'], `${name} still gets its push`);
   });
 
   // --- thread index, concurrent sessions, archive search ------------
@@ -2371,6 +2400,10 @@ async function main() {
         }
       }
       assert.ok(/connect-src[^;]*'self'/.test(csp), 'submit and the SSE stream are same-origin fetches');
+      // A stage's inlined <video> plays from a data: URI or a blob: URL its own script
+      // builds, and from nothing else: no 'self' (the daemon serves no media) and no host.
+      const media = csp.split(';').map(c => c.trim()).filter(c => c.split(/\s+/)[0] === 'media-src');
+      assert.deepEqual(media, ['media-src data: blob:'], `${pathName} must admit media from data: and blob: only, got: ${csp}`);
     }
   });
 
@@ -3359,7 +3392,9 @@ async function main() {
     // landed, and a content-only round is never `sent`, so nothing ever broke the cycle.
     const stageDir = projectDir('regenerated-artifact');
     const stagePath = path.join(stageDir, 'stage.html');
-    const page = marker => `<!doctype html><html><body><h1>${marker}</h1></body></html>`;
+    // Past 512 KiB, the cap every block but a stage keeps (ADR 121): the retry re-reads
+    // the file, and a re-read under the smaller cap reads as drifted on every retry.
+    const page = marker => `<!doctype html><html><body><h1>${marker}</h1><!--${'A'.repeat(MAX_REF_BYTES)}--></body></html>`;
     writeFileSync(stagePath, page('ARTIFACT_V1'), 'utf8');
 
     const ask = { title: 'Rendered artifact', blocks: [{ kind: 'html', source: { path: 'stage.html' } }], requestId: 'regen-artifact-1' };
@@ -3711,6 +3746,129 @@ async function main() {
     });
     assert.equal(ordinary.status, 200, 'the cap is a ceiling, not a blanket refusal');
     assert.equal(readBoard((await ordinary.json()).boardId, home).blocks[0].left.label, 'Before');
+  });
+
+  // An html stage carrying a clip inlined as a data: URI: the committed test fixture,
+  // padded with an html comment to `bytes` long.
+  const clipUri = `data:video/mp4;base64,${readFileSync(new URL('./fixtures/video-clip.mp4', import.meta.url)).toString('base64')}`;
+  const videoStage = bytes => {
+    const head = `<video controls src="${clipUri}"></video><!--`;
+    return head + 'A'.repeat(bytes - head.length - 3) + '-->';
+  };
+
+  // The stage the cap was raised for (ADR 121): ~20 MB, far past the 512 KiB every other
+  // block keeps, and under the post limit with the JSON around it.
+  const bigStage = videoStage(20_000_000);
+  const asAttribute = stage => stage.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+  let bigBoardId = null;
+
+  await check('an html stage carrying ~20 MB of inlined video posts by value, and the served page carries it once, in its frame: the page is under 21 MB, and its #board-data carries no stage html', async () => {
+    const posted = await postBoard(port, SECRET, {
+      title: 'Video stage at 20 MB',
+      blocks: [{ kind: 'markdown', text: 'An ordinary board.' }, { kind: 'html', html: bigStage }],
+    });
+    bigBoardId = posted.boardId;
+    const stored = readBoard(posted.boardId, home).blocks[1];
+    assert.equal(stored.html, bigStage, 'the stored stage is the posted one, whole');
+    const served = await (await fetch(`${base}/b/${posted.boardId}`)).text();
+    // Outside the board-data script, so the match is the stage's own srcdoc attribute.
+    assert.ok(renderedMarkup(served).includes(asAttribute(bigStage)), 'the served stage must carry the whole posted stage, clip and padding, byte for byte');
+    assert.ok(Buffer.byteLength(served) < 21_000_000,
+      `the served page is ${Buffer.byteLength(served)} bytes: a page carries its 20,000,000-byte stage once (ADR 122)`);
+    assert.equal(served.split(clipUri).length - 1, 1, 'the clip appears once in the page, in its frame');
+    const data = boardDataOf(served);
+    assert.ok(!data.includes(clipUri) && !data.includes('AAAAAAAA'), '#board-data carries none of the stage, clip or padding');
+    const block = JSON.parse(data).blocks[1];
+    assert.equal('html' in block, false, 'the stage block in #board-data has no html');
+    assert.equal(block.sha, stored.sha, 'and keeps its sha, which is how the page sees a stage change');
+  });
+
+  await check('a tab\'s catch-up read of the page (?stages=held) carries none of a ~20 MB stage: its frame empty and held, and #board-data the same bytes the page inlines', async () => {
+    assert.ok(bigBoardId, 'setup failure: the ~20 MB board above was never posted');
+    const served = await (await fetch(`${base}/b/${bigBoardId}`)).text();
+    const r = await fetch(`${base}/b/${bigBoardId}?stages=held`);
+    assert.equal(r.status, 200);
+    const held = await r.text();
+    assert.ok(Buffer.byteLength(held) < 1_000_000, `the catch-up read is ${Buffer.byteLength(held)} bytes; a tab that holds its stages reads none of them again`);
+    assert.ok(!held.includes(clipUri), 'it carries no clip');
+    const sha = readBoard(bigBoardId, home).blocks[1].sha;
+    assert.ok(held.includes(`<iframe class="html-stage" sandbox="allow-scripts" data-sha="${sha}" data-held></iframe>`),
+      'the stage\'s frame is there, empty, held and named by its sha, for the tab to put its own frame in');
+    assert.equal(boardDataOf(held), boardDataOf(served), '#board-data is the same bytes the page inlines');
+  });
+
+  await check('an html block naming a ~20 MB file resolves whole, and a file one byte over the html cap gets the 400 naming that cap', async () => {
+    const project = projectDir('big-stage');
+    writeFileSync(path.join(project, 'stage.html'), bigStage, 'utf8');
+    writeFileSync(path.join(project, 'over.html'), 'x'.repeat(MAX_HTML_BYTES + 1), 'utf8');
+    try {
+      const posted = await postBoard(port, SECRET, { title: 'Video stage by reference', cwd: project, blocks: [{ kind: 'html', source: { path: 'stage.html' } }] });
+      const block = readBoard(posted.boardId, home).blocks[0];
+      assert.equal(block.error, undefined);
+      assert.equal(block.html, bigStage, 'the referenced file is the stage, whole');
+
+      const before = storeListing();
+      const over = await rawRequest(port, 'POST', '/api/board', {
+        headers: writeHeaders(SECRET),
+        body: JSON.stringify({ title: 'Stage file over the cap', cwd: project, blocks: [{ kind: 'html', source: { path: 'over.html' } }] }),
+      });
+      assert.equal(over.status, 400);
+      assert.match(JSON.parse(over.body).error, new RegExp(`exceeds the ${MAX_HTML_BYTES}-byte reference cap`));
+      assert.deepEqual(storeListing(), before, 'and nothing is stored for it');
+    } finally {
+      unlinkSync(path.join(project, 'stage.html'));
+      unlinkSync(path.join(project, 'over.html'));
+    }
+  });
+
+  await check('a markdown, code or mermaid block over 512 KiB still gets its 400, by value and by reference', async () => {
+    const project = projectDir('over-512k');
+    const oversize = 'x'.repeat(MAX_REF_BYTES + 1);
+    writeFileSync(path.join(project, 'big.txt'), oversize, 'utf8');
+    try {
+      for (const kind of ['markdown', 'code', 'mermaid']) {
+        for (const [how, block, message] of [
+          ['by value', { kind, text: oversize }, `block text is over the ${MAX_REF_BYTES}-byte cap`],
+          ['by reference', { kind, source: { path: 'big.txt' } }, `exceeds the ${MAX_REF_BYTES}-byte reference cap`],
+        ]) {
+          const before = storeListing();
+          const r = await rawRequest(port, 'POST', '/api/board', {
+            headers: writeHeaders(SECRET),
+            body: JSON.stringify({ title: `${kind} over 512 KiB`, cwd: project, blocks: [block] }),
+          });
+          assert.equal(r.status, 400, `a ${kind} block ${how} over 512 KiB`);
+          assert.match(JSON.parse(r.body).error, new RegExp(message), `a ${kind} block ${how}`);
+          assert.deepEqual(storeListing(), before, `nothing is stored for the ${kind} block ${how}`);
+        }
+      }
+    } finally {
+      unlinkSync(path.join(project, 'big.txt'));
+    }
+  });
+
+  await check('a post carrying video over the 25,000,000-byte post limit is refused by a reset connection with nothing stored', async () => {
+    // readJsonBody (src/server.mjs) destroys the request once its body passes
+    // 25,000,000 bytes, so the refusal is no HTTP response at all: the caller's socket
+    // resets mid-upload, and node:http (bin/mcp.mjs's transport) reports ECONNRESET
+    // "socket hang up". One stage at the html cap fills the post limit, so the JSON
+    // around it carries the body past it.
+    const body = JSON.stringify({
+      title: 'Video post over the body limit',
+      blocks: [{ kind: 'html', html: videoStage(MAX_HTML_BYTES) }],
+    });
+    assert.ok(Buffer.byteLength(body) > 25_000_000, `the fixture post is ${Buffer.byteLength(body)} bytes`);
+    const before = storeListing();
+    let outcome;
+    try {
+      const r = await rawRequest(port, 'POST', '/api/board', { headers: writeHeaders(SECRET), body });
+      outcome = { status: r.status, body: r.body.slice(0, 200) };
+    } catch (err) {
+      outcome = { code: err.code };
+    }
+    assert.ok(outcome.code === 'ECONNRESET' || outcome.code === 'EPIPE',
+      `the post must be refused by the connection dropping, before any response; got ${JSON.stringify(outcome)}`);
+    assert.deepEqual(storeListing(), before, 'no board and no page is written for it');
   });
 
   await check('ADR 35: re-issuing the IDENTICAL /wait URL on an already-answered round returns the same packet, and drains nothing a second time', async () => {

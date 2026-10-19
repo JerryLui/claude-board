@@ -1894,6 +1894,7 @@ forwarding list is config.toml-only.
 - [Scratch probe scripts belong in the worktree, not `/tmp`](#scratch-probe-scripts-belong-in-the-worktree-not-tmp)
 - [Git in a worktree agent runs only when piped](#git-in-a-worktree-agent-runs-only-when-piped)
 - [A `cd <shared> && python3` write is not guarded](#a-cd-shared--python3-write-is-not-guarded)
+- [A heredoc or inline script followed by a run is refused](#a-heredoc-or-inline-script-followed-by-a-run-is-refused)
 
 ### The same absolute-looking path can name two different checkouts
 
@@ -1969,6 +1970,16 @@ probe scripts to the worktree root with the `Write` tool and delete them before
 committing; `node probe.mjs` from the worktree cwd then resolves `./src/*.mjs`
 relatively, which is also the one import path that cannot accidentally reach the
 SHARED checkout's copy of a tracked file (see above).
+
+### A heredoc or inline script followed by a run is refused
+
+A worktree agent's hook refuses one command that writes or edits through a heredoc and then
+runs node: `cat > .x.mjs <<'EOF' ... EOF` then `node .x.mjs` (2026-10-12), and a
+`python3 - <<'EOF'` edit of a tracked file then `node .x.mjs` (2026-10-19), both "too
+complex to verify that it stays inside the worktree". A multi-statement `node -e "..."` that
+dynamically imports from `./src` is refused the same way. The heredoc edit alone runs, and so
+does the script alone: write a probe with the Write tool, make an edit in its own command (or
+with the Edit tool), and run each as one plain command.
 
 ---
 
@@ -2224,7 +2235,8 @@ chrome band; if that ever surfaces, the fix is this same resend, not a broadcast
   a freshly created sandboxed iframe's target races its first subresource fetch; the request you
   care most about (the stage's engine fetch) is exactly the one that got away. Assert network
   behaviour at the PROCESS level instead: launch Chrome with `--proxy-server` pointed at a local
-  sink and read what actually tried to connect (`test/browser-check-mermaid-stage.mjs`). Expect
+  sink and read what actually tried to connect (`createWitnessProxy` in `test/browser-support.mjs`,
+  the harness the browser checks share). Expect
   Chrome's own background chatter (accounts.google.com etc.) in the sink; filter by host, don't
   assert an empty log.
 - **`CLAUDE_BOARD_PORT=0` silently becomes 7391**: `Number(...) || DEFAULT_PORT` in
@@ -2267,9 +2279,14 @@ Traps that have bitten once. A second bite moves the entry up into the section i
   opaque-origin frame boundary; an element's or the window's own `scrollTo` stays in its box,
   which is why `scrollToAnchor` (`src/render.mjs`) moves each box itself.
 - **Headless Chrome on macOS draws classic 15px scrollbars**, not the overlay ones a trackpad Mac
-  shows, unless `--hide-scrollbars` is passed (the mermaid browser check passes it). A wide
-  stage's sideways scrollbar then takes 15px out of its viewport, so a check of a fitted height
-  adds `innerHeight - clientHeight`, read inside the frame.
+  shows, unless `--hide-scrollbars` is passed (`withChrome`'s `hideScrollbars` in
+  `test/browser-support.mjs`). A wide stage's sideways scrollbar then takes 15px out of its
+  viewport, so a check of a fitted height adds `innerHeight - clientHeight`, read inside the
+  frame. [Not so on 2026-10-19: Chrome 155.0.8059.80 on jerry-m6, no `--hide-scrollbars`, drew
+  a frame's native bar at 0px (the board's restyled one still 11px), so four rows of
+  `test/browser-check-stage-fold.mjs` (three Pull-out rows and Wide 100vh) went red on their own
+  "no classic scrollbar" setup guard, at the integration tip before any change. Unproven
+  whether Chrome 155 or the Mac's unset "Show scroll bars" setting decides it.]
 - **A scroll aimed at a fractional offset stops on a whole pixel.** Chrome 154 headless, DPR 1: a
   board `scrollTo` aimed so a folded stage's target sits exactly `--head-clear` (88px) under the
   window top stopped at 5698 for 5697.75, and the frame's own scroll at 1738 for 1737.9, so the
@@ -2344,12 +2361,54 @@ Traps that have bitten once. A second bite moves the entry up into the section i
   computed at runtime"), though the same loop over `node --check $f` runs. Run several files
   from a node script in the worktree that `spawnSync`s each one and prints its exit code, or
   one plain command per file.
-- **A heredoc that writes a script and then runs it is refused in a worktree agent**
-  (2026-10-12). `cat > .x.mjs <<'EOF' ... EOF` followed by `node .x.mjs` in one command is
-  refused ("too complex to verify that it stays inside the worktree"). Write the script with
-  the Write tool, then run it as one plain command.
 - **A falsified row can be red for a reason beside the one being proved** (2026-10-12). With the
   Lens's load post removed, the self-themed Lens rows in `test/browser-check-stage-fold.mjs`
   go red in the light pass too, on "told null" alone, so a red row does not say what the copy
   drew. Read the failing row's own lines (the runner prints them to stderr) before reporting
   what a mutation showed.
+- **A row of zeros measures `ch` short of the unit Chrome lays out** (2026-10-19). Headless
+  Chrome, the board's 14px body font: `max-width: 72ch` laid out a 635px box (8.82px a ch), while
+  a span of 100 zeros in the same computed font measured 8.67px a zero, so the box read 73.2ch.
+  A measure set right at a check's ceiling (80ch in CSS against 80 probe zeros) fails by that
+  1.7%. `test/browser-check-round-width.mjs` holds prose to 80ch of the probe; the stylesheet
+  sets 72ch, which leaves the room.
+- **A press on a video's native controls never reaches the page, not even its capture phase**
+  (2026-10-19). Headless Chrome 154, a CDP press on the timeline of a `<video controls>` in a
+  stage: the video seeked, and capture listeners on the stage's `document` and bubble listeners on
+  its `window` heard no `pointerdown`, `mousedown`, `pointerup`, `mouseup` or `click`, only the
+  timeline's `input` (retargeted to the video) and `seeking`. A `preventDefault` anywhere in the
+  page therefore cannot stop a control from seeking or playing. To keep a press off the controls,
+  take `controls` away (the stage does it in comment mode); with no controls the same press arrives
+  as an ordinary click on the video. Held again in Chrome 155.0.8059.80 by
+  `test/browser-check-video.mjs`'s press row, which finds the timeline with `DOM.getDocument`
+  (`pierce: true`) from the stage's own target: a node whose `pseudo` is
+  `-webkit-media-controls-timeline`, one per video, so the search starts at the video's own node or
+  it finds a sibling's (a bare video draws a `display: none` panel with no box).
+- **A press aimed at a stage that has not fitted yet lands beside its target** (2026-10-19).
+  Chrome 155 headless: a stage shorter than the 320px placeholder shrinks only after
+  `STAGE_SETTLE_MS` (`src/ui.mjs`), and the board then reflows and clamps its scroll, so the frame
+  moved 13px after a check had read its place. A press on a 4px video timeline missed about one run
+  in three, and three equal reads 150ms apart did not catch the pending shrink. Make a pressed
+  stage taller than the placeholder (its box then only grows, at once) and wait for the frame's
+  `style.height` before reading its place (`stageOrigin` in `test/browser-check-video.mjs`).
+- **`check-install.mjs` can outrun the suite's 180s per-check deadline on a loaded Mac**
+  (2026-10-19). `test/run.mjs` estimates the check at ~48s, but with review agents and headless
+  Chrome running beside the suite it measured 171s and 176s on a branch and 184s on `main` alone,
+  so `npm run check` reports a timeout with every row green. Rerun it alone, or run the suite with
+  CI's `CLAUDE_BOARD_CHECK_TIMEOUT_MS=300000`, before reading the timeout as a regression; compare
+  against `main` in a detached worktree under the same load.
+- **A stage frame that leaves the document loads again, and a Send's push used to take every
+  frame out** (2026-10-19). Chrome 155: `applySubmittedPush` swapped the whole round section, so a
+  video paused at 1.4s came back at 0 after a Send, and `el.replaceWith(el)` is no safe no-op
+  either (the DOM removes the node and inserts it again). A push keeps a frame only by leaving it
+  attached and making the markup over around it (`swapKeepingStages` in `src/ui.mjs`), and keys it
+  on the stage's sha, not its block id: an amend re-mints the ids of blocks nested in the block it
+  re-posts (`resolveBlockId` in `src/board.mjs`), so a context stage comes back under a new id.
+  The tab's catch-up read on every connect fetched the whole page again too, doubling each load
+  of a large stage, until it asked for `?stages=held`.
+- **A one-line command that mixes `git show … > file`, a heredoc and a run is refused in a worktree
+  agent** (2026-10-19). The hook answered "too complex to verify that it stays inside the worktree"
+  to `git show HEAD:src/server.mjs > src/x.mjs && cat > probe.mjs <<EOF … EOF && node probe.mjs`.
+  The same three steps as separate calls (the `git show` redirect alone, the probe written with the
+  Write tool, then `node probe.mjs`) all ran. A probe of the pre-change code imports such a copy
+  from `src/` so its relative imports resolve, and both files are deleted before committing.

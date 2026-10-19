@@ -27,12 +27,16 @@
 // scroll-spy fires and a real <dialog> opens at 100vh is a real-browser question.
 
 import assert from 'node:assert/strict';
-import { createBoard, addRound, applySubmit, abandonOpenRounds } from '../src/board.mjs';
-import { renderBoardPage, renderRoundSection, groupCommentsByBlock, stageAgentScript, COMMENT_ICON } from '../src/render.mjs';
+import { createBoard, addRound, amendRound, applySubmit, abandonOpenRounds, resolveComments } from '../src/board.mjs';
+import {
+  renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, stageAgentScript, COMMENT_ICON,
+} from '../src/render.mjs';
+// The daemon's own push builders, so a push here is byte for byte what it broadcasts.
+import { buildRoundPushPayload, buildSubmittedPushPayload } from '../src/server.mjs';
 import { styles } from '../src/styles.mjs';
 import { PAGE_SEND_EXPIRED_LABEL, PAGE_SEND_EXPIRED_TITLE, PILL_READONLY_TITLE } from '../src/badge.mjs';
 import { parseHTML, StandInEvent, withFrameClock } from './dom-stand-in.mjs';
-import { check, checkAsync, finish, flush, inlineColorScheme, pageHarness } from './support.mjs';
+import { boardDataOf, check, checkAsync, finish, flush, inlineColorScheme, pageHarness } from './support.mjs';
 
 const {
   loadBoard, loadBoardWithEventSource, withFetchCapture, enableCommentMode,
@@ -1243,6 +1247,133 @@ check('the seam for ticket 05: a round arriving over SSE ends the page-board lay
     'and the send bar must be live again -- it was only ever CSS-hidden, never dropped, precisely so a queued comment has a way out');
   assert.equal(document.querySelectorAll('.comment-item.comment-pending').length, 1,
     'the comment queued on the artifact must still be queued -- it rides this round\'s submit (ADR.md entry 35), so nothing here may throw it away');
+});
+
+// =================================================================================
+// A page carries each stage once: its own copy of the board leaves the stage out,
+// and a push sends a stage the tab already holds empty, the tab keeping its live
+// frame (src/render.mjs's boardForClient and holdStages, src/ui.mjs's
+// swapKeepingStages). test/browser-check-video.mjs holds the same in Chrome, a
+// paused video's second included.
+// =================================================================================
+
+/** A board with an html stage in every place one sits: top level, a question's
+ * context, a compare side, a rendered-variant option. Each stage's text marks it. */
+function stageEverywhere() {
+  return createBoard({
+    title: 'A stage in every place one sits',
+    blocks: [
+      { kind: 'html', html: '<p>TOP-STAGE</p>' },
+      {
+        kind: 'question', prompt: 'Is the context right?', widget: 'single', options: [{ label: 'yes' }, { label: 'no' }],
+        context: [{ kind: 'html', html: '<p>CONTEXT-STAGE</p>' }],
+      },
+      { kind: 'compare', left: { label: 'Before', block: { kind: 'html', html: '<p>SIDE-STAGE</p>' } }, right: { label: 'After', block: { kind: 'markdown', text: 'after' } } },
+      {
+        kind: 'question', prompt: 'Which mock?', widget: 'choose-between-rendered-variants',
+        options: [{ label: 'One', block: { kind: 'html', html: '<p>OPTION-STAGE</p>' } }, { label: 'Two', block: { kind: 'markdown', text: 'two' } }],
+      },
+    ],
+  });
+}
+const STAGE_MARKERS = ['TOP-STAGE', 'CONTEXT-STAGE', 'SIDE-STAGE', 'OPTION-STAGE'];
+
+/** `markup` as a push sends it to a tab holding every stage in it: each frame's
+ * srcdoc left out and the frame marked held. */
+const allHeld = markup => markup.replace(/ srcdoc="[^"]*"><\/iframe>/g, ' data-held></iframe>');
+
+check('a page carries each stage once: #board-data leaves out every stage\'s html wherever the stage sits and keeps its sha, a push carries the bytes a later reload inlines, and its markup is the reload\'s with each stage the tab holds sent empty', () => {
+  const board = stageEverywhere();
+  const shas = [board.blocks[0].sha, board.blocks[1].context[0].sha, board.blocks[2].left.block.sha, board.blocks[3].options[0].block.sha];
+  const page = renderBoardPage(board);
+  const inlined = boardDataOf(page);
+  for (const marker of STAGE_MARKERS) {
+    assert.ok(!inlined.includes(marker), `#board-data must carry no stage's html, and ${marker} is in it`);
+    assert.equal(page.split(marker).length - 1, 1, `the page must carry ${marker} once, in its frame`);
+  }
+  for (const sha of shas) {
+    assert.ok(inlined.includes(JSON.stringify(sha)), 'each stage keeps its sha in #board-data, the key a push diff sees a stage change by');
+  }
+  const commentsByBlock = () => groupCommentsByBlock(resolveComments(board, board.comments));
+
+  // An amend re-posting the context question with a new prompt: its context stage
+  // comes back under a re-minted id (src/board.mjs's resolveBlockId) and the same
+  // sha, so the push sends it held.
+  const before = board.blocks.slice();
+  const amended = amendRound(board, {
+    blocks: [{
+      id: board.blocks[1].id, kind: 'question', prompt: 'Is the context still right?', widget: 'single',
+      options: [{ label: 'yes' }, { label: 'no' }], context: [{ kind: 'html', html: '<p>CONTEXT-STAGE</p>' }],
+    }],
+  });
+  const amend = buildRoundPushPayload(board, 1, 'amend', amended.blockIds, before);
+  assert.equal(JSON.stringify(amend.board), JSON.stringify(JSON.parse(boardDataOf(renderBoardPage(board)))),
+    'an amend\'s push carries the bytes a reload inlines');
+  assert.equal(amend.html, allHeld(renderBlock(board.blocks[1], board, commentsByBlock(), false, false)),
+    'and its markup is the reload\'s block, the unchanged stage sent empty');
+
+  // A Send changes no block: every stage in the round goes out held.
+  applySubmit(board, { action: 'send', answers: [{ id: board.blocks[1].id, choice: 'yes' }], comments: [] }, 1);
+  const sent = buildSubmittedPushPayload(board, 1);
+  assert.equal(JSON.stringify(sent.board), JSON.stringify(JSON.parse(boardDataOf(renderBoardPage(board)))),
+    'a Send\'s push carries the bytes a reload inlines');
+  assert.equal(sent.html, allHeld(renderRoundSection(board, 1, commentsByBlock())), 'and its markup is the reload\'s round, every stage sent empty');
+  for (const marker of STAGE_MARKERS) assert.ok(!JSON.stringify(sent).includes(marker), `a Send re-sends no stage, and ${marker} is in its push`);
+});
+
+check('a push leaves a stage it does not change alone: an amend that re-sends a stage unchanged keeps its frame, one that changes the stage replaces it, and a Send keeps every frame with its box and its fold', () => {
+  const board = createBoard({
+    title: 'Stages through pushes',
+    blocks: [
+      {
+        kind: 'question', prompt: 'Is the clip right?', widget: 'single', options: [{ label: 'yes' }, { label: 'no' }],
+        context: [{ kind: 'html', html: '<p id="ctx">CONTEXT ONE</p>' }],
+      },
+      { kind: 'html', html: '<p id="top">TOP ONE</p>' },
+    ],
+  });
+  const qid = board.blocks[0].id;
+  const topId = board.blocks[1].id;
+  const { document, es } = loadBoardWithEventSource(renderBoardPage(board));
+  const ctxFrame = () => document.querySelector('.context-item iframe.html-stage');
+  const topFrame = () => document.querySelector(`section.html-block[data-block-id="${topId}"] iframe.html-stage`);
+  const amend = blocks => {
+    const before = board.blocks.slice();
+    const { blockIds } = amendRound(board, { blocks });
+    es.dispatch('round', JSON.stringify(buildRoundPushPayload(board, 1, 'amend', blockIds, before)));
+  };
+  const question = prompt => ({
+    id: qid, kind: 'question', prompt, widget: 'single', options: [{ label: 'yes' }, { label: 'no' }],
+    context: [{ kind: 'html', html: '<p id="ctx">CONTEXT ONE</p>' }],
+  });
+  const ctx = ctxFrame();
+  const top = topFrame();
+
+  amend([question('Is the clip still right?'), { id: topId, kind: 'html', html: '<p id="top">TOP ONE</p>' }]);
+  assert.equal(ctxFrame(), ctx, 'a context stage the amend re-sent unchanged keeps its frame, though its block came back under a new id');
+  assert.equal(topFrame(), top, 'and so does a top-level stage the amend re-sent unchanged');
+  assert.match(document.querySelector('.question-block').textContent, /still right/, 'while the markup around them is the amended one');
+
+  amend([{ id: topId, kind: 'html', html: '<p id="top">TOP TWO</p>' }]);
+  assert.notEqual(topFrame(), top, 'an amend that changes a stage replaces its frame');
+  assert.match(topFrame().getAttribute('srcdoc'), /TOP TWO/, 'with the new stage in it');
+  assert.equal(ctxFrame(), ctx, 'and leaves the stage it did not touch alone');
+
+  // The box and fold a stage's own reports gave it (applyStageHeight): opened, at
+  // 900px, while the push's markup renders the bar for a stage that fits.
+  const opened = topFrame();
+  opened.style.height = '900px';
+  opened.closest('.html-block').classList.add('stage-opened');
+  applySubmit(board, { action: 'send', answers: [{ id: qid, choice: 'yes' }], comments: [] }, 1);
+  es.dispatch('submitted', JSON.stringify(buildSubmittedPushPayload(board, 1)));
+  assert.ok(document.querySelector('.round[data-round="1"]').classList.contains('round-history'), 'setup failure: the Send\'s push did not land');
+  assert.equal(ctxFrame(), ctx, 'a Send keeps the context stage\'s frame');
+  assert.equal(topFrame(), opened, 'and the top-level stage\'s');
+  assert.equal(opened.style.height, '900px', 'with the box it had');
+  const block = opened.closest('.html-block');
+  assert.ok(block.classList.contains('stage-opened'), 'and the fold its block had');
+  assert.equal(block.querySelector('.stage-fold-toggle').textContent, 'Show less', 'the bar the push brought in names that fold');
+  assert.equal(document.querySelectorAll('iframe.html-stage[data-held]').length, 0, 'no empty frame is left on the page');
 });
 
 // =================================================================================

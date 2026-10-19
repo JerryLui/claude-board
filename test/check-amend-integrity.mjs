@@ -508,7 +508,8 @@ await checkAsync('a reconnect that missed nothing leaves an open lens open, one 
     document.querySelector('.html-block .pull-out').dispatchEvent(new StandInEvent('click'));
     assert.ok(document.querySelector('.stage-lens-frame'), 'setup failure: the stage lens did not open');
     await reconnect();
-    assert.equal(fetched[0], '/b/' + encodeURIComponent(board.id), 'the catch-up must re-read this board\'s own page');
+    assert.equal(fetched[0], '/b/' + encodeURIComponent(board.id) + '?stages=held',
+      'the catch-up must re-read this board\'s own page, with the stages this tab holds left out (ADR 122)');
     assert.ok(document.querySelector('.stage-lens-frame'), 'a reconnect that missed nothing must not close the lens the reviewer has open');
 
     applySubmit(board, { action: 'send', answers: [], comments: [] }, 1);

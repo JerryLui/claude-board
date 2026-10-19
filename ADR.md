@@ -20,7 +20,7 @@ link where it is worth reading.
 | 3 | [References resolve inside a configured allowlist, not only `cwd`](.agents/adr/0003-references-resolve-inside-a-configured-allowlist-not-only.md) | 2026-07-30 | accepted |
 | 4 | [Every command falls back off the board, `/grill` included](.agents/adr/0004-every-command-falls-back-off-the-board-grill.md) | 2026-07-31 | narrowed by 55 |
 | 5 | [This repo ships the protocol, not its callers](.agents/adr/0005-this-repo-ships-the-protocol-not-its-callers.md) | 2026-07-31 | narrowed by 102 |
-| 7 | [An `html` block may name a file, but only a whole one](.agents/adr/0007-html-block-may-name-a-file-but-only.md) | 2026-08-04 | accepted |
+| 7 | [An `html` block may name a file, but only a whole one](.agents/adr/0007-html-block-may-name-a-file-but-only.md) | 2026-08-04 | amended by 121 |
 | 8 | [The daemon owns the pomodoro clock](.agents/adr/0008-daemon-owns-the-pomodoro-clock.md) | 2026-08-04 | narrowed by 67 |
 | 11 | [The repo ships one caller-facing file: the manual](.agents/adr/0011-repo-ships-one-caller-facing-file-the-manual.md) | 2026-08-04 | narrowed by 102 |
 | 13 | [The daemon's environment is baked into the launcher, not the plist](.agents/adr/0013-daemon-s-environment-is-baked-into-the-launcher.md) | 2026-08-04 | accepted |
@@ -107,3 +107,5 @@ link where it is worth reading.
 | 118 | [Remote review rides an SSH tunnel; the daemon stays loopback-only](.agents/adr/0118-remote-review-rides-an-ssh-tunnel.md) | 2026-09-28 | relates to 116 |
 | 119 | [A stage fits its content and folds past 600px](.agents/adr/0119-a-stage-fits-its-content-and-folds-past-600px.md) | 2026-10-12 | widens 110 |
 | 120 | [One Pull-out in the corner of every rendered block](.agents/adr/0120-one-pull-out-in-the-corner-of-every-rendered-block.md) | 2026-10-12 | relates to 22, 110 |
+| 121 | [An html stage may carry the post limit](.agents/adr/0121-an-html-stage-may-carry-the-post-limit.md) | 2026-10-19 | amends 7; relates to 112, 117; amended by 122 |
+| 122 | [A page carries each stage once](.agents/adr/0122-a-page-carries-each-stage-once.md) | 2026-10-19 | amends 121; relates to 32, 42 |

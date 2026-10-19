@@ -838,10 +838,11 @@ check('criterion 7: a page board archived to disk opens from Finder as a page bo
     const frame = document.querySelector('.html-stage');
     assert.ok(frame, 'the frame itself must be in the archived bytes');
     const srcdoc = frame.getAttribute('srcdoc');
-    // Read off the FRAME's own attribute, never off the raw bytes: the whole
-    // board is inlined as JSON in #board-data too, so `fileContents.includes(...)`
-    // is true whether or not the stage ever carried the artifact (QUIRKS.md: "A
-    // rendered page contains every comment's text twice").
+    // Read off the FRAME's own attribute, never off the raw bytes: the frame is
+    // the one place a page carries its stage (ADR 122; #board-data leaves the
+    // stage's html out), and a raw-bytes match would also pass on a marker that
+    // rode in anywhere else in the file (QUIRKS.md: "A rendered page contains
+    // every comment's text twice").
     assert.ok(srcdoc.includes('ARCHIVED_ARTIFACT_MARKER'),
       'the artifact\'s own markup must be inside the frame\'s srcdoc -- an archive that framed a path would open blank with the network off');
     assert.equal(srcdoc.indexOf(STAGE_MARGIN_RESET), 0, 'with the same leading reset a live page renders');

@@ -252,11 +252,24 @@ page's own 50,000-character limit, while an engine failure that is not a parse f
 open.
 
 **`html` may carry a `source`** (ADR 7), for an agent that renders a real page to disk rather
-than re-emitting the bytes as generated tokens. It resolves through the same reader, confinement,
-512 KiB cap and refusal behaviour as `markdown`, `code` and `mermaid`. It is the one
+than re-emitting the bytes as generated tokens. It resolves through the same reader, confinement
+and refusal behaviour as `markdown`, `code` and `mermaid`, under the html cap of 25,000,000 bytes
+in place of their 512 KiB (ADR 121). It is the one
 exception to what a `Ref` may carry: `lines` and `section` are refused, naming markup slicing as
 the reason, and refuse the post with them. Cutting text at a line boundary still yields text;
 cutting markup yields unclosed tags and orphaned `<style>`.
+
+**An `html` stage may carry video**: a `<video controls>` whose source is a `data:` URI in the
+stage's markup, or a `blob:` URL the stage's own script builds from inlined bytes, inlined like
+every other stage asset. The `<video>` and its `aria-label` are written in the markup, and a
+script sets only its `src`: the daemon resolves a comment against the stored markup while the stage
+names the live element, so a video or a label a script creates leaves every comment on it lost. The page policy's `media-src data: blob:` admits those two and nothing
+else, on a live board and on an archive opened from disk alike: no route serves media, and an
+`http(s)` or relative source loads nothing. The clip counts toward the caps every stage lives
+under (ADR 121): 25,000,000 bytes per `html` block, by value or by reference, and the same
+25,000,000 across every `html` block in one post, each a 400 naming the cap; and 25,000,000 bytes
+per request body, past which the daemon drops the connection mid-upload and sends no response at
+all. Every other block keeps 512 KiB.
 
 **`explainer`** (ADR 111) is the question's own one-to-three-sentence lead-in: markdown by value,
 optional, bounded by the same by-value cap as `prompt`, rendered as plain prose directly under the
@@ -324,7 +337,8 @@ realpath outside cwd and every root  refused (covers ../ traversal AND symlinks 
 the project directory itself         refused: a directory is never a reference target
 not a regular file                   refused (a fifo blocks the daemon's only thread
                                       forever; a character device exhausts its heap)
-larger than 512 KiB                  refused, before any of it is read
+larger than 512 KiB                  refused, before any of it is read (an html
+                                      block's file: larger than 25,000,000 bytes)
 line range past end of file          refused at BOTH ends (a trailing newline does not
                                       make a phantom last line)
 ```
@@ -358,10 +372,12 @@ name containing `:` degenerates into) grants nothing at all.
 A markdown `section` is located with the same fence-aware scan `src/markdown.mjs` uses, so the
 slug the agent is shown for a heading is the slug that resolves.
 
-The same 512 KiB cap applies to by-value `text` and `html`, and it is a **400 on the post** either
-way now: by-value or by reference, the content came from the caller, so there is a caller to tell.
-A `source` ref never raises this cap for any kind — the whole file's size is checked from `fstat`
-before any of it is read.
+The same caps apply by value, 512 KiB to `text` and 25,000,000 bytes to `html` (ADR 121), and each
+is a **400 on the post** either way now: by-value or by reference, the content came from the
+caller, so there is a caller to tell. A `source` ref never raises a kind's cap — the whole file's
+size is checked from `fstat` before any of it is read. The `html` blocks in one post also share
+25,000,000 bytes between them, so a post naming several large stage files is refused at the one
+that passes it, as a post carrying them by value is by the body limit.
 
 ### Answers, comments, anchors
 
@@ -383,7 +399,8 @@ Comment = { n, blockId, anchor, text, createdAt, round, mintBlockKind }
           // replaces a block with a different kind cannot silently re-point the anchor
 
 Anchor  = { kind: 'block' }                       // whole block
-        | { kind: 'dom',     ref, hint }          // "N.N.N" child-index path + a composed hint
+        | { kind: 'dom',     ref, hint, time? }   // "N.N.N" child-index path + a composed hint;
+                                                  // time: a video comment's whole second
         | { kind: 'mermaid', ref, domRef, hint }  // node id, plus the same path + hint; ref is
                                                   // the fallback, never the model. domRef/hint
                                                   // are absent on older stored anchors
@@ -424,6 +441,23 @@ own kind is `html` or `mermaid`.
 else empty. Only inside one side of a `compare` does it go further: the role word is appended after
 real text too (`"Send button"`), and the identity is suffixed with `" in <context>"`, naming that
 side's label plus the block kind it holds (`"Before html stage"`, `"After diagram"`).
+
+**A comment on a `<video>` records its second.** The stage sends the video's `currentTime` with
+the click, and the anchor stores it as `time`: whole seconds, floored, kept only as a finite number
+from 0 to 86400 and dropped otherwise, never coerced from a string (`videoSecond`). The hint names
+the second too, `" at m:ss"` (`" at h:mm:ss"` from an hour) after the composed hint, so the label
+reads `"Criterion 2 clip at 0:07"` beside `time: 7`. A video's identity is its `aria-label`, else
+its `title`, else `video`, never its fallback text (`videoIdentity`); an attribute name spelled
+inside another attribute's quoted value is not that attribute. Resolution strips the suffix only
+when it equals the stored `time`'s, and a timed anchor resolves only onto a `<video>`. An untimed
+anchor on a `<video>` also resolves under the video's fallback text, the name a comment stored
+before videos carried a second gave it. Another second on the same video is a different anchor, so
+a sent comment at 0:07 leaves the video open to a comment at 0:12; the stage marks the video sent
+only while it shows 0:07 (`sentTimes`). While comment mode is on the stage takes `controls` off
+every video that has them or gains them (a stage's own script adding a `<video controls>` or putting
+`controls` back), and gives them back to those videos when it ends: a press on Chrome's native controls
+seeks without reaching the stage's document, so nothing there could cancel it. The press then lands
+on the video itself and sends the second it shows.
 
 ### A complete board
 
@@ -620,6 +654,11 @@ is not a question block of the round being submitted is ignored server-side rath
 ```
 GET  /?q=                           thread index, filtered to sessions matching q
 GET  /b/:boardId                    the served page
+GET  /b/:boardId?stages=held        the same page with every stage frame empty and
+                                    held (ADR 122): a tab's own catch-up read, see
+                                    "SSE events"
+GET  /b/:boardId?stages=<sha>,...   the same page with every stage held but those
+                                    named: a tab's fill of the frames a push left held
 GET  /b/<asset>                     the shared script or stylesheet a page names, by
                                     content-addressed filename (ADR.md entry 70); the
                                     daemon's only static route. Disjoint from the line
@@ -642,7 +681,8 @@ GET  /api/board/:id/read            one board's rounds, answers and comments, in
                                     delivered and nothing is written, so the same call twice
                                     answers the same twice. Secret only, like /wait: a tool
                                     calls it, never a page
-GET  /api/board/:id/events          SSE: round pushes, state changes
+GET  /api/board/:id/events          SSE: round pushes, state changes; `?stages=held`
+                                    declares the page fills held stage frames
 POST /api/board/:id/submit          { round, action: 'send'|'discuss', answers, comments }
 POST /api/board/:id/abandon         {} -> { ok: true, rounds }; closes every round still
                                     open on a board a conversation walked away from
@@ -1258,9 +1298,11 @@ never ends on its own. Heartbeat comment lines (`: heartbeat\n\n`) keep it alive
 timers and proxies — invisible to `EventSource`'s message events, so they never surface as a stray
 event. `CLAUDE_BOARD_SSE_HEARTBEAT_MS` overrides the cadence (default 15000), for checks only.
 
-Four named events. The middle two carry the full board JSON (the same shape a served page inlines)
-so a client can diff against its own last-known copy, plus enough to apply the push without a
-reload:
+Four named events. The middle two carry the page's own copy of the board, the same bytes a served
+page inlines as `#board-data` (ADR 122), so a client can diff against its own last-known copy, plus
+enough to apply the push without a reload. That copy is the stored board less `cwd`, the daemon-only
+fields, and every html block's `html`, wherever the block sits; the block keeps its `sha`, which is
+how a diff sees a stage change. A page carries each stage once, in its frame's `srcdoc`:
 
 ```js
 event: watcher        data: { id }
@@ -1281,10 +1323,32 @@ client only ever inserts or replaces that much DOM: `renderRoundSection`'s outpu
 `<section class="round">` wrapper) for `mode: 'new-round'`, or one `renderBlock` call per touched
 id (no wrapper) for `mode: 'amend'`, since the round section already exists client-side.
 
+Every stage frame names its content by its block's sha, `<iframe class="html-stage" … data-sha="…">`.
+A push sends a stage every tab showing the board already holds **held**: the same frame with no
+`srcdoc`, marked `data-held`. An amend holds, in each block it re-posts that already sat in the open
+round, each stage that block held before it (keyed on the sha, since an amend re-mints the ids of the
+blocks nested in a block it re-posts); a block it adds holds none, whatever stage it carries, and a
+new round holds none. The client keeps its live frame wherever a push's markup names the same
+`data-sha` in the same place, making the markup over around it rather than replacing it, so the mock
+keeps its state (a paused video its second); a frame that names a new sha goes in as it came. A held
+frame no live frame can stand for is filled from `GET /b/:boardId?stages=<sha>,...`, naming the shas
+of the frames left held, which serves only those stages whole; the client puts each into the held
+frames that name its sha. So a push and a later full reload carry the same `board` bytes and the same
+markup, but for a held frame, empty in the push.
+
+A push holds stages only for a subscription that declares it can fill a held frame, by opening the
+stream as `GET /api/board/:id/events?stages=held`, as today's page script does. A subscription that
+declares nothing is a tab still running a page script from before held frames: its pushes carry every
+stage whole, and their `board` keeps each html block's `html`, the copy that script holds and diffs
+against (its diff sees a stage change through the html). Its catch-up read, a script's fetch of the
+plain `GET /b/:boardId` (`Sec-Fetch-Dest: empty`, never sent by today's script), inlines that same
+copy, so it replaces no stage that did not change. A navigation to the plain route gets the page as
+served.
+
 `submitted` fires on every submit, to every connected client including the one that just
 submitted, so a second tab sees the round go sent — and read-only, if that page is the one it is
 showing — without reloading. Its `html` is the re-rendered `<section class="round">` in sent/history
-form; without it a client that did not
+form, every stage in it held, since a submit changes no block; without it a client that did not
 submit would show its own unsent, in-progress state as if it were what was sent. A client that
 receives no `html` must fall back to disabling the round in place.
 
@@ -1305,9 +1369,11 @@ agent is mid-amend) is lost permanently. So on **every** `open` of the subscript
 connection included — the client re-reads the board and diffs it against its local copy with the
 same `computeBoardPatch` (`src/patch.mjs`) every push uses, replaying the difference through the
 same apply path as a live push. A first connection with nothing missed diffs to nothing and
-touches no DOM. The re-read is a plain `GET /b/:boardId`, which already inlines both the payload
-(`#board-data`, `resolveComment` already run over it) and the server-rendered markup for every
-round; a dedicated JSON route would be leaner and can be added later without changing this rule.
+touches no DOM. The re-read is `GET /b/:boardId?stages=held`, the page with every stage held: it
+inlines both the payload (`#board-data`, `resolveComment` already run over it, the same bytes as the
+plain page) and the server-rendered markup for every round, and leaves out the stages the tab
+already holds, so a page loads once rather than twice. A dedicated JSON route would be leaner and
+can be added later without changing this rule.
 
 ### The daemon-wide stream
 
@@ -1356,7 +1422,7 @@ from anything else that might postMessage this window (an extension, devtools, a
 | --- | --- | --- |
 | `ready` | — | listeners attached. Sent once, unconditionally, at the end of the agent script |
 | `hover` | `{ ref, tag, text }` | innermost element under the cursor, or `ref: null` on mouseout. The stage also applies its own outline locally |
-| `click` | `{ ref, tag, text }` | step path plus **raw** tag/text, never a composed hint |
+| `click` | `{ ref, tag, text, time? }` | step path plus **raw** tag/text, never a composed hint. On a `<video>`, `text` is its identity (`aria-label`, else `title`, else empty) and `time` the whole second it shows |
 | `link` | `{ url }`, `{ top }` or `{ top, scrolled: true }` | `{ url }`: "the reviewer clicked this `http`/`https` address inside me", which the board opens in a new tab. `{ top }`, no `url`: "the reviewer clicked an in-page anchor I have nothing of my own to scroll to; its target sits this far down my viewport", which the board scrolls itself to. `{ top, scrolled: true }`: "I scrolled to an in-page anchor myself; its target now sits this far down my viewport", which the board scrolls to only if that spot is hidden: under its header, or within the same clearance of the window's bottom edge or past it (ADR 113 and 119, and "Links inside a stage" below) |
 | `positions` | `{ requestId, positions }` | response to `locate`: per requested ref, `{left, top}` in the frame's viewport coordinates (the element's own client rect), or `null` if the ref no longer resolves. Numbers and null only |
 | `height` | `{ height }` | the height this whole document needs to show with no vertical scrollbar (see below) |
@@ -1370,8 +1436,8 @@ from anything else that might postMessage this window (an extension, devtools, a
 inside a compare side, which the stage cannot see. The parent calls `buildHint` on what it
 receives, through the same function every other content kind's click already uses. This is also
 why `composeHint` needs no third copy embedded here: only
-`buildSteps`/`stepsToPath`/`pathToSteps`/`resolveSteps` do, bound via `.toString()` from
-`src/anchor.mjs`, never hand-copied.
+`buildSteps`/`stepsToPath`/`pathToSteps`/`resolveSteps`, and `videoIdentity`/`videoSecond` for a
+video's click, are, bound via `.toString()` from `src/anchor.mjs`, never hand-copied.
 
 `positions` only ever positions a pin the parent already decided to draw from its own
 server-verdict-derived comment list (`commentsWithPending`), never to decide *whether* a pin
@@ -1418,6 +1484,20 @@ What the cap hides on a variant option is not lost: the same reported height is 
 parent the stage has somewhere to scroll, which is what `scrollBy` below forwards a wheel notch
 for.
 
+No stage reports a width: a frame is as wide as the box it sits in, and the board's column runs
+as wide as the window, up to 2560px (`.board-shell`, `src/styles.mjs`). A top-level stage,
+diagram or compare spans the window less about 100px of gutter, card padding and scrollbar
+(1811px in a 1920px window), and so does a stage in a question's context, since a question
+carrying one lays out in one column (ADR 26). A diagram or compare in the context panel beside a
+question's options gets what the options leave, which from a 1440px window is all of it past
+the 523px the old 1120px column gave them. A compare side gets half; an `html` variant option
+takes a whole row, other variant kinds share one. Prose does not widen with the column: below a
+1440px window a line set straight in a block keeps the 1022px the old column gave it (a line in
+the options, the context panel or a compare side still widens with its box), and from 1440px
+every line holds 72ch of its own font (`--prose`). An option's `preview` image or code is not
+prose: its card keeps the old column's width, so a preview is never drawn narrower than it was.
+A page board's stage fills the window, as before (ADR 33).
+
 `scroll` exists because ADR 40's page-board header condenses on the reader's scroll, but on a page
 board the document itself never scrolls — the artifact scrolls inside the opaque-origin frame — so
 the parent cannot observe it short of being told.
@@ -1426,7 +1506,7 @@ the parent cannot observe it short of being told.
 
 | type | payload | meaning |
 | --- | --- | --- |
-| `mode` | `{ commentMode, sentRefs?, theme? }` | comment mode on/off. The stage keeps its own flag, read by the same `if (!commentMode) return;` guards the old in-parent listeners used. `sentRefs` lists the block's `dom` refs already sent. `theme` is the board's theme resolved to `light` or `dark` (System included); see below |
+| `mode` | `{ commentMode, sentRefs?, sentTimes?, theme? }` | comment mode on/off. The stage keeps its own flag, read by the same `if (!commentMode) return;` guards the old in-parent listeners used. `sentRefs` lists the block's untimed `dom` refs already sent; `sentTimes` lists each video second already sent as `{ ref, time }`. `theme` is the board's theme resolved to `light` or `dark` (System included); see below |
 | `locate` | `{ requestId, refs }` | asks for the current `{left, top}` of every ref |
 | `band` | `{ top, bottom }` | the board's own chrome band, right now (ADR 59) |
 | `scroll` | `{ top }` | "put yourself at this offset" |

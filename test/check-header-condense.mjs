@@ -318,10 +318,10 @@ check('AC 7: below the 560px breakpoint the condense is suppressed outright, not
     'the panel\'s own opacity must be driven by --stage-p, or pinning it to 0 below the breakpoint would leave a mispositioned panel visible instead of invisible');
 });
 
-check('AC 7: the header\'s wash reaches the real viewport edges, not the 1120px column, and never with a raw vw unit', () => {
+check('AC 7: the header\'s wash reaches the real viewport edges, not the content column, and never with a raw vw unit', () => {
   // PM review of a real screenshot (2026-08-09), the expanded (--stage-p: 0)
   // state, separate from the pill: 'inset: 0' on '.board-head::after' sizes
-  // the wash to '.board-head''s OWN box -- the 1120px column, since this
+  // the wash to '.board-head''s OWN box -- the board's column, since this
   // header is 'position: sticky' inside it, unlike a page board's, which is
   // full-bleed by construction (position: fixed, no document scrollbar at
   // all). A wash confined to the column reads as a rounded blur-plus-gradient
@@ -362,7 +362,7 @@ check('AC 7: the header\'s wash reaches the real viewport edges, not the 1120px 
 // examples/sample-board.html's ordinary-board round (round 2): containment at
 // 1324px (mark and the state label both inside the panel's measured rect,
 // ~6-12px of air on every edge) and at the content width the 1120px column
-// caps out at; the narrow-viewport suppression by applying the media block's
+// then capped out at; the narrow-viewport suppression by applying the media block's
 // own declarations directly (this environment's viewport could not be
 // resized below its own floor) and confirming '--stage-p' resolves to '0'
 // and the pill's opacity to '0' under them, with a screenshot showing the

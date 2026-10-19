@@ -12,33 +12,23 @@
 // script so it constructs one and registers its OWN `addEventListener('round', ...)`
 // / `addEventListener('submitted', ...)` listeners, then fires the exact events a
 // real server push would carry (the 'round' payload from src/server.mjs's own
-// exported `buildRoundPushPayload`, the 'submitted' one from the same functions
-// that broadcast uses -- resolveComment, groupCommentsByBlock, renderRoundSection
-// -- never a hand-shaped payload), and asserts the pushed content is ACTUALLY ANCHORABLE end to end:
+// exported `buildRoundPushPayload`, the 'submitted' one from its
+// `buildSubmittedPushPayload` -- never a hand-shaped payload), and asserts the
+// pushed content is ACTUALLY ANCHORABLE end to end:
 // comment mode on, click the pushed element, a form opens, submitting it draws a
 // pin. Never by calling applyRoundPush/applySubmittedPush directly -- that would
 // prove nothing about whether the subscription is wired at all.
 
 import assert from 'node:assert/strict';
-import { createBoard, addRound, amendRound, applySubmit, resolveComment } from '../src/board.mjs';
-import { renderBoardPage, renderRoundSection, groupCommentsByBlock } from '../src/render.mjs';
-// The daemon's own 'round' payload builder, imported rather than rebuilt here, so
-// a push in this file is byte-for-byte what a real daemon broadcasts.
-import { buildRoundPushPayload } from '../src/server.mjs';
+import { createBoard, addRound, amendRound, applySubmit } from '../src/board.mjs';
+import { renderBoardPage } from '../src/render.mjs';
+// The daemon's own payload builders, imported rather than rebuilt here, so a push
+// in this file is byte-for-byte what a real daemon broadcasts.
+import { buildRoundPushPayload, buildSubmittedPushPayload } from '../src/server.mjs';
 import { StandInEvent } from './dom-stand-in.mjs';
 import { check, finish, pageHarness } from './support.mjs';
 
 const { loadBoard, loadBoardWithEventSource, enableCommentMode } = await pageHarness();
-
-/** The exact payload shape src/server.mjs's handleSubmit builds for the
- * 'submitted' broadcast. */
-function buildSubmittedPushPayload(board, round) {
-  const resolvedComments = board.comments.map(c => resolveComment(board, c));
-  const commentsByBlock = groupCommentsByBlock(resolvedComments);
-  const boardForClient = { ...board, comments: resolvedComments };
-  const html = renderRoundSection(board, round, commentsByBlock);
-  return { round, board: boardForClient, html };
-}
 
 /** Click `button` (comment mode already on), submit the opened form, and return
  * the pin that landed in `layer` -- the full, real, end-to-end proof that

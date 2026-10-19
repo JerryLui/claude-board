@@ -12,9 +12,9 @@
 //
 //   node test/browser-check-stage-fold.mjs
 //
-// Harness: test/browser-check-mermaid-stage.mjs's -- the branch's own
-// bin/daemon.mjs on a scratch port and a scratch store, headless Chrome over the
-// DevTools Protocol with Node's native WebSocket, zero npm dependencies. Every
+// Harness: test/browser-support.mjs -- the branch's own bin/daemon.mjs on a scratch
+// port and a scratch store, headless Chrome over the DevTools Protocol with Node's
+// native WebSocket, zero npm dependencies, real scrollbars. Every
 // mock sits on ONE ordinary board twice, once in a question's context and once at
 // top level (an ordinary board, not a page board: QUIRKS.md "A fixture board
 // holding one html block and nothing else is a PAGE board"), and a tall and a
@@ -40,19 +40,13 @@
 // its stage and in the Lens's copy, which the board tells the theme too.
 
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
-import http from 'node:http';
-import { randomBytes } from 'node:crypto';
 import { inflateSync } from 'node:zlib';
-import { SECRET_HEADER, SESSION_COOKIE, sessionToken } from '../src/secret.mjs';
+import { sessionToken } from '../src/secret.mjs';
 import { THEME_STORAGE_KEY } from '../src/theme.mjs';
-import { check, freePort, repoRoot, runMain, sleep, withTimeout } from './support.mjs';
-
-const CHROME = process.env.CLAUDE_BOARD_CHROME_BIN
-  || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+import { runMain, sleep, withTimeout } from './support.mjs';
+import {
+  evalIn, guardRun, postJson, requireChrome, row, setSessionCookie, startScratchDaemon, withChrome,
+} from './browser-support.mjs';
 
 // The numbers ADR.md entry 119 fixes, written out here rather than imported, so a
 // drift in src/ui.mjs turns a row red instead of moving the expectation with it.
@@ -63,39 +57,7 @@ const OPEN_CAP = 30000;
 const BORDER = 2; // the frame's 1px border, top and bottom, inside its height
 
 const RUN_DEADLINE_MS = 300000;
-
-// ---------------------------------------------------------------------------
-// Every child this script starts dies with it, on every exit path: the normal
-// finally blocks, a thrown error, Ctrl-C, and the whole-run watchdog below.
-const children = new Set();
-const scratchDirs = new Set();
-function killAll() {
-  for (const c of children) { try { c.kill('SIGKILL'); } catch {} }
-  for (const d of scratchDirs) { try { rmSync(d, { recursive: true, force: true }); } catch {} }
-}
-process.on('exit', killAll);
-for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { killAll(); process.exit(130); });
-const watchdog = setTimeout(() => {
-  console.error(`browser-check-stage-fold: the whole run passed ${RUN_DEADLINE_MS}ms; killing Chrome and the daemon`);
-  process.exit(1);
-}, RUN_DEADLINE_MS);
-watchdog.unref();
-
-function scratchDir(prefix) {
-  const d = mkdtempSync(path.join(tmpdir(), prefix));
-  scratchDirs.add(d);
-  return d;
-}
-
-/** One row through test/support.mjs's `check`, plus the one thing only this file
- * needs: `fn` is handed a `note(line)`, and each note prints under the row's own
- * line as `  # <line>`, pass or fail. A row here measures a real browser, and the
- * numbers it read are worth seeing beside a pass too. */
-async function row(name, fn) {
-  const notes = [];
-  await check(name, () => fn(line => notes.push(line)));
-  for (const line of notes) console.log(`  # ${line}`);
-}
+guardRun('browser-check-stage-fold', { deadlineMs: RUN_DEADLINE_MS });
 
 const near = (a, b, tol = 1) => Math.abs(a - b) <= tol;
 
@@ -264,163 +226,6 @@ const FRAME_PROBE = `window.__cbFP = {
 true`;
 
 // ---------------------------------------------------------------------------
-// Headless Chrome over CDP.
-function launchChrome() {
-  const profile = scratchDir('cb-stage-fold-profile-');
-  const chrome = spawn(CHROME, [
-    '--headless=new', '--disable-gpu', '--remote-debugging-port=0',
-    `--user-data-dir=${profile}`, '--window-size=1280,900',
-    '--disable-background-networking', '--disable-sync', '--disable-default-apps',
-    '--disable-component-update', '--no-first-run', '--no-default-browser-check',
-    'about:blank',
-  ], { stdio: 'ignore' });
-  children.add(chrome);
-  let chromeFailed = null;
-  chrome.on('error', err => { chromeFailed = err; });
-
-  async function endpoint() {
-    const portFile = path.join(profile, 'DevToolsActivePort');
-    const deadline = Date.now() + 15000;
-    for (;;) {
-      try {
-        const [livePort, wsPath] = readFileSync(portFile, 'utf8').split('\n');
-        if (livePort && wsPath) return `ws://127.0.0.1:${livePort.trim()}${wsPath.trim()}`;
-      } catch { /* not written yet */ }
-      if (chromeFailed) throw new Error(`could not start ${CHROME}: ${chromeFailed.message}`);
-      if (chrome.exitCode !== null) throw new Error(`chrome exited with ${chrome.exitCode}`);
-      if (Date.now() >= deadline) throw new Error('chrome never came up');
-      await sleep(100);
-    }
-  }
-
-  async function cleanup() {
-    const exited = chrome.exitCode !== null || chrome.signalCode !== null
-      ? Promise.resolve()
-      : new Promise(res => chrome.once('exit', res));
-    chrome.kill();
-    await Promise.race([exited, sleep(5000)]);
-    if (chrome.exitCode === null && chrome.signalCode === null) chrome.kill('SIGKILL');
-    children.delete(chrome);
-    rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-    scratchDirs.delete(profile);
-  }
-
-  return { endpoint, cleanup };
-}
-
-function connectDevtools(ws) {
-  let nextId = 0;
-  const pending = new Map();
-  const listeners = new Set();
-  const failAll = reason => {
-    for (const { reject } of pending.values()) reject(new Error(reason));
-    pending.clear();
-  };
-  ws.addEventListener('close', () => failAll('devtools socket closed before the reply arrived'));
-  ws.addEventListener('error', () => failAll('devtools socket errored'));
-  ws.addEventListener('message', ev => {
-    const msg = JSON.parse(ev.data);
-    if (msg.id != null && pending.has(msg.id)) {
-      const { resolve, reject } = pending.get(msg.id);
-      pending.delete(msg.id);
-      msg.error ? reject(new Error(JSON.stringify(msg.error))) : resolve(msg.result);
-    } else if (msg.method) {
-      for (const l of listeners) l(msg);
-    }
-  });
-  const send = (method, params = {}, sessionId) => withTimeout(new Promise((resolve, reject) => {
-    const id = ++nextId;
-    pending.set(id, { resolve, reject });
-    ws.send(JSON.stringify({ id, method, params, sessionId }));
-  }), 15000, `devtools ${method} never answered`);
-  const onEvent = fn => { listeners.add(fn); return () => listeners.delete(fn); };
-  return { send, onEvent };
-}
-
-async function evalIn(send, sessionId, expression) {
-  const { result, exceptionDetails } = await send('Runtime.evaluate', { expression, returnByValue: true }, sessionId);
-  if (exceptionDetails) throw new Error(`eval threw: ${exceptionDetails.exception?.description || exceptionDetails.text}`);
-  return result.value;
-}
-
-// ---------------------------------------------------------------------------
-// Daemon: the branch's own bin/daemon.mjs, scratch port, scratch store, and an
-// osascript stub first on PATH (QUIRKS.md "Any check that boots a daemon will
-// raise real banners"). test/support.mjs's `freePort` picks the port.
-async function startScratchDaemon() {
-  const home = scratchDir('cb-stage-fold-home-');
-  const secretFile = path.join(home, 'secret');
-  const secret = randomBytes(32).toString('hex');
-  writeFileSync(secretFile, `${secret}\n`, { mode: 0o600 });
-  const stubDir = path.join(home, 'stub-bin');
-  mkdirSync(stubDir);
-  writeFileSync(path.join(stubDir, 'osascript'), '#!/bin/sh\nexit 0\n');
-  chmodSync(path.join(stubDir, 'osascript'), 0o755);
-  const wantPort = await freePort();
-
-  const child = spawn(process.execPath, [path.join(repoRoot, 'bin', 'daemon.mjs')], {
-    env: {
-      ...process.env,
-      PATH: `${stubDir}:${process.env.PATH}`,
-      CLAUDE_BOARD_HOME: home,
-      CLAUDE_BOARD_SECRET_FILE: secretFile,
-      CLAUDE_BOARD_PORT: String(wantPort),
-      CLAUDE_BOARD_STRANDED_GRACE_MS: String(24 * 60 * 60 * 1000),
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  children.add(child);
-  let out = '';
-  child.stdout.on('data', c => { out += c; });
-  child.stderr.on('data', c => { out += c; });
-
-  async function port() {
-    const deadline = Date.now() + 15000;
-    for (;;) {
-      const m = /claude-board daemon listening on 127\.0\.0\.1:(\d+)/.exec(out);
-      if (m) return Number(m[1]);
-      if (child.exitCode !== null) throw new Error(`daemon exited early (${child.exitCode}):\n${out}`);
-      if (Date.now() >= deadline) throw new Error(`daemon never reported its port:\n${out}`);
-      await sleep(100);
-    }
-  }
-
-  async function stop() {
-    if (child.exitCode === null) {
-      child.kill('SIGTERM');
-      await Promise.race([new Promise(res => child.once('exit', res)), sleep(3000)]);
-      if (child.exitCode === null) child.kill('SIGKILL');
-    }
-    children.delete(child);
-    rmSync(home, { recursive: true, force: true });
-    scratchDirs.delete(home);
-  }
-
-  return { secret, port, stop };
-}
-
-function postJson(urlStr, body, secret) {
-  return withTimeout(new Promise((resolve, reject) => {
-    const u = new URL(urlStr);
-    const data = JSON.stringify(body);
-    const req = http.request({
-      hostname: u.hostname, port: u.port, path: u.pathname, method: 'POST',
-      headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data), [SECRET_HEADER]: secret },
-    }, res => {
-      const chunks = [];
-      res.on('data', c => chunks.push(c));
-      res.on('end', () => {
-        const text = Buffer.concat(chunks).toString('utf8');
-        if (res.statusCode >= 400) return reject(new Error(`daemon responded ${res.statusCode}: ${text}`));
-        try { resolve(JSON.parse(text)); } catch (err) { reject(new Error(`invalid JSON: ${err.message}`)); }
-      });
-    });
-    req.on('error', reject);
-    req.end(data);
-  }), 10000, 'POST /api/board never answered');
-}
-
-// ---------------------------------------------------------------------------
 // The board page, opened with the probe installed, and every stage's own target
 // found by the name its mock carries.
 async function openBoard(send, onEvent, url, cookie, { names = ALL, os = null, setting = null } = {}) {
@@ -456,10 +261,7 @@ async function openBoard(send, onEvent, url, cookie, { names = ALL, os = null, s
     })();` });
   }
   await sp('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true });
-  await sp('Network.enable');
-  await sp('Network.setCookie', {
-    name: SESSION_COOKIE, value: cookie, domain: '127.0.0.1', path: '/', httpOnly: true, sameSite: 'Strict',
-  });
+  await setSessionCookie(sp, cookie);
   await sp('Page.navigate', { url });
   await withTimeout(loadFired, 20000, `page never fired load: ${url}`);
 
@@ -496,39 +298,29 @@ async function mockNameIn(send, sid) {
 
 // ---------------------------------------------------------------------------
 async function main() {
-  if (!existsSync(CHROME)) {
-    console.error(`browser-check-stage-fold: no Chrome at ${CHROME} (set CLAUDE_BOARD_CHROME_BIN to override).`);
-    process.exit(1);
-  }
+  requireChrome('browser-check-stage-fold');
 
-  const daemon = await startScratchDaemon();
-  const chrome = launchChrome();
-  let ws;
+  const daemon = await startScratchDaemon('cb-stage-fold');
   try {
     const daemonPort = await daemon.port();
     const posted = await postJson(`http://127.0.0.1:${daemonPort}/api/board`, boardBody(), daemon.secret);
     assert.ok(posted.url, `daemon did not return a board url: ${JSON.stringify(posted)}`);
     const boardUrl = `http://127.0.0.1:${daemonPort}${new URL(posted.url).pathname}`;
 
-    ws = new WebSocket(await chrome.endpoint());
-    await withTimeout(new Promise((resolve, reject) => {
-      ws.addEventListener('open', resolve, { once: true });
-      ws.addEventListener('error', () => reject(new Error('devtools websocket failed to open')), { once: true });
-    }), 10000, 'devtools websocket never opened');
-    const { send, onEvent } = connectDevtools(ws);
-    const cookie = sessionToken(daemon.secret);
-    const { sp, stages } = await openBoard(send, onEvent, boardUrl, cookie);
-    await runRows({ send, sp, stages });
-    await runInkRows({
-      send,
-      open: async (body, opts) => {
-        const made = await postJson(`http://127.0.0.1:${daemonPort}/api/board`, body, daemon.secret);
-        return openBoard(send, onEvent, `http://127.0.0.1:${daemonPort}${new URL(made.url).pathname}`, cookie, opts);
-      },
+    // Real scrollbars: the Pull-out rows measure the one a frame draws.
+    await withChrome({ tag: 'cb-stage-fold' }, async ({ send, onEvent }) => {
+      const cookie = sessionToken(daemon.secret);
+      const { sp, stages } = await openBoard(send, onEvent, boardUrl, cookie);
+      await runRows({ send, sp, stages });
+      await runInkRows({
+        send,
+        open: async (body, opts) => {
+          const made = await postJson(`http://127.0.0.1:${daemonPort}/api/board`, body, daemon.secret);
+          return openBoard(send, onEvent, `http://127.0.0.1:${daemonPort}${new URL(made.url).pathname}`, cookie, opts);
+        },
+      });
     });
   } finally {
-    if (ws) { try { ws.close(); } catch {} }
-    await chrome.cleanup();
     await daemon.stop();
   }
 }

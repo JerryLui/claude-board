@@ -167,6 +167,12 @@ const ARTIFACT_RULES = {
     patterns: [/page board/i, /one `html` block and nothing else/i],
     lost: ['the page-board shape rule', /one `html` block and nothing else/g],
   },
+  // ADR 121: an evidence page inlines its shots and clips, so a renderer has to know a
+  // stage may run to the post limit while a markdown, code or mermaid block may not.
+  'a stage may carry up to the post limit, and every other block keeps 512 KiB': {
+    patterns: [/a stage may carry up to the post's 25 MB/i, /every other block keeps 512 KiB/i],
+    lost: ['the stage cap', /up to the post's 25 MB/g],
+  },
 };
 for (const [rule, { patterns }] of Object.entries(ARTIFACT_RULES)) {
   check(`the manual states that ${rule}`, () => statesAll(patterns)(prose));
