@@ -268,6 +268,7 @@ one case that matters is also the one no automated check here can produce.
 - [A pin over an html stage arrives after the round flip, not with it](#a-pin-over-an-html-stage-arrives-after-the-round-flip-not-with-it)
 - [Preview harness](#preview-harness)
 - [A driven tab does not paint, and half the stage channel needs a paint](#a-driven-tab-does-not-paint-and-half-the-stage-channel-needs-a-paint)
+- [Headless Chrome's scrollbars follow the Mac's Show scroll bars setting](#headless-chromes-scrollbars-follow-the-macs-show-scroll-bars-setting)
 
 ### `ResizeObserver` does not necessarily deliver an initial observation
 
@@ -742,6 +743,32 @@ with a dispatched `WheelEvent` (which reaches listeners but is `isTrusted: false
 performs no native scroll), so hit-testing — which element a real notch lands on over
 a `pointer-events: none` iframe — stays a question only a human at the trackpad can
 answer.
+
+### Headless Chrome's scrollbars follow the Mac's Show scroll bars setting
+
+Headless Chrome on macOS draws the scrollbar kind the Mac's "Show scroll bars" setting
+(`AppleShowScrollBars`) asks for, so the same check sees different bars on different
+Macs. Chrome 154 headless drew classic 15px bars where this was first measured. Chrome
+155.0.8059.80 on jerry-m6 (2026-10-19), the setting unset ("Automatic", a trackpad Mac),
+drew overlay ones: a frame's native bar measured 0px while the board's restyled one
+(`::-webkit-scrollbar`, `src/styles.mjs`) still took 11px, and four rows of
+`test/browser-check-stage-fold.mjs` (three Pull-out rows and Wide 100vh) stopped at their
+own "no classic scrollbar" setup guard, on `main` too.
+
+A check that measures a bar picks its kind rather than inheriting it. `withChrome`'s
+`classicScrollbars` (`test/browser-support.mjs`) passes `-AppleShowScrollBars Always`:
+macOS reads a `-key value` pair off any app's command line as a defaults override for
+that process alone, and on the same Chrome 155 it drew classic 15px bars in the page and
+in a sandboxed `srcdoc` frame. Two traps in passing it. Headless Chrome opens every bare
+argument as a page and exits on two ("Multiple targets are not supported in headless
+mode"), so `Always` replaces `about:blank`. And as a page it would be a lookup of the host
+`always`, unless a file of that name sits in Chrome's working directory, which makes it a
+local file. `hideScrollbars` (`--hide-scrollbars`) zeroes every bar instead, the restyled
+one too. Tried and no help: a `CFFIXED_USER_HOME` holding a `.GlobalPreferences.plist`
+with the key (still 0px).
+
+A wide stage's sideways classic bar takes 15px out of its viewport, so a check of a
+fitted height adds `innerHeight - clientHeight`, read inside the frame.
 
 ---
 
@@ -2278,15 +2305,6 @@ Traps that have bitten once. A second bite moves the entry up into the section i
   the target ends at the window top under the sticky header. `scrollIntoView` crosses the
   opaque-origin frame boundary; an element's or the window's own `scrollTo` stays in its box,
   which is why `scrollToAnchor` (`src/render.mjs`) moves each box itself.
-- **Headless Chrome on macOS draws classic 15px scrollbars**, not the overlay ones a trackpad Mac
-  shows, unless `--hide-scrollbars` is passed (`withChrome`'s `hideScrollbars` in
-  `test/browser-support.mjs`). A wide stage's sideways scrollbar then takes 15px out of its
-  viewport, so a check of a fitted height adds `innerHeight - clientHeight`, read inside the
-  frame. [Not so on 2026-10-19: Chrome 155.0.8059.80 on jerry-m6, no `--hide-scrollbars`, drew
-  a frame's native bar at 0px (the board's restyled one still 11px), so four rows of
-  `test/browser-check-stage-fold.mjs` (three Pull-out rows and Wide 100vh) went red on their own
-  "no classic scrollbar" setup guard, at the integration tip before any change. Unproven
-  whether Chrome 155 or the Mac's unset "Show scroll bars" setting decides it.]
 - **A scroll aimed at a fractional offset stops on a whole pixel.** Chrome 154 headless, DPR 1: a
   board `scrollTo` aimed so a folded stage's target sits exactly `--head-clear` (88px) under the
   window top stopped at 5698 for 5697.75, and the frame's own scroll at 1738 for 1737.9, so the
@@ -2309,7 +2327,10 @@ Traps that have bitten once. A second bite moves the entry up into the section i
   `--enable-overlay-scrollbar` all left a native bar at 15px, and `--hide-scrollbars` zeroes
   every bar, the restyled 11px one included, so it is no overlay bar either. Behaviour that
   differs only beside an overlay bar is checked on declared numbers in the stand-in
-  (`withScrollbar` in `test/check-stage-lens.mjs`) or by eye on a trackpad Mac.
+  (`withScrollbar` in `test/check-stage-lens.mjs`) or by eye on a trackpad Mac. [Untried: the
+  macOS defaults override `-AppleShowScrollBars WhenScrolling`, the overlay counterpart of what
+  `classicScrollbars` passes; see "Headless Chrome's scrollbars follow the Mac's Show scroll bars
+  setting".]
 - **The cascade resolver cannot see a sibling combinator or an inline style.**
   `resolveComputedProperty` splits a selector on whitespace, so `~` is a compound it cannot
   parse and a quoted attribute value with a space in it (`[style*="height: 600px"]`) breaks in
@@ -2391,12 +2412,20 @@ Traps that have bitten once. A second bite moves the entry up into the section i
   in three, and three equal reads 150ms apart did not catch the pending shrink. Make a pressed
   stage taller than the placeholder (its box then only grows, at once) and wait for the frame's
   `style.height` before reading its place (`stageOrigin` in `test/browser-check-video.mjs`).
-- **`check-install.mjs` can outrun the suite's 180s per-check deadline on a loaded Mac**
-  (2026-10-19). `test/run.mjs` estimates the check at ~48s, but with review agents and headless
-  Chrome running beside the suite it measured 171s and 176s on a branch and 184s on `main` alone,
-  so `npm run check` reports a timeout with every row green. Rerun it alone, or run the suite with
-  CI's `CLAUDE_BOARD_CHECK_TIMEOUT_MS=300000`, before reading the timeout as a regression; compare
-  against `main` in a detached worktree under the same load.
+- **`check-install.mjs`'s time is process starts across some 60 `install.sh` runs, not one slow
+  step** (2026-10-19). It ran 168s to 240s on jerry-m6 against the suite's 180s per-check deadline
+  (`test/run.mjs` still estimates ~48s), so `npm run check` could report a timeout with every row
+  green. Timed by row and by traced `install.sh` line: each run took 2s to 3s, and a run that
+  rebuilt nothing spent most of its 2s starting processes, about 60ms per node start: a dozen of
+  `install.sh`'s own node calls (hashing, `node --version`), six launchctl stub calls and four
+  client CLI stub calls, all node, plus the bootstrap retry's half-second sleep, which the stub
+  forced on every run by refusing the first bootstrap after any bootout. 35 bundle builds took
+  about 0.65s each. The stubs are now sh and awk, and refuse a bootstrap only after a bootout of a
+  loaded job, as launchd does: 168s to 117s back to back on the same Mac. The check prints its own
+  time last. What is left is `install.sh`'s own node calls (about 0.75s a run) and its builds:
+  measure those first if it creeps back. To time a script under macOS's bash 3.2, which has no
+  `EPOCHREALTIME` and no `BASH_XTRACEFD`: run it under `bash -x` from a node wrapper that splits
+  the trace lines (a marked `PS4`) off stderr and stamps each as it arrives.
 - **A stage frame that leaves the document loads again, and a Send's push used to take every
   frame out** (2026-10-19). Chrome 155: `applySubmittedPush` swapped the whole round section, so a
   video paused at 1.4s came back at 0 after a Send, and `el.replaceWith(el)` is no safe no-op

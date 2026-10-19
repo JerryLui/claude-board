@@ -28,97 +28,129 @@ import { DEFAULT_REF_ROOTS } from '../src/resolve.mjs';
 import { DEFAULT_PORT } from '../src/handoff.mjs';
 import { check, freePort, listFiles, repoRoot, runMain, sleep, waitForHealthy, writeStub } from './support.mjs';
 
+// Printed at the end: this is the suite's slowest check, and test/run.mjs's per-check
+// deadline (180s unless CLAUDE_BOARD_CHECK_TIMEOUT_MS says otherwise) applies to it.
+const startedAt = Date.now();
+
 const installScript = path.join(repoRoot, 'install.sh');
 const uninstallScript = path.join(repoRoot, 'uninstall.sh');
 
-const STUB_CLAUDE = `#!/usr/bin/env node
-// Test stub standing in for the real \`claude\` CLI. Records every invocation
-// and simulates just enough of \`mcp add\`/\`mcp remove --scope user\` to prove
-// install.sh reconciles rather than duplicates: a JSON object keyed by
-// server label.
-import fs from 'node:fs';
-
-const logPath = process.env.STUB_CLAUDE_LOG;
-const statePath = process.env.STUB_CLAUDE_STATE;
-const args = process.argv.slice(2);
-fs.appendFileSync(logPath, JSON.stringify(args) + '\\n');
-
-function loadState() {
-  try { return JSON.parse(fs.readFileSync(statePath, 'utf8')); } catch { return {}; }
-}
-function saveState(state) { fs.writeFileSync(statePath, JSON.stringify(state, null, 2)); }
-
-if (args[0] === 'mcp' && args[1] === 'get') {
-  // \`codex mcp get NAME\`: exit 1 when absent, which is what uninstall.sh asks, since the
-  // real \`codex mcp remove\` exits 0 either way.
-  process.exit(args[2] in loadState() ? 0 : 1);
-} else if (args[0] === 'mcp' && args[1] === 'remove') {
-  const label = args[2];
-  const state = loadState();
-  if (!(label in state)) process.exit(1); // nothing to remove, like the real CLI
-  delete state[label];
-  saveState(state);
-  process.exit(0);
-} else if (args[0] === 'mcp' && args[1] === 'add') {
-  const label = args[2];
-  const scopeIdx = args.indexOf('--scope');
-  const scope = scopeIdx >= 0 ? args[scopeIdx + 1] : null;
-  const dashIdx = args.indexOf('--');
-  const command = dashIdx >= 0 ? args.slice(dashIdx + 1) : [];
-  // \`codex mcp add\`'s --env KEY=VALUE, repeatable; \`claude mcp add\` has one too.
-  const env = {};
-  args.forEach((a, i) => { if (a === '--env' && i < dashIdx) { const [k, ...v] = args[i + 1].split('='); env[k] = v.join('='); } });
-  const state = loadState();
-  state[label] = { scope, command, env };
-  saveState(state);
-  process.exit(0);
-} else {
-  process.exit(1);
-}
-`;
-// The same stub standing in for \`codex\`: its \`mcp add NAME --env K=V -- CMD...\` and
-// \`mcp remove NAME\` are the claude CLI's minus --scope, so one template serves both,
-// keyed to its own log and state files.
-const STUB_CODEX = STUB_CLAUDE.replaceAll('STUB_CLAUDE_', 'STUB_CODEX_').replace('the real `claude` CLI', 'the real `codex` CLI');
-
-const STUB_LAUNCHCTL = `#!/usr/bin/env node
-// Test stub standing in for the real launchctl. Records every invocation and
-// never touches the real launchd session. This is the "skip or stub anything
-// that would genuinely load a launchd job" seam.
+// The stubs install.sh calls are sh and awk rather than node: it calls launchctl six
+// times a run and the client CLIs four, the check runs install.sh some sixty times, and
+// a node start costs about 60ms where sh and awk cost about 5. They are written with
+// String.raw, so the awk and sh escapes reach the files as written: no backtick may
+// appear in them, and no dollar-brace but the two below. LC_ALL=C on every awk: awk
+// refuses a byte that is not UTF-8 under a UTF-8 locale, and a path in a check may
+// carry one (node read it as U+FFFD, and a JSON reader of these files still does).
 //
-// It does NOT always succeed, because the real thing does not: \`bootout\`
-// returns as soon as the job is asked to stop, and a \`bootstrap\` landing while
-// a KeepAlive job is still tearing down is refused (EBUSY, "service already
-// loaded"). A stub that always exits 0 turns the idempotency proof into an
-// artifact — the reinstall path it certifies is the one path that fails on a
-// real machine. So: the first bootstrap after each bootout fails, exactly once.
-import fs from 'node:fs';
-const args = process.argv.slice(2);
-fs.appendFileSync(process.env.STUB_LAUNCHCTL_LOG, JSON.stringify(args) + '\\n');
-const statePath = process.env.STUB_LAUNCHCTL_STATE;
-const readState = () => { try { return JSON.parse(fs.readFileSync(statePath, 'utf8')); } catch { return {}; } };
-const writeState = s => fs.writeFileSync(statePath, JSON.stringify(s));
-if (args[0] === 'bootout') {
-  writeState({ tearingDown: true });
-  process.exit(0);
+// q() quotes one string as JSON; ARGV_JSON prints the stub's argv as a JSON array.
+const AWK_QUOTE = String.raw`function q(s) {
+  gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s)
+  gsub(/\n/, "\\n", s); gsub(/\r/, "\\r", s); gsub(/\t/, "\\t", s)
+  return "\"" s "\""
+}`;
+const ARGV_JSON = String.raw`LC_ALL=C awk '${AWK_QUOTE}
+BEGIN { out = "["; for (i = 1; i < ARGC; i++) out = out (i > 1 ? "," : "") q(ARGV[i]); print out "]" }' "$@"`;
+
+const STUB_CLAUDE = String.raw`#!/bin/sh
+# Test stub standing in for the real 'claude' CLI. Records every invocation and
+# simulates just enough of 'mcp add'/'mcp remove --scope user' to prove install.sh
+# reconciles rather than duplicates: a JSON object keyed by server label, written
+# one label to a line so this script can edit it.
+${ARGV_JSON} >> "$STUB_CLAUDE_LOG"
+state="$STUB_CLAUDE_STATE"
+
+# Exit 0 when label $1 is registered.
+has() {
+  [ -f "$state" ] && LC_ALL=C awk -v key="  \"$1\": " 'index($0, key) == 1 { found = 1 } END { exit !found }' "$state"
 }
-if (args[0] === 'bootstrap') {
-  const state = readState();
-  if (state.tearingDown) {
-    writeState({ tearingDown: false });
-    process.stderr.write('Bootstrap failed: 37: Operation already in progress\\n');
-    process.exit(37);
+# Every entry but label $1's, one to a line, without the separating comma.
+others() {
+  [ -f "$state" ] || return 0
+  LC_ALL=C awk -v key="  \"$1\": " 'index($0, "  \"") == 1 && index($0, key) != 1 { sub(/,$/, ""); print }' "$state"
+}
+# The entries on stdin, written as the state object.
+save() {
+  LC_ALL=C awk 'BEGIN { print "{" } NR > 1 { print prev "," } { prev = $0 } END { if (NR) print prev; print "}" }' > "$state"
+}
+
+case "$1 $2" in
+  'mcp get')
+    # 'codex mcp get NAME': exit 1 when absent, which is what uninstall.sh asks, since
+    # the real 'codex mcp remove' exits 0 either way.
+    if has "$3"; then exit 0; fi
+    exit 1 ;;
+  'mcp remove')
+    has "$3" || exit 1 # nothing to remove, like the real CLI
+    rest="$(others "$3")"
+    if [ -n "$rest" ]; then printf '%s\n' "$rest"; fi | save
+    exit 0 ;;
+  'mcp add')
+    # The scope after --scope, null without one; the command after --; and
+    # 'codex mcp add'/'claude mcp add' --env KEY=VALUE before the --, repeatable, the
+    # value everything after the key's first '='.
+    entry="$(LC_ALL=C awk '${AWK_QUOTE}
+BEGIN {
+  n = ARGC - 1
+  dash = 0; for (i = 1; i <= n; i++) if (ARGV[i] == "--") { dash = i; break }
+  scope = "null"; for (i = 1; i <= n; i++) if (ARGV[i] == "--scope") { if (i < n) scope = q(ARGV[i + 1]); break }
+  cmd = ""; if (dash) for (i = dash + 1; i <= n; i++) cmd = cmd (i > dash + 1 ? "," : "") q(ARGV[i])
+  ne = 0
+  for (i = 1; i < dash; i++) if (ARGV[i] == "--env") {
+    kv = ARGV[i + 1]; p = index(kv, "=")
+    k = p ? substr(kv, 1, p - 1) : kv; v = p ? substr(kv, p + 1) : ""
+    if (!(k in val)) key[++ne] = k
+    val[k] = v
   }
-  process.exit(0);
-}
-// The pid gate asks launchd which process it supervises; this stub starts nothing,
-// so the answer is whatever pid the check says the "supervised" daemon has.
-if (args[0] === 'print') {
-  const jobPid = process.env.STUB_LAUNCHCTL_PRINT_PID;
-  if (jobPid) process.stdout.write('\\tpid = ' + jobPid + '\\n');
-  process.exit(0);
-}
-process.exit(0);
+  env = ""; for (j = 1; j <= ne; j++) env = env (j > 1 ? "," : "") q(key[j]) ":" q(val[key[j]])
+  printf "  %s: {\"scope\":%s,\"command\":[%s],\"env\":{%s}}\n", q(ARGV[3]), scope, cmd, env
+}' "$@")"
+    rest="$(others "$3")"
+    { if [ -n "$rest" ]; then printf '%s\n' "$rest"; fi; printf '%s\n' "$entry"; } | save
+    exit 0 ;;
+esac
+exit 1
+`;
+// The same stub standing in for `codex`: its `mcp add NAME --env K=V -- CMD...` and
+// `mcp remove NAME` are the claude CLI's minus --scope, so one template serves both,
+// keyed to its own log and state files.
+const STUB_CODEX = STUB_CLAUDE.replaceAll('STUB_CLAUDE_', 'STUB_CODEX_').replace("the real 'claude' CLI", "the real 'codex' CLI");
+
+const STUB_LAUNCHCTL = String.raw`#!/bin/sh
+# Test stub standing in for the real launchctl. Records every invocation and
+# never touches the real launchd session. This is the "skip or stub anything
+# that would genuinely load a launchd job" seam.
+#
+# It does NOT always succeed, because the real thing does not: 'bootout' of a
+# loaded job returns as soon as the job is asked to stop, and a 'bootstrap'
+# landing while a KeepAlive job is still tearing down is refused (EBUSY, "service
+# already loaded"). A stub that always exits 0 turns the idempotency proof into an
+# artifact: the reinstall path it certifies is the one path that fails on a real
+# machine. So the first bootstrap after a bootout of a loaded job fails, exactly
+# once. A bootout with nothing loaded, a first install's, stops nothing, so the
+# bootstrap after it lands, as on a real machine, and that install skips the
+# retry's half-second sleep.
+${ARGV_JSON} >> "$STUB_LAUNCHCTL_LOG"
+state="$(cat "$STUB_LAUNCHCTL_STATE" 2>/dev/null)"
+case "$1" in
+  bootout)
+    if [ "$state" = loaded ]; then printf 'tearing-down' > "$STUB_LAUNCHCTL_STATE"; fi
+    exit 0 ;;
+  bootstrap)
+    if [ "$state" = tearing-down ]; then
+      printf 'stopped' > "$STUB_LAUNCHCTL_STATE"
+      echo 'Bootstrap failed: 37: Operation already in progress' >&2
+      exit 37
+    fi
+    printf 'loaded' > "$STUB_LAUNCHCTL_STATE"
+    exit 0 ;;
+  # The pid gate asks launchd which process it supervises; this stub starts nothing,
+  # so the answer is whatever pid the check says the "supervised" daemon has.
+  print)
+    if [ -n "$STUB_LAUNCHCTL_PRINT_PID" ]; then printf '\tpid = %s\n' "$STUB_LAUNCHCTL_PRINT_PID"; fi
+    exit 0 ;;
+esac
+exit 0
 `;
 
 const workDir = mkdtempSync(path.join(tmpdir(), 'claude-board-install-check-'));
@@ -150,12 +182,12 @@ writeFileSync(storeBoardFile, storeBoardContent);
 const pomodoroFile = path.join(storeDir, 'pomodoro.json');
 writeFileSync(pomodoroFile, JSON.stringify({ deadline: 1234567890, cycles: 2, workMinutes: 25 }));
 
-const claudeStub = writeStub(binDir, 'claude-stub.mjs', STUB_CLAUDE);
-const codexStub = writeStub(binDir, 'codex-stub.mjs', STUB_CODEX);
+const claudeStub = writeStub(binDir, 'claude-stub.sh', STUB_CLAUDE);
+const codexStub = writeStub(binDir, 'codex-stub.sh', STUB_CODEX);
 // install.sh only asks whether \`opencode\` is on PATH (its registration is a config file,
 // not a command), so the stub standing in for it is an executable that is never run.
 const opencodeStub = writeStub(binDir, 'opencode-stub.sh', '#!/bin/sh\nexit 0\n');
-const launchctlStub = writeStub(binDir, 'launchctl-stub.mjs', STUB_LAUNCHCTL);
+const launchctlStub = writeStub(binDir, 'launchctl-stub.sh', STUB_LAUNCHCTL);
 
 const claudeLog = path.join(workDir, 'claude-invocations.log');
 const claudeState = path.join(workDir, 'claude-registrations.json');
@@ -1184,13 +1216,19 @@ async function main() {
   });
 
   await check('a bootstrap refused because the previous KeepAlive job is still tearing down is retried, not fatal', async () => {
-    // The stub launchctl fails the first bootstrap after each bootout, which is what
-    // the real one does on the reinstall path. (Ablation: with the retry loop replaced
-    // by a bare `launchctl bootstrap`, `set -e` kills the script on that first failure
-    // and BOTH runs above exit non-zero — the idempotency claim evaporates.)
+    // The stub launchctl fails the first bootstrap after a bootout of a loaded job,
+    // which is what the real one does on the reinstall path; the first install had
+    // nothing loaded. (Ablation: with the retry loop replaced by a bare `launchctl
+    // bootstrap`, `set -e` kills the reinstall on that first failure and the second
+    // run above exits non-zero: the idempotency claim evaporates.)
     const lines = readFileSync(launchctlLog, 'utf8').trim().split('\n').map(l => JSON.parse(l));
-    const bootstraps = lines.filter(l => l[0] === 'bootstrap');
-    assert.equal(bootstraps.length, 4, 'each run must retry its refused bootstrap exactly once more (2 runs x 2 attempts)');
+    const bootstrapsPerRun = [];
+    for (const [verb] of lines) {
+      if (verb === 'bootout') bootstrapsPerRun.push(0);
+      else if (verb === 'bootstrap') bootstrapsPerRun[bootstrapsPerRun.length - 1] += 1;
+    }
+    assert.deepEqual(bootstrapsPerRun, [1, 2],
+      'the first install bootstraps once, nothing being loaded; the reinstall retries its refused bootstrap exactly once more');
     assert.equal(first.status, 0);
     assert.equal(second.status, 0);
   });
@@ -3514,5 +3552,6 @@ runMain('install', main, {
   cleanup: () => {
     healthProc.kill();
     rmSync(workDir, { recursive: true, force: true });
+    console.log(`# check-install ran ${Math.round((Date.now() - startedAt) / 1000)}s`);
   },
 });

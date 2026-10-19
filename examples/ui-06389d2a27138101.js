@@ -3156,22 +3156,50 @@
 
   /** A Pull-out pressed on a held frame (fillHeldStages) has no stage to copy yet:
    * the frame waits for a fill, or one failed. The press starts a fill, or joins the
-   * one out, and the control says why nothing opened, then, once the fill settles,
-   * either goes back to what it said or says the stage did not load. */
-  function pullOutHeldStage(frame, opener) {
+   * one out, and the control and a note beside it say why nothing opened, then,
+   * once the fill settles, either the note goes and the control goes back to what
+   * it said, or both say the stage did not load. */
+  function pullOutHeldStage(frame) {
     var settled = fillHeldStages();
-    if (!opener || !opener.setAttribute) return;
-    var was = opener.__cbPullOutLabel;
-    if (!was) was = opener.__cbPullOutLabel = { title: opener.getAttribute('title'), label: opener.getAttribute('aria-label') };
+    sayOnHeldStage(frame, STAGE_LOADING_NOTE);
+    settled.then(function () {
+      if (frame.hasAttribute('data-held')) sayOnHeldStage(frame, STAGE_UNLOADED_NOTE, true);
+      else sayOnHeldStage(frame, null);
+    });
+  }
+
+  /** What the Pull-out in a held frame's corner says: 'note' as the control's
+   * label and in a note beside it, on screen, or with no note what the control
+   * said before either. Both are found from the frame each time, never kept from
+   * the press: a push that keeps the frame puts its own control in the corner
+   * (wireStagePullOut). The note sits in the board's document beside the
+   * control, over the frame's corner and never inside it, and a screen reader
+   * skips it, since the control's own label already says the same words.
+   * 'failed' marks the note for a fill that did not load the stage, which ends
+   * the wait the note's spinner stands for. */
+  function sayOnHeldStage(frame, note, failed) {
+    var wrap = frame.closest && frame.closest('.stage-wrap');
+    if (!wrap) return;
+    var control = wrap.querySelector('.pull-out');
+    var shown = wrap.querySelector('.pull-out-note');
+    var was = control && control.__cbPullOutLabel;
+    if (control && !was && note) was = control.__cbPullOutLabel = { title: control.getAttribute('title'), label: control.getAttribute('aria-label') };
     function put(name, value) {
-      if (value == null) opener.removeAttribute(name); else opener.setAttribute(name, value);
+      if (value == null) control.removeAttribute(name); else control.setAttribute(name, value);
     }
-    function say(note) {
+    if (was) {
       put('title', note || was.title);
       put('aria-label', note || was.label);
     }
-    say(STAGE_LOADING_NOTE);
-    settled.then(function () { say(frame.hasAttribute('data-held') ? STAGE_UNLOADED_NOTE : null); });
+    if (!note) { if (shown) shown.replaceWith(); return; }
+    if (!shown) {
+      shown = document.createElement('span');
+      shown.className = 'pull-out-note';
+      shown.setAttribute('aria-hidden', 'true');
+      wrap.appendChild(shown);
+    }
+    shown.classList.toggle('pull-out-note-failed', !!failed);
+    shown.textContent = note;
   }
 
   /** Mount 'section''s stage in the lens. 'opener' is the control that asked for
@@ -3181,7 +3209,7 @@
   function stageLensOpen(section, blockId, opener) {
     var inline = section.querySelector('iframe.html-stage');
     if (!inline || !inline.getAttribute) return;
-    if (inline.hasAttribute('data-held')) { pullOutHeldStage(inline, opener); return; }
+    if (inline.hasAttribute('data-held')) { pullOutHeldStage(inline); return; }
     var srcdoc = inline.getAttribute('srcdoc');
     var sandbox = inline.getAttribute('sandbox');
     // Fail closed on both: with no srcdoc there is nothing to show, and with no
@@ -6772,6 +6800,9 @@
           if (!sha || !Object.prototype.hasOwnProperty.call(whole, sha)) return;
           frame.removeAttribute('data-held');
           frame.setAttribute('srcdoc', whole[sha]);
+          // A Pull-out that said the stage was loading, or did not load, says
+          // nothing of the kind once it is in, whichever fill brought it.
+          sayOnHeldStage(frame, null);
         });
       }).catch(function () { /* the frame stays empty until the next call */ }).then(readNext);
     }

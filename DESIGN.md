@@ -389,6 +389,19 @@ serving agent HTML and a security round of its own. The cost is the corner itsel
 covers the artifact's own top-right corner. A page board and a block that failed to render carry
 none.
 
+**A Pull-out on a held stage says why nothing opened in a note beside it, not only in its
+tooltip.** A held frame (ADR 122) has no stage to copy until a fill lands it. The Pull-out that
+opens it (ADR 119, 120) used to say so only through the control's `title`/`aria-label`, true but
+invisible to a sighted reader who clicks and sees nothing happen without first hovering to read a
+tooltip. The control now also writes a note into the board's own document, over the held frame's
+corner, left of the button: "This stage is still loading. Open it full size once it shows." while
+the fill it started or joined is still out, or "This stage did not load. Press again to retry, or
+reload the page." once that fill settles with the frame still held. The note is `aria-hidden`,
+since the control's own label carries the same words and a screen reader needs it said once, not
+twice. It is removed the moment any fill, the one the press started or a later one, puts the
+stage into the frame, so the Lens never opens beside a note about a stage that already loaded.
+Rejected: the tooltip alone (the prior state), discoverable only on hover or focus.
+
 **References may resolve inside a configured allowlist as well as `cwd`.** `cwd` confinement alone
 means a session can never render the skill, command or agent file it is discussing, a real and
 recurring case in this repo. Read-only by construction, since resolving a reference is only ever a

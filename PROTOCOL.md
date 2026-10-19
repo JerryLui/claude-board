@@ -268,8 +268,8 @@ else, on a live board and on an archive opened from disk alike: no route serves 
 `http(s)` or relative source loads nothing. The clip counts toward the caps every stage lives
 under (ADR 121): 25,000,000 bytes per `html` block, by value or by reference, and the same
 25,000,000 across every `html` block in one post, each a 400 naming the cap; and 25,000,000 bytes
-per request body, past which the daemon drops the connection mid-upload and sends no response at
-all. Every other block keeps 512 KiB.
+per request body, past which the daemon reads the body through, stores nothing and answers 413
+naming the limit and the size it read. Every other block keeps 512 KiB.
 
 **`explainer`** (ADR 111) is the question's own one-to-three-sentence lead-in: markdown by value,
 optional, bounded by the same by-value cap as `prompt`, rendered as plain prose directly under the
@@ -454,10 +454,12 @@ anchor on a `<video>` also resolves under the video's fallback text, the name a 
 before videos carried a second gave it. Another second on the same video is a different anchor, so
 a sent comment at 0:07 leaves the video open to a comment at 0:12; the stage marks the video sent
 only while it shows 0:07 (`sentTimes`). While comment mode is on the stage takes `controls` off
-every video that has them or gains them (a stage's own script adding a `<video controls>` or putting
-`controls` back), and gives them back to those videos when it ends: a press on Chrome's native controls
-seeks without reaching the stage's document, so nothing there could cancel it. The press then lands
-on the video itself and sends the second it shows.
+every video in its light DOM, the tree its own markup builds, that has them or gains them (a stage's
+own script adding a `<video controls>` there or putting `controls` back), and gives them back to
+those videos when it ends: a press on Chrome's native controls seeks without reaching the stage's
+document, so nothing there could cancel it. The press then lands on the video itself and sends the
+second it shows. A video inside a shadow root keeps its controls: a script built it, which the
+markup rule above already rules out.
 
 ### A complete board
 

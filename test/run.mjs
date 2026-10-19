@@ -32,7 +32,7 @@ const CHECK_TIMEOUT_MS = Number(process.env.CLAUDE_BOARD_CHECK_TIMEOUT_MS) || 18
 process.env.CLAUDE_BOARD_STRANDED_GRACE_MS ??= String(24 * 60 * 60 * 1000);
 
 // Capped well below the core count on purpose. The suite's wall clock is pinned by its
-// single slowest check (check-install, ~48s of real installer runs and `cc` builds), so
+// single slowest check (check-install, ~120s of real installer runs and `cc` builds), so
 // past a handful of workers there is nothing left to overlap -- measured: 4 jobs and 10
 // jobs finish within a second of each other. Staying low leaves headroom for the three
 // wall-clock deadlines in check-anchor-perf, which have to hold on a 2-core CI box too.

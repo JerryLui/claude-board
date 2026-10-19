@@ -691,6 +691,23 @@ function sendCredentialRefusal(req, res, pathname) {
   return sendJson(res, 401, { error: 'no claude-board credential', recover: command });
 }
 
+/** The most one request body may carry, a board post above all. src/resolve.mjs's
+ * `MAX_HTML_BYTES` is the same number by ADR 121 and a different bound: it caps one
+ * stage's markup however it arrived, read off disk included, and this caps the bytes on
+ * the wire. */
+const MAX_POST_BYTES = 25_000_000;
+
+/** Past this many bytes a body is no longer read through to its 413: the connection is
+ * cut instead, as an abuse bound. No caller that means well comes near it. */
+const MAX_DRAINED_BYTES = 4 * MAX_POST_BYTES;
+
+function postTooLarge(bytes) {
+  return Object.assign(new Error(
+    `post is ${bytes.toLocaleString('en-US')} bytes, over the ${MAX_POST_BYTES.toLocaleString('en-US')}-byte limit of one post: ` +
+    'split it into rounds, or name a large stage\'s file in its source rather than inlining it'
+  ), { status: 413 });
+}
+
 function readJsonBody(req) {
   return new Promise((resolve, reject) => {
     // A JSON content-type is the other half of the same guard: `text/plain` and the
@@ -701,6 +718,16 @@ function readJsonBody(req) {
     if (ctype !== 'application/json') {
       return reject(Object.assign(new Error('content-type must be application/json'), { status: 415 }));
     }
+    // A body over MAX_POST_BYTES is read to its end and dropped as it arrives, from the
+    // first byte when its Content-Length already says so, and only then refused. A 413
+    // sent while the caller is still uploading can reach it as a reset before the status
+    // does, and bin/mcp.mjs reports a reset as a daemon to revive.
+    const declared = Number(req.headers['content-length']);
+    if (declared > MAX_DRAINED_BYTES) {
+      req.destroy();
+      return reject(postTooLarge(declared));
+    }
+    let over = declared > MAX_POST_BYTES;
     // Buffers, decoded once at the end — never `data += chunk`. A socket chunk boundary
     // falls wherever the kernel put it, so stringifying each chunk on its own turns any
     // multi-byte character that straddles one into U+FFFD: an `é` in a 70KB html stage
@@ -710,11 +737,19 @@ function readJsonBody(req) {
     const chunks = [];
     let length = 0;
     req.on('data', chunk => {
-      chunks.push(chunk);
       length += chunk.length;
-      if (length > 25_000_000) req.destroy(new Error('body too large'));
+      if (length > MAX_DRAINED_BYTES) {
+        req.destroy();
+        return reject(postTooLarge(length));
+      }
+      if (!over && length > MAX_POST_BYTES) {
+        over = true;
+        chunks.length = 0;
+      }
+      if (!over) chunks.push(chunk);
     });
     req.on('end', () => {
+      if (over) return reject(postTooLarge(length));
       if (!length) return resolve({});
       try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch (err) { reject(err); }
     });

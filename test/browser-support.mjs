@@ -83,12 +83,22 @@ export async function row(name, fn) {
 // Headless Chrome over CDP. QUIRKS.md "The worktree hook refuses Chrome launched
 // from the shell": it is spawned from node, never from a quoted shell path.
 //
-// `hideScrollbars` zeroes every scrollbar (QUIRKS.md "Headless Chrome on macOS draws
-// classic 15px scrollbars"), so a check that measures one leaves it off. `proxyPort`
+// Scrollbars follow the Mac's "Show scroll bars" setting (QUIRKS.md "Headless Chrome's
+// scrollbars follow the Mac's Show scroll bars setting"), so a check that measures a
+// bar picks one: `hideScrollbars` zeroes every bar; `classicScrollbars` draws classic
+// 15px ones whatever the setting; with neither, the setting decides. `proxyPort`
 // routes every request through the witness below and adds the flags that quiet the
 // background traffic it would otherwise record.
-function launchChrome({ tag, proxyPort = null, hideScrollbars = false }) {
+//
+// `classicScrollbars` is `-AppleShowScrollBars Always`, which macOS reads off any app's
+// command line as a defaults override, in this Chrome only. Headless Chrome opens every
+// bare argument as a page and refuses two, so `Always` replaces `about:blank` as the one
+// it opens, and runs from the profile dir, where an empty file of that name makes the
+// page a local file, not a lookup of the host `always`.
+function launchChrome({ tag, proxyPort = null, hideScrollbars = false, classicScrollbars = false }) {
+  if (hideScrollbars && classicScrollbars) throw new Error('withChrome: hideScrollbars and classicScrollbars contradict');
   const profile = scratchDir(`${tag}-profile-`);
+  if (classicScrollbars) writeFileSync(path.join(profile, 'Always'), '');
   const chrome = spawn(CHROME, [
     '--headless=new', '--disable-gpu',
     ...(hideScrollbars ? ['--hide-scrollbars'] : []),
@@ -101,8 +111,8 @@ function launchChrome({ tag, proxyPort = null, hideScrollbars = false }) {
       '--disable-domain-reliability',
       '--disable-features=OptimizationHints,MediaRouter,AutofillServerCommunication,NetworkTimeServiceQuerying',
     ]),
-    'about:blank',
-  ], { stdio: 'ignore' });
+    ...(classicScrollbars ? ['-AppleShowScrollBars', 'Always'] : ['about:blank']),
+  ], { stdio: 'ignore', cwd: classicScrollbars ? profile : undefined });
   children.add(chrome);
   let chromeFailed = null;
   chrome.on('error', err => { chromeFailed = err; });
@@ -170,8 +180,8 @@ function connectDevtools(ws) {
  * down afterward however `fn` ends. `send(method, params, sessionId)` answers a
  * DevTools command (15s, then it rejects); `onEvent(listener)` hears every event
  * and hands back its own unsubscribe. `tag` names the profile's temp dir. */
-export async function withChrome({ tag, proxyPort = null, hideScrollbars = false }, fn) {
-  const chrome = launchChrome({ tag, proxyPort, hideScrollbars });
+export async function withChrome({ tag, proxyPort = null, hideScrollbars = false, classicScrollbars = false }, fn) {
+  const chrome = launchChrome({ tag, proxyPort, hideScrollbars, classicScrollbars });
   let ws;
   try {
     ws = new WebSocket(await chrome.endpoint());

@@ -14,7 +14,7 @@
 //
 // Harness: test/browser-support.mjs -- the branch's own bin/daemon.mjs on a scratch
 // port and a scratch store, headless Chrome over the DevTools Protocol with Node's
-// native WebSocket, zero npm dependencies, real scrollbars. Every
+// native WebSocket, zero npm dependencies, classic scrollbars forced on. Every
 // mock sits on ONE ordinary board twice, once in a question's context and once at
 // top level (an ordinary board, not a page board: QUIRKS.md "A fixture board
 // holding one html block and nothing else is a PAGE board"), and a tall and a
@@ -307,8 +307,9 @@ async function main() {
     assert.ok(posted.url, `daemon did not return a board url: ${JSON.stringify(posted)}`);
     const boardUrl = `http://127.0.0.1:${daemonPort}${new URL(posted.url).pathname}`;
 
-    // Real scrollbars: the Pull-out rows measure the one a frame draws.
-    await withChrome({ tag: 'cb-stage-fold' }, async ({ send, onEvent }) => {
+    // Classic scrollbars, whatever the Mac's "Show scroll bars" setting: the Pull-out
+    // rows measure the one a frame draws, and the wide 100vh row counts its sideways one.
+    await withChrome({ tag: 'cb-stage-fold', classicScrollbars: true }, async ({ send, onEvent }) => {
       const cookie = sessionToken(daemon.secret);
       const { sp, stages } = await openBoard(send, onEvent, boardUrl, cookie);
       await runRows({ send, sp, stages });
@@ -477,10 +478,11 @@ async function runRows({ send, sp, stages }) {
   });
 
   // --- The Pull-out and the frame's own scrollbar (ADR.md entry 120) ----------
-  // Headless Chrome draws classic scrollbars, which take their width out of the
-  // frame's right edge, just inside its border; an overlay bar takes none. The
-  // bar's width is read inside the frame itself, and the Pull-out's place off the
-  // frame's own box in the board, so nothing here is the board's word for it.
+  // This Chrome draws classic scrollbars (`classicScrollbars` in main), which take
+  // their width out of the frame's right edge, just inside its border; an overlay
+  // bar takes none. The bar's width is read inside the frame itself, and the
+  // Pull-out's place off the frame's own box in the board, so nothing here is the
+  // board's word for it.
   // `marked` is the board's own word, that this frame scrolls inside
   // (.stage-scrolls on the stage's block), read beside the geometry it explains.
   const pullOut = name => evalPage(`(function () {

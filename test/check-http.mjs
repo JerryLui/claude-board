@@ -33,7 +33,7 @@ import { isPageRound, ROUND_OPEN_UNAWAITED_TITLE, PILL_READONLY_TITLE } from '..
 import { StandInEvent } from './dom-stand-in.mjs';
 import {
   boardDataOf, check, execFileAsync, freshLog, openSseClient, pageHarness, postBoard, rawRequest, renderedMarkup, runMain,
-  secretFetch, secretHome, sessionCookieHeader, sleep, waitForCount, withEnv, writeHeaders,
+  secretFetch, secretHome, sessionCookieHeader, sleep, spawnShim, waitForCount, withEnv, withTimeout, writeHeaders,
 } from './support.mjs';
 
 const { loadBoard, enableCommentMode } = await pageHarness();
@@ -3847,28 +3847,78 @@ async function main() {
     }
   });
 
-  await check('a post carrying video over the 25,000,000-byte post limit is refused by a reset connection with nothing stored', async () => {
-    // readJsonBody (src/server.mjs) destroys the request once its body passes
-    // 25,000,000 bytes, so the refusal is no HTTP response at all: the caller's socket
-    // resets mid-upload, and node:http (bin/mcp.mjs's transport) reports ECONNRESET
-    // "socket hang up". One stage at the html cap fills the post limit, so the JSON
-    // around it carries the body past it.
-    const body = JSON.stringify({
-      title: 'Video post over the body limit',
-      blocks: [{ kind: 'html', html: videoStage(MAX_HTML_BYTES) }],
+  // One stage at the html cap fills the post limit, so the JSON around it carries the
+  // body past it.
+  const oversizedBlocks = () => [{ kind: 'html', html: videoStage(MAX_HTML_BYTES) }];
+
+  /** `body` posted to POST /api/board holding the secret, in 1 MiB writes framed by a
+   * Content-Length or, with `chunked`, by `Transfer-Encoding: chunked` and no length.
+   * Resolves the status, the body, and `sentWhole`: whether the whole upload had gone out
+   * when the answer arrived. Rejects with the socket's error when no answer arrives. */
+  const postFramed = (body, { chunked }) => new Promise((resolve, reject) => {
+    const payload = Buffer.from(body, 'utf8');
+    const framing = chunked ? { 'transfer-encoding': 'chunked' } : { 'content-length': payload.length };
+    const req = http.request({
+      host: '127.0.0.1', port, method: 'POST', path: '/api/board',
+      headers: { ...writeHeaders(SECRET), ...framing },
+    }, res => {
+      const sentWhole = req.writableFinished;
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString('utf8'), sentWhole }));
     });
-    assert.ok(Buffer.byteLength(body) > 25_000_000, `the fixture post is ${Buffer.byteLength(body)} bytes`);
-    const before = storeListing();
-    let outcome;
-    try {
-      const r = await rawRequest(port, 'POST', '/api/board', { headers: writeHeaders(SECRET), body });
-      outcome = { status: r.status, body: r.body.slice(0, 200) };
-    } catch (err) {
-      outcome = { code: err.code };
+    req.on('error', reject);
+    for (let at = 0; at < payload.length; at += 1 << 20) req.write(payload.subarray(at, at + (1 << 20)));
+    req.end();
+  });
+
+  await check('a post over the 25,000,000-byte limit, with a Content-Length or sent chunked, is read through and answered 413 naming its size and the limit, stores nothing, and the next small post lands', async () => {
+    // The daemon reads such a body to its end before it answers: an answer sent while the
+    // caller is still uploading can reach it as a reset before its status, and
+    // bin/mcp.mjs reports a reset as a daemon to revive.
+    const body = JSON.stringify({ title: 'Video post over the body limit', blocks: oversizedBlocks() });
+    const bytes = Buffer.byteLength(body);
+    assert.ok(bytes > 25_000_000, `setup: the fixture post is ${bytes} bytes`);
+    for (const chunked of [false, true]) {
+      const framing = chunked ? 'sent chunked' : 'with a Content-Length';
+      const before = storeListing();
+      const refused = await postFramed(body, { chunked });
+      assert.equal(refused.status, 413, `a post over the limit ${framing} gets a 413, not a dropped connection`);
+      assert.match(JSON.parse(refused.body).error,
+        new RegExp(`^post is ${bytes.toLocaleString('en-US')} bytes, over the 25,000,000-byte limit of one post: `),
+        `the 413 names the size it read and the limit, ${framing}`);
+      assert.equal(refused.sentWhole, true, `the 413 comes once the whole body is read, ${framing}`);
+      assert.deepEqual(storeListing(), before, `no board and no page is written for it, ${framing}`);
+
+      const small = await rawRequest(port, 'POST', '/api/board', {
+        headers: writeHeaders(SECRET),
+        body: JSON.stringify({ title: 'Small post after an oversized one', blocks: [{ kind: 'markdown', text: 'small' }] }),
+      });
+      assert.equal(small.status, 200, `the daemon serves the next small post, after one ${framing}: ${small.body.slice(0, 200)}`);
+      assert.equal(readBoard(JSON.parse(small.body).boardId, home).title, 'Small post after an oversized one');
     }
-    assert.ok(outcome.code === 'ECONNRESET' || outcome.code === 'EPIPE',
-      `the post must be refused by the connection dropping, before any response; got ${JSON.stringify(outcome)}`);
-    assert.deepEqual(storeListing(), before, 'no board and no page is written for it');
+  });
+
+  await check('through bin/mcp.mjs, a post over the limit reads as the daemon rejecting this board (HTTP 413) with the limit, and names no revive command', async () => {
+    // The shim tells a refusal from a dead daemon by whether a status came back
+    // (bin/mcp.mjs's toolErrorFor): a body cut off mid-upload left it none, and the agent
+    // was told to kickstart a daemon that was running.
+    const before = storeListing();
+    const shim = spawnShim({ CLAUDE_BOARD_PORT: String(port), CLAUDE_BOARD_NO_OPEN: '1', CLAUDE_CODE_ENTRYPOINT: 'cli' });
+    try {
+      const res = await withTimeout(shim.request('tools/call', {
+        name: 'ask',
+        arguments: { title: 'Video post over the body limit, through the shim', blocks: oversizedBlocks() },
+      }), 30_000, 'the shim never answered the oversized ask');
+      assert.equal(res.result.isError, true, 'an oversized post is an error result');
+      const text = res.result.content[0].text;
+      assert.match(text, /rejected this board \(HTTP 413\): post is [\d,]+ bytes, over the 25,000,000-byte limit of one post: /,
+        `the agent reads a refusal naming the limit; got: ${text}`);
+      assert.doesNotMatch(text, /kickstart|not reachable/, 'a daemon that answered is not one to revive');
+      assert.deepEqual(storeListing(), before, 'no board and no page is written for it');
+    } finally {
+      shim.close();
+    }
   });
 
   await check('ADR 35: re-issuing the IDENTICAL /wait URL on an already-answered round returns the same packet, and drains nothing a second time', async () => {

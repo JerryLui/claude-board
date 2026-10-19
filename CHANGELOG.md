@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **An oversized post gets a 413, not a dropped connection**: a post over the 25,000,000-byte
+  limit is now read through, stored nowhere, and answered HTTP 413 naming the size it read and the
+  byte limit; the next post on the same connection is served normally. The MCP shim relays it as
+  "claude-board daemon rejected this board (HTTP 413): ..." with no revive command. Before, the
+  daemon dropped the connection mid-upload with no response at all, and the shim told the agent to
+  restart a healthy daemon.
+- **A held Pull-out says why nothing opened**: pressing Pull-out on a stage that is still loading
+  now shows a note beside the button, "This stage is still loading. Open it full size once it
+  shows.", or "This stage did not load. Press again to retry, or reload the page." if the load
+  failed; the note goes away once the stage fills in. Before, only the button's tooltip said so,
+  which a sighted reader who just clicks never sees.
 - **An unstyled mock reads in a dark board**: a stage that sets no color now draws black text,
   blue links and light form controls on its light artboard in both themes (in a dark board its
   text was white on light gray, 1.71:1), and the full-size view shows the artboard where a dark

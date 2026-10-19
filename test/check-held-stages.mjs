@@ -13,7 +13,8 @@
 //   - an amend holds only the stages a block already held in the open round;
 //   - a tab running a page script from before ADR 122 gets every stage whole, and its
 //     catch-up sees no stage change;
-//   - Pull-out on a held frame starts a fill and says why nothing opened;
+//   - Pull-out on a held frame starts a fill and says why nothing opened, on the control and
+//     in a note beside it, until the frame is filled by that fill or any later one;
 //   - a fill reads the stages it fills, not every stage on the board.
 
 import assert from 'node:assert/strict';
@@ -22,7 +23,8 @@ import { startServer } from '../src/server.mjs';
 import { readBoard } from '../src/store.mjs';
 import { computeBoardPatch } from '../src/patch.mjs';
 import { SECRET_HEADER } from '../src/secret.mjs';
-import { parseHTML } from './dom-stand-in.mjs';
+import { styles } from '../src/styles.mjs';
+import { parseHTML, resolveComputedProperty } from './dom-stand-in.mjs';
 import {
   boardDataOf, check, openSseClient, pageHarness, postBoard, rawRequest, renderedMarkup, runMain,
   secretFetch, secretHome, waitFor, writeHeaders,
@@ -147,6 +149,8 @@ const stored = boardId => readBoard(boardId, home);
 const frameOf = (document, id) => document.querySelector(`section.html-block[data-block-id="${id}"] iframe.html-stage`);
 /** The reads that fill frames, not the catch-ups. */
 const fills = reads => reads.filter(u => /\?stages=/.test(u) && !u.endsWith('?stages=held'));
+/** The note beside the Pull-out in `frame`'s corner, or null. */
+const pullOutNote = frame => frame.closest('.stage-wrap').querySelector('.pull-out-note');
 /** The shas a fill read names. */
 const named = url => decodeURIComponent(url.slice(url.indexOf('?stages=') + '?stages='.length)).split(',');
 
@@ -409,7 +413,7 @@ async function main() {
     assert.equal(renderedMarkup(navigated.body).split('TOP-STAGE').length - 1, 1, 'and carries the stage once, in its frame');
   });
 
-  await check('Pull-out on a held frame not yet filled starts a fill and says on the control why nothing opened, then that the stage did not load, and a second press fills it', async () => {
+  await check('Pull-out on a held frame not yet filled starts a fill and says why nothing opened, on the control and in a note beside it, then that the stage did not load, and a second press fills it and takes the note away', async () => {
     const { boardId } = await post({ title: 'Pull-out on a held frame', blocks: [yesNo('Right?'), stage('<p>STAGE-ZERO</p>')] });
     const stageId = stored(boardId).blocks[1].id;
     const { document, es } = await openTab(boardId);
@@ -424,20 +428,54 @@ async function main() {
       assert.equal(frame.hasAttribute('data-held'), true, 'setup failure: the frame is not held');
       const control = frame.closest('.html-block').querySelector('.pull-out');
       const label = control.getAttribute('title');
+      assert.equal(pullOutNote(frame), null, 'setup failure: a note shows before any press');
       const fillsBefore = fills(reads).length;
       click(control);
       assert.equal(document.querySelector('.stage-lens-frame'), null, 'nothing opens');
       assert.match(control.getAttribute('title'), /still loading/, 'the control says the stage is still loading');
       assert.equal(control.getAttribute('aria-label'), control.getAttribute('title'), 'to a screen reader too');
+      const note = pullOutNote(frame);
+      assert.ok(note, 'and a note beside the control says it on screen');
+      assert.equal(note.textContent, control.getAttribute('title'), 'in the control\'s own words');
+      assert.notEqual(resolveComputedProperty(styles, note, false, 'display'), 'none', 'a note the stylesheet shows');
+      assert.equal(note.getAttribute('aria-hidden'), 'true', 'and a screen reader skips, since the control\'s label already says it');
       await settle();
       assert.deepEqual(fills(reads).slice(fillsBefore), [`/b/${boardId}?stages=${one}`], 'the press started a fill of that stage');
       assert.match(control.getAttribute('title'), /did not load/, 'and, once it failed, the control says the stage did not load');
+      assert.equal(pullOutNote(frame) && pullOutNote(frame).textContent, control.getAttribute('title'), 'and so does the note');
       failing = false;
       click(control);
       await settle();
       assert.equal(frame.hasAttribute('data-held'), false, 'a second press fills the frame');
       assert.match(frame.getAttribute('srcdoc'), /STAGE-ONE/, 'with its stage');
       assert.equal(control.getAttribute('title'), label, 'and the control says again what it does');
+      assert.equal(pullOutNote(frame), null, 'with no note beside it');
+    }, { gate: url => (failing && fills([url]).length ? 'fail' : null) });
+  });
+
+  await check('a held frame a reconnect\'s catch-up fills, after a Pull-out on it said the stage did not load, loses the note and the control says again what it does', async () => {
+    const { boardId } = await post({ title: 'Filled by a catch-up', blocks: [yesNo('Right?'), stage('<p>STAGE-ZERO</p>')] });
+    const stageId = stored(boardId).blocks[1].id;
+    const { document, es } = await openTab(boardId);
+    const { click } = await pageHarness();
+    let failing = true;
+    await withPageReads(async ({ settle }) => {
+      await post({ boardId, title: 'Filled by a catch-up', blocks: [{ id: stageId, kind: 'html', html: '<p>STAGE-ONE</p>' }] });
+      es.dispatch('open', '');
+      await settle();
+      const frame = frameOf(document, stageId);
+      const control = frame.closest('.html-block').querySelector('.pull-out');
+      const label = control.getAttribute('title');
+      click(control);
+      await settle();
+      assert.match(pullOutNote(frame) ? pullOutNote(frame).textContent : '', /did not load/, 'setup failure: the press did not leave the did-not-load note');
+      failing = false;
+      es.dispatch('open', '');
+      await settle();
+      assert.match(frame.getAttribute('srcdoc') || '', /STAGE-ONE/, 'setup failure: the catch-up did not fill the frame');
+      assert.equal(pullOutNote(frame), null, 'the note goes once the stage is in, whichever fill put it there');
+      assert.equal(control.getAttribute('title'), label, 'and the control says again what it does');
+      assert.equal(control.getAttribute('aria-label'), 'Open this stage full size', 'to a screen reader too');
     }, { gate: url => (failing && fills([url]).length ? 'fail' : null) });
   });
 

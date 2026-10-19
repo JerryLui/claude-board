@@ -1061,6 +1061,31 @@ body.sent-page .comment-btn { display: none; }
    scroll. */
 .stage-scrolls .pull-out { right: calc(8px + var(--stage-scrollbar-w, 0px)); }
 body.comment-mode .pull-out { display: none; }
+/* What a Pull-out pressed on a held stage says on screen (src/ui.mjs's
+   sayOnHeldStage): that the stage is still loading, or did not load, in a note
+   to the control's left, in the control's own chrome. It sits over the held
+   frame's corner, which has nothing in it yet, in the board's document and
+   never in the frame's; it takes no pointer, so it stands between no press and
+   the frame, and it goes with the Pull-out in comment mode. The ring turns
+   while the stage is read; a failed read swaps it for a still amber dot, the
+   words saying which. */
+.pull-out-note { position: absolute; top: 8px; right: 44px; max-width: calc(100% - 60px); min-height: 28px;
+  display: inline-flex; align-items: center; gap: 8px; padding: 5px 10px;
+  border: 1px solid var(--hairline-2); border-radius: var(--r-sm); background: var(--panel);
+  color: var(--ink-2); box-shadow: var(--shadow-1); font-size: 12px; font-weight: 550; line-height: 16px;
+  pointer-events: none; }
+.pull-out-note::before { content: ""; flex: none; width: 10px; height: 10px; border-radius: 50%;
+  border: 2px solid var(--hairline-2); border-top-color: var(--accent); animation: cb-spin 0.9s linear infinite; }
+.pull-out-note.pull-out-note-failed { border-color: var(--warning-border-strong); }
+.pull-out-note.pull-out-note-failed::before { width: 8px; height: 8px; border: 0; background: var(--warning); animation: none; }
+.stage-scrolls .pull-out-note { right: calc(44px + var(--stage-scrollbar-w, 0px)); }
+body.comment-mode .pull-out-note { display: none; }
+@keyframes cb-spin { to { transform: rotate(360deg); } }
+/* The page-wide reduced-motion rule names every element, and a ring drawn by
+   a pseudo-element is none: it stops here, a still ring. */
+@media (prefers-reduced-motion: reduce) {
+  .pull-out-note::before { animation: none; }
+}
 
 /* Both stage kinds are clickable at element level, and both read as pictures with no
    built-in cue of their own -- the comment-mode toggle is the one thing on the page
