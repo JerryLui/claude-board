@@ -3039,15 +3039,15 @@ export const ui = `
 
   /** A Pull-out pressed on a held frame (fillHeldStages) has no stage to copy yet:
    * the frame waits for a fill, or one failed. The press starts a fill, or joins the
-   * one out, and the control and a note beside it say why nothing opened, then,
-   * once the fill settles, either the note goes and the control goes back to what
-   * it said, or both say the stage did not load. */
+   * one out, and the control and a note beside it say why nothing opened. A fill
+   * that lands the stage takes the note away and gives the control back what it
+   * said (fillHeldStages); one that settles with the frame still held has both
+   * say the stage did not load. */
   function pullOutHeldStage(frame) {
     var settled = fillHeldStages();
     sayOnHeldStage(frame, STAGE_LOADING_NOTE);
     settled.then(function () {
       if (frame.hasAttribute('data-held')) sayOnHeldStage(frame, STAGE_UNLOADED_NOTE, true);
-      else sayOnHeldStage(frame, null);
     });
   }
 
@@ -3083,6 +3083,14 @@ export const ui = `
     }
     shown.classList.toggle('pull-out-note-failed', !!failed);
     shown.textContent = note;
+  }
+
+  /** What the note beside a held frame's Pull-out says (sayOnHeldStage), as
+   * '{ text, failed }', or null when no note shows. */
+  function heldStageNote(frame) {
+    var wrap = frame.closest && frame.closest('.stage-wrap');
+    var shown = wrap && wrap.querySelector('.pull-out-note');
+    return shown ? { text: shown.textContent, failed: shown.classList.contains('pull-out-note-failed') } : null;
   }
 
   /** Mount 'section''s stage in the lens. 'opener' is the control that asked for
@@ -6575,10 +6583,16 @@ export const ui = `
     if (live === next) return live;
     var kept = keptStages(live, next);
     if (!kept.frames.length) { live.replaceWith(next); return next; }
+    // A note beside a kept frame's Pull-out stands until a fill lands the stage
+    // (pullOutHeldStage), and the push's markup carries neither the note nor the
+    // words it gave the control, so both are said again beside the control the
+    // push brings.
+    var notes = kept.frames.map(heldStageNote);
     graftAround(live, next, kept);
-    // The bar under a kept stage arrived with the push's markup; it is told the
-    // fold its block kept.
-    kept.frames.forEach(function (frame) {
+    // The bar under a kept stage arrived with the push's markup too; it is told
+    // the fold its block kept.
+    kept.frames.forEach(function (frame, i) {
+      if (notes[i]) sayOnHeldStage(frame, notes[i].text, notes[i].failed);
       var block = frame.closest('.html-block');
       if (!block) return;
       setStageFoldState(block, block.classList.contains('stage-opened') ? 'opened'

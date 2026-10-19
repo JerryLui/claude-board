@@ -64,6 +64,7 @@ import { notifyBoundary, notifyTest } from './notify.mjs';
 import { isCue, cuePath } from './cues.mjs';
 import { resolveRefRoots } from './resolve.mjs';
 import { createStrandedWatch } from './stranded.mjs';
+import { MAX_POST_BYTES, MAX_DRAINED_BYTES, postTooLargeMessage } from './post-limit.mjs';
 
 // Declared in src/handoff.mjs (which this module imports, so it cannot import back) and
 // re-exported here, where every caller has always looked for it.
@@ -691,21 +692,12 @@ function sendCredentialRefusal(req, res, pathname) {
   return sendJson(res, 401, { error: 'no claude-board credential', recover: command });
 }
 
-/** The most one request body may carry, a board post above all. src/resolve.mjs's
- * `MAX_HTML_BYTES` is the same number by ADR 121 and a different bound: it caps one
- * stage's markup however it arrived, read off disk included, and this caps the bytes on
- * the wire. */
-const MAX_POST_BYTES = 25_000_000;
-
-/** Past this many bytes a body is no longer read through to its 413: the connection is
- * cut instead, as an abuse bound. No caller that means well comes near it. */
-const MAX_DRAINED_BYTES = 4 * MAX_POST_BYTES;
-
-function postTooLarge(bytes) {
+/** A body over MAX_POST_BYTES, on any route. The board post's own advice is
+ * handlePostBoard's to give: no other route's body can be split into rounds. */
+function bodyTooLarge(bytes) {
   return Object.assign(new Error(
-    `post is ${bytes.toLocaleString('en-US')} bytes, over the ${MAX_POST_BYTES.toLocaleString('en-US')}-byte limit of one post: ` +
-    'split it into rounds, or name a large stage\'s file in its source rather than inlining it'
-  ), { status: 413 });
+    `body is ${bytes.toLocaleString('en-US')} bytes, over the ${MAX_POST_BYTES.toLocaleString('en-US')}-byte limit of one request body`
+  ), { status: 413, bytes });
 }
 
 function readJsonBody(req) {
@@ -721,11 +713,13 @@ function readJsonBody(req) {
     // A body over MAX_POST_BYTES is read to its end and dropped as it arrives, from the
     // first byte when its Content-Length already says so, and only then refused. A 413
     // sent while the caller is still uploading can reach it as a reset before the status
-    // does, and bin/mcp.mjs reports a reset as a daemon to revive.
+    // does, and bin/mcp.mjs reports a reset as a daemon to revive. Past MAX_DRAINED_BYTES
+    // the connection is cut with no answer, which is why bin/mcp.mjs never sends a body
+    // that large.
     const declared = Number(req.headers['content-length']);
     if (declared > MAX_DRAINED_BYTES) {
       req.destroy();
-      return reject(postTooLarge(declared));
+      return reject(bodyTooLarge(declared));
     }
     let over = declared > MAX_POST_BYTES;
     // Buffers, decoded once at the end — never `data += chunk`. A socket chunk boundary
@@ -740,7 +734,7 @@ function readJsonBody(req) {
       length += chunk.length;
       if (length > MAX_DRAINED_BYTES) {
         req.destroy();
-        return reject(postTooLarge(length));
+        return reject(bodyTooLarge(length));
       }
       if (!over && length > MAX_POST_BYTES) {
         over = true;
@@ -749,7 +743,7 @@ function readJsonBody(req) {
       if (!over) chunks.push(chunk);
     });
     req.on('end', () => {
-      if (over) return reject(postTooLarge(length));
+      if (over) return reject(bodyTooLarge(length));
       if (!length) return resolve({});
       try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch (err) { reject(err); }
     });
@@ -961,6 +955,7 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting) {
   try {
     body = await readJsonBody(req);
   } catch (err) {
+    if (err.status === 413) return sendJson(res, 413, { error: postTooLargeMessage(err.bytes) });
     return sendJson(res, err.status || 400, { error: err.status ? err.message : 'invalid JSON body' });
   }
   let board;

@@ -3921,6 +3921,98 @@ async function main() {
     }
   });
 
+  /** `bytes` of spaces posted to POST /api/board holding the secret, in 1 MiB writes, framed
+   * by a Content-Length of `declared` (`bytes` unless given; a larger one leaves the upload
+   * unfinished) or, with `chunked`, chunked. Resolves `{ status }` once the daemon answers,
+   * `{ cut }`, the socket's error, when it closes the connection with no answer, or
+   * `{ hung: true }` when it does neither within 20 s. */
+  const postSpaces = (bytes, { chunked = false, declared = bytes } = {}) => new Promise(resolve => {
+    let timer;
+    const done = outcome => { clearTimeout(timer); resolve(outcome); };
+    const mib = Buffer.alloc(1 << 20, 0x20);
+    const req = http.request({
+      host: '127.0.0.1', port, method: 'POST', path: '/api/board',
+      headers: { ...writeHeaders(SECRET), ...(chunked ? { 'transfer-encoding': 'chunked' } : { 'content-length': declared }) },
+    }, res => {
+      res.resume();
+      res.on('end', () => done({ status: res.statusCode }));
+    });
+    timer = setTimeout(() => { done({ hung: true }); req.destroy(); }, 20_000);
+    req.on('error', err => done({ cut: err.code || err.message }));
+    for (let sent = 0; sent < bytes; sent += mib.length) req.write(mib.subarray(0, Math.min(mib.length, bytes - sent)));
+    if (chunked || declared === bytes) req.end();
+  });
+
+  await check('a post past 100,000,000 bytes is cut off with no answer, as soon as its Content-Length says so or once a chunked body passes it; one of exactly 100,000,000 still gets its 413; nothing is stored and the next small post lands', async () => {
+    for (const [what, send, expect] of [
+      ['a Content-Length of 100,000,000', () => postSpaces(100_000_000), { status: 413 }],
+      ['a Content-Length of 100,000,001, with 1 MiB of it sent', () => postSpaces(1 << 20, { declared: 100_000_001 }), 'cut'],
+      ['a chunked body of 101 MiB', () => postSpaces(101 << 20, { chunked: true }), 'cut'],
+    ]) {
+      const before = storeListing();
+      const outcome = await send();
+      if (expect === 'cut') assert.ok(outcome.cut, `${what}: the connection is cut with no answer, got ${JSON.stringify(outcome)}`);
+      else assert.deepEqual(outcome, expect, `${what}: the body is read through to its 413`);
+      assert.deepEqual(storeListing(), before, `${what}: no board and no page is written for it`);
+      const small = await rawRequest(port, 'POST', '/api/board', {
+        headers: writeHeaders(SECRET),
+        body: JSON.stringify({ title: 'Small post after a cut one', blocks: [{ kind: 'markdown', text: 'small' }] }),
+      });
+      assert.equal(small.status, 200, `${what}: the daemon serves the next small post: ${small.body.slice(0, 200)}`);
+    }
+  });
+
+  await check('a post of exactly 25,000,000 bytes is within the limit and lands, with a Content-Length or sent chunked, and one byte more is a 413', async () => {
+    const board = JSON.stringify({ title: 'A post at the body limit', blocks: [{ kind: 'markdown', text: 'at the limit' }] });
+    const atLimit = board + ' '.repeat(25_000_000 - Buffer.byteLength(board));
+    assert.equal(Buffer.byteLength(atLimit), 25_000_000, 'setup: the fixture post is exactly 25,000,000 bytes');
+    for (const chunked of [false, true]) {
+      const landed = await postFramed(atLimit, { chunked });
+      assert.equal(landed.status, 200, `a post of exactly the limit lands, ${chunked ? 'sent chunked' : 'with a Content-Length'}: ${landed.body.slice(0, 200)}`);
+      assert.equal(readBoard(JSON.parse(landed.body).boardId, home).title, 'A post at the body limit');
+    }
+    const over = await postFramed(`${atLimit} `, { chunked: false });
+    assert.equal(over.status, 413, 'one byte more is over it');
+    assert.match(JSON.parse(over.body).error, /^post is 25,000,001 bytes, over the 25,000,000-byte limit of one post: /);
+  });
+
+  await check('a body over the limit on a JSON route other than a board post is a 413 naming its size and the limit, with no advice about rounds or stages', async () => {
+    const { boardId } = await postBoard(port, SECRET, { title: 'A board to post oversized bodies at', blocks: [{ kind: 'markdown', text: 'target' }] });
+    const body = `{}${' '.repeat(25_000_000)}`;
+    for (const route of [
+      '/api/handoff', `/api/board/${boardId}/submit`, `/api/board/${boardId}/attended`,
+      '/api/pomodoro/settings', '/api/pomodoro/preview', '/api/store/prune',
+    ]) {
+      const before = storeListing();
+      const r = await rawRequest(port, 'POST', route, { headers: writeHeaders(SECRET), body });
+      assert.equal(r.status, 413, `${route} answers an oversized body 413: ${r.body.slice(0, 200)}`);
+      assert.equal(JSON.parse(r.body).error, 'body is 25,000,002 bytes, over the 25,000,000-byte limit of one request body', `${route} names the size and the limit`);
+      assert.deepEqual(storeListing(), before, `${route} writes nothing for it`);
+    }
+  });
+
+  await check('through bin/mcp.mjs, an ask whose post would pass 100,000,000 bytes is refused before it is sent, as too large, naming the limit, and names no revive command', async () => {
+    // The daemon cuts such a post off with no answer, which the shim would otherwise
+    // report as a daemon to revive.
+    const before = storeListing();
+    const shim = spawnShim({ CLAUDE_BOARD_PORT: String(port), CLAUDE_BOARD_NO_OPEN: '1', CLAUDE_CODE_ENTRYPOINT: 'cli' });
+    try {
+      const res = await withTimeout(shim.request('tools/call', {
+        name: 'ask',
+        arguments: { title: 'A post past the cut, through the shim', blocks: [{ kind: 'html', html: 'x'.repeat(100_000_000) }] },
+      }), 60_000, 'the shim never answered the ask past the cut');
+      assert.equal(res.result.isError, true, 'the refusal is an error result');
+      const text = res.result.content[0].text;
+      assert.match(text, /^ask refused: post is [\d,]+ bytes, over the 25,000,000-byte limit of one post: split it into rounds/,
+        `the agent reads the too-large refusal the daemon gives a post over the limit; got: ${text.slice(0, 400)}`);
+      assert.match(text, /Nothing was posted or written/, 'and that nothing landed');
+      assert.doesNotMatch(text, /kickstart|not reachable/, 'a post the shim never sent leaves no daemon to revive');
+      assert.deepEqual(storeListing(), before, 'no board and no page is written for it');
+    } finally {
+      shim.close();
+    }
+  });
+
   await check('ADR 35: re-issuing the IDENTICAL /wait URL on an already-answered round returns the same packet, and drains nothing a second time', async () => {
     // Non-redelivery had only ever been proven by moving on -- a later round, or a
     // later board. This is the case that does not move on: the exact same URL,

@@ -14,7 +14,8 @@
 //   - a tab running a page script from before ADR 122 gets every stage whole, and its
 //     catch-up sees no stage change;
 //   - Pull-out on a held frame starts a fill and says why nothing opened, on the control and
-//     in a note beside it, until the frame is filled by that fill or any later one;
+//     in a note beside it, until the frame is filled by that fill or any later one, a round
+//     push that keeps the frame keeping both;
 //   - a fill reads the stages it fills, not every stage on the board.
 
 import assert from 'node:assert/strict';
@@ -477,6 +478,53 @@ async function main() {
       assert.equal(control.getAttribute('title'), label, 'and the control says again what it does');
       assert.equal(control.getAttribute('aria-label'), 'Open this stage full size', 'to a screen reader too');
     }, { gate: url => (failing && fills([url]).length ? 'fail' : null) });
+  });
+
+  await check('a round push that keeps a held frame keeps the still-loading note beside its Pull-out, and the control\'s words, while the fill a press started is out, until that fill lands the stage', async () => {
+    const title = 'A push over a held Pull-out';
+    const { boardId } = await post({ title, blocks: [yesNo('Right?'), stage('<p>STAGE-ZERO</p>')] });
+    const stageId = stored(boardId).blocks[1].id;
+    const { document, es } = await openTab(boardId);
+    const sse = await openStream(boardId, '?stages=held');
+    const { click } = await pageHarness();
+    const { gate, release, fail } = fillGates();
+    const amendStage = async () => {
+      const pushed = nextEvent(sse, 'round');
+      await post({ boardId, title, blocks: [{ id: stageId, kind: 'html', html: '<p>STAGE-ONE</p>' }] });
+      await pushed;
+    };
+    const controlOf = frame => frame.closest('.html-block').querySelector('.pull-out');
+    await withPageReads(async ({ reads, settle }) => {
+      // The stage changes while the tab's stream is down: its catch-up holds the frame,
+      // and the fill that catch-up sends fails.
+      await amendStage();
+      miss(sse);
+      fail(0);
+      es.dispatch('open', '');
+      await settle();
+      const frame = frameOf(document, stageId);
+      assert.equal(frame.hasAttribute('data-held'), true, 'setup failure: the frame is not held');
+      const label = controlOf(frame).getAttribute('title');
+      click(controlOf(frame));
+      await waitFor(() => fills(reads).length === 2, { what: 'the press\'s fill read' });
+      assert.match(pullOutNote(frame)?.textContent || '', /still loading/, 'setup failure: the press left no still-loading note');
+      // While that read is out, an amend re-posts the stage unchanged: its push holds the
+      // frame, and the live frame stands in for it.
+      await amendStage();
+      deliver(sse, es);
+      assert.equal(frameOf(document, stageId), frame, 'setup failure: the push did not keep the frame');
+      assert.equal(frame.hasAttribute('data-held'), true, 'setup failure: the frame was filled before the read was let through');
+      const note = pullOutNote(frame);
+      assert.match(note?.textContent || '', /still loading/, 'the note still says the stage is loading');
+      assert.equal(controlOf(frame).getAttribute('title'), note.textContent, 'and so does the control the push put in the corner');
+      assert.equal(controlOf(frame).getAttribute('aria-label'), note.textContent, 'to a screen reader too');
+      release(1);
+      release(2);
+      await settle();
+      assert.match(frame.getAttribute('srcdoc') || '', /STAGE-ONE/, 'setup failure: the fill did not land the stage');
+      assert.equal(pullOutNote(frame), null, 'the note goes once that fill lands the stage');
+      assert.equal(controlOf(frame).getAttribute('title'), label, 'and the control says again what it does');
+    }, { gate });
   });
 
   await check('filling one held frame reads that stage alone, not every stage on the board, and fills the frame with the stage the board holds, named by its sha', async () => {

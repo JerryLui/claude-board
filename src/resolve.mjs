@@ -80,7 +80,7 @@ export const MAX_REF_BYTES = 512 * 1024;
 
 /** Byte cap on one `html` block, by value or by reference, and on the html one post
  * carries in total (src/board.mjs): the post limit itself, the 25,000,000 bytes of
- * src/server.mjs's `MAX_POST_BYTES`, so a stage may carry an inlined video as large as any
+ * src/post-limit.mjs's `MAX_POST_BYTES`, so a stage may carry an inlined video as large as any
  * post can (ADR 121). A separate constant all the same: that one bounds a request body on
  * the wire, and this one a stage's markup however it arrived. Measured safe at that size
  * because every pass over a stage's html is linear and none is per keystroke: the

@@ -269,7 +269,9 @@ else, on a live board and on an archive opened from disk alike: no route serves 
 under (ADR 121): 25,000,000 bytes per `html` block, by value or by reference, and the same
 25,000,000 across every `html` block in one post, each a 400 naming the cap; and 25,000,000 bytes
 per request body, past which the daemon reads the body through, stores nothing and answers 413
-naming the limit and the size it read. Every other block keeps 512 KiB.
+naming the limit and the size it read. That holds up to 100,000,000 bytes: past it the daemon cuts
+the connection with no answer, and the MCP shim refuses such a post before sending any of it, with
+the same too-large message and nothing to restart. Every other block keeps 512 KiB.
 
 **`explainer`** (ADR 111) is the question's own one-to-three-sentence lead-in: markdown by value,
 optional, bounded by the same by-value cap as `prompt`, rendered as plain prose directly under the
@@ -761,9 +763,10 @@ The Host check does not cover a browser: a page on any origin doing
 `fetch('http://127.0.0.1:7391/...')` has its `Host` set to loopback by the browser itself. So
 every non-GET additionally refuses (403, no body) when `Origin` is present and is not the daemon's
 own origin, or when `Sec-Fetch-Site` is present and is not `same-origin`, and every body must be
-`Content-Type: application/json` (415 otherwise). Non-browser clients (the shim, curl, the checks)
-send neither header and are unaffected. Every HTML response also carries `X-Frame-Options: DENY`
-and a `frame-ancestors 'none'` CSP.
+`Content-Type: application/json` (415 otherwise) and at most 25,000,000 bytes (413 naming its size
+and the limit; past 100,000,000 the connection is cut with no answer). Non-browser clients (the
+shim, curl, the checks) send neither header and are unaffected. Every HTML response also carries
+`X-Frame-Options: DENY` and a `frame-ancestors 'none'` CSP.
 
 The two credentials and every route with rules of its own carry them in their own sections, below.
 

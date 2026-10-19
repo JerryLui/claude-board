@@ -33,6 +33,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readSecret, secretPath, daemonPort, SECRET_HEADER } from '../src/secret.mjs';
 import { HANDOFF_TOKEN_RE, recoveryCommand } from '../src/handoff.mjs';
+import { MAX_DRAINED_BYTES, postTooLargeMessage } from '../src/post-limit.mjs';
 
 // CLAUDE_BOARD_HOME/CLAUDE_BOARD_PORT are PROTOCOL.md's; the rest are additive env
 // vars documented in PROTOCOL.md "MCP surface", never repurposing an existing name.
@@ -179,6 +180,10 @@ function httpJson(method, urlStr, body, { timeoutMs, signal } = {}) {
   return new Promise((resolve, reject) => {
     const u = new URL(urlStr);
     const data = body != null ? JSON.stringify(body) : null;
+    // The daemon cuts a body past MAX_DRAINED_BYTES off with no answer, which would read
+    // here as a daemon gone away; such a body is refused before any of it is sent.
+    const bytes = data ? Buffer.byteLength(data) : 0;
+    if (bytes > MAX_DRAINED_BYTES) return reject(Object.assign(new Error(postTooLargeMessage(bytes)), { tooLarge: true }));
     const req = http.request({
       hostname: u.hostname,
       port: u.port,
@@ -190,7 +195,7 @@ function httpJson(method, urlStr, body, { timeoutMs, signal } = {}) {
         // On every call, not just the writes: a route that starts requiring it later
         // must not silently start failing, and a header on a GET costs nothing.
         ...(SECRET ? { [SECRET_HEADER]: SECRET } : {}),
-        ...(data ? { 'content-length': Buffer.byteLength(data) } : {}),
+        ...(data ? { 'content-length': bytes } : {}),
       },
       signal,
     }, res => {
@@ -276,6 +281,16 @@ function daemonRejectedMessage(err, url) {
   ].join('\n');
 }
 
+/** A post this shim would not send (httpJson), since the daemon cuts one that large off
+ * with no answer. Nothing reached the daemon, so it carries no revive command either. */
+function tooLargeMessage(err, tool = 'ask') {
+  return [
+    `${tool} refused: ${err.message}.`,
+    `Nothing was posted or written: this shim sends no post over ${MAX_DRAINED_BYTES.toLocaleString('en-US')} bytes, ` +
+    `so the daemon never saw it and needs no restart.`,
+  ].join('\n');
+}
+
 /** No secret on this machine, or one the daemon does not recognise. Both are the same
  * fix — run the installer, which generates one if there isn't one and never rotates
  * one that already exists — and both mean nothing was posted or written. Deliberately
@@ -290,16 +305,17 @@ function missingSecretMessage(reason, tool = 'ask') {
   ].join('\n');
 }
 
-/** Split the two failure modes `httpJson` can produce. A connection-level failure
+/** Split the failure modes `httpJson` can produce. A connection-level failure
  * carries err.code and no status; a daemon refusal carries err.statusCode and the
- * daemon's own message. Conflating them is what makes a typo in a block kind read
- * as "the service is down".
+ * daemon's own message; a body this shim would not send carries err.tooLarge.
+ * Conflating them is what makes a typo in a block kind read as "the service is down".
  *
- * `tool` is the call this failure belongs to, and it is here for the 401 branch alone:
- * `missingSecretMessage` opens with the tool name, so a refusal that always said `ask`
+ * `tool` is the call this failure belongs to, and it is here for the messages that open
+ * with it: `missingSecretMessage` above all, since a refusal that always said `ask`
  * sent an agent whose `read` was rejected to look at the wrong call. Defaults to `ask`,
  * which every other caller is. */
 function toolErrorFor(err, url, tool = 'ask') {
+  if (err?.tooLarge) return new ToolError(tooLargeMessage(err, tool));
   if (err?.statusCode === 401) {
     return new ToolError(missingSecretMessage(
       SECRET
