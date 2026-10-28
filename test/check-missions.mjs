@@ -6,7 +6,7 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
-import { readdirSync, mkdirSync, writeFileSync } from 'node:fs';
+import { readdirSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync } from 'node:fs';
 import path from 'node:path';
 import { startServer } from '../src/server.mjs';
 import { SECRET_HEADER } from '../src/secret.mjs';
@@ -14,7 +14,8 @@ import { readBoard, readMission, writeMission, pruneStore, MISSION_RETENTION_MS 
 import {
   missionsOverview, launchMission, bindSession, upsertMission, deriveState, MAX_WORKING, MAX_ALIVE, STALL_SILENCE_MS, UNBOUND_GRACE_MS, LANDED_VISIBLE_MS,
 } from '../src/missions.mjs';
-import { check, rawRequest, runMain, secretFetch, secretHome, sessionCookieHeader, waitFor, writeHeaders } from './support.mjs';
+import { createMissionsCache, MISSIONS_CACHE_MS } from '../src/missions-cache.mjs';
+import { check, openSseClient, rawRequest, runMain, secretFetch, secretHome, sessionCookieHeader, waitFor, writeHeaders } from './support.mjs';
 
 const { home, secret: SECRET } = secretHome('claude-board-missions-');
 const fetch = secretFetch(SECRET);
@@ -296,6 +297,24 @@ async function main() {
 
   // --- the view -------------------------------------------------------------------
 
+  await check(`the overview cache answers from one read for ${MISSIONS_CACHE_MS / 1000} s, and a write to the missions store is read at once`, () => {
+    const dir = scratchHome('cache');
+    const t0 = Date.parse('2026-10-28T12:00:00Z');
+    seed(dir, 'SILENT', { now: t0, session: { pid: process.pid, id: 's', startedAt: iso(t0 - minutes(60)), seenAt: iso(t0 - STALL_SILENCE_MS + 1000) } });
+    const clock = { t: t0 };
+    const cache = createMissionsCache({ home: dir, now: () => clock.t });
+    const viewOf = (key, overview = cache.overview()) => overview.missions.find(m => m.key === key)?.view;
+    assert.equal(viewOf('SILENT'), 'working');
+    clock.t = t0 + 2000;
+    assert.equal(viewOf('SILENT', missionsOverview({ home: dir, now: clock.t })), 'stalled', 'a fresh read at this instant says stalled');
+    assert.equal(viewOf('SILENT'), 'working', 'inside the bound, the first read answers');
+    clock.t = t0 + MISSIONS_CACHE_MS;
+    assert.equal(viewOf('SILENT'), 'stalled', 'past the bound, a fresh read');
+    upsertMission('WRITTEN', { title: 'Written' }, { home: dir, now: clock.t });
+    clock.t += 1;
+    assert.equal(viewOf('WRITTEN'), 'waiting', 'a record written inside the bound is read');
+  });
+
   await check('a mission shows stalled when its session\'s process is gone', async () => {
     const gonePid = await deadPid();
     await post('/api/mission/DEAD_PID/launch', { phase: 'direct' });
@@ -441,6 +460,52 @@ async function main() {
     const r = await post('/api/board', { title: 'x', mission: '../etc', blocks: [{ kind: 'markdown', text: 'x' }] });
     assert.equal(r.status, 400);
     assert.equal(readdirSync(path.join(home, 'boards')).length, before);
+  });
+
+  await check('a board post whose body is not a JSON object is a 400 that writes no board', async () => {
+    const before = readdirSync(path.join(home, 'boards')).length;
+    for (const body of ['null', '5', '[]']) {
+      const r = await rawRequest(port, 'POST', '/api/board', { headers: writeHeaders(SECRET), body });
+      assert.equal(r.status, 400, `${body}: ${r.body}`);
+      assert.deepEqual(JSON.parse(r.body), { error: 'the body must be a JSON object' });
+    }
+    assert.equal(readdirSync(path.join(home, 'boards')).length, before);
+  });
+
+  await check('a board post whose mission record cannot be read or written still answers 200 and pushes its round; the record is left as it was', async () => {
+    const record = path.join(home, 'missions', 'UNREADABLE.json');
+    writeFileSync(record, '{"key":"UNREA');
+    let sse;
+    try {
+      const blocks = [{ kind: 'markdown', text: 'x' }];
+      const first = await post('/api/board', { title: 'unlinked', mission: 'UNREADABLE', blocks });
+      assert.equal(first.status, 200, JSON.stringify(first.body));
+      assert.equal(readBoard(first.body.boardId, home).mission, 'UNREADABLE');
+      sse = await openSseClient(port, first.body.boardId, { secret: SECRET });
+      const second = await post('/api/board', { boardId: first.body.boardId, mission: 'UNREADABLE', requestId: 'unreadable-2', blocks });
+      assert.equal(second.status, 200, JSON.stringify(second.body));
+      assert.equal(second.body.round, 2);
+      await waitFor(() => sse.events.some(e => e.event === 'round'), { what: 'the second round pushed to the open board' });
+      assert.equal(readFileSync(record, 'utf8'), '{"key":"UNREA');
+    } finally {
+      sse?.res.destroy();
+      rmSync(record, { force: true });
+    }
+  });
+
+  await check('an unreadable missions store draws the home page with empty columns, and GET /api/missions answers an error', async () => {
+    const dir = path.join(home, 'missions');
+    chmodSync(dir, 0o000);
+    try {
+      const page = await fetch(`${base}/`);
+      assert.equal(page.status, 200);
+      assert.match(page.headers.get('content-type'), /^text\/html/);
+      const list = await getJson('/api/missions');
+      assert.equal(list.status, 500);
+      assert.match(list.body.error, /^the missions could not be read: EACCES/);
+    } finally {
+      chmodSync(dir, 0o755);
+    }
   });
 
   // --- the relay --------------------------------------------------------------------

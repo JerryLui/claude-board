@@ -124,21 +124,25 @@ export function createMissionWatch({
     batch.set(key, entry);
     if (dueAt === null) {
       dueAt = t + windowMs;
-      flushTimer = setTimeout(tick, windowMs);
+      // The timer's read closes the batch whatever the clock says: libuv arms it on its
+      // cached loop time, which runs behind `now()`, so it can fire a hair before dueAt.
+      flushTimer = setTimeout(() => tick({ closing: true }), windowMs);
       flushTimer.unref?.();
     }
   }
 
   /** One read: diff every mission's derived state against the last read, publish the
    * changes no write published, batch the ones that speak, and speak a batch whose window
-   * has closed. Never throws: it runs from a timer on the daemon's one event loop. */
-  function tick() {
+   * has closed. `closing` is the batch timer's read, which speaks the batch even when
+   * the read fails. Never throws: it runs from a timer on the daemon's one event loop. */
+  function tick({ closing = false } = {}) {
     const t = now();
     let views;
     try {
       views = read(t);
     } catch (err) {
       warnOnce('read the missions', err);
+      if (closing) flush();
       return;
     }
     const next = new Map(views.map(v => [v.key, { view: v.view, updatedAt: v.updatedAt }]));
@@ -158,17 +162,17 @@ export function createMissionWatch({
     }
     seen = next;
     for (const v of joining) join(v.key, { name: nameOf(v), state: v.view }, t);
-    if (dueAt !== null && t >= dueAt) flush();
+    if (dueAt !== null && (closing || t >= dueAt)) flush();
   }
 
   return {
     /** The baseline read, then a read every `intervalMs`. */
     start() {
       tick();
-      interval = setInterval(tick, intervalMs);
+      interval = setInterval(() => tick(), intervalMs);
       interval.unref?.();
     },
-    tick,
+    tick: () => tick(),
     close() {
       if (interval) clearInterval(interval);
       if (flushTimer) clearTimeout(flushTimer);
