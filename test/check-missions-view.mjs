@@ -1,9 +1,9 @@
 // The Missions view, the board's home page (`GET /`): a column per derived state with the
 // queued shown under waiting, a card's Fire and Merge buttons only while a round on the
 // mission's own board still asks for that answer, a click on one answering that round
-// with option 0, Stop asked once and then posted as an order, a note on a card posted as
-// a comment order, and the columns re-read when the daemon-wide stream says a mission
-// changed. Plus the question `action` field those buttons read, accepted and refused at
+// with option 0, Stop asked once and then posted as an order (a Cmd-click posts it at
+// once), a note on a card posted as a comment order, and the columns re-read when the
+// daemon-wide stream says a mission changed. Plus the question `action` field those buttons read, accepted and refused at
 // post time.
 //
 // One layer: a real daemon on a temporary store and ephemeral port, the page it serves
@@ -316,8 +316,30 @@ async function main() {
       }
     });
 
-    await check('a Stop click with Cmd, Ctrl, Shift or Alt held only asks, as a plain one does', async () => {
-      for (const held of ['metaKey', 'ctrlKey', 'shiftKey', 'altKey']) {
+    await check('a Cmd-click on Stop posts one stop order at once, with no question, and leaves no Stop to click while the order is out', async () => {
+      await liveMission('STOP_AT_ONCE');
+      const tab = await openMissionsTab();
+      try {
+        const stop = cardFor(tab.document, 'STOP_AT_ONCE').querySelector('button.mission-stop');
+        assert.equal(stop.getAttribute('title'), 'Stop: finish the step, hand off, end. Cmd-click stops at once');
+        stop.dispatchEvent(new StandInEvent('click', { metaKey: true, button: 0 }));
+        const sending = cardFor(tab.document, 'STOP_AT_ONCE');
+        assert.equal(sending.querySelector('p.mission-order').textContent, 'Stop asked: waiting for the Master Chief to relay it',
+          'the card says so while the order is in flight');
+        assert.equal(sending.querySelector('button.mission-stop'), null, 'no Stop left to click while it is in flight');
+        await settler.settle();
+        assert.deepEqual((await mission('STOP_AT_ONCE')).orders.map(o => [o.kind, o.by]), [['stop', 'card']]);
+        const card = cardFor(tab.document, 'STOP_AT_ONCE');
+        assert.equal(card.querySelector('div.mission-confirm'), null, 'no question');
+        assert.equal(card.querySelector('p.mission-order').textContent, 'Stop asked: waiting for the Master Chief to relay it');
+        assert.equal(card.querySelector('button.mission-stop'), null, 'no second Stop while one is on its way');
+      } finally {
+        tab.restoreFetch();
+      }
+    });
+
+    await check('a Stop click with Ctrl, Shift or Alt held only asks, as a plain one does', async () => {
+      for (const held of ['ctrlKey', 'shiftKey', 'altKey']) {
         const key = `STOP_${held.toUpperCase()}`;
         await liveMission(key);
         const tab = await openMissionsTab();

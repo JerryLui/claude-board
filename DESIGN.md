@@ -745,7 +745,8 @@ and then five columns, Needs you, Working, Waiting, Stalled and Landed, as a gri
 least 250px wide that wraps on a narrow window. A card is the work's title and age, its key and
 phase (with a Queued tag under Waiting), the summary, what it waits on and what comes next, its
 PRs with a mark for their state, any pending order, and a row of buttons: the latest board or the
-round asking, Fire or Merge while asked, and the Stop icon at the right while a session is live.
+round asking, Fire or Merge while asked, and the Stop icon at the right while a session is live,
+asking once before it sends, or sending at once on a Cmd-click.
 Boards is the list of Threads with its filter, the home page before Missions took `/`, now at the
 bar's full width.
 

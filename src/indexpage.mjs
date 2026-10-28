@@ -260,11 +260,12 @@ const missionsScript = `
  *
  * Fire and Merge answer the round their button names, through the board's own submit:
  * the question set to option 0, the round number, nothing else. Stop asks once, inline,
- * then posts a stop order; the card says the order is on its way until the Master Chief
- * acks it. With Comment on in the bar, a click on a card opens a note that posts a
+ * then posts a stop order; a Cmd-click posts it at once, with no question. The card says
+ * the order is on its way from the post until the Master Chief acks it, and a second
+ * Stop on the card posts nothing until the daemon's missions show the first. With Comment on in the bar, a click on a card opens a note that posts a
  * comment order. Same quoting rules as the rest of this script: no backticks and no
  * dollar-brace below. */
-var missionsUi = { confirming: {}, sending: {}, errors: {}, commenting: {}, drafts: {} };
+var missionsUi = { confirming: {}, sending: {}, errors: {}, commenting: {}, drafts: {}, stopSent: {} };
 var missionsData = null;
 var missionsCardHtml = {};
 var missionsInFlight = false;
@@ -425,6 +426,7 @@ function patchMissions() {
     .then(function (data) {
       if (!data || !Array.isArray(data.missions)) return;
       missionsData = data;
+      missionsSettleStops(data.missions);
       paintMissions();
     })
     .catch(function () { /* leave the columns as they are, as patchRows does */ })
@@ -435,6 +437,16 @@ function patchMissions() {
         return patchMissions();
       }
     });
+}
+
+// A stop this page sent stays on its card until the daemon's missions show it, or show
+// the session gone: only then does the card read the order from the daemon alone.
+function missionsSettleStops(missions) {
+  Object.keys(missionsUi.stopSent).forEach(function (key) {
+    var m = missions.filter(function (x) { return x.key === key; })[0];
+    var orders = m && Array.isArray(m.orders) ? m.orders : [];
+    if (!m || !m.live || orders.some(function (o) { return o.kind === 'stop'; })) delete missionsUi.stopSent[key];
+  });
 }
 
 function postMissionJson(url, body) {
@@ -495,6 +507,17 @@ function missionsOrder(key, body, failure) {
   }, failure);
 }
 
+function missionsStop(key) {
+  delete missionsUi.confirming[key];
+  if (missionsUi.stopSent[key] || missionsUi.sending[key]) { paintMissions(); return; }
+  missionsUi.stopSent[key] = true;
+  missionsOrder(key, { kind: 'stop' }, 'Could not send the stop').then(function (ok) {
+    if (ok) return;
+    delete missionsUi.stopSent[key];
+    paintMissions();
+  });
+}
+
 function focusIn(key, selector) {
   var node = missionsFind(key);
   var el = node && node.querySelector(selector);
@@ -509,7 +532,11 @@ function onMissionsClick(ev) {
   var key = cardEl.getAttribute('data-mission-key');
   var act = t.closest('button.mission-act');
   if (act) { if (!act.disabled) missionsAnswer(key, act); return; }
-  if (t.closest('button.mission-stop')) {
+  var stop = t.closest('button.mission-stop');
+  if (stop) {
+    if (stop.disabled) return;
+    // Cmd-click stops at once. A Mac Ctrl press comes in as contextmenu and still asks.
+    if (ev.type === 'click' && ev.metaKey) { missionsStop(key); return; }
     missionsUi.confirming[key] = !missionsUi.confirming[key];
     paintMissions();
     if (missionsUi.confirming[key]) focusIn(key, 'button.mission-stop-confirm');
@@ -522,8 +549,7 @@ function onMissionsClick(ev) {
     return;
   }
   if (t.closest('button.mission-stop-confirm')) {
-    delete missionsUi.confirming[key];
-    missionsOrder(key, { kind: 'stop' }, 'Could not send the stop');
+    missionsStop(key);
     return;
   }
   if (t.closest('button.mission-comment-cancel')) {
@@ -1753,7 +1779,7 @@ function missionsParts(overview, ui) {
     return m.view === 'queued' ? 'waiting' : m.view;
   }
 
-  function orderLines(m) {
+  function orderLines(m, sent) {
     var orders = Array.isArray(m.orders) ? m.orders : [];
     var lines = [];
     var stop = null;
@@ -1762,6 +1788,7 @@ function missionsParts(overview, ui) {
       if (orders[i].kind === 'stop') stop = orders[i];
       else if (orders[i].kind === 'comment' && !orders[i].relayedAt) comments += 1;
     }
+    if (!stop && sent) stop = {};
     if (stop && m.live) {
       lines.push(stop.relayedAt
         ? 'Stop relayed: the session finishes its step, writes its Handoff and ends'
@@ -1776,7 +1803,7 @@ function missionsParts(overview, ui) {
     var actions = Array.isArray(m.actions) ? m.actions : [];
     var boards = Array.isArray(m.boards) ? m.boards : [];
     var latest = boards.length ? boards[boards.length - 1] : null;
-    var orders = orderLines(m);
+    var orders = orderLines(m, pick('stopSent', key));
     var busy = pick('sending', key);
     var out = '<article class="mission-card" data-mission-key="' + esc(key) + '" data-view="' + esc(m.view) + '">';
     out += '<div class="mission-card-head"><b class="mission-title">' + esc(m.title || key) + '</b>'
@@ -1824,7 +1851,7 @@ function missionsParts(overview, ui) {
     }
     if (m.live && !orders.stopPending) {
       var confirming = pick('confirming', key);
-      btns += '<button type="button" class="mission-stop" aria-label="Stop session" title="Stop: finish the step, hand off, end" aria-expanded="'
+      btns += '<button type="button" class="mission-stop" aria-label="Stop session" title="Stop: finish the step, hand off, end. Cmd-click stops at once" aria-expanded="'
         + (confirming ? 'true' : 'false') + '"' + (busy ? ' disabled' : '') + '>' + STOP_ICON + '</button>';
     }
     if (btns) out += '<div class="mission-btns">' + btns + '</div>';

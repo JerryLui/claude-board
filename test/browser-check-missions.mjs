@@ -1,9 +1,9 @@
 // Real-browser check for the Missions view with cards on it: the top bar lands on the same
 // pixels on `/` (cards in every column, Comment on offer) as on `/boards`; the five columns
 // lay out in one row across the bar's whole content width, at 1440 and 2560 wide, light
-// and dark, with nothing scrolling sideways; and Stop, pressed with a real mouse, with or
-// without a modifier held, asks once and then sends its order, its Stop and Keep on one
-// line. Layout and a real press, which the DOM stand-in has none of (QUIRKS.md "The DOM
+// and dark, with nothing scrolling sideways; and Stop, pressed with a real mouse, plain or
+// with Ctrl, Shift or Alt held, asks once and then sends its order, its Stop and Keep on
+// one line, while a Cmd double-press sends one order with no question. Layout and a real press, which the DOM stand-in has none of (QUIRKS.md "The DOM
 // stand-in's ceilings"): test/check-missions-view.mjs holds the markup and the requests.
 //
 // NOT wired into test/run.mjs's `checks` array, on purpose: that suite has to pass on a
@@ -76,8 +76,9 @@ const MEASURE_EXPR = `(function () {
 const tabAt = (width, theme) => ({ width, height: HEIGHT, theme, expr: MEASURE_EXPR });
 
 /** Presses the element `selector` names with a real mouse, at its centre, with the
- * DevTools `modifiers` bitmask held (1 Alt, 2 Ctrl, 4 Cmd, 8 Shift). */
-async function press(tab, selector, modifiers = 0) {
+ * DevTools `modifiers` bitmask held (1 Alt, 2 Ctrl, 4 Cmd, 8 Shift), `times` presses in
+ * a row on the same spot as a double-click lands them. */
+async function press(tab, selector, modifiers = 0, times = 1) {
   const at = await tab.evalPage(`(function () {
     var el = document.querySelector(${JSON.stringify(selector)});
     if (!el) return null;
@@ -86,8 +87,11 @@ async function press(tab, selector, modifiers = 0) {
     return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
   })()`);
   assert.ok(at, `nothing to press at ${selector}`);
-  for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased']) {
-    await tab.sp('Input.dispatchMouseEvent', { type, x: at.x, y: at.y, button: 'left', modifiers, clickCount: type === 'mouseMoved' ? 0 : 1 });
+  await tab.sp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: at.x, y: at.y, button: 'left', modifiers, clickCount: 0 });
+  for (let n = 1; n <= times; n++) {
+    for (const type of ['mousePressed', 'mouseReleased']) {
+      await tab.sp('Input.dispatchMouseEvent', { type, x: at.x, y: at.y, button: 'left', modifiers, clickCount: n });
+    }
   }
 }
 
@@ -128,6 +132,7 @@ async function main() {
     await live('FILETYPE_FOLLOWUP', { title: 'File types, part 2', summary: 'Wave 2 of 3, 4 owners', next: 'wave 3',
       prs: [{ repo: 'service', number: 1866, url: 'https://github.com/o/service/pull/1866', state: 'draft' }] });
     await live('ANNOUNCEMENTS', { title: 'In-app announcements', summary: 'Wave 1 of 2, 3 owners' });
+    await live('BANK_EXPORT', { title: 'Bank export', summary: 'Wave 1 of 1, 1 owner' });
     await post('/api/mission/SCHEDULED', { title: 'Scheduled steps', phase: 'landing', state: 'waiting', waitingOn: 'checks on service #1880' });
     await post('/api/mission/PAGE_READ_ROLLOUT', { title: 'Page reading rollout', phase: 'direct', state: 'queued', next: 'starts when a slot frees' });
     await post('/api/mission/SMALL_FIXES', { title: 'Security small fixes', phase: 'direct', state: 'working', summary: 'Silent since its last step' });
@@ -211,11 +216,29 @@ async function main() {
 
     await withChrome({ tag: 'cb-missions-stop' }, async ({ send, onEvent }) => {
       const cookie = sessionToken(daemon.secret);
-      await row('Stop, pressed with Cmd, Ctrl, Shift or Alt held, only asks, and Keep shuts the question', async note => {
+      await row('Stop, double-pressed with Cmd held, sends one stop order with no question and says so on the card', async note => {
+        const tab = await openTab(send, onEvent, `${origin}/`, cookie, tabAt(1440, 'light'));
+        try {
+          const card = 'article.mission-card[data-mission-key="BANK_EXPORT"]';
+          await press(tab, `${card} button.mission-stop`, 4, 2);
+          const said = await waitFor(tab, `(document.querySelector('${card} p.mission-order') || {}).textContent`, 'the order line');
+          note(said);
+          assert.equal(said, 'Stop asked: waiting for the Master Chief to relay it');
+          await sleep(300); // room for a second order's request to land before it is looked for
+          assert.equal(await tab.evalPage(`!!document.querySelector('${card} div.mission-confirm')`), false, 'no question');
+          const orders = (await getJson(`${origin}/api/mission/BANK_EXPORT`, daemon.secret)).orders;
+          note(`orders: ${orders.map(o => o.kind).join(', ')}`);
+          assert.deepEqual(orders.map(o => o.kind), ['stop']);
+        } finally {
+          await tab.close();
+        }
+      });
+
+      await row('Stop, pressed plain or with Ctrl, Shift or Alt held, only asks, and Keep shuts the question', async note => {
         const tab = await openTab(send, onEvent, `${origin}/`, cookie, tabAt(1440, 'light'));
         try {
           const card = 'article.mission-card[data-mission-key="ANNOUNCEMENTS"]';
-          for (const [held, modifiers] of [['Cmd', 4], ['Ctrl', 2], ['Shift', 8], ['Alt', 1]]) {
+          for (const [held, modifiers] of [['plain', 0], ['Ctrl', 2], ['Shift', 8], ['Alt', 1]]) {
             await press(tab, `${card} button.mission-stop`, modifiers);
             await waitFor(tab, `!!document.querySelector('${card} div.mission-confirm')`, `the Stop question on a ${held} press`);
             await sleep(300); // room for a stray order's request to land before it is looked for
