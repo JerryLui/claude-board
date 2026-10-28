@@ -269,6 +269,73 @@ async function main() {
     assert.deepEqual(launchMission('THIRTEENTH', { phase: 'grill' }, { home: dir, now, isAlive: alive }), { queued: true });
   });
 
+  await check('a launch queued behind the cap ends the session it replaces: the mission holds no slot, dequeues on the next launch, and that pid cannot bind', () => {
+    const dir = scratchHome('queued-after-fire');
+    const t0 = Date.parse('2026-10-28T12:00:00Z');
+    const alive = () => true;
+    launchMission('GRILLED', { phase: 'grill' }, { home: dir, now: t0 });
+    bindSession('GRILLED', { pid: 7171 }, { home: dir, now: t0 + 1000, isAlive: alive });
+    upsertMission('GRILLED', { state: 'waiting', fire: { by: 'round' } }, { home: dir, now: t0 + 2000 });
+    for (let i = 0; i < MAX_WORKING; i++) {
+      seed(dir, `W${i}`, { now: t0, session: { pid: 1000 + i, startedAt: iso(t0), seenAt: iso(t0) } });
+    }
+    const now = t0 + minutes(1);
+    assert.deepEqual(launchMission('GRILLED', { phase: 'direct' }, { home: dir, now, isAlive: alive }), { queued: true });
+    const overview = missionsOverview({ home: dir, now, isAlive: alive });
+    const queued = overview.missions.find(m => m.key === 'GRILLED');
+    assert.equal(queued.view, 'queued');
+    assert.equal(queued.live, false, 'the fired grill, still running, no longer holds the mission');
+    assert.deepEqual(overview.live, { working: MAX_WORKING, alive: MAX_WORKING });
+
+    writeMission({ ...readMission('W0', dir), session: null, state: 'waiting' }, dir);
+    assert.deepEqual(launchMission('GRILLED', { phase: 'direct' }, { home: dir, now, isAlive: alive }), { launch: true });
+    assert.throws(() => bindSession('GRILLED', { pid: 7171 }, { home: dir, now, isAlive: alive }), { status: 409, message: 'live' },
+      'the ended grill cannot take the dequeued session');
+    assert.equal(bindSession('GRILLED', { pid: 8181 }, { home: dir, now, isAlive: alive }).session.pid, 8181);
+  });
+
+  await check('a session its mission expects to have stopped never reads stalled: a fired grill whose pid is gone, and a dead mission relaunched into a full queue', () => {
+    const dir = scratchHome('expected-stop');
+    const t0 = Date.parse('2026-10-28T12:00:00Z');
+    const alive = () => true;
+    launchMission('FIRED_GONE', { phase: 'grill' }, { home: dir, now: t0 });
+    bindSession('FIRED_GONE', { pid: 9191 }, { home: dir, now: t0 + 1000, isAlive: alive });
+    upsertMission('FIRED_GONE', { state: 'waiting', fire: { by: 'round' } }, { home: dir, now: t0 + 2000 });
+    launchMission('DIED', { phase: 'direct' }, { home: dir, now: t0 });
+    bindSession('DIED', { pid: 9292 }, { home: dir, now: t0 + 1000, isAlive: alive });
+    for (let i = 0; i < MAX_WORKING; i++) {
+      seed(dir, `W${i}`, { now: t0, session: { pid: 10000 + i, startedAt: iso(t0), seenAt: iso(t0) } });
+    }
+    const now = t0 + minutes(1);
+    const deadGrillAndDied = pid => pid !== 9191 && pid !== 9292;
+    assert.deepEqual(launchMission('DIED', { phase: 'direct' }, { home: dir, now, isAlive: deadGrillAndDied }), { queued: true });
+
+    const overview = missionsOverview({ home: dir, now, isAlive: deadGrillAndDied });
+    assert.equal(overview.missions.find(m => m.key === 'FIRED_GONE').view, 'waiting');
+    assert.equal(overview.missions.find(m => m.key === 'DIED').view, 'queued');
+    assert.equal(overview.counts.stalled, 0);
+    assert.equal(overview.counts.queued, 1);
+  });
+
+  await check('a silent session bound by id alone, replaced by a relaunch, cannot bind again, and its successor binds and holds against any other id', () => {
+    const dir = scratchHome('silent-id');
+    const t0 = Date.parse('2026-10-28T12:00:00Z');
+    launchMission('CODEX', { phase: 'direct' }, { home: dir, now: t0 });
+    bindSession('CODEX', { id: 'sess-a' }, { home: dir, now: t0 + 1000 });
+    const silent = t0 + minutes(16);
+    assert.deepEqual(launchMission('CODEX', { phase: 'direct' }, { home: dir, now: silent }), { launch: true });
+
+    const live = { status: 409, message: 'live' };
+    assert.throws(() => bindSession('CODEX', { id: 'sess-a' }, { home: dir, now: silent + 1000 }), live,
+      'the replaced session cannot take its successor\'s reservation');
+    assert.equal(bindSession('CODEX', { id: 'sess-b' }, { home: dir, now: silent + 2000 }).session.id, 'sess-b');
+    assert.throws(() => bindSession('CODEX', { id: 'sess-a' }, { home: dir, now: silent + 3000 }), live,
+      'nor displace the successor once it is bound');
+    assert.throws(() => bindSession('CODEX', { id: 'sess-c' }, { home: dir, now: silent + 4000 }), live,
+      'a second id while the bound one is heard from is a second live session');
+    assert.equal(readMission('CODEX', dir).session.id, 'sess-b');
+  });
+
   await check('a mission waiting on the PM is alive but not working, so it holds no working slot', () => {
     const dir = scratchHome('waiting-on-pm');
     const now = Date.now();
