@@ -67,6 +67,16 @@ const MESSAGES = {
     format: folder => `${folder}: a round is waiting.`,
     unnamed: 'A round is waiting.',
   },
+  // A batch of missions turning needs-you, stalled or landed (src/mission-watch.mjs). The
+  // line is composed by the watch from work names and counts only, and crosses as the
+  // row's one argument under its own filter, isSafeMissionLine below, which admits the
+  // comma a list of groups needs and nothing else the folder filter refuses.
+  missions: {
+    title: 'Missions',
+    format: line => line,
+    unnamed: 'A mission changed.',
+    safe: name => isSafeMissionLine(name),
+  },
 };
 
 // Phase -> the settings key holding THAT phase's cue (src/pomodoro.mjs's cueWork/
@@ -108,6 +118,15 @@ const MAX_FOLDER_NAME_LEN = 80;
 function isSafeFolderName(name) {
   return typeof name === 'string' && name.length > 0 && name.length < MAX_FOLDER_NAME_LEN
     && SAFE_FOLDER_NAME.test(name);
+}
+
+// The missions row's argument filter, bin/launcher.c's `is_safe_mission_line`: the folder
+// set plus the comma, under MAX_MISSION_LINE_LEN, which must match the C constant.
+const SAFE_MISSION_LINE = /^[A-Za-z0-9][A-Za-z0-9 _,-]*$/;
+export const MAX_MISSION_LINE_LEN = 120;
+export function isSafeMissionLine(line) {
+  return typeof line === 'string' && line.length > 0 && line.length < MAX_MISSION_LINE_LEN
+    && SAFE_MISSION_LINE.test(line);
 }
 
 // The click target's filter, mirroring bin/launcher.c's `cb_is_board_url` the same way
@@ -411,6 +430,14 @@ export function notifyTest() {
   fire('test', NO_CUE);
 }
 
+/** One notification for a batch of missions (src/mission-watch.mjs composes `line` from
+ * work names and counts). A line the filter refuses shows the row's unnamed sentence.
+ * No click: the launcher opens only board URLs, and the home page is not one. Never
+ * throws, exactly like its siblings. */
+export function notifyMissions(line) {
+  return fire('missions', NO_CUE, line);
+}
+
 /** The spawn both entry points share: the bundle's own executable when this file is
  * running from inside one, `osascript` otherwise (see the file header for why that
  * fallback is load-bearing rather than a nicety). Split out of `notifyBoundary` when
@@ -429,7 +456,8 @@ function fire(phase, cue, name, url = null, port = null, deadlineAt = null) {
   const row = MESSAGES[phase];
   if (!row) return null; // unrecognised phase: no notification, see MESSAGES above.
 
-  const message = row.format ? (isSafeFolderName(name) ? row.format(name) : row.unnamed) : row.message;
+  const safe = row.safe || isSafeFolderName;
+  const message = row.format ? (safe(name) ? row.format(name) : row.unnamed) : row.message;
 
   if (APP_EXEC) {
     // `phase` itself crosses here, where every other path in this file passes only
@@ -449,7 +477,7 @@ function fire(phase, cue, name, url = null, port = null, deadlineAt = null) {
     // folder. Either way, what crosses here is never free text.
     const args = ['--notify', phase];
     if (row.format) {
-      if (isSafeFolderName(name)) args.push(name);
+      if (safe(name)) args.push(name);
     } else if (cue !== NO_CUE) {
       args.push(cue);
     }

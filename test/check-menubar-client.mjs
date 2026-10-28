@@ -368,6 +368,7 @@ async function probe({ home, port, args = [] }) {
     }
     if (line.startsWith('row=')) state.rows.push(line.slice(4));
     else if (line.startsWith('morerow=')) state.morerow = line.slice(8);
+    else if (line.startsWith('missionsrow=')) state.missionsrow = line.slice(12);
     else if (line.startsWith('caption=')) state.caption = line.slice(8);
     else if (line.startsWith('status=')) state.status = line.slice(7);
     else if (line.startsWith('url=')) state.url = line.slice(4);
@@ -1724,6 +1725,46 @@ async function main() {
       assert.equal(seven.total, '7');
       assert.equal(seven.morerow, '2 more waiting');
       assert.equal(seven.rows.length, 5, 'the rows never grow past the cap however long the list gets');
+    });
+  });
+
+  await check('the missions row: /api/waiting carries the counts needing the PM and working, and the popover names them in one row below the boards, absent at zero', async () => {
+    await withDaemon(runningDoc(null), async ({ probeHome, port, secret }) => {
+      const setMission = async (key, state) => {
+        const r = await fetch(`http://127.0.0.1:${port}/api/mission/${key}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', [SECRET_HEADER]: secret },
+          body: JSON.stringify({ state }),
+        });
+        assert.equal(r.status, 200, await r.text());
+      };
+      const counts = async () => (await (await fetch(`http://127.0.0.1:${port}/api/waiting`, {
+        headers: { [SECRET_HEADER]: secret },
+      })).json()).missions;
+
+      assert.deepEqual(await counts(), { needsYou: 0, working: 0 });
+      assert.equal((await probe({ home: probeHome, port })).missionsrow, undefined, 'no missions, no row');
+
+      await setMission('CHARLIE', 'needs-you');
+      assert.equal((await probe({ home: probeHome, port })).missionsrow, 'Missions: 1 needs you');
+      await setMission('DELTA', 'needs-you');
+      assert.equal((await probe({ home: probeHome, port })).missionsrow, 'Missions: 2 need you');
+      await setMission('ALPHA', 'working');
+      await setMission('BRAVO', 'waiting');
+      assert.deepEqual(await counts(), { needsYou: 2, working: 1 }, 'a waiting mission is in neither count');
+      assert.equal((await probe({ home: probeHome, port })).missionsrow, 'Missions: 2 need you, 1 working');
+
+      const layout = await probe({ home: probeHome, port, args: ['layout'] });
+      const rowNames = Object.keys(layout.frames).filter(name => /^row\d+$/.test(name))
+        .sort((a, b) => Number(a.slice(3)) - Number(b.slice(3)));
+      const rows = rowNames.map(name => layout.frames[name]);
+      assert.deepEqual(rows.map(row => row.class), ['NSStackView', 'NSButton'],
+        `with the switch off and nothing waiting: the caption+gear row, then the missions row; got ${JSON.stringify(rows.map(r => r.class))}`);
+      assertRowsSpanPanel(rows, 'row (missions)');
+
+      await setMission('CHARLIE', 'landed');
+      await setMission('DELTA', 'landed');
+      assert.equal((await probe({ home: probeHome, port })).missionsrow, 'Missions: 1 working');
     });
   });
 

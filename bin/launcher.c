@@ -345,6 +345,22 @@ static int is_safe_folder_name(const char *s) {
   return 1;
 }
 
+/* The missions row's argument filter: is_safe_folder_name's set plus the comma, which a
+ * list of groups ("2 missions need you, FRONT_AGENT landed") needs. The line is composed
+ * by src/mission-watch.mjs from work names and counts; src/notify.mjs's
+ * isSafeMissionLine mirrors this, MAX_MISSION_LINE_LEN included. */
+#define MAX_MISSION_LINE_LEN 120
+static int is_safe_mission_line(const char *s) {
+  size_t len = strlen(s);
+  if (len == 0 || len >= MAX_MISSION_LINE_LEN) return 0;
+  if (!isalnum((unsigned char)s[0])) return 0;
+  for (size_t i = 0; i < len; i++) {
+    unsigned char c = (unsigned char)s[i];
+    if (!(isalnum(c) || c == ' ' || c == '_' || c == '-' || c == ',')) return 0;
+  }
+  return 1;
+}
+
 /* --- The click target -----------------------------------------------------------
  *
  * ADR.md entry 57: a round's banner is clickable, and what a click opens is a plain
@@ -921,6 +937,9 @@ static const struct {
    * crossing here exactly as a cue name always has: as argv[3], filtered before it
    * reaches this table at all. */
   { "round",     "Board",    NULL, "%s: a round is waiting.",   "A round is waiting." },
+  /* A batch of missions turning needs-you, stalled or landed. Its argument is the whole
+   * line, under is_safe_mission_line rather than the folder filter; it carries no click. */
+  { "missions",  "Missions", NULL, "%s",                        "A mission changed." },
 };
 enum { MESSAGES_N = (int)(sizeof(MESSAGES) / sizeof(MESSAGES[0])) };
 
@@ -1029,9 +1048,10 @@ int main(int argc, char **argv) {
          * rather than the phase being rejected (ADR.md entry 56). Always the system
          * default sound -- see the MESSAGES table's own comment on why this row has no
          * cue of its own. */
-        char body_buf[MAX_FOLDER_NAME_LEN + 32];
+        char body_buf[MAX_MISSION_LINE_LEN + MAX_FOLDER_NAME_LEN + 32];
         const char *body;
-        if (argc >= 4 && is_safe_folder_name(argv[3])) {
+        int is_missions = strcmp(MESSAGES[i].phase, "missions") == 0;
+        if (argc >= 4 && (is_missions ? is_safe_mission_line(argv[3]) : is_safe_folder_name(argv[3]))) {
           snprintf(body_buf, sizeof(body_buf), MESSAGES[i].format, argv[3]);
           body = body_buf;
         } else {

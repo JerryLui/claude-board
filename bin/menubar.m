@@ -515,6 +515,7 @@ typedef struct {
   int total;                /* what the route said, uncapped — the overflow's numerator */
   int more;                 /* total - count, floored at 0 */
   char more_label[40];      /* "N more waiting", or "" when there is no overflow row */
+  char missions_label[64];  /* the missions row (cb_missions_label), or "" for no row */
 } cb_waiting;
 
 /* Copy `s` into `out`, cutting it at `max_bytes` with an ellipsis if it is longer.
@@ -577,6 +578,22 @@ static void cb_waiting_caption(int total, char *out, size_t out_len) {
   if (total <= 0) snprintf(out, out_len, "Nothing waiting");
   else if (total == 1) snprintf(out, out_len, "1 waiting for an answer");
   else snprintf(out, out_len, "%d waiting for an answer", total);
+}
+
+/* The missions row: the counts `GET /api/waiting` carries under `missions` of the missions
+ * needing the PM and of those working, as one row that opens the home page (the Missions
+ * view). "Missions: 2 need you, 3 working"; a zero count is left out, and with both zero,
+ * or a daemon that sends no counts, there is no row at all: a row reading "nothing" would
+ * be a row of chrome on every popover of a machine that never runs a mission. */
+static void cb_missions_label(int needs_you, int working, char *out, size_t out_len) {
+  char needs[32] = "";
+  char work[32] = "";
+  if (needs_you == 1) snprintf(needs, sizeof(needs), "1 needs you");
+  else if (needs_you > 1) snprintf(needs, sizeof(needs), "%d need you", needs_you);
+  if (working > 0) snprintf(work, sizeof(work), "%d working", working);
+  if (needs[0] && work[0]) snprintf(out, out_len, "Missions: %s, %s", needs, work);
+  else if (needs[0] || work[0]) snprintf(out, out_len, "Missions: %s", needs[0] ? needs : work);
+  else out[0] = '\0';
 }
 
 /* The popover's one line of text about the Timer — ADR 88, narrowing ADR 83. This is now
@@ -1234,6 +1251,12 @@ static BOOL cb_fetch_waiting(cb_waiting *out) {
   }
   built.more = cb_overflow_count(built.count, built.total);
   cb_overflow_label(built.more, built.more_label, sizeof(built.more_label));
+  NSDictionary *missions = doc[@"missions"];
+  if ([missions isKindOfClass:[NSDictionary class]]) {
+    cb_missions_label(cb_number_int(missions, @"needsYou", 0.0, 0, CB_COUNT_MAX),
+                      cb_number_int(missions, @"working", 0.0, 0, CB_COUNT_MAX),
+                      built.missions_label, sizeof(built.missions_label));
+  }
   *out = built;
   return YES;
 }
@@ -1554,14 +1577,15 @@ static void cb_stream_schedule_reconnect(void) {
 static NSURLSession *cb_stream_session = nil;
 static CBEventStream *cb_stream_delegate = nil;
 
-/* The one thing an event NAME means: `pomodoro` and `waiting` both become the exact same
- * re-poll a button press already triggers (cb_dispatch_action's own trailing
+/* The one thing an event NAME means: `pomodoro`, `waiting` and `missions` all become the
+ * exact same re-poll a button press already triggers (cb_dispatch_action's own trailing
  * `cb_poll_once`). Anything else — a future event name this build predates — is silently
  * ignored, the same closed-set discipline cb_phase_from applies to an unrecognised phase
  * string: an unknown event is not evidence of nothing, only of nothing THIS build knows
  * how to act on. */
 static void cb_stream_handle_event(NSString *name) {
-  if (![name isEqualToString:@"pomodoro"] && ![name isEqualToString:@"waiting"]) return;
+  if (![name isEqualToString:@"pomodoro"] && ![name isEqualToString:@"waiting"]
+      && ![name isEqualToString:@"missions"]) return;
   if (cb_poll_queue == nil) return;
   dispatch_async(cb_poll_queue, ^{
     cb_poll_once();
@@ -2663,6 +2687,14 @@ static void cb_open_url(NSURL *url) {
                                   @"Open the index page, which lists every board waiting for an answer",
                                   self, @selector(pressIndex:), 0)];
   }
+  /* Last, below the boards: the waiting caption stays beside the rows it counts. */
+  if (waiting.missions_label[0] != '\0') {
+    NSString *missions = [NSString stringWithUTF8String:waiting.missions_label];
+    if (missions != nil) {
+      [rows addObject:cb_row_button(missions, @"Open Missions, the board's home page", self,
+                                    @selector(pressIndex:), 0)];
+    }
+  }
   self.rowURLs = urls;
 
   NSStackView *stack = [NSStackView stackViewWithViews:rows];
@@ -3383,10 +3415,10 @@ static NSInteger cb_row_index_of(NSStackView *stack, NSView *target) {
  * ticket was handed.
  *
  * One `frame=` line per top-level row (`row0`, `row1`, … in stack order — the status row,
- * the control row, the separator, the waiting caption, then each waiting row and the
- * overflow row if either is present), which is what lets a check assert "every row shares
- * one left edge and one right edge" — criterion 1's "spans the panel" and criterion 13's
- * "a row stops spanning the panel" — generically, over however many rows this daemon's
+ * the control row, the separator, the waiting caption, then each waiting row, the
+ * overflow row and the missions row where present), which is what lets a check assert
+ * "every row shares one left edge and one right edge" — criterion 1's "spans the panel"
+ * and criterion 13's "a row stops spanning the panel" — generically, over however many rows this daemon's
  * waiting list produced, with no row's identity hardcoded. Each carries a trailing
  * `class=` naming the row's own Objective-C class (`NSStackView` for the status/control
  * rows, `NSBox` for the divider, `NSTextField` for the waiting caption, `NSButton` for a
@@ -3644,6 +3676,7 @@ int cb_menubar_probe(const char *word, const char *argument) {
            CB_ROW_TITLE_COLOR);
     for (int i = 0; i < waiting.count; i++) printf("row=%s\n", waiting.rows[i].label);
     if (waiting.more > 0) printf("morerow=%s\n", waiting.more_label);
+    if (waiting.missions_label[0] != '\0') printf("missionsrow=%s\n", waiting.missions_label);
     /* The caption carries the count (see cb_waiting_caption), so it is a thing a check
        has to be able to read -- printed unconditionally, including at zero. */
     char caption[48];
