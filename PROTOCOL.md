@@ -19,13 +19,15 @@ packet's `resolved`, redundant beside `lost`) is the shape of that exception.
 | `bin/launcher.c` | launchd entry point, compiled by `install.sh` into a signed app bundle that forks the daemon, so macOS TCC has an application of ours to attribute its file reads to. Also the two C functions both native click surfaces share: the board-URL scanner (`cb_is_board_url`) and the tab surfacer (`cb_surface_tab`) |
 | `bin/notify.m` | the bundle's `--notify` mode: one native notification, posted natively rather than through `osascript`. Its click serves the board through `cb_surface_tab` (`bin/launcher.c`), which does spawn `osascript` — to raise the tab the board is already open in rather than open a second one (ADR 93) |
 | `bin/menubar.m` | the bundle's `--menubar` mode: the macOS status item, forked beside the daemon as a second child of the launcher (ADR 72) |
-| `src/store.mjs` | board JSON persistence: read, write, list, search |
+| `src/store.mjs` | board and mission JSON persistence: read, write, list, search, prune |
 | `src/board.mjs` | the model: id minting, block normalisation, rounds, packet assembly |
 | `src/markdown.mjs` | markdown -> HTML + anchor extraction; runs in node and in the browser |
 | `src/anchor.mjs` | element-level (`dom`/`mermaid`) anchor path and hint logic, pure. `src/ui.mjs` carries a duplicate as plain functions, since the served page has no import graph at runtime |
 | `src/resolve.mjs` | content-by-reference resolution and sha snapshotting |
 | `src/render.mjs` | board JSON -> complete HTML page (pure function) |
-| `src/indexpage.mjs` | daemon root: the thread index and its session filter |
+| `src/indexpage.mjs` | the two home views under one top bar: Missions at `/`, its columns and card buttons, and the Boards view at `/boards`, the thread index and its session filter |
+| `src/missions.mjs` | the missions ledger: the writable fields and their caps, the derived view (`view`, `live`, `actions`), the launch check and its caps, sessions, orders, board links |
+| `src/mission-watch.mjs` | the daemon's 30-second read of every mission: publishes the derived changes no write made, and speaks one batched notification a minute (ADR 128) |
 | `src/server.mjs` | the `node:http` daemon: routes, SSE, the four gates below |
 | `src/stranded.mjs` | the stranded rule: a board no Watcher is looking at, carrying an awaited round or a Suppressed board's own first round, gets one banner per absence, after a grace. Persistence, grace timers and the click-serving child's lifecycle, all behind `createStrandedWatch` |
 | `src/secret.mjs` | the two credentials: the local secret and the browser session cookie derived from it, shared by the daemon and the shim |
@@ -40,8 +42,8 @@ packet's `resolved`, redundant beside `lost`) is the shape of that exception.
 | `src/cues.mjs` | the cue vocabulary: the closed set of legal cue values, enumerated live from BOTH sound directories (`/System/Library/Sounds` and `~/Library/Sounds`, ADR 20) plus `"None"`, memoised on a 5-second TTL |
 | `src/pomodoro.mjs` | the global pomodoro clock: the pure boundary rule, the pomodoro day above it (05:00 to 05:00, ADR 67), the document's shape on disk, the impure shell the daemon boots. Absolute deadlines, so a restart is invisible and a deadline slept through expires silently |
 | `src/pomodoro-widget.mjs` | the timer's server-rendered markup for the index page; its client half extends `src/indexpage.mjs`'s script by concatenation |
-| `src/notify.mjs` | one native notification per interval boundary, carrying that phase's cue. The bundle's own executable in `--notify` mode inside `claude-board.app` (ADR 19), `osascript` only on the no-launcher clone install; message text and cue both come from closed-set lookups |
-| `skills/claude-board/SKILL.md` | the manual for the `ask` tool, and the only prose statement of this protocol a caller reads. `install.sh` copies it to `~/.claude/skills/claude-board/` (ADR 11); `test/check-skill-prose.mjs` binds it to the live shim |
+| `src/notify.mjs` | one native notification per interval boundary, carrying that phase's cue. The bundle's own executable in `--notify` mode inside `claude-board.app` (ADR 19), `osascript` only on the no-launcher clone install; message text and cue both come from closed-set lookups, a round's folder name and a missions batch's line each passing a filter first (ADR 56, 128) |
+| `skills/claude-board/SKILL.md` | the manual for the `ask`, `read` and `mission` tools, and the only prose statement of this protocol a caller reads. `install.sh` copies it to `~/.claude/skills/claude-board/` (ADR 11); `test/check-skill-prose.mjs` binds it to the live shim |
 | `test/check-*.mjs` | the suite; `test/run.mjs` carries an explicit list of them rather than globbing, so a new check runs only once its filename is added there |
 
 Zero *installed* dependencies: no `npm install`, no `node_modules`, no bundler, no build step;
@@ -63,6 +65,8 @@ $CLAUDE_BOARD_HOME/pages/styles-<hash>.css  the shared stylesheet a page names
 $CLAUDE_BOARD_HOME/pages/mermaid-<hash>.js  the shared diagram engine, named by ui.js
                                              rather than by any page (vendored, ADR 62)
 $CLAUDE_BOARD_HOME/pomodoro.json            the pomodoro clock and its settings (ADR 8)
+$CLAUDE_BOARD_HOME/missions/<key>.json      one mission record (ADR 123), see "The missions
+                                             routes" below
 ```
 
 A page does not carry the client script or the stylesheet; it *names* them, as a bare
@@ -86,7 +90,8 @@ Nothing in this directory expires. No read, no daemon start and no timer has eve
 a board, and none does now. What does exist is a **prune**, fired by hand from the
 settings panel on the index (`POST /api/store/prune`, ADR 71): it deletes every board
 older than a window the caller names — document and emitted page together — and then any
-shared asset no surviving page or asset still names. The window has no default; a prune that does
+shared asset no surviving page or asset still names, and every mission record whose `retiredAt`
+is at least 30 days old (ADR 123). The window has no default; a prune that does
 not name one is refused. This is the only thing in the system that ever deletes a board,
 so how long a board survives is the reader's decision and nothing else's.
 
@@ -667,7 +672,10 @@ is not a question block of the round being submitted is ignored server-side rath
 ## HTTP surface
 
 ```
-GET  /?q=                           thread index, filtered to sessions matching q
+GET  /                             the Missions view, the board's home page (ADR 124);
+                                    `/?q=` is a 302 to `/boards?q=`, where that filter lives
+GET  /boards?q=                     the Boards view: the thread index, filtered to sessions
+                                    matching q
 GET  /b/:boardId                    the served page
 GET  /b/:boardId?stages=held        the same page with every stage frame empty and
                                     held (ADR 122): a tab's own catch-up read, see
@@ -714,15 +722,19 @@ GET  /api/index/rows?q=             -> { html }: the index's thread rows, filter
                                     fifteen-second tick, and again on a `waiting` push over
                                     the daemon-wide stream (ADR 77, amended by 87), to
                                     patch the list in place; the rows are rendered by the
-                                    same function `GET /` uses, so the two cannot drift
+                                    same function `GET /boards` uses, so the two cannot drift
 GET  /api/search?q=                 archive search
 GET  /api/waiting                   every round in the store with an OPEN WAIT (not merely
                                     unanswered, and not "stranded") ->
                                     { waiting: [{ boardId, thread, title, round, url }],
-                                      total, now }; newest board first, uncapped -- a client
-                                    showing only its first few owns that cap
-GET  /api/events                    SSE: the daemon-wide stream -- timer, settings and
-                                    waiting-count changes, for a process or page with no
+                                      total, now, missions?: { needsYou, working } };
+                                    newest board first, uncapped -- a client showing only
+                                    its first few owns that cap. `missions` counts the
+                                    missions needing the PM and those working, for the
+                                    Status item's missions row; absent when the missions
+                                    read fails, never failing the list
+GET  /api/events                    SSE: the daemon-wide stream -- timer, settings,
+                                    waiting-count and mission changes, for a process or page with no
                                     single board id to subscribe under
                                     `/api/board/:id/events` with (bin/menubar.m; the index
                                     page, src/indexpage.mjs, ADR 87). See "SSE events" below
@@ -751,21 +763,35 @@ POST /api/pomodoro/preview          { cue } -> { ok: true }; plays a cue immedia
                                     and writes nothing
 POST /api/pomodoro/notifyTest       no body -> { ok: true }; raises one test banner
                                     immediately, reads and writes nothing
-POST /api/store/prune               { days } -> { ok: true, boards, assets }, the counts
-                                    removed. Deletes every board older than `days`
+POST /api/store/prune               { days } -> { ok: true, boards, assets, missions }, the
+                                    counts removed. Deletes every board older than `days`
                                     (document and page) plus every shared asset no
-                                    surviving page or asset names. `days` is REQUIRED and never
+                                    surviving page or asset names, and every mission
+                                    retired 30 days or more ago, whatever `days` says. `days` is REQUIRED and never
                                     defaulted: a call without it is a 400. The only
                                     route that deletes a board, and nothing but a click
                                     in the index's settings panel calls it (ADR 71)
+POST /api/board/:id/relay           { round, answers, words } -> { ok: true, board, round };
+                                    a submit on the PM's relayed words (ADR 126). Secret only
+GET  /api/missions?all=1            every mission's view, with counts -> see "The missions
+                                    routes"; the cookie reads it too
+GET  /api/mission/:key              one mission's view. Secret only
+POST /api/mission/:key              write a mission's whitelisted fields
+POST /api/mission/:key/launch       { phase, login?, prompt? }: reserve its one live session,
+                                    or queue it
+POST /api/mission/:key/session      { pid?, id?, name?, login? }: bind or heartbeat
+POST /api/mission/:key/order        { kind: 'stop'|'comment', text? }: a card's order; the
+                                    cookie may post it
+POST /api/mission/:key/order/:id/ack
+                                    {}: the order was relayed
 ```
 
 Posting and waiting are separate routes on purpose, so splitting `ask` into post + collect stays
 cheap.
 
 **Four gates, in order:** loopback `Host` (403), same-origin on every non-GET (403), a credential
-on every non-GET -- plus the two GETs held to the secret alone (401): `/wait`, because it also
-writes, and `/read`, because only a tool ever calls it -- and a credential on every other GET but
+on every non-GET -- plus the three GETs held to the secret alone (401): `/wait`, because it also
+writes, and `/read` and `GET /api/mission/:key`, because only a tool ever calls them -- and a credential on every other GET but
 two (401, secret or cookie). Both credential gates are written
 as "everything, minus an explicit exception list", so a route added later is gated by default
 rather than by whoever adds it remembering.
@@ -793,8 +819,8 @@ x-claude-board-secret: <secret>    request header; the file is re-read per gated
 ```
 
 **Every non-GET request** must carry it — except `POST /api/board/:id/submit`,
-`POST /api/board/:id/attended` and `POST /api/store/prune`, which also take the session
-cookie below. `POST /api/board/:id/abandon` is deliberately **not** among them: only the
+`POST /api/board/:id/attended`, `POST /api/store/prune` and `POST /api/mission/:key/order`, which
+also take the session cookie below. `POST /api/board/:id/abandon` is deliberately **not** among them: only the
 shim that owns a board may close its rounds, never a browser looking at it. A missing or wrong
 credential is **401 with no body**: nothing about
 what is behind it, not even whether the board exists. A daemon that finds no secret file says so
@@ -895,6 +921,13 @@ amend never mints one, so `wait` on an amending post is inert (the round it woul
 already stamped `awaited` when it was first minted, per the paragraph above naming
 `awaited`/`awaitDeadline`). It sets `round.awaited` together with the question-block check
 already run on the same blocks: see "Round `awaited` / `awaitDeadline`" above.
+
+**`mission` (a mission key, either form) links the board to that mission** (ADR 123): the daemon
+appends `{ id, url, at }` to the mission's `boards`, `url` the one this post's reply carries,
+making a stub mission (titled by its key, phase `grill`, state `waiting`) when there is none, and
+stores `mission` on the board. A later round naming a mission links a board that had none; a
+board never moves from one mission to another, so naming a second is a **400**, and so is a key
+off the pattern, both before anything is written. The shim sends it from `CLAUDE_MISSION`.
 
 **`noWait` (boolean) is the caller stating it will not open `/wait` on this post**, which is what
 makes the response the thread's next packet. On it the daemon drains into that response whatever
@@ -1042,14 +1075,33 @@ The page renders both as buttons in one `.send-bar` (`#send-btn`, `#discuss-btn`
 ## `POST /api/board/:id/relay`
 
 ```js
-{ round, answers: [ { id, status, choice, note } ], words }  -> { ok: true, board, round }
+{
+  round: 3,                                       // required, an integer: the round answered
+  answers: [ { id, status?, choice, note? } ],    // as a submit carries them; default []
+  words: 'yes, merge it',                         // required: the PM's words, verbatim
+}
+  -> { ok: true, board, round }
 ```
 
-Secret only; on no cookie list. The Master Chief answers a session's open round on the PM's own
-words: it is a submit, through the submit route's own path, so the round is sent, its tabs are
-pushed and a waiting `ask` wakes, and the round records `relayed: { words, at }`, carried by every
-packet and `read` of it. `words` is required, at most 1 KB. A sent round is a 409 as for a submit,
-and so is an abandoned one, which a Send would still take: nobody is waiting on a yes there.
+Secret only; on no cookie list, so a browser cannot forge one, and answers through `submit`
+instead (ADR 126). The Master Chief answers a session's open round on the PM's own words, typed to
+it rather than on the page. It is a submit with `action: 'send'`, through the submit route's own
+path, so everything above holds: the round is sent, its tabs are pushed, a waiting `ask` wakes,
+`waiting` and the mission's `missions` go out on the daemon-wide stream, and a question with no
+entry in `answers` is unanswered. The round then records `relayed: { words, at }` (`at` the
+daemon's ISO time of the relay), carried by every packet and `read` of it; the shim's text channel
+says so on its own line, `Relayed: the Master Chief answered this round on the PM's words at
+<at>: "<words>"`.
+
+Refusals, each writing nothing: a body that is not an object, `words` missing, empty after trimming
+or over 1 KB in UTF-8, `round` not an integer, or `answers` not an array is a **400**; an unknown
+board is a **404**; a sent round is a **409** as for a submit, and so is an **abandoned** one,
+which a Send would still take (ADR 114): its conversation walked away, so nobody waits on the yes,
+and a successor reading the board later must not find an approval meant for a session that is
+gone.
+
+`relayed` proves which path answered, not who typed the words: any process of this user holding
+the secret could post a relay, as it could already post a submit.
 
 ## `POST /api/board/:id/abandon`
 
@@ -1305,6 +1357,111 @@ Everything the table above does not say:
   `notifyTest` is the Notify checkbox's equivalent audition, and ignores the stored `notify`
   setting because the tick that triggered it has not been saved yet.
 
+## The missions routes
+
+The missions ledger (ADR 123): one record per piece of work, across its grill, direct and landing
+sessions, at `$CLAUDE_BOARD_HOME/missions/<key>.json`, the key matching `^[A-Za-z0-9_-]{1,80}$`
+(a spec's descriptor, such as `FRONT_AGENT`). A key off the pattern is a 400 on every route. Any
+agent writes one, and nothing in it is case content: work names, phases, links and closing
+summaries.
+
+```js
+Mission = {
+  key, title, cwd?,
+  phase,                     // 'grill' | 'direct' | 'landing'
+  state,                     // stored: 'needs-you' | 'working' | 'waiting' | 'queued' | 'landed'
+  summary?,                  // at most 280 characters
+  waitingOn?, next?,         // short phrases, at most 280 characters each
+  prs: [ { repo, number, url, state, order? } ],   // state: 'draft'|'open'|'green'|'merged'
+  boards: [ { id, url, at } ],                     // linked by a post; the last is the latest
+  session: { id?, pid?, name?, login?, startedAt, seenAt, ended? } | null,
+  handoff?,                  // a Handoff block, at most 4 KB
+  fire?: { at, by },         // by: 'round' | 'card'
+  orders: [ { id, kind, text?, at, by: 'card', relayedAt? } ],   // kind: 'stop' | 'comment'
+  queue?: { phase, prompt, login?, at },
+  history: [ { at, phase, state } ],               // one entry per phase or state change
+  createdAt, updatedAt, landedAt?, retiredAt?,
+}
+```
+
+**A view is what every read answers**: the stored record plus three fields derived on each read
+and never stored. `view` is the column the mission shows in: `landed` while stored landed;
+else `stalled` when its session is gone (a bound `pid` that no longer exists, or a reservation no
+`pid` or `id` bound within 5 minutes) or it is stored `working` and `session.seenAt` is over 15
+minutes old; else `needs-you` when a linked board holds an open round that asks a question or was
+minted awaited (a lapsed wait still counts); else the stored `state`. `live` is whether a session
+holds the mission (ADR 129): bound or reserved, not gone, and the mission has not recorded its end
+(stored `landed`, or phase `grill` with `fire` set); silence frees only a session with no `pid`.
+`actions` lists the card's buttons (ADR 125):
+
+```js
+actions: [ { kind, board, round, question, choice } ]   // kind: 'fire' | 'merge'
+```
+
+one per `single` question carrying an `action`, in a round of a linked board that still wants its
+answer as `needs-you` reads it: `board` the board id, `round` the round's number, `question` the
+question block's id, and `choice` option 0's label, the one a click submits through
+`POST /api/board/:id/submit` with `action: 'send'`.
+
+```
+GET  /api/missions[?all=1]
+       -> { missions: [View], counts: { needsYou, working, waiting, stalled, landed, queued },
+            live: { working, alive }, now }
+```
+
+Newest change first. A landed mission is listed until 24 hours after `landedAt`, or always with
+`all=1`. `counts` are per `view` over the missions listed; `live` counts every mission holding a
+live session, `working` including one that reads stalled. Secret or cookie.
+
+```
+GET  /api/mission/:key              -> View; 404 { error } when absent. Secret only
+POST /api/mission/:key              { ...fields } -> View
+```
+
+The write sets only `title cwd phase state summary waitingOn next prs handoff fire queue
+retiredAt`, each typed and capped as above; any other field, a wrong type or a value over its cap
+is a 400 that writes nothing. `null` clears an optional field and is a 400 on `title`, `phase`,
+`state` or `prs`. A mission that does not exist is created (phase `grill`, state `waiting`, titled
+by its key, until the body says otherwise). A phase or state change appends to `history`, and
+turning `landed` stamps `landedAt`.
+
+```
+POST /api/mission/:key/launch       { phase, login?, prompt? }
+       -> { launch: true }          a session is reserved ({ startedAt, seenAt } now), and the
+                                    mission moves to `working` in `phase`
+       -> { queued: true }          six missions' sessions working or twelve alive, the others
+                                    counted: state `queued`, `queue` holding the launch
+       -> 409 { error: 'live', session, silent? }
+```
+
+The one check that keeps a mission to one live session. The 409 names the live `session`, and
+carries `silent: true` when that session reads stalled by silence while its process lives, which
+is how a launcher tells a hang from a busy session. A finished session's `pid` and `id` move to
+the new session's `ended`.
+
+```
+POST /api/mission/:key/session      { pid?, id?, name?, login? } -> { session }
+       -> 409 { error: 'live', session }
+```
+
+Binds a session, or heartbeats the one bound (`seenAt` now); a hook calls it at every turn's end.
+A different `pid` while the bound one lives is a 409, and so is the `pid` or `id` of the session
+that ended before this launch; a different `pid` once the bound one died starts a fresh session.
+An absent mission is a 404.
+
+```
+POST /api/mission/:key/order          { kind: 'stop' | 'comment', text? } -> { order }
+POST /api/mission/:key/order/:id/ack  {} -> { order }
+```
+
+An order is a card's Stop or comment for the Master Chief to carry to the session (ADR 125); a
+comment needs non-empty `text`, at most 4 KB. It is the one mission write the browser's cookie may
+make. The ack, secret only, sets `relayedAt` once; a repeat keeps the first. An absent mission or
+order is a 404.
+
+Every write publishes `missions` on the daemon-wide stream ("SSE events"). A refusal is
+`{ error }` with its status.
+
 ## Marking an already-open tab
 
 Three marks, and no others (ADR 30): the unbadged board mark every page emits in its `<head>`
@@ -1416,6 +1573,7 @@ nothing published here is per-connection.
 ```js
 event: pomodoro   data: { settings, cycle, cycleDate, timer, now }   // same shape as GET /api/pomodoro
 event: waiting    data: { total, now }                               // same total as GET /api/waiting
+event: missions   data: { key, now }                                 // which mission changed
 ```
 
 `pomodoro` fires after every write under `/api/pomodoro/*` (ensure, pause, resume, reset, forward,
@@ -1424,6 +1582,13 @@ phase boundary on its own — the daemon's internal clock reconciling with nobod
 fires whenever a round could plausibly have entered or left the waiting set: a round posted or
 amended into an awaited state, a submit, an abandon, or a wait's wall clock lapsing. It carries
 only the count, not the rows — a client that wants the rows still asks `GET /api/waiting` for them.
+
+`missions` names one mission whose view may have moved, and nothing else: a subscriber re-reads
+`GET /api/missions` for it. It fires on every write under `/api/mission/:key`, on every `waiting`
+caused by a board linked to a mission (its rounds decide whether it reads needs-you), and from the
+daemon's missions watch (ADR 128), which reads every mission each 30 seconds and publishes a
+derived change no write made: a session whose process died, or one gone silent past 15 minutes.
+A read between the watch's ticks can therefore see a stall before the event says so.
 
 ## Stage postMessage channel
 
@@ -1896,12 +2061,27 @@ at ~/.config/claude-board/secret".
   key?, all?, fields?, board?, round?, answers?, words?, order? }
 ```
 
-Any agent (Claude, Codex, OpenCode) writes its own work's status here, never case content. `list`
-is `GET /api/missions` (`all` keeps missions landed past 24 hours), `read` `GET /api/mission/:key`,
-`write` `POST /api/mission/:key` with `fields`, `relay` `POST /api/board/:id/relay` above, `ack`
-`POST /api/mission/:key/order/:id/ack`. The daemon's answer comes back as JSON on the text channel
-and as `structuredContent`; a refusal comes back as the tool's error text, with the route's own
-message. Like `read`, it skips both session checks: a status write shows a human nothing.
+Any agent (Claude, Codex, OpenCode) writes its own work's status here, never case content
+(ADR 123). One daemon call per action, each the route of "The missions routes" or the relay
+above:
+
+```
+list    { all? }                              GET  /api/missions, `?all=1` when all is true
+read    { key }                               GET  /api/mission/:key
+write   { key, fields }                       POST /api/mission/:key, with fields as the body
+relay   { board, round, answers?, words }     POST /api/board/:id/relay; board is a board URL
+                                              or a bare id, as `read` takes it
+ack     { key, order }                        POST /api/mission/:key/order/:id/ack
+```
+
+`key` matches the store's key pattern, `all` is a boolean, `fields` an object and `order` an
+order id; an argument off its shape, or an unknown `action`, is refused by the shim before any
+call, naming the argument. The daemon's answer comes back as JSON on the text channel and as
+`structuredContent`. A refusal is the tool's error (`isError: true`) with no packet fields: the
+daemon's own, as `mission <action> refused by the daemon (HTTP <status>): <message>`, and a daemon
+that cannot be reached, or a missing or rejected secret, in the words `ask` and `read` use for
+the same, naming `mission`. Like `read`, it skips both session checks: a status write shows a
+human nothing, and the sessions that write most are the ones nobody watches.
 
 ### MCP shim environment
 
@@ -1962,8 +2142,8 @@ The shim therefore treats interactivity as an **allowlist and fails closed**: po
 `claude-desktop-3p`. Any other value — and an absent value — is a session with nobody watching,
 and `ask` refuses before anything is posted or written. `CLAUDE_BOARD_HEADLESS=1` forces the
 refusal regardless, which is the hook an unattended runner sets. `ask` is the whole scope of this
-section and of the tab check below it: `read` shows a human nothing, so it runs in a session both
-of them refuse (see "The `read` tool" above).
+section and of the tab check below it: `read` and `mission` show a human nothing, so they run in a
+session both of them refuse (see "The `read` tool" and "The `mission` tool" above).
 
 **Codex and OpenCode export no entrypoint an MCP server can read**, so for them the registration
 itself is the declaration (ADR.md entry 116): `install.sh` step 5 bakes `CLAUDE_BOARD_CLIENT=codex`
@@ -1983,6 +2163,14 @@ TUI, so the declaration passes there too. The rule an unattended run carries is 
 board out for that run: `codex exec -c mcp_servers.claude-board.enabled=false`, and for OpenCode
 either `CLAUDE_BOARD_HEADLESS=1 opencode run` (OpenCode does pass its environment through) or
 `OPENCODE_CONFIG_CONTENT='{"mcp":{"claude-board":{"enabled":false}}}'`.
+
+**A background session declares itself the same way** (ADR 127): `CLAUDE_BOARD_CLIENT=background`
+is a non-empty value, so it passes the allowlist, and the shim reads that one value as nobody at
+the terminal: `ask` posts and waits as ever and opens no tab, and the round reaches the PM through
+its Banner and the Missions view. The Master Chief's launcher sets it on the sessions it starts;
+`CLAUDE_BOARD_HEADLESS=1` still refuses over it, and a `claude -p` run without it is still refused
+by its entrypoint. Setting it makes 116's promise for the session, so an unattended run never
+carries it.
 
 **A third, distinct refusal: the daemon cannot open a tab.** SSH onto a machine with no display
 exports `CLAUDE_CODE_ENTRYPOINT=cli` and reaches the daemon fine, but `openBoardTab`
