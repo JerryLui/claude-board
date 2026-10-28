@@ -1384,7 +1384,7 @@ summaries.
 Mission = {
   key, title, cwd?,
   phase,                     // 'grill' | 'direct' | 'landing'
-  state,                     // stored: 'needs-you' | 'working' | 'waiting' | 'queued' | 'landed'
+  state,                     // stored: 'needs-you' | 'working' | 'waiting' | 'queued' | 'released'
   summary?,                  // at most 280 characters
   waitingOn?, next?,         // short phrases, at most 280 characters each
   prs: [ { repo, number, url, state, order? } ],   // state: 'draft'|'open'|'green'|'merged'
@@ -1395,18 +1395,18 @@ Mission = {
   orders: [ { id, kind, text?, at, by: 'card', relayedAt? } ],   // kind: 'stop' | 'comment'
   queue?: { phase, prompt, login?, at },
   history: [ { at, phase, state } ],               // one entry per phase or state change
-  createdAt, updatedAt, landedAt?, retiredAt?,
+  createdAt, updatedAt, releasedAt?, retiredAt?,
 }
 ```
 
 **A view is what every read answers**: the stored record plus three fields derived on each read
-and never stored. `view` is the column the mission shows in: `landed` while stored landed;
+and never stored. `view` is the column the mission shows in: `released` while stored released;
 else `stalled` when its session is gone (a bound `pid` that no longer exists, or a reservation no
 `pid` or `id` bound within 5 minutes) or it is stored `working` and `session.seenAt` is over 15
 minutes old; else `needs-you` when a linked board holds an open round that asks a question or was
 minted awaited (a lapsed wait still counts); else the stored `state`. `live` is whether a session
 holds the mission (ADR 129): bound or reserved, not gone, and the mission has not recorded its end
-(stored `landed`, or phase `grill` with `fire` set); silence frees only a session with no `pid`.
+(stored `released`, or phase `grill` with `fire` set); silence frees only a session with no `pid`.
 `actions` lists the card's buttons (ADR 125):
 
 ```js
@@ -1420,11 +1420,11 @@ question block's id, and `choice` option 0's label, the one a click submits thro
 
 ```
 GET  /api/missions[?all=1]
-       -> { missions: [View], counts: { needsYou, working, waiting, stalled, landed, queued },
+       -> { missions: [View], counts: { needsYou, working, waiting, stalled, released, queued },
             live: { working, alive }, now }
 ```
 
-Newest change first. A landed mission is listed until 24 hours after `landedAt`, or always with
+Newest change first. A released mission is listed until 24 hours after `releasedAt`, or always with
 `all=1`. `counts` are per `view` over the missions listed; `live` counts every mission holding a
 live session, `working` including one that reads stalled. Secret or cookie.
 
@@ -1438,7 +1438,9 @@ retiredAt`, each typed and capped as above; any other field, a wrong type or a v
 is a 400 that writes nothing. `null` clears an optional field and is a 400 on `title`, `phase`,
 `state` or `prs`. A mission that does not exist is created (phase `grill`, state `waiting`, titled
 by its key, until the body says otherwise). A phase or state change appends to `history`, and
-turning `landed` stamps `landedAt`.
+turning `released` stamps `releasedAt`. `state: 'landed'`, the name before ADR 130, is still
+taken and stored as `released`; a record stored `landed` is rewritten as `released` (its
+`landedAt` as `releasedAt`) at the daemon's start, and reads as `released` meanwhile.
 
 ```
 POST /api/mission/:key/launch       { phase, login?, prompt? }

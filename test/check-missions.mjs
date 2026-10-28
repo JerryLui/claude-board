@@ -6,13 +6,13 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
-import { readdirSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync } from 'node:fs';
+import { readdirSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { startServer } from '../src/server.mjs';
 import { SECRET_HEADER } from '../src/secret.mjs';
 import { readBoard, readMission, writeMission, pruneStore, MISSION_RETENTION_MS } from '../src/store.mjs';
 import {
-  missionsOverview, launchMission, bindSession, upsertMission, deriveState, MAX_WORKING, MAX_ALIVE, STALL_SILENCE_MS, UNBOUND_GRACE_MS, LANDED_VISIBLE_MS,
+  missionsOverview, launchMission, bindSession, upsertMission, deriveState, MAX_WORKING, MAX_ALIVE, STALL_SILENCE_MS, UNBOUND_GRACE_MS, RELEASED_VISIBLE_MS,
 } from '../src/missions.mjs';
 import { createMissionsCache, MISSIONS_CACHE_MS } from '../src/missions-cache.mjs';
 import { check, deadPid, openSseClient, rawRequest, runMain, secretFetch, secretHome, sessionCookieHeader, waitFor, writeHeaders } from './support.mjs';
@@ -231,20 +231,20 @@ async function main() {
       'a silent session whose process is gone frees its mission');
   });
 
-  await check('a session whose mission recorded its end (a grill answered Fire, or landed) holds neither the mission nor a slot, and its pid cannot take the next session', () => {
+  await check('a session whose mission recorded its end (a grill answered Fire, or released) holds neither the mission nor a slot, and its pid cannot take the next session', () => {
     const dir = scratchHome('finished');
     const t0 = Date.parse('2026-10-28T12:00:00Z');
     const alive = () => true;
     launchMission('FIRED', { phase: 'grill' }, { home: dir, now: t0 });
     bindSession('FIRED', { pid: 5151 }, { home: dir, now: t0 + 1000, isAlive: alive });
     upsertMission('FIRED', { state: 'waiting', fire: { by: 'round' } }, { home: dir, now: t0 + 2000 });
-    launchMission('LANDED', { phase: 'landing' }, { home: dir, now: t0 });
-    bindSession('LANDED', { pid: 5252 }, { home: dir, now: t0 + 1000, isAlive: alive });
-    upsertMission('LANDED', { state: 'landed' }, { home: dir, now: t0 + 2000 });
+    launchMission('RELEASED', { phase: 'landing' }, { home: dir, now: t0 });
+    bindSession('RELEASED', { pid: 5252 }, { home: dir, now: t0 + 1000, isAlive: alive });
+    upsertMission('RELEASED', { state: 'released' }, { home: dir, now: t0 + 2000 });
 
     const now = t0 + minutes(1);
     const overview = missionsOverview({ home: dir, now, isAlive: alive });
-    assert.deepEqual(overview.missions.map(m => [m.key, m.live]).sort(), [['FIRED', false], ['LANDED', false]]);
+    assert.deepEqual(overview.missions.map(m => [m.key, m.live]).sort(), [['FIRED', false], ['RELEASED', false]]);
     assert.deepEqual(overview.live, { working: 0, alive: 0 });
 
     assert.deepEqual(launchMission('FIRED', { phase: 'direct' }, { home: dir, now, isAlive: alive }), { launch: true });
@@ -449,25 +449,67 @@ async function main() {
     assert.equal(deriveState(at(STALL_SILENCE_MS + 1000), { home, now, isAlive: alive }), 'stalled');
     assert.equal(deriveState(at(STALL_SILENCE_MS - 1000), { home, now, isAlive: alive }), 'working');
     assert.equal(deriveState({ ...at(minutes(600)), state: 'waiting' }, { home, now, isAlive: alive }), 'waiting');
-    assert.equal(deriveState({ ...at(minutes(600)), state: 'landed' }, { home, now, isAlive: () => false }), 'landed', 'a landed mission stays landed after its session ends');
+    assert.equal(deriveState({ ...at(minutes(600)), state: 'released' }, { home, now, isAlive: () => false }), 'released', 'a released mission stays released after its session ends');
   });
 
-  await check('a landed mission leaves the list 24 hours after it landed, and ?all=1 keeps it', async () => {
-    const dir = scratchHome('landed');
+  await check('a released mission leaves the list 24 hours after it was released, and ?all=1 keeps it', async () => {
+    const dir = scratchHome('released');
     const now = Date.parse('2026-10-28T12:00:00Z');
-    upsertMission('LANDED_OLD', { state: 'landed' }, { home: dir, now: now - LANDED_VISIBLE_MS - 1000 });
-    upsertMission('LANDED_NEW', { state: 'landed' }, { home: dir, now: now - LANDED_VISIBLE_MS + 60_000 });
+    upsertMission('RELEASED_OLD', { state: 'released' }, { home: dir, now: now - RELEASED_VISIBLE_MS - 1000 });
+    upsertMission('RELEASED_NEW', { state: 'released' }, { home: dir, now: now - RELEASED_VISIBLE_MS + 60_000 });
     const keys = o => o.missions.map(m => m.key).sort();
-    assert.deepEqual(keys(missionsOverview({ home: dir, now })), ['LANDED_NEW']);
-    assert.deepEqual(keys(missionsOverview({ home: dir, now, all: true })), ['LANDED_NEW', 'LANDED_OLD']);
-    assert.equal(readMission('LANDED_OLD', dir).landedAt, iso(now - LANDED_VISIBLE_MS - 1000));
+    assert.deepEqual(keys(missionsOverview({ home: dir, now })), ['RELEASED_NEW']);
+    assert.deepEqual(keys(missionsOverview({ home: dir, now, all: true })), ['RELEASED_NEW', 'RELEASED_OLD']);
+    assert.equal(readMission('RELEASED_OLD', dir).releasedAt, iso(now - RELEASED_VISIBLE_MS - 1000));
 
     // The same over the route, on the daemon's store.
-    seed(home, 'ROUTE_LANDED', { state: 'landed', landedAt: iso(Date.now() - LANDED_VISIBLE_MS - 60_000) });
+    seed(home, 'ROUTE_RELEASED', { state: 'released', releasedAt: iso(Date.now() - RELEASED_VISIBLE_MS - 60_000) });
     const listed = (await getJson('/api/missions')).body.missions.map(m => m.key);
     const all = (await getJson('/api/missions?all=1')).body.missions.map(m => m.key);
-    assert.ok(!listed.includes('ROUTE_LANDED'));
-    assert.ok(all.includes('ROUTE_LANDED'));
+    assert.ok(!listed.includes('ROUTE_RELEASED'));
+    assert.ok(all.includes('ROUTE_RELEASED'));
+  });
+
+  await check('a record stored landed, from before ADR 130, is rewritten released at the daemon\'s start, its landedAt as releasedAt, and a second start rewrites nothing', async () => {
+    const dir = scratchHome('migrate');
+    const landedAt = '2026-10-27T09:30:00.000Z';
+    seed(dir, 'OLD_LANDED', {
+      phase: 'landing', state: 'landed', landedAt, now: Date.parse('2026-10-27T09:30:00Z'),
+      history: [{ at: '2026-10-27T08:00:00.000Z', phase: 'landing', state: 'working' }, { at: landedAt, phase: 'landing', state: 'landed' }],
+    });
+    seed(dir, 'STILL_WORKING', { state: 'working' });
+    const file = key => path.join(dir, 'missions', `${key}.json`);
+    // A rewrite is a temp-and-rename, so it always lands a new inode.
+    const inode = key => statSync(file(key)).ino;
+    const untouched = inode('STILL_WORKING');
+
+    const first = await startServer({ home: dir, port: 0 });
+    try {
+      const onDisk = JSON.parse(readFileSync(file('OLD_LANDED'), 'utf8'));
+      assert.equal(onDisk.state, 'released');
+      assert.equal(onDisk.releasedAt, landedAt, 'the moment it landed is kept as the moment it was released');
+      assert.equal('landedAt' in onDisk, false);
+      assert.deepEqual(onDisk.history.map(h => h.state), ['working', 'released']);
+      assert.equal(inode('STILL_WORKING'), untouched, 'a record with nothing to move is not rewritten');
+      const r = await rawRequest(first.port, 'GET', '/api/mission/OLD_LANDED', { headers: { [SECRET_HEADER]: SECRET } });
+      const view = JSON.parse(r.body);
+      assert.deepEqual([view.state, view.view, view.releasedAt], ['released', 'released', landedAt]);
+    } finally {
+      await new Promise(resolve => first.server.close(resolve));
+    }
+    const migrated = inode('OLD_LANDED');
+    const second = await startServer({ home: dir, port: 0 });
+    await new Promise(resolve => second.server.close(resolve));
+    assert.equal(inode('OLD_LANDED'), migrated, 'a second start finds nothing to move');
+  });
+
+  await check('a POST carrying state landed, from a session open before ADR 130, stores released and stamps releasedAt', async () => {
+    const r = await post('/api/mission/POST_LANDED', { title: 'Shipped before the rename', phase: 'landing', state: 'landed' });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    const record = readMission('POST_LANDED', home);
+    assert.equal(record.state, 'released');
+    assert.ok(Number.isFinite(Date.parse(record.releasedAt)), `releasedAt is stamped: ${record.releasedAt}`);
+    assert.equal(JSON.parse(readFileSync(path.join(home, 'missions', 'POST_LANDED.json'), 'utf8')).state, 'released', 'stored as released on disk');
   });
 
   await check('a prune deletes a mission record 30 days after its retiredAt, and keeps a younger or unretired one', () => {
@@ -780,7 +822,7 @@ async function main() {
     const r = await getJson('/api/missions');
     assert.equal(r.status, 200);
     assert.deepEqual(Object.keys(r.body).sort(), ['counts', 'live', 'missions', 'now']);
-    assert.deepEqual(Object.keys(r.body.counts).sort(), ['landed', 'needsYou', 'queued', 'stalled', 'waiting', 'working']);
+    assert.deepEqual(Object.keys(r.body.counts).sort(), ['needsYou', 'queued', 'released', 'stalled', 'waiting', 'working']);
     assert.deepEqual(Object.keys(r.body.live).sort(), ['alive', 'working']);
     const total = Object.values(r.body.counts).reduce((a, b) => a + b, 0);
     assert.equal(total, r.body.missions.length, 'every listed mission is counted in one column');

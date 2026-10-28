@@ -53,17 +53,17 @@ function rig({ bannerLevel } = {}) {
 }
 
 async function main() {
-  await check('three missions turning needs-you, landed and needs-you within a minute post ONE notification, a minute after the first', () => {
+  await check('three missions turning needs-you, released and needs-you within a minute post ONE notification, a minute after the first', () => {
     const r = rig();
     for (const key of ['ALPHA', 'BRAVO', 'CHARLIE']) r.set(key, { state: 'working' });
     r.at(0);
     r.at(10 * SECOND, () => r.set('ALPHA', { state: 'needs-you' }));
-    r.at(20 * SECOND, () => r.set('BRAVO', { state: 'landed' }));
+    r.at(20 * SECOND, () => r.set('BRAVO', { state: 'released' }));
     r.at(30 * SECOND, () => r.set('CHARLIE', { state: 'needs-you' }));
     r.at(60 * SECOND);
     assert.deepEqual(r.posted, [], 'nothing speaks before the window opened by the first transition closes');
     r.at(71 * SECOND);
-    assert.deepEqual(r.posted, ['2 missions need you, BRAVO landed']);
+    assert.deepEqual(r.posted, ['2 missions need you, BRAVO released']);
     r.watch.close();
   });
 
@@ -72,17 +72,17 @@ async function main() {
     for (const key of ['ALPHA', 'BRAVO']) r.set(key, { state: 'working' });
     r.at(0);
     r.at(10 * SECOND, () => r.set('ALPHA', { state: 'needs-you' }));
-    r.at(75 * SECOND, () => r.set('BRAVO', { state: 'landed' }));
+    r.at(75 * SECOND, () => r.set('BRAVO', { state: 'released' }));
     assert.deepEqual(r.posted, ['ALPHA needs you'], 'the first window closed before the second transition joined it');
     r.at(140 * SECOND);
-    assert.deepEqual(r.posted, ['ALPHA needs you', 'BRAVO landed']);
+    assert.deepEqual(r.posted, ['ALPHA needs you', 'BRAVO released']);
     r.watch.close();
   });
 
-  await check('the first read after a start is a baseline: missions already needing the PM, stalled or landed post nothing', async () => {
+  await check('the first read after a start is a baseline: missions already needing the PM, stalled or released post nothing', async () => {
     const r = rig();
     r.set('ALPHA', { state: 'needs-you' });
-    r.set('BRAVO', { state: 'landed' });
+    r.set('BRAVO', { state: 'released' });
     launchMission('CHARLIE', { phase: 'direct' }, { home: r.home, now: T0 - STALL_SILENCE_MS - 60 * SECOND });
     for (let i = 0; i < 2; i++) {
       // A restart is a new watch over the same store.
@@ -120,7 +120,7 @@ async function main() {
     const r = rig();
     r.set('ECHO', { state: 'working' });
     r.at(0);
-    r.at(10 * SECOND, () => r.set('ECHO', { state: 'landed' }));
+    r.at(10 * SECOND, () => r.set('ECHO', { state: 'released' }));
     assert.deepEqual(r.broadcasts, []);
     r.watch.close();
   });
@@ -187,16 +187,16 @@ async function main() {
     r.set('JULIET', { state: 'working', title: 'J'.repeat(41), ...caseContent });
     r.at(0);
     r.at(5 * SECOND, () => r.set('HOTEL', { state: 'needs-you' }));
-    r.at(6 * SECOND, () => r.set('INDIA', { state: 'landed' }));
-    r.at(7 * SECOND, () => r.set('JULIET', { state: 'landed' }));
+    r.at(6 * SECOND, () => r.set('INDIA', { state: 'released' }));
+    r.at(7 * SECOND, () => r.set('JULIET', { state: 'released' }));
     r.at(70 * SECOND);
-    assert.deepEqual(r.posted, ['Front agent needs you, 2 missions landed'],
+    assert.deepEqual(r.posted, ['Front agent needs you, 2 missions released'],
       'a title that is a plain name is shown; a group of two is counted');
     r.set('INDIA', { state: 'working' });
     r.at(100 * SECOND);
-    r.at(110 * SECOND, () => r.set('INDIA', { state: 'landed' }));
+    r.at(110 * SECOND, () => r.set('INDIA', { state: 'released' }));
     r.at(180 * SECOND);
-    assert.deepEqual(r.posted.slice(1), ['INDIA landed'], 'a title outside the name pattern falls back to the key');
+    assert.deepEqual(r.posted.slice(1), ['INDIA released'], 'a title outside the name pattern falls back to the key');
     r.watch.close();
   });
 
@@ -207,11 +207,11 @@ async function main() {
     r.at(0);
     r.at(5 * SECOND, () => {
       r.set(keys[0], { state: 'needs-you' });
-      r.set(keys[1], { state: 'landed' });
+      r.set(keys[1], { state: 'released' });
     });
     r.at(6 * SECOND, () => launchMission(keys[2], { phase: 'direct' }, { home: r.home, now: T0 - STALL_SILENCE_MS }));
     r.at(70 * SECOND);
-    assert.deepEqual(r.posted, ['1 mission needs you, 1 mission stalled, 1 mission landed']);
+    assert.deepEqual(r.posted, ['1 mission needs you, 1 mission stalled, 1 mission released']);
     r.watch.close();
   });
 
@@ -219,7 +219,7 @@ async function main() {
     const stubDir = path.join(workDir, 'stub-bin');
     writeStub(stubDir, 'osascript', STUB_OSASCRIPT);
     for (const [line, body] of [
-      ['2 missions need you, BRAVO landed', '2 missions need you, BRAVO landed'],
+      ['2 missions need you, BRAVO released', '2 missions need you, BRAVO released'],
       ['ALPHA needs you"; do shell script "rm -rf ~"', 'A mission changed.'],
       ['a'.repeat(120), 'A mission changed.'],
     ]) {
@@ -249,8 +249,8 @@ int cb_menubar_probe(void) { return 0; }
       const launcher = buildLauncher(dir, { node: '/nonexistent/node', daemon: '/nonexistent/daemon.mjs', link: [stub] });
       assert.equal(launcher.build.status, 0, launcher.build.stderr);
       const run = args => spawnSync(launcher.exec, ['--notify', ...args], { encoding: 'utf8', timeout: 10_000 }).stdout;
-      assert.equal(run(['missions', '2 missions need you, BRAVO landed']),
-        'title=Missions\nbody=2 missions need you, BRAVO landed\nurl=(null)\n');
+      assert.equal(run(['missions', '2 missions need you, BRAVO released']),
+        'title=Missions\nbody=2 missions need you, BRAVO released\nurl=(null)\n');
       assert.equal(run(['missions', 'ALPHA needs you; open evil']), 'title=Missions\nbody=A mission changed.\nurl=(null)\n');
       assert.equal(run(['missions', 'a'.repeat(120)]), 'title=Missions\nbody=A mission changed.\nurl=(null)\n');
       assert.equal(run(['round', 'my,project']), 'title=Board\nbody=A round is waiting.\nurl=(null)\n');

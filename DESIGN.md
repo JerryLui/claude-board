@@ -741,7 +741,7 @@ header, `.board-head` in the board page's `.board-shell`, rendered by one functi
 views: the mark at 30px linking home, the 20px title, the Missions and Boards tabs beside it, and
 on the right the timer, Comment and theme controls. The Boards tab carries the daemon's one waiting
 total, the same number on either view at the same moment. Under it, Missions draws a row of counts
-and then five columns, Needs you, Working, Waiting, Stalled and Landed, as a grid of columns at
+and then five columns, Needs you, Working, Waiting, Stalled and Released, as a grid of columns at
 least 250px wide that wraps on a narrow window. A card is the work's title and age, its key and
 phase (with a Queued tag under Waiting), the summary, what it waits on and what comes next, its
 PRs with a mark for their state, any pending order, and a row of buttons: the latest board or the

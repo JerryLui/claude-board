@@ -1755,7 +1755,7 @@ function missionsParts(overview, ui) {
   var esc = function (s) {
     return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   };
-  var COLUMNS = [['needs-you', 'Needs you'], ['working', 'Working'], ['waiting', 'Waiting'], ['stalled', 'Stalled'], ['landed', 'Landed']];
+  var COLUMNS = [['needs-you', 'Needs you'], ['working', 'Working'], ['waiting', 'Waiting'], ['stalled', 'Stalled'], ['released', 'Released']];
   var ACTION_LABELS = { fire: 'Fire', merge: 'Merge' };
   var PR_MARKS = { green: '✓', merged: '✓', open: '○', draft: '○' };
   var STOP_ICON = '<svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="1.8"/><line x1="4.7" y1="4.7" x2="15.3" y2="15.3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';

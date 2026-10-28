@@ -264,10 +264,16 @@ for each; switching tabs moves nothing in it. _Avoid_: nav bar, header (unqualif
 page has its own).
 
 **Mission state**: the column a Mission shows in, derived on every read: needs you, working,
-waiting, stalled or landed. Needs you is any linked board with a round still open that asks the
+waiting, stalled or released. Between merge and Released a Mission is working, or needs you
+while a release step waits on the person. Needs you is any linked board with a round still open that asks the
 person a question or was posted Awaited, a Lapsed one included; waiting is the Mission waiting on
 something else (a check, another PR, a Queued launch). _Avoid_: status (collides with the
-Packet's), phase (grill, direct or landing), column.
+Packet's), phase (grill, direct or landing), column, landed (the name before Released).
+
+**Released**: of a Mission, that every release step after its merge is walked: each deploy,
+infra apply, one-time script, secret, switch or production check that puts the change in
+production or proves it there. A Mission with none is Released at its merge. _Avoid_: landed
+(that is the merge), shipped, done, deployed.
 
 **Live**: of a Mission's session, that it holds the Mission: bound or reserved, its Mission has
 not recorded its end, and its process is not gone. Only one session is Live per Mission, and only
@@ -293,5 +299,5 @@ command, signal, message, kill.
 with the answer, rather than by a Send on the page. _Avoid_: forwarded, proxied, approved.
 
 **Missions notification**: the one native notification for a batch of Missions turning needs you,
-stalled or landed within a minute, naming the work or counting it. Silent at the daemon's start,
+stalled or released within a minute, naming the work or counting it. Silent at the daemon's start,
 and silenced by the Banner level's Off. _Avoid_: Banner (that is a round's), mission alert.

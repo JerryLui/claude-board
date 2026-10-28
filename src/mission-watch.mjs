@@ -8,9 +8,9 @@
 //  - a derived state that moved while the record did not (no write behind it, so no route
 //    published it) goes out as `missions` on the daemon-wide stream, so the home page, the
 //    status item and any agent watching the stream re-read;
-//  - a mission turning needs-you, stalled or landed joins a batch that speaks once,
+//  - a mission turning needs-you, stalled or released joins a batch that speaks once,
 //    BATCH_WINDOW_MS after its first entry, as one notification naming the work or
-//    counting it ("2 missions need you, FRONT_AGENT landed").
+//    counting it ("2 missions need you, FRONT_AGENT released").
 //
 // The first read after start is the baseline and says nothing, so a restart never floods
 // the screen with every mission already waiting. A mission that moves on before its batch
@@ -30,7 +30,7 @@ export const DEFAULT_MISSION_WATCH_MS = 30_000;
 export const BATCH_WINDOW_MS = 60_000;
 
 /** The derived states that speak, in the order a notification names them. */
-export const SPOKEN_STATES = ['needs-you', 'stalled', 'landed'];
+export const SPOKEN_STATES = ['needs-you', 'stalled', 'released'];
 
 /** The read interval. `CLAUDE_BOARD_MISSION_WATCH_MS` overrides it, the way
  * `CLAUDE_BOARD_STRANDED_GRACE_MS` overrides the stranded grace: test/run.mjs pushes it out
@@ -56,7 +56,7 @@ function nameOf(view) {
 const VERBS = {
   'needs-you': { one: 'needs you', many: 'need you' },
   stalled: { one: 'stalled', many: 'stalled' },
-  landed: { one: 'landed', many: 'landed' },
+  released: { one: 'released', many: 'released' },
 };
 
 function counted(n, state) {

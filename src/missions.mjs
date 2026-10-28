@@ -21,7 +21,7 @@ import { questionBlocks } from './badge.mjs';
 export { SAFE_MISSION_KEY, assertMissionKey, MISSION_RETENTION_MS };
 
 export const PHASES = ['grill', 'direct', 'landing'];
-export const STORED_STATES = ['needs-you', 'working', 'waiting', 'queued', 'landed'];
+export const STORED_STATES = ['needs-you', 'working', 'waiting', 'queued', 'released'];
 export const PR_STATES = ['draft', 'open', 'green', 'merged'];
 export const ORDER_KINDS = ['stop', 'comment'];
 
@@ -41,8 +41,8 @@ export const STALL_SILENCE_MS = 15 * 60 * 1000;
  * A good start binds within seconds. */
 export const UNBOUND_GRACE_MS = 5 * 60 * 1000;
 
-/** A landed mission leaves the default list this long after `landedAt`. */
-export const LANDED_VISIBLE_MS = 24 * 60 * 60 * 1000;
+/** A released mission leaves the default list this long after `releasedAt`. */
+export const RELEASED_VISIBLE_MS = 24 * 60 * 60 * 1000;
 
 export const MAX_SUMMARY_CHARS = 280;
 export const MAX_HANDOFF_BYTES = 4096;
@@ -137,7 +137,9 @@ const FIELD_RULES = {
   },
   cwd: v => str(v, 'cwd', MAX_PATH_CHARS),
   phase: v => oneOf(v, PHASES, 'phase'),
-  state: v => oneOf(v, STORED_STATES, 'state'),
+  // `landed`, the name before released (ADR 130), is still taken, as released: a session
+  // open since before the rename writes it.
+  state: v => oneOf(v === 'landed' ? 'released' : v, STORED_STATES, 'state'),
   summary: v => str(v, 'summary', MAX_SUMMARY_CHARS),
   waitingOn: v => str(v, 'waitingOn', MAX_PHRASE_CHARS),
   next: v => str(v, 'next', MAX_PHRASE_CHARS),
@@ -202,11 +204,11 @@ function newMission(key, now, { phase = 'grill', state = 'waiting' } = {}) {
 }
 
 /** Moves `phase` and `state`, appending to `history` when either changed and keeping
- * `landedAt` to the moment the mission last became landed. */
+ * `releasedAt` to the moment the mission last became released. */
 function moveTo(m, { phase = m.phase, state = m.state }, now) {
   const changed = phase !== m.phase || state !== m.state;
-  if (state === 'landed' && (m.state !== 'landed' || !m.landedAt)) m.landedAt = iso(now);
-  if (state !== 'landed') delete m.landedAt;
+  if (state === 'released' && (m.state !== 'released' || !m.releasedAt)) m.releasedAt = iso(now);
+  if (state !== 'released') delete m.releasedAt;
   m.phase = phase;
   m.state = state;
   if (changed) {
@@ -244,10 +246,10 @@ function sessionSilent(m, now) {
 }
 
 /** The mission recorded the end of its session: a grill answered Fire records `fire` and
- * stops, and a landed mission's session has closed. Its process may linger, idle, but it
+ * stops, and a released mission's session has closed. Its process may linger, idle, but it
  * holds neither the mission nor a slot. */
 function sessionFinished(m) {
-  return m.state === 'landed' || (m.phase === 'grill' && !!m.fire);
+  return m.state === 'released' || (m.phase === 'grill' && !!m.fire);
 }
 
 /** A session that should be running and is not heard from: gone, or silent while working.
@@ -326,13 +328,13 @@ export function missionActions(m, { home = boardHome() } = {}) {
 }
 
 function viewState(m, linked, now, isAlive) {
-  if (m.state === 'landed') return 'landed';
+  if (m.state === 'released') return 'released';
   if (sessionStalled(m, now, isAlive)) return 'stalled';
   if (boardsNeedYou(linked())) return 'needs-you';
   return m.state;
 }
 
-/** The column `m` shows in: landed stays landed; a stalled session wins over everything
+/** The column `m` shows in: released stays released; a stalled session wins over everything
  * else; then a board waiting on the PM; else the stored state. */
 export function deriveState(m, { home = boardHome(), now = Date.now(), isAlive = pidAlive } = {}) {
   return viewState(m, () => linkedBoards(m, home), now, isAlive);
@@ -361,20 +363,20 @@ function liveCounts(views) {
   return live;
 }
 
-function landedLongAgo(m, now) {
-  if (m.state !== 'landed') return false;
-  const at = Date.parse(m.landedAt || m.updatedAt);
-  return Number.isFinite(at) && now - at >= LANDED_VISIBLE_MS;
+function releasedLongAgo(m, now) {
+  if (m.state !== 'released') return false;
+  const at = Date.parse(m.releasedAt || m.updatedAt);
+  return Number.isFinite(at) && now - at >= RELEASED_VISIBLE_MS;
 }
 
 /** `GET /api/missions`: the views, newest change first, with per-column counts over the
- * missions listed and `live` counts over every mission. A landed mission is listed until
- * `LANDED_VISIBLE_MS` after it landed, or always with `all`. */
+ * missions listed and `live` counts over every mission. A released mission is listed until
+ * `RELEASED_VISIBLE_MS` after it was released, or always with `all`. */
 export function missionsOverview({ home = boardHome(), now = Date.now(), all = false, isAlive = pidAlive } = {}) {
   const views = listMissions(home).map(m => missionView(m, { home, now, isAlive }));
-  const missions = (all ? views : views.filter(v => !landedLongAgo(v, now)))
+  const missions = (all ? views : views.filter(v => !releasedLongAgo(v, now)))
     .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
-  const counts = { needsYou: 0, working: 0, waiting: 0, stalled: 0, landed: 0, queued: 0 };
+  const counts = { needsYou: 0, working: 0, waiting: 0, stalled: 0, released: 0, queued: 0 };
   for (const v of missions) counts[v.view === 'needs-you' ? 'needsYou' : v.view] += 1;
   return { missions, counts, live: liveCounts(views), now: iso(now) };
 }

@@ -665,7 +665,7 @@ const MISSION_TOOL = {
     properties: {
       action: { type: 'string', enum: ['list', 'read', 'write', 'relay', 'ack'] },
       key: { type: 'string', description: 'The mission key (letters, digits, - and _), e.g. a spec\'s descriptor. read, write, ack.' },
-      all: { type: 'boolean', description: 'list: keep missions landed more than 24 hours ago.' },
+      all: { type: 'boolean', description: 'list: keep missions released more than 24 hours ago.' },
       fields: {
         type: 'object',
         description: 'write: the fields to set, from title cwd phase state summary waitingOn next prs handoff fire queue retiredAt.',

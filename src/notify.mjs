@@ -67,7 +67,7 @@ const MESSAGES = {
     format: folder => `${folder}: a round is waiting.`,
     unnamed: 'A round is waiting.',
   },
-  // A batch of missions turning needs-you, stalled or landed (src/mission-watch.mjs). The
+  // A batch of missions turning needs-you, stalled or released (src/mission-watch.mjs). The
   // line is composed by the watch from work names and counts only, and crosses as the
   // row's one argument under its own filter, isSafeMissionLine below, which admits the
   // comma a list of groups needs and nothing else the folder filter refuses.
