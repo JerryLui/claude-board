@@ -54,7 +54,7 @@ import { readSecret, secretPath, secretMatches, sessionToken, sessionCookieMatch
 import { createHandoffStore, handoffTarget, recoveryCommand, HANDOFF_TOKEN_RE, DEFAULT_PORT } from './handoff.mjs';
 import { createBoard, addRound, amendRound, abandonOpenRounds, applySubmit, buildPacket, roundAnswers, dropResolved, resolveComments, questionBlocks, SUPPRESSED, ANSWERS_DELIVERED, roundContentDrifted } from './board.mjs';
 import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, renderRefusalPage, boardForClient, holdStages, holdAllStages, stageShas, CSP, INDEX_CSP } from './render.mjs';
-import { buildThreadIndex, renderIndexPage, renderThreadRows, folderName } from './indexpage.mjs';
+import { buildThreadIndex, renderIndexPage, renderMissionsPage, renderThreadRows, folderName } from './indexpage.mjs';
 // The one shape rule for "is this round a full-viewport page" (ADR.md entry 33),
 // imported rather than restated so the push path and the page path can never
 // disagree about what a page round is -- see buildRoundPushPayload below.
@@ -2800,7 +2800,29 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
         return await handleMintHandoff(req, res, handoffs);
       }
 
-      if (req.method === 'GET' && url.pathname === '/') {
+      // The two home views under one top bar: Missions at `/`, the board's home page,
+      // and the boards list at `/boards`. A `/?q=` link from before the split names a
+      // filter on the boards list, so it lands there with its query.
+      if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/boards')) {
+        if (url.pathname === '/' && url.searchParams.has('q')) {
+          const target = `/boards?q=${encodeURIComponent(url.searchParams.get('q'))}`;
+          res.writeHead(302, { location: target, 'cache-control': 'no-store', 'content-length': '0' });
+          return res.end();
+        }
+        // ADR 103's server-side gate -- the one pomodoro.json read these routes ever
+        // do, and only for this one boolean: `readPomodoroDoc` never throws (see its
+        // own comment) and `settings.enabled !== false` is the documented derivation
+        // ("missing, or anything but literally false, reads as on"). Everything else
+        // pomodoro-shaped reaches the reader one round trip later
+        // (src/pomodoro-widget.mjs's own header comment).
+        const pomodoroEnabled = readPomodoroDoc(home).settings.enabled !== false;
+        // The Boards tab's count, the same total `GET /api/waiting` serves.
+        const waitingCount = waitingCache.rows().length;
+        if (url.pathname === '/') {
+          return sendHtml(res, 200, renderMissionsPage({ waitingCount, pomodoroEnabled }), {
+            'content-security-policy': INDEX_CSP,
+          });
+        }
         const query = url.searchParams.get('q') || '';
         // One walk of the store, and no full-text search behind it: the box on this
         // page filters the thread list on session identity alone (title, project
@@ -2808,21 +2830,10 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
         // extracted from this same walk. `GET /api/search` is unchanged and remains
         // the full-text route over board bodies.
         const threads = buildThreadIndex(listBoards(home));
-        // ADR 103's server-side gate -- the one pomodoro.json read this route ever
-        // does, and only for this one boolean: `readPomodoroDoc` never throws (see
-        // its own comment) and `settings.enabled !== false` is the documented
-        // derivation ("missing, or anything but literally false, reads as on"), so a
-        // settings document from before this key existed renders exactly like it
-        // does today. Everything else pomodoro-shaped about this page -- the
-        // countdown text, every other settings field -- still reaches the reader the
-        // one round trip later that src/pomodoro-widget.mjs's own header comment
-        // describes; this is not GET / growing a second source of truth for the
-        // Timer, only for which of pomodoroWidget()'s two shapes to render.
-        const pomodoroEnabled = readPomodoroDoc(home).settings.enabled !== false;
         // INDEX_CSP, not the board CSP: the search box is a plain GET form back to
         // this same route, and `form-action 'none'` makes the browser refuse to
         // submit it. See render.mjs's comment on INDEX_CSP.
-        return sendHtml(res, 200, renderIndexPage({ threads, query, pomodoroEnabled }), {
+        return sendHtml(res, 200, renderIndexPage({ threads, query, pomodoroEnabled, waitingCount }), {
           'content-security-policy': INDEX_CSP,
         });
       }

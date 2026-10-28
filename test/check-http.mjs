@@ -286,6 +286,7 @@ async function main() {
     const routes = [
       ['GET', '/api/health'],
       ['GET', '/'],
+      ['GET', '/boards'],
       ['GET', `/b/${boardId}`],
       ['POST', '/api/board'],
       ['GET', `/api/board/${boardId}/wait?round=1`],
@@ -704,7 +705,7 @@ async function main() {
     });
     const { boardId: idxBoardId, thread: idxThread } = await r.json();
 
-    const before = await (await fetch(`${base}/`)).text();
+    const before = await (await fetch(`${base}/boards`)).text();
     const rowBefore = threadRowFor(before, idxThread);
     assert.ok(rowBefore, 'the posted thread must appear in the index');
     // Two question BLOCKS, but one open ROUND that asks something -- the badge
@@ -732,7 +733,7 @@ async function main() {
       }),
     });
 
-    const after = await (await fetch(`${base}/`)).text();
+    const after = await (await fetch(`${base}/boards`)).text();
     const rowAfter = threadRowFor(after, idxThread);
     assert.ok(rowAfter);
     assert.match(rowAfter, /data-rounds-left="0"/, 'sending the only open round must drop the rendered count to 0');
@@ -773,7 +774,7 @@ async function main() {
     assert.notEqual(postA.boardId, postB.boardId);
     assert.notEqual(postA.thread, postB.thread, 'two independent posts to the same cwd must mint two distinct threads');
 
-    const idxHtml = await (await fetch(`${base}/`)).text();
+    const idxHtml = await (await fetch(`${base}/boards`)).text();
     const rowA = threadRowFor(idxHtml, postA.thread);
     const rowB = threadRowFor(idxHtml, postB.thread);
     assert.ok(rowA && rowB, 'both same-cwd threads must be listed as separate rows');
@@ -812,7 +813,7 @@ async function main() {
     assert.equal(boardBOnDisk.state, 'open', 'session B\'s board must be untouched by session A\'s submit');
     assert.equal(boardBOnDisk.rounds[0].status, 'open');
 
-    const idxAfterA = await (await fetch(`${base}/`)).text();
+    const idxAfterA = await (await fetch(`${base}/boards`)).text();
     assert.match(threadRowFor(idxAfterA, postA.thread), /data-rounds-left="0"/);
     assert.match(threadRowFor(idxAfterA, postB.thread), /data-rounds-left="1"/, 'session B\'s rounds-left count must be independent of session A\'s submit');
 
@@ -896,29 +897,29 @@ async function main() {
     assert.equal(emptyRes.results.filter(r => r.boardId === posted.boardId).length, 0);
 
     // The index UI is a FILTER over the session list, not a second view of the
-    // full-text results above: `GET /` matches on session identity only (title,
+    // full-text results above: `GET /boards` matches on session identity only (title,
     // project folder, cwd, thread id) and narrows the thread rows in place. The
     // full-text surface asserted above lives entirely at /api/search.
-    const uiHtml = await (await fetch(`${base}/?q=${encodeURIComponent('checkout redesign')}`)).text();
+    const uiHtml = await (await fetch(`${base}/boards?q=${encodeURIComponent('checkout redesign')}`)).text();
     assert.ok(uiHtml.includes(`data-thread-id="${posted.thread}"`), 'a query matching a session title must leave that session in the filtered list');
     assert.ok(uiHtml.includes(`href="/b/${posted.boardId}"`), 'the surviving row must still link to the board');
     assert.ok(!uiHtml.includes('Should we ship the checkout redesign?'), 'the index must NOT render block-level result cards any more -- what was asked inside a session is /api/search\'s answer, not this list\'s');
 
     // ...and identity-only means identity-only: a phrase that appears only INSIDE
     // the board (this one is the answer note) is a hit at /api/search and must not
-    // be one here. Ablation: restore the old searchBoards call behind GET / and
+    // be one here. Ablation: restore the old searchBoards call behind GET /boards and
     // this row comes back.
-    const insideHtml = await (await fetch(`${base}/?q=${encodeURIComponent('validated in staging')}`)).text();
+    const insideHtml = await (await fetch(`${base}/boards?q=${encodeURIComponent('validated in staging')}`)).text();
     assert.ok(!insideHtml.includes(`data-thread-id="${posted.thread}"`), 'matching on a board\'s CONTENTS must not filter the session list -- the box names sessions, not what was said in them');
     assert.ok(insideHtml.includes('No sessions match'), 'a query that matches no session must say so, rather than falling back to the empty-store message');
 
     // ...and the box a REAL browser uses to get here must actually submit. Every
-    // assertion above fetches `/?q=` directly, which is not what a user does and does
+    // assertion above fetches `/boards?q=` directly, which is not what a user does and does
     // not feel the CSP at all -- under `form-action 'none'` the whole search UI was
     // dead in the browser ("violates the following Content Security Policy directive")
-    // while all of the above still passed. Ablation: put 'none' back on GET / and this
+    // while all of the above still passed. Ablation: put 'none' back on GET /boards and this
     // check fails (along with the per-path form-action assertion further down).
-    const indexRes = await fetch(`${base}/`);
+    const indexRes = await fetch(`${base}/boards`);
     const indexHtml = await indexRes.text();
     const form = indexHtml.match(/<form class="search-form"[^>]*>/);
     assert.ok(form, 'the index must ship a search form');
@@ -2223,7 +2224,7 @@ async function main() {
       // (Ablation: without the try/catch in listBoards, JSON.parse throws straight out
       // of the handler and both of these are 500s -- the closed-tab recovery path and
       // archive search both dead until someone deletes the file by hand.)
-      const indexRes = await fetch(`${base}/?q=${encodeURIComponent('checkout redesign')}`);
+      const indexRes = await fetch(`${base}/boards?q=${encodeURIComponent('checkout redesign')}`);
       assert.equal(indexRes.status, 200, 'a corrupt board file must not 500 the index');
       const indexHtml = await indexRes.text();
       assert.ok(indexHtml.includes('Checkout redesign'), 'every readable board must still be listed and filterable');
@@ -2233,12 +2234,14 @@ async function main() {
       assert.ok((await searchRes.json()).results.length > 0);
 
       // L4: the corrupt file is logged once per store walk, so the warning count is a
-      // direct count of how many times `GET /?q=` walked the store. Two here: one for
-      // the index request, one for the separate /api/search request. The index's own
-      // count is what matters -- it is 1 whether or not a query is present, since the
-      // filter reads what buildThreadIndex already extracted and never re-walks.
+      // direct count of how many times the store was walked. Three here: one for the
+      // boards list, one for the waiting cache behind the Boards tab's count (the store
+      // changed since it last filled; an unchanged store answers it from the cache), and
+      // one for the separate /api/search request. The list's own count is what matters
+      // -- it is 1 whether or not a query is present, since the filter reads what
+      // buildThreadIndex already extracted and never re-walks.
       const indexWarnings = warnings.filter(w => w.includes('b_deadbe11.json'));
-      assert.equal(indexWarnings.length, 2, `GET /?q= must walk the store once (plus once for the separate /api/search request), got ${indexWarnings.length} walks`);
+      assert.equal(indexWarnings.length, 3, `GET /boards?q= must walk the store once for its list (plus the waiting cache's refill and the separate /api/search request), got ${indexWarnings.length} walks`);
     } finally {
       console.warn = realWarn;
       unlinkSync(corruptPath);
@@ -2468,7 +2471,9 @@ async function main() {
     // that could open a socket, which handed every local process the source excerpts,
     // questions and answers of every board in the store.
     const index = await rawRequest(port, 'GET', '/', { headers: BROWSER_NAV });
-    assert.equal(index.status, 401, 'the thread index must not render without a credential');
+    assert.equal(index.status, 401, 'the home page must not render without a credential');
+    const boards = await rawRequest(port, 'GET', '/boards', { headers: BROWSER_NAV });
+    assert.equal(boards.status, 401, 'the boards list must not render without a credential');
 
     const page = await rawRequest(port, 'GET', `/b/${boardId}`, { headers: BROWSER_NAV });
     assert.equal(page.status, 401, 'the served board page must not render without a credential');
