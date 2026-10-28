@@ -12,7 +12,7 @@ import { startServer } from '../src/server.mjs';
 import { SECRET_HEADER } from '../src/secret.mjs';
 import { readBoard, readMission, writeMission, pruneStore, MISSION_RETENTION_MS } from '../src/store.mjs';
 import {
-  missionsOverview, launchMission, upsertMission, deriveState, MAX_WORKING, MAX_ALIVE, STALL_SILENCE_MS, LANDED_VISIBLE_MS,
+  missionsOverview, launchMission, bindSession, upsertMission, deriveState, MAX_WORKING, MAX_ALIVE, STALL_SILENCE_MS, UNBOUND_GRACE_MS, LANDED_VISIBLE_MS,
 } from '../src/missions.mjs';
 import { check, rawRequest, runMain, secretFetch, secretHome, sessionCookieHeader, waitFor, writeHeaders } from './support.mjs';
 
@@ -125,6 +125,40 @@ async function main() {
       await endProcess(a);
       await endProcess(b);
     }
+  });
+
+  await check(`a reserved session no process binds is live for ${UNBOUND_GRACE_MS / 60000} minutes, then stalls and frees its mission and its slot`, () => {
+    const dir = scratchHome('unbound');
+    const t0 = Date.parse('2026-10-28T12:00:00Z');
+    const alive = () => true;
+    const live = { status: 409, message: 'live' };
+    assert.deepEqual(launchMission('FAILED_START', { phase: 'direct' }, { home: dir, now: t0 }), { launch: true });
+    // A stub's stored state never stalls by silence: the reservation alone must lapse.
+    upsertMission('FAILED_START', { state: 'waiting' }, { home: dir, now: t0 });
+
+    const inside = t0 + UNBOUND_GRACE_MS - 1000;
+    assert.throws(() => launchMission('FAILED_START', { phase: 'direct' }, { home: dir, now: inside, isAlive: alive }), live);
+    assert.deepEqual(missionsOverview({ home: dir, now: inside, isAlive: alive }).live, { working: 0, alive: 1 });
+
+    const past = t0 + UNBOUND_GRACE_MS + 1000;
+    const lapsed = missionsOverview({ home: dir, now: past, isAlive: alive });
+    assert.deepEqual(launchMission('FAILED_START', { phase: 'direct' }, { home: dir, now: past, isAlive: alive }), { launch: true });
+    assert.deepEqual(lapsed.live, { working: 0, alive: 0 }, 'a lapsed reservation holds no slot');
+    assert.equal(lapsed.missions[0].view, 'stalled', 'the failed start shows, so the Master Chief sees it');
+    assert.deepEqual(readMission('FAILED_START', dir).session, { startedAt: iso(past), seenAt: iso(past) }, 'the new launch re-reserves');
+    assert.deepEqual(missionsOverview({ home: dir, now: past, isAlive: alive }).live, { working: 1, alive: 1 });
+  });
+
+  await check('a session bound by id alone stays live past the unbound grace', () => {
+    const t0 = Date.parse('2026-10-28T12:00:00Z');
+    const dir = scratchHome('bound-by-id');
+    launchMission('BOUND_BY_ID', { phase: 'direct' }, { home: dir, now: t0 });
+    bindSession('BOUND_BY_ID', { id: 'sess-1' }, { home: dir, now: t0 + 1000 });
+    const past = t0 + UNBOUND_GRACE_MS + 60_000;
+    assert.throws(() => launchMission('BOUND_BY_ID', { phase: 'direct' }, { home: dir, now: past }), { status: 409, message: 'live' });
+    const overview = missionsOverview({ home: dir, now: past });
+    assert.deepEqual(overview.live, { working: 1, alive: 1 });
+    assert.equal(overview.missions[0].view, 'working');
   });
 
   await check(`a launch queues at ${MAX_WORKING} working sessions, and launches at one fewer`, () => {
