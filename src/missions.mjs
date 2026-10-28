@@ -203,10 +203,12 @@ function newMission(key, now, { phase = 'grill', state = 'waiting' } = {}) {
   };
 }
 
-/** Moves `phase` and `state`, appending to `history` when either changed and keeping
- * `releasedAt` to the moment the mission last became released. */
+/** Moves `phase` and `state`, appending to `history` when either changed, keeping
+ * `releasedAt` to the moment the mission last became released, and dropping `waitingOn`
+ * when the mission leaves needs-you, since what it waited on is past (ADR 130). */
 function moveTo(m, { phase = m.phase, state = m.state }, now) {
   const changed = phase !== m.phase || state !== m.state;
+  if (m.state === 'needs-you' && state !== 'needs-you') delete m.waitingOn;
   if (state === 'released' && (m.state !== 'released' || !m.releasedAt)) m.releasedAt = iso(now);
   if (state !== 'released') delete m.releasedAt;
   m.phase = phase;
@@ -401,11 +403,12 @@ export function upsertMission(key, patch, { home = boardHome(), now = Date.now()
     state: fields.state || 'waiting',
   });
   const { phase, state, ...rest } = fields;
+  // The move first, so a `waitingOn` the same patch sets outlives the one the move drops.
+  moveTo(m, { phase, state }, now);
   for (const [field, value] of Object.entries(rest)) {
     if (value === null) delete m[field];
     else m[field] = value;
   }
-  moveTo(m, { phase, state }, now);
   touch(m, now);
   return writeMission(m, home);
 }

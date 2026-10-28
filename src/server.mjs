@@ -3137,15 +3137,6 @@ export function startServer({ home = boardHome(), port = Number(process.env.CLAU
     },
   });
 
-  // Mission records from before ADR 130 move from landed to released on disk here, once,
-  // before the handler serves a read. A failure leaves the daemon up: every read still
-  // sees such a record as released.
-  try {
-    migrateMissions(home);
-  } catch (err) {
-    console.warn(`claude-board: mission records not migrated: ${(err && err.message) || err}`);
-  }
-
   // `secret` is passed through UNRESOLVED on purpose: defaulting it to readSecret() here
   // would pin the value for the life of the process and undo S4's fix one layer down,
   // where it would be much harder to notice. Absent means "read it per request".
@@ -3164,8 +3155,23 @@ export function startServer({ home = boardHome(), port = Number(process.env.CLAU
   });
 
   return new Promise((resolve, reject) => {
-    server.once('error', reject);
+    // A failed bind closes the server, so the clocks above stop with it.
+    let bound = false;
+    server.once('error', err => {
+      if (!bound) server.close();
+      reject(err);
+    });
     server.listen(port, '127.0.0.1', () => {
+      bound = true;
+      // Mission records from before ADR 130 move from landed to released on disk here, once
+      // the port is ours: a start that cannot bind, beside an older daemon still serving
+      // this store, leaves its records as that daemon reads them. A failure leaves the
+      // daemon up, and every read still sees such a record as released.
+      try {
+        migrateMissions(home);
+      } catch (err) {
+        console.warn(`claude-board: mission records not migrated: ${(err && err.message) || err}`);
+      }
       resolve({ server, port: server.address().port, home });
     });
   });

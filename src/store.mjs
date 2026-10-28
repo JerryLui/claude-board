@@ -134,56 +134,49 @@ export function writeMission(mission, home = boardHome()) {
   return mission;
 }
 
-/** Every readable mission record. An unreadable file is skipped with a warning, as
- * `listBoards` skips one. */
-export function listMissions(home = boardHome()) {
+/** Calls `visit(key)` for every mission record file in the store, temp files left out. A
+ * throw from `visit` skips that file with a warning, as `listBoards` skips an unreadable one. */
+function eachMissionKey(home, visit) {
   let files;
   try {
     files = readdirSync(missionsDir(home));
   } catch (err) {
-    if (err.code === 'ENOENT') return [];
+    if (err.code === 'ENOENT') return;
     throw err;
   }
-  const missions = [];
   for (const f of files) {
     if (!f.endsWith('.json') || f.includes('.tmp-')) continue;
-    const key = f.slice(0, -'.json'.length);
     try {
-      const m = readMission(key, home);
-      if (m && m.key === key) missions.push(m);
+      visit(f.slice(0, -'.json'.length));
     } catch (err) {
       console.warn(`claude-board: skipping unreadable store file missions/${f}: ${(err && err.message) || err}`);
     }
   }
+}
+
+/** Every readable mission record. */
+export function listMissions(home = boardHome()) {
+  const missions = [];
+  eachMissionKey(home, key => {
+    const m = readMission(key, home);
+    if (m && m.key === key) missions.push(m);
+  });
   return missions;
 }
 
-/** Rewrites every mission record from before ADR 130 as `releasedRecord` reads it, at the
- * daemon's start and before it serves, so no request reads or writes beside it. A record
- * already migrated is left untouched, so a second start rewrites nothing. Answers the keys
- * rewritten; an unreadable file is skipped with a warning, as `listMissions` skips one. */
+/** Rewrites every mission record from before ADR 130 as `releasedRecord` reads it, once the
+ * daemon holds its port, so a start that cannot bind leaves the store as an older daemon
+ * still serving it reads it. A record already migrated is left untouched, so a second start
+ * rewrites nothing. Answers the keys rewritten. */
 export function migrateMissions(home = boardHome()) {
-  let files;
-  try {
-    files = readdirSync(missionsDir(home));
-  } catch (err) {
-    if (err.code === 'ENOENT') return [];
-    throw err;
-  }
   const migrated = [];
-  for (const f of files) {
-    if (!f.endsWith('.json') || f.includes('.tmp-')) continue;
-    const key = f.slice(0, -'.json'.length);
-    try {
-      const stored = readMissionFile(key, home);
-      const m = releasedRecord(stored);
-      if (m === stored || !m || m.key !== key) continue;
-      writeMission(m, home);
-      migrated.push(key);
-    } catch (err) {
-      console.warn(`claude-board: skipping unreadable store file missions/${f}: ${(err && err.message) || err}`);
-    }
-  }
+  eachMissionKey(home, key => {
+    const stored = readMissionFile(key, home);
+    const m = releasedRecord(stored);
+    if (m === stored || !m || m.key !== key) return;
+    writeMission(m, home);
+    migrated.push(key);
+  });
   return migrated;
 }
 
