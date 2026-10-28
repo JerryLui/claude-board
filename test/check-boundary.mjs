@@ -231,7 +231,7 @@ async function main() {
   });
 
   await check('AC 2: the index lists the cleared conversation and the new one as separate rows', async () => {
-    const page = await rawGet(`${base}/`, { [SECRET_HEADER]: SECRET });
+    const page = await rawGet(`${base}/boards`, { [SECRET_HEADER]: SECRET });
     assert.equal(page.status, 200);
     const rows = [...page.body.matchAll(/data-thread-id="([^"]+)"/g)].map(m => m[1]);
     const threads = boardIds().map(id => storedBoard(id)).filter(b => b.cwd && b.cwd.endsWith('/cleared')).map(b => b.thread);
@@ -242,7 +242,7 @@ async function main() {
 
   await check('an abandoned board stops advertising an open round on the index', async () => {
     const abandoned = boardIds().map(id => storedBoard(id)).find(b => b.rounds.some(r => r.status === 'abandoned'));
-    const page = await rawGet(`${base}/`, { [SECRET_HEADER]: SECRET });
+    const page = await rawGet(`${base}/boards`, { [SECRET_HEADER]: SECRET });
     const row = page.body.match(new RegExp(`data-thread-id="${abandoned.thread}"[^>]*`))[0];
     assert.match(row, /data-rounds-left="0"/, 'nothing on it is still owed');
     assert.match(row, /data-live="false"/, 'and the row is not live');
