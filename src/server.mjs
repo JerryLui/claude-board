@@ -1789,6 +1789,8 @@ function handleReadBoard(req, res, id, home) {
       // sent: it is an instruction to stop posting boards, which a packet carries as its
       // `status` and which no reader arriving through this route could otherwise see.
       action: r.action ?? null,
+      // Present only on a round the Master Chief answered on the PM's words (`handleRelay`).
+      ...(r.relayed ? { relayed: r.relayed } : {}),
       awaited: roundIsAwaitedOpen(r),
       deadline: r.awaitDeadline ?? null,
     })),
@@ -1962,12 +1964,14 @@ function handleAbandon(req, res, id, home, sse, stranded, stream, waiting) {
  * a board past answering, and every 409 below really is about a round somebody sent. */
 const ALREADY_SUBMITTED = 'already been submitted';
 
-async function handleSubmit(req, res, id, home, sse, stranded, stream, waiting) {
-  let body;
-  try {
-    body = await readJsonBody(req);
-  } catch (err) {
-    return sendJson(res, err.status || 400, { error: err.status ? err.message : 'invalid JSON body' });
+async function handleSubmit(req, res, id, home, sse, stranded, stream, waiting, { body: relayBody, relayed } = {}) {
+  let body = relayBody;
+  if (!body) {
+    try {
+      body = await readJsonBody(req);
+    } catch (err) {
+      return sendJson(res, err.status || 400, { error: err.status ? err.message : 'invalid JSON body' });
+    }
   }
   const board = readBoard(id, home);
   if (!board) return sendJson(res, 404, { error: 'board not found' });
@@ -2029,7 +2033,7 @@ async function handleSubmit(req, res, id, home, sse, stranded, stream, waiting) 
   }
   const round = claimed;
   try {
-    applySubmit(board, { action: body.action, answers: body.answers, comments: body.comments }, round);
+    applySubmit(board, { action: body.action, answers: body.answers, comments: body.comments, relayed }, round);
   } catch (err) {
     // Same shape as handlePostBoard's guard above, and for the same reason: applySubmit
     // now runs answers through byValueText, which throws a plain Error carrying no
@@ -2074,6 +2078,47 @@ async function handleSubmit(req, res, id, home, sse, stranded, stream, waiting) 
   stranded.answered(id, round);
   stranded.evaluate(id, strandedTarget(req, id));
   return sendJson(res, 200, { ok: true, board: board.id, round });
+}
+
+/** The relayed words' cap, in UTF-8 bytes: a PM's yes and the sentence around it, never a
+ * document. */
+const MAX_RELAY_WORDS_BYTES = 1024;
+
+/** POST /api/board/:id/relay { round, answers, words }: the Master Chief answering a round
+ * on the PM's typed words. SECRET-ONLY: `relay` is on no cookie list, so a browser cannot
+ * forge one; a browser answers through `submit`.
+ *
+ * It is a submit, through `handleSubmit` itself, so the round is sent, written, pushed to
+ * its tabs and wakes a waiting `ask` exactly as a Send does, and the round carries
+ * `relayed: { words, at }` into every packet and read of it. Stricter than a Send in one
+ * way: an abandoned round is refused too. Its conversation walked away, so nobody is
+ * waiting on the yes, and a successor reading the board later must not find an approval
+ * meant for a session that is gone. */
+async function handleRelay(req, res, id, home, sse, stranded, stream, waiting) {
+  let body;
+  try {
+    body = await readJsonBody(req);
+  } catch (err) {
+    return sendJson(res, err.status || 400, { error: err.status ? err.message : 'invalid JSON body' });
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return sendJson(res, 400, { error: 'relay requires a JSON object body' });
+  const words = typeof body.words === 'string' ? body.words.trim() : '';
+  if (!words) return sendJson(res, 400, { error: 'relay requires "words": the PM\'s own words, as typed' });
+  if (Buffer.byteLength(words) > MAX_RELAY_WORDS_BYTES) {
+    return sendJson(res, 400, { error: `relay "words" is ${Buffer.byteLength(words)} bytes, over the ${MAX_RELAY_WORDS_BYTES}-byte cap` });
+  }
+  if (!Number.isInteger(body.round)) return sendJson(res, 400, { error: 'relay requires an integer "round" naming the round being answered' });
+  if (body.answers !== undefined && !Array.isArray(body.answers)) return sendJson(res, 400, { error: 'relay "answers" must be an array' });
+  const board = readBoard(id, home);
+  if (!board) return sendJson(res, 404, { error: 'board not found' });
+  const target = board.rounds.find(r => r.n === body.round);
+  if (target && target.status === 'abandoned') {
+    return sendJson(res, 409, { error: `round ${body.round} cannot be relayed: it was abandoned, so no session is waiting on it`, board: board.id, round: body.round });
+  }
+  return handleSubmit(req, res, id, home, sse, stranded, stream, waiting, {
+    body: { answers: body.answers ?? [], round: body.round },
+    relayed: { words },
+  });
 }
 
 /** POST /api/board/:id/attended: the open board tab reporting whether it is Attended
@@ -2906,6 +2951,9 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
         }
         if (req.method === 'POST' && action === 'submit') {
           return await handleSubmit(req, res, boardId, home, sse, stranded, streamHub, waitingCache);
+        }
+        if (req.method === 'POST' && action === 'relay') {
+          return await handleRelay(req, res, boardId, home, sse, stranded, streamHub, waitingCache);
         }
         if (req.method === 'POST' && action === 'abandon') {
           return handleAbandon(req, res, boardId, home, sse, stranded, streamHub, waitingCache);

@@ -1187,7 +1187,7 @@ export const MAX_ANSWER_CHOICES = 200;
  * settled answer from a later round's Send) are all dropped silently rather than
  * stored -- there is nothing for the reviewer to fix, and a request that carries one
  * is not a request the human made. */
-export function applySubmit(board, { action, answers, comments }, round) {
+export function applySubmit(board, { action, answers, comments, relayed }, round) {
   const now = new Date().toISOString();
 
   // Both length gates run BEFORE anything is merged, so an over-cap submit changes
@@ -1291,6 +1291,10 @@ export function applySubmit(board, { action, answers, comments }, round) {
     // reported "Board submitted." and the agent never got the stop instruction.
     // The round's own outcome cannot be overwritten by a later round.
     r.action = action === 'discuss' ? 'discuss' : 'submitted';
+    // A round answered by the Master Chief on the PM's typed words, not by a Send on this
+    // board (`POST /api/board/:id/relay`): the words as relayed, and when, so every packet
+    // and read of the round says who answered it.
+    if (relayed) r.relayed = { words: relayed.words, at: now };
   }
   board.state = action === 'discuss' ? 'discuss' : 'submitted';
   board.updatedAt = now;
@@ -1547,6 +1551,7 @@ export function buildPacket(board, round, url) {
     answers,
     comments,
     url,
+    ...(sentRound?.relayed ? { relayed: sentRound.relayed } : {}),
   };
 }
 

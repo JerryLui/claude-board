@@ -572,8 +572,13 @@ except for `cwd`.
   answers:  [ { id, round, prompt, widget, status, choice, note } ],
   comments: [ { n, blockId, blockKind, anchor, text, round, createdAt, lost? } ],
   url,
+  relayed?,                         // { words, at }: answered by a relay, not a Send
 }
 ```
+
+`relayed` is present only on a round the Master Chief answered on the PM's typed words
+(`POST /api/board/:id/relay` below); the text channel says so in a `Relayed:` line carrying the
+words.
 
 No `resolved` (ADR 99): it read as review state to every packet consumer, and duplicated `lost` —
 false exactly when `lost` is present. A comment whose anchor is gone still carries `lost`, naming
@@ -1027,6 +1032,18 @@ shows its comments and no compose form, exactly as a lapsed one does.
 
 The page renders both as buttons in one `.send-bar` (`#send-btn`, `#discuss-btn`), which
 `body.readonly` hides wholesale — so the standalone `file:` archive offers neither.
+
+## `POST /api/board/:id/relay`
+
+```js
+{ round, answers: [ { id, status, choice, note } ], words }  -> { ok: true, board, round }
+```
+
+Secret only; on no cookie list. The Master Chief answers a session's open round on the PM's own
+words: it is a submit, through the submit route's own path, so the round is sent, its tabs are
+pushed and a waiting `ask` wakes, and the round records `relayed: { words, at }`, carried by every
+packet and `read` of it. `words` is required, at most 1 KB. A sent round is a 409 as for a submit,
+and so is an abandoned one, which a Send would still take: nobody is waiting on a yes there.
 
 ## `POST /api/board/:id/abandon`
 
@@ -1764,8 +1781,8 @@ as an object exposing only `postMessage`, never `.document`, for the same reason
 
 ## MCP surface
 
-Two tools on the stdio shim: `ask`, which posts a board and blocks on it, and `read`, which reads
-one back (ADR 115, its own subsection below). `ask` arguments mirror the board document:
+Three tools on the stdio shim: `ask`, which posts a board and blocks on it, `read`, which reads
+one back (ADR 115), and `mission`, the missions ledger, each with its own subsection below. `ask` arguments mirror the board document:
 `{ title, blocks, wait?, fresh? }`, where question blocks carry their questions by value and
 content blocks carry a `source` ref. It posts a board and opens the tab on the thread's first
 board.
@@ -1866,6 +1883,20 @@ refuses it exactly as it refuses `ask`, in the same words, naming the tool that 
 refused: ... The claude-board daemon only serves a tool call from a caller holding the local secret
 at ~/.config/claude-board/secret".
 
+### The `mission` tool
+
+```js
+{ action: 'list' | 'read' | 'write' | 'relay' | 'ack',
+  key?, all?, fields?, board?, round?, answers?, words?, order? }
+```
+
+Any agent (Claude, Codex, OpenCode) writes its own work's status here, never case content. `list`
+is `GET /api/missions` (`all` keeps missions landed past 24 hours), `read` `GET /api/mission/:key`,
+`write` `POST /api/mission/:key` with `fields`, `relay` `POST /api/board/:id/relay` above, `ack`
+`POST /api/mission/:key/order/:id/ack`. The daemon's answer comes back as JSON on the text channel
+and as `structuredContent`; a refusal comes back as the tool's error text, with the route's own
+message. Like `read`, it skips both session checks: a status write shows a human nothing.
+
 ### MCP shim environment
 
 Additive to `CLAUDE_BOARD_HOME` / `CLAUDE_BOARD_PORT` above.
@@ -1901,6 +1932,14 @@ CLAUDE_BOARD_OPEN_CMD         command used to open the board URL, default `open`
 CLAUDE_BOARD_ASSUME_PLATFORM  overrides process.platform for the "cannot open a tab" decision
                                only (checks only) -- there is no second OS on the machine that
                                runs this suite to exercise the non-darwin branch on for real
+CLAUDE_BOARD_CLIENT=background
+                               a session the Master Chief started with nobody at it: it passes
+                               the interactivity check as any declared client does, and `ask`
+                               opens no tab; the board's own notification still fires.
+                               CLAUDE_BOARD_HEADLESS=1 still wins over it
+CLAUDE_MISSION                the mission key this session works for: every board post carries
+                               `mission: <key>`, so the daemon links the board to it. A value
+                               that is not a mission key is ignored, never a failed post
 CLAUDE_BOARD_SECRET_FILE      where the local secret lives, default
                                ~/.config/claude-board/secret. Read by install.sh, the daemon
                                and the shim alike; a testing seam, not configuration
