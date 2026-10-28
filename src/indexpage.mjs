@@ -15,6 +15,7 @@ import path from 'node:path';
 import { styles, faviconLink, markSvg } from './styles.mjs';
 import { themeBootScript, themeToggle } from './theme.mjs';
 import { commentModeToggle } from './render.mjs';
+import { trackDocWidth } from './ui.mjs';
 import { roundIsAwaited } from './badge.mjs';
 // formatCountdown only -- src/pomodoro.mjs's document shape, HTTP surface and
 // clock are owned by other tickets and stay untouched here (this file consumes
@@ -254,7 +255,8 @@ const missionsScript = `
  * and 'waiting' events, on connect, and on the fifteen-second tick (a stalled session
  * raises no event of its own), one fetch at a time like patchRows. A repaint patches
  * card by card: a card whose markup is unchanged is left alone, and a card holding an
- * open comment is never repainted under the reader's typing.
+ * open comment is never replaced under the reader's typing: only its buttons' disabled
+ * state and its error line are written onto it in place.
  *
  * Fire and Merge answer the round their button names, through the board's own submit:
  * the question set to option 0, the round number, nothing else. Stop asks once, inline,
@@ -319,6 +321,29 @@ function missionsCardHeld(node, key) {
   return !!(missionsUi.commenting[key] && node.querySelector('textarea.mission-comment-text'));
 }
 
+// What a repaint would change on a held card, written onto it in place: its buttons
+// disabled while a request is out, and its error line, taken from the card's fresh
+// markup 'html' so it reads as a repainted card's would.
+function missionsSyncHeld(node, key, html) {
+  var busy = !!missionsUi.sending[key];
+  var btns = node.querySelectorAll('button.mission-act, button.mission-stop, button.mission-stop-confirm, button.mission-comment-send');
+  for (var i = 0; i < btns.length; i++) {
+    if (busy) btns[i].setAttribute('disabled', ''); else btns[i].removeAttribute('disabled');
+  }
+  var was = node.querySelector('p.mission-error');
+  var now = missionsNode(html).querySelector('p.mission-error');
+  if (was && now) { was.replaceWith(now); return; }
+  if (was) { was.replaceWith(); return; }
+  if (!now) return;
+  // In the fresh markup the error sits just above the card's first row of controls.
+  var before = null;
+  for (var j = 0; j < node.children.length && !before; j++) {
+    var cl = node.children[j].classList;
+    if (cl.contains('mission-btns') || cl.contains('mission-confirm') || cl.contains('mission-comment')) before = node.children[j];
+  }
+  node.insertBefore(now, before);
+}
+
 function paintMissions() {
   var mount = missionsMount();
   if (!mount || !missionsData) return;
@@ -335,7 +360,9 @@ function paintMissions() {
   parts.columns.forEach(function (c) {
     c.cards.forEach(function (k) {
       var node = missionsFind(k.key);
-      if (node && missionsCardHeld(node, k.key)) held[k.key] = node;
+      if (!node || !missionsCardHeld(node, k.key)) return;
+      held[k.key] = node;
+      missionsSyncHeld(node, k.key, k.html);
     });
   });
   var counts = mount.querySelector('div.mission-counts');
@@ -410,9 +437,10 @@ function postMissionJson(url, body) {
 }
 
 // One request per card at a time; the card's buttons are disabled while it is out, and
-// the card is re-read once it lands, whatever the answer.
+// the card is re-read once it lands, whatever the answer. Answers a promise of whether
+// it went through, false at once for a click while one is still out.
 function missionsSend(key, request, failure) {
-  if (missionsUi.sending[key]) return;
+  if (missionsUi.sending[key]) return Promise.resolve(false);
   missionsUi.sending[key] = true;
   delete missionsUi.errors[key];
   paintMissions();
@@ -793,24 +821,9 @@ function fetchWaitingCount() {
     .catch(function () { /* see this function's own comment */ });
 }
 
-// The top bar's wash runs the window's full width, the board page's own
-// measurement (measureDocWidth, src/ui.mjs; QUIRKS.md on why not 100vw). Measured
-// again whenever the root's box changes, not only on resize: in Chrome the first
-// read here can come before the root's scrollbar has taken its width, and a wash
-// left that much wider scrolls the page sideways by half the difference.
-function measureDocWidth() {
-  if (!document.body || !document.documentElement) return;
-  var value = document.documentElement.clientWidth + 'px';
-  if (document.body.style.getPropertyValue('--doc-w') !== value) document.body.style.setProperty('--doc-w', value);
-}
-if (typeof window !== 'undefined' && window && typeof window.addEventListener === 'function') {
-  measureDocWidth();
-  window.addEventListener('resize', measureDocWidth);
-  window.addEventListener('load', measureDocWidth);
-  if (typeof ResizeObserver === 'function' && document.documentElement) {
-    new ResizeObserver(measureDocWidth).observe(document.documentElement);
-  }
-}
+// The top bar's wash runs the window's full width: '--doc-w', kept by trackDocWidth
+// (src/ui.mjs), spliced in after this script's own text and started there, the same
+// measurement the board page runs.
 
 function tick() {
   refresh();
@@ -1604,10 +1617,11 @@ function wakePomodoro() {
 // exactly the set of moments this tab may have missed something: nothing backfills
 // events sent while it was disconnected, so coming back live means asking what the
 // state is NOW. That is what makes an index left open through a daemon restart go
-// live again on its own. The first 'open' costs one extra pair of fetches at load,
-// which is the price of not keeping a 'have I connected before' flag to tell a
-// connect from a reconnect -- and the rows fetch would have happened on the first
-// tick anyway. src/ui.mjs's board stream resyncs on 'open' for the same reason.
+// live again on its own. The first 'open' repeats two fetches the page already made
+// at load, the timer's and, on Missions, the columns', which is the price of not
+// keeping a 'have I connected before' flag to tell a connect from a reconnect; its
+// rows and waiting-count fetches are the first of their kind, ahead of the first
+// tick. src/ui.mjs's board stream resyncs on 'open' for the same reason.
 //
 // No reconnect and no backoff written here: EventSource does it natively, which is
 // the whole reason this page subscribes with one. Guarded on typeof exactly as
@@ -1619,11 +1633,12 @@ function wakePomodoro() {
 //
 // Only the events the daemon already broadcasts (broadcastWaiting, broadcastPomodoro
 // and broadcastMissions, src/server.mjs) are listened for. 'waiting' wakes the
-// missions columns too: a round opening or being answered moves a mission in or out of
-// needs-you, and a submit broadcasts no 'missions' of its own. A row change with no
-// broadcast behind it -- a prune, a last-activity stamp drifting -- keeps arriving on
-// the tick; teaching the daemon a new event is a decision of its own, not a line
-// added here.
+// missions columns too, though a write to a mission's own board sends 'missions'
+// beside it (broadcastWaiting), so a submit there re-reads the columns twice: the
+// second wake lands while the first fetch is out and runs once it is back
+// (patchMissions). A row change with no broadcast behind it -- a prune, a
+// last-activity stamp drifting -- keeps arriving on the tick; teaching the daemon a
+// new event is a decision of its own, not a line added here.
 //
 // ponytail: one held connection per open index tab, the shape a board tab already
 // has. Ceiling: a reviewer who leaves a dozen index tabs open for days costs the
@@ -1648,7 +1663,8 @@ function initIndexStream() {
   es.addEventListener('missions', function () { patchMissions(); });
 }
 initIndexStream();
-` + '\n' + missionsParts.toString() + '\n' + missionsScript;
+` + '\n' + missionsParts.toString() + '\n' + missionsScript
+  + '\n' + trackDocWidth.toString() + '\ntrackDocWidth();\n';
 
 /** Filter the thread index down to the sessions a query names. Matches on what
  * IDENTIFIES a session and nothing else — its title, its project folder, the

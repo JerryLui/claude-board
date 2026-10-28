@@ -290,6 +290,15 @@ export function freePort() {
   });
 }
 
+/** `deadPid()` resolves a pid that belonged to a process that has already exited: a session
+ * bound to it reads as gone, the way a crashed one does. */
+export function deadPid() {
+  return new Promise(resolve => {
+    const child = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    child.once('exit', () => resolve(child.pid));
+  });
+}
+
 /** `secretHome(prefix, opts)` sets up a check's daemon home: a fresh `mkdtemp` directory under
  * the OS temp dir named from `prefix`, exported as `CLAUDE_BOARD_HOME` (unless
  * `opts.setHome` is false), with a `secret` file inside it holding `opts.secret`
