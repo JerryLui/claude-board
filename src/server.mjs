@@ -2634,7 +2634,9 @@ async function handlePrune(req, res, home, waiting) {
  *   POST /api/mission/:key/order            { order }
  *   POST /api/mission/:key/order/:id/ack    { order }
  *
- * A refusal is `{ error }` with its status, and a 409 also carries the live `session`.
+ * A refusal is `{ error }` with its status, and a 409 also carries the live `session`, plus
+ * `silent: true` on a launch refused by a session that reads stalled by silence while its
+ * process lives.
  * Every write publishes `missions` on the daemon-wide stream. */
 async function handleMission(req, res, parts, home, stream) {
   const key = parts[2];
@@ -2666,7 +2668,7 @@ async function handleMission(req, res, parts, home, stream) {
     return sendJson(res, 200, answer);
   } catch (err) {
     const status = err && Number.isInteger(err.status) ? err.status : 500;
-    if (status === 409) return sendJson(res, 409, { error: 'live', session: err.session });
+    if (status === 409) return sendJson(res, 409, { error: 'live', session: err.session, ...(err.silent ? { silent: true } : {}) });
     return sendJson(res, status, { error: String((err && err.message) || err) });
   }
 }

@@ -318,7 +318,7 @@ export function deriveState(m, { home = boardHome(), now = Date.now(), isAlive =
 }
 
 /** The record as a reader gets it: every stored field, plus `view` (the derived state),
- * `live` (a session is bound and has not stalled) and `actions` (`missionActions`). */
+ * `live` (a session holds the mission, `hasLiveSession`) and `actions` (`missionActions`). */
 export function missionView(m, { home = boardHome(), now = Date.now(), isAlive = pidAlive } = {}) {
   return {
     ...m,

@@ -127,6 +127,29 @@ async function main() {
     }
   });
 
+  await check('a launch refused by a silent live session answers 409 with silent: true, and a heartbeat drops the flag', async () => {
+    const session = liveProcess();
+    try {
+      const now = Date.now();
+      seed(home, 'SILENT_HTTP', {
+        now: now - minutes(30),
+        session: { pid: session.pid, startedAt: iso(now - minutes(30)), seenAt: iso(now - minutes(16)) },
+      });
+      const silent = await post('/api/mission/SILENT_HTTP/launch', { phase: 'direct' });
+      assert.equal(silent.status, 409);
+      assert.equal(silent.body.error, 'live');
+      assert.equal(silent.body.session.pid, session.pid);
+      assert.equal(silent.body.silent, true, `the body says the live session is silent: ${JSON.stringify(silent.body)}`);
+
+      assert.equal((await post('/api/mission/SILENT_HTTP/session', { pid: session.pid })).status, 200);
+      const heard = await post('/api/mission/SILENT_HTTP/launch', { phase: 'direct' });
+      assert.equal(heard.status, 409);
+      assert.equal('silent' in heard.body, false, `a session just heard from is not silent: ${JSON.stringify(heard.body)}`);
+    } finally {
+      await endProcess(session);
+    }
+  });
+
   await check(`a reserved session no process binds is live for ${UNBOUND_GRACE_MS / 60000} minutes, then stalls and frees its mission and its slot`, () => {
     const dir = scratchHome('unbound');
     const t0 = Date.parse('2026-10-28T12:00:00Z');
