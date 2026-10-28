@@ -17,7 +17,6 @@
 // shape: the PATH stub and the day-long grace keep any banner off the screen.
 
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
 import http from 'node:http';
 import { mkdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
@@ -25,7 +24,7 @@ import { SECRET_HEADER } from '../src/secret.mjs';
 import { startServer } from '../src/server.mjs';
 import { readBoard } from '../src/store.mjs';
 import { StandInEvent, fetchSettler, parseHTML } from './dom-stand-in.mjs';
-import { check, runMain, secretHome, writeStub, rawRequest, writeHeaders, pageHarness, postBoard, sleep } from './support.mjs';
+import { check, deadPid, runMain, secretHome, writeStub, rawRequest, writeHeaders, pageHarness, postBoard, sleep } from './support.mjs';
 
 const { loadIndexAgainstDaemon } = await pageHarness();
 
@@ -56,14 +55,6 @@ async function mission(key) {
 async function liveMission(key, fields = {}) {
   assert.equal((await post(`/api/mission/${key}`, { title: key, phase: 'direct', state: 'working', ...fields })).status, 200);
   assert.equal((await post(`/api/mission/${key}/session`, { pid: process.pid, id: `sess-${key}` })).status, 200);
-}
-
-/** A pid that belonged to a process that has already exited. */
-function deadPid() {
-  return new Promise(resolve => {
-    const child = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
-    child.once('exit', () => resolve(child.pid));
-  });
 }
 
 /** A round on `key`'s own board holding one question with `action`, beside an ordinary one. */
@@ -358,6 +349,50 @@ async function main() {
         assert.equal(card.querySelector('textarea'), null, 'the note closes once sent');
         assert.equal(card.querySelector('p.mission-order').textContent, 'Comment waiting for the Master Chief');
         assert.deepEqual((await mission('WORKING_ONE')).orders, [], 'no other mission got it');
+      } finally {
+        tab.restoreFetch();
+      }
+    });
+
+    /** A tab with Comment on and `key`'s note open, holding `text`. */
+    async function openNote(key, text) {
+      const tab = await openMissionsTab();
+      await tab.click(tab.document.querySelector('button#comment-mode-toggle'));
+      await tab.click(cardFor(tab.document, key).querySelector('b.mission-title'));
+      const box = cardFor(tab.document, key).querySelector('textarea.mission-comment-text');
+      box.value = text;
+      box.dispatchEvent(new StandInEvent('input'));
+      return tab;
+    }
+
+    await check('a comment the daemon refuses shows its error on the open note, which keeps its text', async () => {
+      await liveMission('COMMENT_REFUSED');
+      const text = 'x'.repeat(4097);
+      const tab = await openNote('COMMENT_REFUSED', text);
+      try {
+        await tab.click(cardFor(tab.document, 'COMMENT_REFUSED').querySelector('button.mission-comment-send'));
+        assert.deepEqual((await mission('COMMENT_REFUSED')).orders, [], 'setup: a comment over 4096 bytes is refused');
+        const card = cardFor(tab.document, 'COMMENT_REFUSED');
+        assert.equal(card.querySelector('p.mission-error').textContent, 'Could not send the comment (400)');
+        assert.equal(card.querySelector('textarea.mission-comment-text').value, text, 'the note stays open with what was written');
+        assert.equal(card.querySelector('button.mission-comment-send').getAttribute('disabled'), null, 'and can be sent again');
+      } finally {
+        tab.restoreFetch();
+      }
+    });
+
+    await check('a second click on Send while the first is out sends nothing more, and Send is disabled meanwhile', async () => {
+      await liveMission('COMMENT_TWICE');
+      const tab = await openNote('COMMENT_TWICE', 'Once only');
+      try {
+        const send = cardFor(tab.document, 'COMMENT_TWICE').querySelector('button.mission-comment-send');
+        send.dispatchEvent(new StandInEvent('click'));
+        assert.equal(send.getAttribute('disabled'), '', 'Send is disabled while its request is out');
+        // The stand-in delivers a click to a disabled button, which a browser would not.
+        send.dispatchEvent(new StandInEvent('click'));
+        await settler.settle();
+        assert.deepEqual((await mission('COMMENT_TWICE')).orders.map(o => [o.kind, o.text]), [['comment', 'Once only']]);
+        assert.equal(cardFor(tab.document, 'COMMENT_TWICE').querySelector('textarea'), null, 'the note closes once sent');
       } finally {
         tab.restoreFetch();
       }

@@ -746,7 +746,8 @@ least 250px wide that wraps on a narrow window. A card is the work's title and a
 phase (with a Queued tag under Waiting), the summary, what it waits on and what comes next, its
 PRs with a mark for their state, any pending order, and a row of buttons: the latest board or the
 round asking, Fire or Merge while asked, and the Stop icon at the right while a session is live.
-Boards is the old index, its filter and thread list, now at the bar's full width.
+Boards is the list of Threads with its filter, the home page before Missions took `/`, now at the
+bar's full width.
 
 **Why columns.** Three layouts were mocked. A needs-you-first list puts the one urgent thing on
 top and buries the rest in one undifferentiated scroll, so "what is working" has no place to be

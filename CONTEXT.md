@@ -264,9 +264,10 @@ for each; switching tabs moves nothing in it. _Avoid_: nav bar, header (unqualif
 page has its own).
 
 **Mission state**: the column a Mission shows in, derived on every read: needs you, working,
-waiting, stalled or landed. Needs you is any linked board Waiting on the person; waiting is the
-Mission waiting on something else (a check, another PR, a Queued launch). _Avoid_: status
-(collides with the Packet's), phase (grill, direct or landing), column.
+waiting, stalled or landed. Needs you is any linked board with a round still open that asks the
+person a question or was posted Awaited, a Lapsed one included; waiting is the Mission waiting on
+something else (a check, another PR, a Queued launch). _Avoid_: status (collides with the
+Packet's), phase (grill, direct or landing), column.
 
 **Live**: of a Mission's session, that it holds the Mission: bound or reserved, its Mission has
 not recorded its end, and its process is not gone. Only one session is Live per Mission, and only

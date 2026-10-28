@@ -98,6 +98,34 @@ export const MERMAID_TOKEN_MAP = {
   edgeLabelBackground: '--panel',
 };
 
+/** Keeps `--doc-w` on the body at the window's width less its scrollbar, for the
+ * header washes that run full-bleed out of a centred column (an ordinary board's
+ * condensed wash and the home views' top bar, src/styles.mjs). Not `100vw`: `vw`
+ * includes the scrollbar, and a page that scrolls would then scroll sideways too
+ * (QUIRKS.md "`100vw` is wider than the page whenever the page actually scrolls").
+ * `clientWidth` excludes it by definition.
+ *
+ * Spliced by `.toString()` into the board page's client script (`ui` below) and the
+ * home views' (indexScript, src/indexpage.mjs), so both measure the same way. Read
+ * again on resize, on load and whenever the root's box changes: in Chrome the first
+ * read can come before the root's scrollbar has taken its width, and a scrollbar
+ * appearing as the page grows fires no resize. Written only when the value changed.
+ * Guarded for the check stand-ins, which may run it with no body or no listener API. */
+export function trackDocWidth() {
+  function measureDocWidth() {
+    if (!document.body || !document.documentElement) return;
+    var value = document.documentElement.clientWidth + 'px';
+    if (document.body.style.getPropertyValue('--doc-w') !== value) document.body.style.setProperty('--doc-w', value);
+  }
+  if (typeof window === 'undefined' || !window || typeof window.addEventListener !== 'function') return;
+  measureDocWidth();
+  window.addEventListener('resize', measureDocWidth);
+  window.addEventListener('load', measureDocWidth);
+  if (typeof ResizeObserver === 'function' && document.documentElement) {
+    new ResizeObserver(measureDocWidth).observe(document.documentElement);
+  }
+}
+
 export const ui = `
 (function () {
   // THE ID RULE FOR THIS WHOLE FILE, stated here once: every id lookup is
@@ -2001,23 +2029,14 @@ export const ui = `
     if (typeof ResizeObserver === 'function') new ResizeObserver(measurePillHalf).observe(actions);
   }());
 
-  /** How far an ordinary board's condensed wash
-   * (body:not(.page-board) .board-head::after, src/styles.mjs) reaches to go
-   * full-bleed without a 'vw' unit -- 'vw' includes the scrollbar's own
-   * width, and an ordinary board is exactly the surface that always has a
-   * real document scrollbar (a page board's own full-bleed header never had
-   * to consider this: body.page-board sets 'overflow: hidden', no scrollbar
-   * at all). 'clientWidth' excludes it by definition, the same measured-not-
-   * guessed idiom measurePillHalf above and reportStageBand use elsewhere in
-   * this file. Feature-detected only by existing (documentElement is always
-   * present); harmless without a later resize, since the wash simply keeps
-   * whatever width it last had -- a stale-but-still-full-bleed rectangle is
-   * a far smaller defect than the seam this exists to fix at all. */
-  function measureDocWidth() {
-    document.body.style.setProperty('--doc-w', document.documentElement.clientWidth + 'px');
-  }
-  measureDocWidth();
-  window.addEventListener('resize', measureDocWidth);
+  // How far an ordinary board's condensed wash
+  // (body:not(.page-board) .board-head::after, src/styles.mjs) reaches to go
+  // full-bleed: '--doc-w', kept by measureDocWidth inside trackDocWidth, the one
+  // measurement the home views run too (its own comment, src/ui.mjs).
+  // A page board's own full-bleed header never needed it: body.page-board sets
+  // 'overflow: hidden', no scrollbar at all.
+  var trackDocWidth = ${trackDocWidth.toString()};
+  trackDocWidth();
 
   /** How wide a scrollbar is inside a stage's frame, written to
    * '--stage-scrollbar-w' for the Pull-out, which moves in by it on a stage
@@ -2037,8 +2056,8 @@ export const ui = `
    * does. What a mock does to its OWN scrollbar (a thin one, a hidden one) the
    * page cannot know; the control clears the native width regardless.
    *
-   * Measured again on every resize, measureDocWidth's trigger and the only
-   * one here, so a width that changes while the page is open (the system
+   * Measured again on every resize and on nothing else, so a width that
+   * changes while the page is open (the system
    * going from overlay to classic scrollbars when a mouse is plugged in) is
    * picked up at the next resize, not at once. With no shadow roots nothing
    * is written, and the stylesheet's own fallback, 0, holds. */

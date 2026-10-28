@@ -25,7 +25,7 @@ packet's `resolved`, redundant beside `lost`) is the shape of that exception.
 | `src/anchor.mjs` | element-level (`dom`/`mermaid`) anchor path and hint logic, pure. `src/ui.mjs` carries a duplicate as plain functions, since the served page has no import graph at runtime |
 | `src/resolve.mjs` | content-by-reference resolution and sha snapshotting |
 | `src/render.mjs` | board JSON -> complete HTML page (pure function) |
-| `src/indexpage.mjs` | the two home views under one top bar: Missions at `/`, its columns and card buttons, and the Boards view at `/boards`, the thread index and its session filter |
+| `src/indexpage.mjs` | the two home views under one top bar: Missions at `/`, its columns and card buttons, and the Boards view at `/boards`, the list of Threads and its session filter |
 | `src/missions.mjs` | the missions ledger: the writable fields and their caps, the derived view (`view`, `live`, `actions`), the launch check and its caps, sessions, orders, board links |
 | `src/mission-watch.mjs` | the daemon's 30-second read of every mission: publishes the derived changes no write made, and speaks one batched notification a minute (ADR 128) |
 | `src/server.mjs` | the `node:http` daemon: routes, SSE, the four gates below |
@@ -674,7 +674,7 @@ is not a question block of the round being submitted is ignored server-side rath
 ```
 GET  /                             the Missions view, the board's home page (ADR 124);
                                     `/?q=` is a 302 to `/boards?q=`, where that filter lives
-GET  /boards?q=                     the Boards view: the thread index, filtered to sessions
+GET  /boards?q=                     the Boards view: the list of Threads, filtered to sessions
                                     matching q
 GET  /b/:boardId                    the served page
 GET  /b/:boardId?stages=held        the same page with every stage frame empty and

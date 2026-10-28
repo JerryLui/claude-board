@@ -23,8 +23,8 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { sessionToken } from '../src/secret.mjs';
-import { runMain, sleep, withTimeout, skipFile } from './support.mjs';
-import { CHROME, guardRun, postJson, row, setSessionCookie, startScratchDaemon, withChrome } from './browser-support.mjs';
+import { runMain, skipFile } from './support.mjs';
+import { CHROME, guardRun, measureTab, postJson, row, startScratchDaemon, withChrome } from './browser-support.mjs';
 
 if (!existsSync(CHROME)) skipFile('browser-check-topbar', `browser-check-topbar: no Chrome at ${CHROME} (set CLAUDE_BOARD_CHROME_BIN to override)`);
 
@@ -71,44 +71,9 @@ const MEASURE_EXPR = `(function () {
   };
 })()`;
 
-/** Opens `url` in a fresh tab at `width` x HEIGHT under `theme`, waits for load and for
- * the layout to hold still, and answers the measurement. */
-async function measure(send, onEvent, url, cookie, { width, theme }) {
-  const { targetId } = await send('Target.createTarget', { url: 'about:blank' });
-  const { sessionId } = await send('Target.attachToTarget', { targetId, flatten: true });
-  const sp = (method, params) => send(method, params, sessionId);
-  const evalPage = expr => sp('Runtime.evaluate', { expression: expr, returnByValue: true }).then(r => {
-    if (r.exceptionDetails) throw new Error(`page eval threw: ${r.exceptionDetails.exception?.description || r.exceptionDetails.text}`);
-    return r.result.value;
-  });
-  try {
-    const loadFired = new Promise(resolve => {
-      const off = onEvent(msg => {
-        if (msg.method === 'Page.loadEventFired' && msg.sessionId === sessionId) { off(); resolve(); }
-      });
-    });
-    await sp('Page.enable');
-    await sp('Runtime.enable');
-    await sp('Emulation.setDeviceMetricsOverride', { width, height: HEIGHT, deviceScaleFactor: 1, mobile: false });
-    await sp('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: theme }] });
-    await setSessionCookie(sp, cookie);
-    await sp('Page.navigate', { url });
-    await withTimeout(loadFired, 20000, `page never fired load: ${url}`);
-    // The widget and the count settle one fetch after load; wait until nothing moves.
-    const deadline = Date.now() + 15000;
-    let last = null;
-    let since = Date.now();
-    for (;;) {
-      await sleep(100);
-      const now = JSON.stringify(await evalPage(MEASURE_EXPR));
-      if (now !== last) { last = now; since = Date.now(); }
-      else if (Date.now() - since >= 500) return JSON.parse(now);
-      if (Date.now() >= deadline) throw new Error(`layout never held still at ${width}px: ${url}`);
-    }
-  } finally {
-    await send('Target.closeTarget', { targetId });
-  }
-}
+/** A tab at `width` x HEIGHT under `theme`, held still on MEASURE_EXPR (openTab's options,
+ * test/browser-support.mjs). */
+const tabAt = (width, theme) => ({ width, height: HEIGHT, theme, expr: MEASURE_EXPR });
 
 async function main() {
   const daemon = await startScratchDaemon('cb-topbar');
@@ -133,9 +98,9 @@ async function main() {
       for (const width of WIDTHS) {
         for (const theme of THEMES) {
           at[`${width} ${theme}`] = {
-            missions: await measure(send, onEvent, `${origin}/`, cookie, { width, theme }),
-            boards: await measure(send, onEvent, `${origin}/boards`, cookie, { width, theme }),
-            board: await measure(send, onEvent, boardUrl, cookie, { width, theme }),
+            missions: await measureTab(send, onEvent, `${origin}/`, cookie, tabAt(width, theme)),
+            boards: await measureTab(send, onEvent, `${origin}/boards`, cookie, tabAt(width, theme)),
+            board: await measureTab(send, onEvent, boardUrl, cookie, tabAt(width, theme)),
           };
         }
       }

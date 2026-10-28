@@ -19,12 +19,10 @@
 // follow the Mac's Show scroll bars setting"). A live session is this process's own pid.
 
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import http from 'node:http';
-import { sessionToken, SECRET_HEADER } from '../src/secret.mjs';
-import { runMain, sleep, withTimeout, skipFile } from './support.mjs';
-import { CHROME, guardRun, postJson, row, setSessionCookie, startScratchDaemon, withChrome } from './browser-support.mjs';
+import { sessionToken } from '../src/secret.mjs';
+import { deadPid, runMain, sleep, skipFile } from './support.mjs';
+import { CHROME, getJson, guardRun, measureTab, openTab, postJson, row, startScratchDaemon, withChrome } from './browser-support.mjs';
 
 if (!existsSync(CHROME)) skipFile('browser-check-missions', `browser-check-missions: no Chrome at ${CHROME} (set CLAUDE_BOARD_CHROME_BIN to override)`);
 
@@ -74,51 +72,8 @@ const MEASURE_EXPR = `(function () {
   };
 })()`;
 
-/** A fresh tab at `width` x HEIGHT under `theme`, loaded and held still. Answers the
- * tab's own `sp`, `evalPage` and `close`. */
-async function openTab(send, onEvent, url, cookie, { width, theme }) {
-  const { targetId } = await send('Target.createTarget', { url: 'about:blank' });
-  const { sessionId } = await send('Target.attachToTarget', { targetId, flatten: true });
-  const sp = (method, params) => send(method, params, sessionId);
-  const evalPage = expr => sp('Runtime.evaluate', { expression: expr, returnByValue: true }).then(r => {
-    if (r.exceptionDetails) throw new Error(`page eval threw: ${r.exceptionDetails.exception?.description || r.exceptionDetails.text}`);
-    return r.result.value;
-  });
-  const close = () => send('Target.closeTarget', { targetId });
-  try {
-    const loadFired = new Promise(resolve => {
-      const off = onEvent(msg => {
-        if (msg.method === 'Page.loadEventFired' && msg.sessionId === sessionId) { off(); resolve(); }
-      });
-    });
-    await sp('Page.enable');
-    await sp('Runtime.enable');
-    await sp('Emulation.setDeviceMetricsOverride', { width, height: HEIGHT, deviceScaleFactor: 1, mobile: false });
-    await sp('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: theme }] });
-    await setSessionCookie(sp, cookie);
-    await sp('Page.navigate', { url });
-    await withTimeout(loadFired, 20000, `page never fired load: ${url}`);
-    const deadline = Date.now() + 15000;
-    let last = null;
-    let since = Date.now();
-    for (;;) {
-      await sleep(100);
-      const now = JSON.stringify(await evalPage(MEASURE_EXPR));
-      if (now !== last) { last = now; since = Date.now(); }
-      else if (Date.now() - since >= 500) return { sp, evalPage, close, measured: JSON.parse(now) };
-      if (Date.now() >= deadline) throw new Error(`layout never held still at ${width}px: ${url}`);
-    }
-  } catch (err) {
-    await close();
-    throw err;
-  }
-}
-
-async function measure(send, onEvent, url, cookie, opts) {
-  const tab = await openTab(send, onEvent, url, cookie, opts);
-  await tab.close();
-  return tab.measured;
-}
+/** A tab at `width` x HEIGHT under `theme`, held still on MEASURE_EXPR (openTab's options). */
+const tabAt = (width, theme) => ({ width, height: HEIGHT, theme, expr: MEASURE_EXPR });
 
 /** Presses the element `selector` names with a real mouse, at its centre. */
 async function press(tab, selector) {
@@ -143,23 +98,6 @@ async function waitFor(tab, expr, what) {
     if (Date.now() >= deadline) throw new Error(`${what} never happened`);
     await sleep(50);
   }
-}
-
-function getJson(port, route, secret) {
-  return new Promise((resolve, reject) => {
-    http.get({ host: '127.0.0.1', port, path: route, headers: { [SECRET_HEADER]: secret } }, res => {
-      let text = '';
-      res.on('data', c => { text += c; });
-      res.on('end', () => resolve(JSON.parse(text)));
-    }).on('error', reject);
-  });
-}
-
-function deadPid() {
-  return new Promise(resolve => {
-    const child = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
-    child.once('exit', () => resolve(child.pid));
-  });
 }
 
 async function main() {
@@ -197,7 +135,7 @@ async function main() {
       prs: [{ repo: 'service', number: 1862, url: 'https://github.com/o/service/pull/1862', state: 'merged' }] });
 
     const counts = Object.fromEntries(COLUMNS.map(c => [c, 0]));
-    for (const m of (await getJson(port, '/api/missions', daemon.secret)).missions) counts[m.view === 'queued' ? 'waiting' : m.view] += 1;
+    for (const m of (await getJson(`${origin}/api/missions`, daemon.secret)).missions) counts[m.view === 'queued' ? 'waiting' : m.view] += 1;
 
     for (const [mode, classicScrollbars] of [['classic scrollbars', true], ['default scrollbars', false]]) {
       await withChrome({ tag: 'cb-missions', classicScrollbars }, async ({ send, onEvent }) => {
@@ -206,8 +144,8 @@ async function main() {
         for (const width of WIDTHS) {
           for (const theme of THEMES) {
             at[`${width} ${theme}`] = {
-              missions: await measure(send, onEvent, `${origin}/`, cookie, { width, theme }),
-              boards: await measure(send, onEvent, `${origin}/boards`, cookie, { width, theme }),
+              missions: await measureTab(send, onEvent, `${origin}/`, cookie, tabAt(width, theme)),
+              boards: await measureTab(send, onEvent, `${origin}/boards`, cookie, tabAt(width, theme)),
             };
           }
         }
@@ -273,13 +211,13 @@ async function main() {
     await withChrome({ tag: 'cb-missions-stop' }, async ({ send, onEvent }) => {
       const cookie = sessionToken(daemon.secret);
       await row('Stop, pressed with a mouse, asks once, then sends the order and says so on the card', async note => {
-        const tab = await openTab(send, onEvent, `${origin}/`, cookie, { width: 1440, theme: 'light' });
+        const tab = await openTab(send, onEvent, `${origin}/`, cookie, tabAt(1440, 'light'));
         try {
           const card = 'article.mission-card[data-mission-key="ANNOUNCEMENTS"]';
           await press(tab, `${card} button.mission-stop`);
           const asked = await waitFor(tab, `(document.querySelector('${card} p.mission-confirm-text') || {}).textContent`, 'the Stop question');
           note(asked);
-          assert.deepEqual((await getJson(port, '/api/mission/ANNOUNCEMENTS', daemon.secret)).orders, [], 'the first press only asks');
+          assert.deepEqual((await getJson(`${origin}/api/mission/ANNOUNCEMENTS`, daemon.secret)).orders, [], 'the first press only asks');
           const focused = await tab.evalPage(`document.activeElement && document.activeElement.textContent`);
           assert.equal(focused, 'Stop session', 'the question takes the focus to its own Stop');
 
@@ -287,7 +225,7 @@ async function main() {
           const said = await waitFor(tab, `(document.querySelector('${card} p.mission-order') || {}).textContent`, 'the order line');
           note(said);
           assert.equal(said, 'Stop asked: waiting for the Master Chief to relay it');
-          const orders = (await getJson(port, '/api/mission/ANNOUNCEMENTS', daemon.secret)).orders;
+          const orders = (await getJson(`${origin}/api/mission/ANNOUNCEMENTS`, daemon.secret)).orders;
           assert.deepEqual(orders.map(o => o.kind), ['stop']);
         } finally {
           await tab.close();
