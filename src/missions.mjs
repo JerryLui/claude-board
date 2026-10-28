@@ -261,6 +261,32 @@ function boardsNeedYou(m, home) {
   return false;
 }
 
+/** The buttons `m`'s card offers: one per question carrying an `action` (Fire or Merge)
+ * in a round of a linked board still waiting on the PM, as `roundWantsAnswer` reads it. A
+ * click answers `question` in `round` of `board` with option 0, whose label is `choice`. A
+ * sent or abandoned round offers none. */
+export function missionActions(m, { home = boardHome() } = {}) {
+  const actions = [];
+  for (const link of m.boards || []) {
+    let board;
+    try {
+      board = readBoard(link.id, home);
+    } catch {
+      continue;
+    }
+    if (!board) continue;
+    const questions = questionBlocks(board);
+    for (const round of board.rounds || []) {
+      if (!roundWantsAnswer(board, round)) continue;
+      for (const q of questions) {
+        if (q.round !== round.n || !q.action || q.widget !== 'single' || !q.options?.length) continue;
+        actions.push({ kind: q.action, board: board.id, round: round.n, question: q.id, choice: q.options[0].label });
+      }
+    }
+  }
+  return actions;
+}
+
 /** The column `m` shows in: landed stays landed; a stalled session wins over everything
  * else; then a board waiting on the PM; else the stored state. */
 export function deriveState(m, { home = boardHome(), now = Date.now(), isAlive = pidAlive } = {}) {
@@ -270,10 +296,15 @@ export function deriveState(m, { home = boardHome(), now = Date.now(), isAlive =
   return m.state;
 }
 
-/** The record as a reader gets it: every stored field, plus `view` (the derived state) and
- * `live` (a session is bound and has not stalled). */
+/** The record as a reader gets it: every stored field, plus `view` (the derived state),
+ * `live` (a session is bound and has not stalled) and `actions` (`missionActions`). */
 export function missionView(m, { home = boardHome(), now = Date.now(), isAlive = pidAlive } = {}) {
-  return { ...m, view: deriveState(m, { home, now, isAlive }), live: hasLiveSession(m, now, isAlive) };
+  return {
+    ...m,
+    view: deriveState(m, { home, now, isAlive }),
+    live: hasLiveSession(m, now, isAlive),
+    actions: missionActions(m, { home }),
+  };
 }
 
 function liveCounts(views) {

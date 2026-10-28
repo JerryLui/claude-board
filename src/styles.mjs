@@ -1885,6 +1885,79 @@ body.home-page .mode-toggle:disabled { opacity: 0.5; cursor: default; }
   color: var(--warning); background: var(--warning-soft); border: 1px solid var(--warning-border-strong);
   border-radius: var(--r-pill); padding: 4px 12px; }
 
+/* the Missions view (src/indexpage.mjs missionsParts): five columns by derived state,
+   a card per mission. Columns share the width the bar's content has, at least 250px
+   each, so they wrap only on a narrow window. */
+.mission-counts { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: var(--space-4); }
+.mission-count { font-size: 12.5px; padding: 2px 10px; border-radius: var(--r-pill); border: 1px solid var(--hairline-2);
+  color: var(--ink-2); background: var(--panel); }
+.mission-count b { color: var(--ink); }
+.mission-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 14px; align-items: start; }
+.mission-col { background: var(--panel-2); border: 1px solid var(--hairline); border-radius: var(--r-md); padding: 10px; min-width: 0; }
+.mission-col[data-col="needs-you"] { border-color: var(--warning-border); }
+.mission-col-head { display: flex; align-items: center; justify-content: space-between; font-size: 13px; margin: 2px 4px 10px; font-weight: 600; }
+.mission-col-count { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; color: var(--muted); }
+.mission-col-list { display: flex; flex-direction: column; gap: 8px; }
+.mission-col-list:empty::after { content: "None"; color: var(--muted); font-size: 12.5px; padding: 2px 4px; }
+.mission-badge { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; padding: 1px 9px;
+  border-radius: var(--r-pill); border: 1px solid var(--hairline-2); white-space: nowrap; color: var(--muted); background: var(--panel-2); }
+.mission-badge::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.mission-badge[data-col="needs-you"] { color: var(--warning); background: var(--warning-soft); border-color: var(--warning-border); }
+.mission-badge[data-col="working"] { color: var(--accent); background: var(--accent-soft); border-color: transparent; }
+.mission-badge[data-col="stalled"] { color: var(--critical); background: var(--critical-soft); border-color: var(--critical-border); }
+.mission-badge[data-col="landed"] { color: var(--good); background: var(--panel); }
+.mission-card { background: var(--panel); border: 1px solid var(--hairline); border-radius: var(--r-sm); padding: 10px 12px;
+  box-shadow: var(--shadow-1); min-width: 0; overflow-wrap: anywhere; }
+.mission-card-head { display: flex; justify-content: space-between; gap: 8px; }
+.mission-title { font-weight: 600; }
+.mission-age, .mission-key { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; color: var(--muted); white-space: nowrap; }
+.mission-ident { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 2px; }
+.mission-key { white-space: normal; }
+.mission-tag { font-size: 11px; padding: 0 7px; border-radius: var(--r-pill); color: var(--muted); border: 1px solid var(--hairline-2); }
+.mission-summary { margin: 6px 0 0; color: var(--ink-2); font-size: 13px; }
+.mission-facts { font-size: 12.5px; color: var(--ink-2); margin: 6px 0 0; display: grid; grid-template-columns: auto 1fr; gap: 1px 10px; }
+.mission-facts dt { color: var(--muted); font-weight: 600; }
+.mission-facts dd { margin: 0; }
+.mission-prs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.mission-pr { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; padding: 1px 8px; border-radius: var(--r-sm);
+  border: 1px solid var(--hairline-2); color: var(--ink-2); background: var(--panel-2); white-space: nowrap; text-decoration: none; }
+.mission-pr:hover { border-color: var(--accent); color: var(--ink); }
+.mission-pr i { font-style: normal; font-weight: 700; color: var(--muted); }
+.mission-pr[data-state="green"] i { color: var(--good); }
+.mission-pr[data-state="merged"] i { color: var(--accent); }
+.mission-order { margin: 8px 0 0; font-size: 12.5px; color: var(--ink-2); }
+.mission-error { margin: 8px 0 0; font-size: 12.5px; color: var(--critical); }
+.mission-btns { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
+.mission-btn { display: inline-flex; align-items: center; min-height: 30px; padding: 3px 12px; border-radius: var(--r-sm);
+  font: inherit; font-size: 12.5px; font-weight: 600; text-decoration: none; white-space: nowrap; cursor: pointer;
+  border: 1px solid var(--hairline-2); color: var(--ink-2); background: var(--panel);
+  transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease), background var(--dur) var(--ease); }
+.mission-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--ink); }
+.mission-btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.mission-btn.primary:hover:not(:disabled) { color: var(--accent-ink); background: var(--accent-hi); }
+.mission-act { background: var(--good); color: var(--accent-ink); border-color: var(--good); }
+.mission-act:hover:not(:disabled) { color: var(--accent-ink); border-color: var(--ink); }
+.mission-btn.danger { background: var(--critical-soft); color: var(--critical); border-color: var(--critical-border); }
+.mission-btn.danger:hover:not(:disabled) { color: var(--critical); border-color: var(--critical); }
+.mission-btn:disabled { opacity: 0.6; cursor: default; }
+/* Stop: the circle-slash icon at the card's right, at a 32px target */
+.mission-stop { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; margin-left: auto;
+  padding: 0; border: 0; border-radius: var(--r-sm); background: transparent; color: var(--critical); opacity: 0.85; cursor: pointer; }
+.mission-stop:hover:not(:disabled), .mission-stop[aria-expanded="true"] { opacity: 1; background: var(--critical-soft); }
+.mission-stop:disabled { opacity: 0.4; cursor: default; }
+.mission-stop svg { display: block; }
+.mission-confirm { margin-top: 8px; padding: 8px 10px; border-radius: var(--r-sm); border: 1px solid var(--critical-border);
+  background: var(--critical-soft); }
+.mission-confirm-text { margin: 0; font-size: 12.5px; color: var(--ink); }
+.mission-comment { margin-top: 8px; }
+.mission-comment-text { display: block; width: 100%; box-sizing: border-box; resize: vertical; min-height: 64px;
+  font: inherit; font-size: 13px; color: var(--ink); background: var(--panel-2); border: 1px solid var(--hairline-2);
+  border-radius: var(--r-sm); padding: 6px 10px; }
+.mission-comment-text:focus { border-color: var(--accent); outline: none; box-shadow: var(--ring); }
+/* comment mode: a card is the thing a note lands on */
+body.comment-mode .mission-card { cursor: pointer; }
+body.comment-mode .mission-card:hover { border-color: var(--accent); }
+
 /* --- the page board: one rendered artifact, filling the viewport -------------
    A board whose blocks are one html block and nothing else (src/render.mjs's
    isPageBoard -- ADR.md entry 33, inferred from the board's shape, never

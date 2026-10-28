@@ -40,6 +40,10 @@ export const KIND_LETTER = {
 
 export const WIDGETS = ['single', 'multi', 'text', 'rank', 'choose-between-rendered-variants'];
 
+/** What a `single` question's yes does when its mission's card offers it as a button
+ * (Fire or Merge): the yes is option 0, and a card click answers the round with it. */
+export const QUESTION_ACTIONS = ['fire', 'merge'];
+
 function hex(n) {
   return randomBytes(n).toString('hex');
 }
@@ -570,6 +574,13 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
         throw new Error(`unknown widget: ${JSON.stringify(raw.widget)} (expected one of ${WIDGETS.join(', ')})`);
       }
       const widget = raw.widget ?? 'single';
+      // A card button stands for option 0, so only a one-pick question can carry one.
+      if (raw.action != null) {
+        if (!QUESTION_ACTIONS.includes(raw.action)) {
+          throw new Error(`unknown question action: ${JSON.stringify(raw.action)} (expected one of ${QUESTION_ACTIONS.join(', ')})`);
+        }
+        if (widget !== 'single') throw new Error(`question action '${raw.action}' needs widget 'single', not '${widget}'`);
+      }
       const context = Array.isArray(raw.context)
         ? raw.context.map((c, index) => normalizeBlock(c, round, counters, cwd, ids, {
           topLevel: false,
@@ -647,6 +658,7 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
         context,
         widget,
         options,
+        ...(raw.action != null ? { action: raw.action } : {}),
       };
     }
     default:

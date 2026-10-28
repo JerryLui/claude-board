@@ -586,8 +586,8 @@ async function main() {
         assert.ok(tab.stream, 'the page must open a live connection at all -- without one it is fifteen seconds behind the menu bar');
         assert.equal(tab.stream.url, '/api/events',
           'the DAEMON-WIDE stream (src/server.mjs handleStream), not a per-board one: the index has no board id to subscribe under');
-        assert.deepEqual([...tab.stream.listeners.keys()].sort(), ['open', 'pomodoro', 'waiting'],
-          'open (first connect and every reconnect), plus the two events the daemon already broadcasts -- a listener for anything else would be waiting on a push nobody sends');
+        assert.deepEqual([...tab.stream.listeners.keys()].sort(), ['missions', 'open', 'pomodoro', 'waiting'],
+          'open (first connect and every reconnect), plus the three events the daemon already broadcasts -- a listener for anything else would be waiting on a push nobody sends');
       } finally {
         tab.restoreFetch();
       }

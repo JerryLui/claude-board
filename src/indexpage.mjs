@@ -242,6 +242,320 @@ export function renderThreadRows({ threads = [], query = '' } = {}) {
     : '<p class="empty-state">No threads yet. Boards posted by a session will show up here.</p>';
 }
 
+// The Missions view's client, spliced into indexScript below after missionsParts' source.
+const missionsScript = `
+/** The Missions view's client (renderMissionsPage): the columns stay live and the card
+ * buttons act. Appended to indexScript after missionsParts' own source, so the cards it
+ * repaints are drawn by the same function the server drew the first paint with. Every
+ * part is guarded on the mount 'section#missions', so on the Boards view all of this
+ * stays still.
+ *
+ * Live: patchMissions re-reads GET /api/missions on the daemon-wide stream's 'missions'
+ * and 'waiting' events, on connect, and on the fifteen-second tick (a stalled session
+ * raises no event of its own), one fetch at a time like patchRows. A repaint patches
+ * card by card: a card whose markup is unchanged is left alone, and a card holding an
+ * open comment is never repainted under the reader's typing.
+ *
+ * Fire and Merge answer the round their button names, through the board's own submit:
+ * the question set to option 0, the round number, nothing else. Stop asks once, inline,
+ * then posts a stop order; the card says the order is on its way until the Master Chief
+ * acks it. With Comment on in the bar, a click on a card opens a note that posts a
+ * comment order. Same quoting rules as the rest of this script: no backticks and no
+ * dollar-brace below. */
+var missionsUi = { confirming: {}, sending: {}, errors: {}, commenting: {}, drafts: {} };
+var missionsData = null;
+var missionsCardHtml = {};
+var missionsInFlight = false;
+var missionsPending = false;
+
+function missionsMount() {
+  return document.querySelector('section#missions');
+}
+
+function missionsFind(key) {
+  var cards = document.querySelectorAll('article.mission-card');
+  for (var i = 0; i < cards.length; i++) if (cards[i].getAttribute('data-mission-key') === key) return cards[i];
+  return null;
+}
+
+function missionsNode(html) {
+  var holder = document.createElement('div');
+  holder.innerHTML = html;
+  return holder.firstElementChild;
+}
+
+// Comment is on offer while any card is shown, and off again when the last one goes.
+function setMissionsCommentable(on) {
+  var toggle = document.querySelector('button#comment-mode-toggle');
+  if (!toggle) return;
+  if (on) {
+    toggle.removeAttribute('disabled');
+    toggle.removeAttribute('title');
+    return;
+  }
+  toggle.setAttribute('disabled', '');
+  toggle.setAttribute('title', 'Nothing here is waiting on a comment');
+  setMissionsCommentMode(false);
+}
+
+function setMissionsCommentMode(on) {
+  var toggle = document.querySelector('button#comment-mode-toggle');
+  if (toggle) {
+    toggle.setAttribute('aria-pressed', on ? 'true' : 'false');
+    if (on) toggle.classList.add('active'); else toggle.classList.remove('active');
+  }
+  if (document.body) {
+    if (on) document.body.classList.add('comment-mode'); else document.body.classList.remove('comment-mode');
+  }
+}
+
+function missionsCommentModeOn() {
+  return !!(document.body && document.body.classList.contains('comment-mode'));
+}
+
+// A card is held while its comment box is open on screen: replacing it would drop the
+// caret and whatever the reader is in the middle of typing.
+function missionsCardHeld(node, key) {
+  return !!(missionsUi.commenting[key] && node.querySelector('textarea.mission-comment-text'));
+}
+
+function paintMissions() {
+  var mount = missionsMount();
+  if (!mount || !missionsData) return;
+  var parts = missionsParts(missionsData, missionsUi);
+  setMissionsCommentable(parts.columns.length > 0);
+  var cols = mount.querySelector('div.mission-cols');
+  if (!parts.columns.length || !cols) {
+    missionsCardHtml = {};
+    mount.innerHTML = parts.html;
+    parts.columns.forEach(function (c) { c.cards.forEach(function (k) { missionsCardHtml[k.key] = k.html; }); });
+    return;
+  }
+  var held = {};
+  parts.columns.forEach(function (c) {
+    c.cards.forEach(function (k) {
+      var node = missionsFind(k.key);
+      if (node && missionsCardHeld(node, k.key)) held[k.key] = node;
+    });
+  });
+  var counts = mount.querySelector('div.mission-counts');
+  if (counts) counts.innerHTML = parts.countsHtml;
+  var seen = {};
+  parts.columns.forEach(function (c) {
+    var section = null;
+    var sections = mount.querySelectorAll('section.mission-col');
+    for (var i = 0; i < sections.length; i++) if (sections[i].getAttribute('data-col') === c.col) section = sections[i];
+    if (!section) return;
+    var count = section.querySelector('span.mission-col-count');
+    if (count) count.textContent = String(c.count);
+    var list = section.querySelector('div.mission-col-list');
+    var have = list.querySelectorAll('article.mission-card');
+    var sameKeys = have.length === c.cards.length && c.cards.every(function (k, idx) {
+      return have[idx].getAttribute('data-mission-key') === k.key;
+    });
+    if (sameKeys) {
+      c.cards.forEach(function (k, idx) {
+        seen[k.key] = true;
+        if (held[k.key] || missionsCardHtml[k.key] === k.html) return;
+        have[idx].replaceWith(missionsNode(k.html));
+        missionsCardHtml[k.key] = k.html;
+      });
+      return;
+    }
+    list.innerHTML = c.cards.map(function (k) { return k.html; }).join('');
+    c.cards.forEach(function (k) {
+      seen[k.key] = true;
+      missionsCardHtml[k.key] = k.html;
+      if (!held[k.key]) return;
+      var fresh = null;
+      var cards = list.querySelectorAll('article.mission-card');
+      for (var j = 0; j < cards.length; j++) if (cards[j].getAttribute('data-mission-key') === k.key) fresh = cards[j];
+      if (fresh) fresh.replaceWith(held[k.key]);
+    });
+  });
+  Object.keys(missionsCardHtml).forEach(function (key) { if (!seen[key]) delete missionsCardHtml[key]; });
+}
+
+function patchMissions() {
+  if (!missionsMount()) return;
+  if (missionsInFlight) { missionsPending = true; return; }
+  missionsInFlight = true;
+  return fetch('/api/missions', { credentials: 'same-origin' })
+    .then(function (r) {
+      if (!r.ok) throw new Error('missions fetch failed: ' + r.status);
+      return r.json();
+    })
+    .then(function (data) {
+      if (!data || !Array.isArray(data.missions)) return;
+      missionsData = data;
+      paintMissions();
+    })
+    .catch(function () { /* leave the columns as they are, as patchRows does */ })
+    .then(function () {
+      missionsInFlight = false;
+      if (missionsPending) {
+        missionsPending = false;
+        return patchMissions();
+      }
+    });
+}
+
+function postMissionJson(url, body) {
+  return fetch(url, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+// One request per card at a time; the card's buttons are disabled while it is out, and
+// the card is re-read once it lands, whatever the answer.
+function missionsSend(key, request, failure) {
+  if (missionsUi.sending[key]) return;
+  missionsUi.sending[key] = true;
+  delete missionsUi.errors[key];
+  paintMissions();
+  return request()
+    .then(function (r) {
+      // 409 on a submit: the round was answered already, here or elsewhere. The re-read
+      // below takes the button away, which is the whole of the right response.
+      if (!r.ok && r.status !== 409) throw new Error(failure + ' (' + r.status + ')');
+      return true;
+    })
+    .catch(function (err) {
+      missionsUi.errors[key] = (err && err.message) || failure;
+      return false;
+    })
+    .then(function (ok) {
+      delete missionsUi.sending[key];
+      paintMissions();
+      return Promise.resolve(patchMissions()).then(function () { return ok; });
+    });
+}
+
+// The round's own answer: the question the button stands for, set to option 0.
+function missionsAnswer(key, btn) {
+  var board = btn.getAttribute('data-board');
+  var round = Number(btn.getAttribute('data-round'));
+  var question = btn.getAttribute('data-question');
+  var choice = btn.getAttribute('data-choice');
+  return missionsSend(key, function () {
+    return postMissionJson('/api/board/' + encodeURIComponent(board) + '/submit', {
+      action: 'send',
+      round: round,
+      answers: [{ id: question, status: 'answered', choice: choice, note: '' }],
+      comments: [],
+    });
+  }, 'Could not send the answer');
+}
+
+function missionsOrder(key, body, failure) {
+  return missionsSend(key, function () {
+    return postMissionJson('/api/mission/' + encodeURIComponent(key) + '/order', body);
+  }, failure);
+}
+
+function focusIn(key, selector) {
+  var node = missionsFind(key);
+  var el = node && node.querySelector(selector);
+  if (el && el.focus) el.focus();
+}
+
+function onMissionsClick(ev) {
+  var t = ev.target;
+  if (!t || !t.closest) return;
+  var cardEl = t.closest('article.mission-card');
+  if (!cardEl) return;
+  var key = cardEl.getAttribute('data-mission-key');
+  var act = t.closest('button.mission-act');
+  if (act) { if (!act.disabled) missionsAnswer(key, act); return; }
+  if (t.closest('button.mission-stop')) {
+    missionsUi.confirming[key] = !missionsUi.confirming[key];
+    paintMissions();
+    if (missionsUi.confirming[key]) focusIn(key, 'button.mission-stop-confirm');
+    return;
+  }
+  if (t.closest('button.mission-stop-cancel')) {
+    delete missionsUi.confirming[key];
+    paintMissions();
+    focusIn(key, 'button.mission-stop');
+    return;
+  }
+  if (t.closest('button.mission-stop-confirm')) {
+    delete missionsUi.confirming[key];
+    missionsOrder(key, { kind: 'stop' }, 'Could not send the stop');
+    return;
+  }
+  if (t.closest('button.mission-comment-cancel')) {
+    delete missionsUi.commenting[key];
+    delete missionsUi.drafts[key];
+    paintMissions();
+    return;
+  }
+  if (t.closest('button.mission-comment-send')) {
+    var box = cardEl.querySelector('textarea.mission-comment-text');
+    var text = box ? String(box.value || '') : '';
+    if (!text.trim()) { if (box && box.focus) box.focus(); return; }
+    missionsUi.drafts[key] = text;
+    missionsOrder(key, { kind: 'comment', text: text }, 'Could not send the comment').then(function (ok) {
+      if (!ok) return;
+      delete missionsUi.commenting[key];
+      delete missionsUi.drafts[key];
+      paintMissions();
+    });
+    return;
+  }
+  if (!missionsCommentModeOn() || missionsUi.commenting[key]) return;
+  if (t.closest('a') || t.closest('button') || t.closest('textarea')) return;
+  missionsUi.commenting[key] = true;
+  paintMissions();
+  focusIn(key, 'textarea.mission-comment-text');
+}
+
+function onMissionsInput(ev) {
+  var t = ev.target;
+  if (!t || !t.closest || !t.classList || !t.classList.contains('mission-comment-text')) return;
+  var cardEl = t.closest('article.mission-card');
+  if (cardEl) missionsUi.drafts[cardEl.getAttribute('data-mission-key')] = t.value;
+}
+
+function onMissionsKeydown(ev) {
+  var t = ev.target;
+  if (!ev || ev.key !== 'Escape' || !t || !t.closest) return;
+  var cardEl = t.closest('article.mission-card');
+  if (!cardEl) return;
+  var key = cardEl.getAttribute('data-mission-key');
+  if (missionsUi.commenting[key] && t.closest('div.mission-comment')) {
+    delete missionsUi.commenting[key];
+    delete missionsUi.drafts[key];
+  } else if (missionsUi.confirming[key]) {
+    delete missionsUi.confirming[key];
+  } else {
+    return;
+  }
+  paintMissions();
+  focusIn(key, 'button.mission-stop');
+}
+
+function initMissions() {
+  var mount = missionsMount();
+  if (!mount) return;
+  mount.addEventListener('click', onMissionsClick);
+  mount.addEventListener('input', onMissionsInput);
+  mount.addEventListener('keydown', onMissionsKeydown);
+  var toggle = document.querySelector('button#comment-mode-toggle');
+  if (toggle) {
+    toggle.addEventListener('click', function () {
+      if (toggle.disabled) return;
+      setMissionsCommentMode(!missionsCommentModeOn());
+    });
+  }
+  patchMissions();
+}
+initMissions();
+`;
+
 /** The index page's only client script. Two jobs on one fifteen-second tick: it
  * keeps each row's `updated` timestamp reading as relative time ("an hour ago")
  * instead of a one-shot server-rendered string that goes stale in a tab left open
@@ -501,6 +815,7 @@ if (typeof window !== 'undefined' && window && typeof window.addEventListener ==
 function tick() {
   refresh();
   patchRows();
+  patchMissions();
 }
 
 refresh();
@@ -1302,8 +1617,10 @@ function wakePomodoro() {
 // EventSource sends it same-origin, like the board page's per-board one, so nothing
 // here needs a secret of its own.
 //
-// Only the two events the daemon already broadcasts (broadcastWaiting and
-// broadcastPomodoro, src/server.mjs) are listened for. A row change with no
+// Only the events the daemon already broadcasts (broadcastWaiting, broadcastPomodoro
+// and broadcastMissions, src/server.mjs) are listened for. 'waiting' wakes the
+// missions columns too: a round opening or being answered moves a mission in or out of
+// needs-you, and a submit broadcasts no 'missions' of its own. A row change with no
 // broadcast behind it -- a prune, a last-activity stamp drifting -- keeps arriving on
 // the tick; teaching the daemon a new event is a decision of its own, not a line
 // added here.
@@ -1316,19 +1633,22 @@ function wakePomodoro() {
 function initIndexStream() {
   if (typeof EventSource === 'undefined') return;
   var es = new EventSource('/api/events');
-  es.addEventListener('open', function () { patchRows(); wakePomodoro(); fetchWaitingCount(); });
+  es.addEventListener('open', function () { patchRows(); patchMissions(); wakePomodoro(); fetchWaitingCount(); });
   // The one listener that reads what a push carried: the event's total IS the
   // count the Boards tab shows, so asking again would only fetch the same number.
   es.addEventListener('waiting', function (ev) {
     patchRows();
+    patchMissions();
     var data = null;
     try { data = JSON.parse(ev && ev.data); } catch (e) { data = null; }
     if (data) setWaitingCount(data.total);
   });
   es.addEventListener('pomodoro', function () { wakePomodoro(); });
+  // A mission changed (src/server.mjs's broadcastMissions): re-read the columns.
+  es.addEventListener('missions', function () { patchMissions(); });
 }
 initIndexStream();
-`;
+` + '\n' + missionsParts.toString() + '\n' + missionsScript;
 
 /** Filter the thread index down to the sessions a query names. Matches on what
  * IDENTIFIES a session and nothing else — its title, its project folder, the
@@ -1349,6 +1669,161 @@ export function filterThreads(threads, query) {
   if (!q) return threads;
   return threads.filter(t => [t.title, folderName(t.cwd), t.cwd, t.thread]
     .some(v => typeof v === 'string' && v.toLowerCase().includes(q)));
+}
+
+/** The Missions view's markup, from `GET /api/missions`'s answer (src/missions.mjs's
+ * `missionsOverview`) and the tab's own per-card state `ui` (a Stop being confirmed, a
+ * click in flight, an error, a comment being written). Pure and self-contained: the
+ * server renders the first paint with it and indexScript carries its source to repaint
+ * from every later fetch, so the two can never draw a card differently.
+ *
+ * Five columns by derived state (`view`), queued shown under waiting. A card's Fire or
+ * Merge button exists only while `actions` holds that kind, which the daemon fills only
+ * from a round still waiting on the PM; the button carries what a click submits. Stop
+ * shows while a session is live and no stop is already on its way.
+ *
+ * Answers `{ html, countsHtml, columns: [{ col, label, count, cards: [{ key, html }] }] }`,
+ * `html` being the mount's whole contents: the empty state when there is no mission. */
+function missionsParts(overview, ui) {
+  var state = ui || {};
+  var pick = function (name, key) { return !!(state[name] && state[name][key]); };
+  var esc = function (s) {
+    return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  };
+  var COLUMNS = [['needs-you', 'Needs you'], ['working', 'Working'], ['waiting', 'Waiting'], ['stalled', 'Stalled'], ['landed', 'Landed']];
+  var ACTION_LABELS = { fire: 'Fire', merge: 'Merge' };
+  var PR_MARKS = { green: '✓', merged: '✓', open: '○', draft: '○' };
+  var STOP_ICON = '<svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="1.8"/><line x1="4.7" y1="4.7" x2="15.3" y2="15.3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
+  var data = overview || {};
+  var missions = Array.isArray(data.missions) ? data.missions : [];
+  var nowMs = Date.parse(data.now);
+  if (!isFinite(nowMs)) nowMs = Date.now();
+
+  function age(iso) {
+    var then = Date.parse(iso);
+    if (!isFinite(then)) return '';
+    var minutes = Math.floor(Math.max(0, nowMs - then) / 60000);
+    if (minutes < 1) return 'now';
+    if (minutes < 60) return minutes + ' min';
+    var hours = Math.floor(minutes / 60);
+    if (hours < 24) return hours + ' h';
+    return Math.floor(hours / 24) + ' d';
+  }
+
+  function columnOf(m) {
+    return m.view === 'queued' ? 'waiting' : m.view;
+  }
+
+  function orderLines(m) {
+    var orders = Array.isArray(m.orders) ? m.orders : [];
+    var lines = [];
+    var stop = null;
+    var comments = 0;
+    for (var i = 0; i < orders.length; i++) {
+      if (orders[i].kind === 'stop') stop = orders[i];
+      else if (orders[i].kind === 'comment' && !orders[i].relayedAt) comments += 1;
+    }
+    if (stop && m.live) {
+      lines.push(stop.relayedAt
+        ? 'Stop relayed: the session finishes its step, writes its Handoff and ends'
+        : 'Stop asked: waiting for the Master Chief to relay it');
+    }
+    if (comments) lines.push(comments === 1 ? 'Comment waiting for the Master Chief' : comments + ' comments waiting for the Master Chief');
+    return { lines: lines, stopPending: !!(stop && m.live) };
+  }
+
+  function card(m) {
+    var key = m.key;
+    var actions = Array.isArray(m.actions) ? m.actions : [];
+    var boards = Array.isArray(m.boards) ? m.boards : [];
+    var latest = boards.length ? boards[boards.length - 1] : null;
+    var orders = orderLines(m);
+    var busy = pick('sending', key);
+    var out = '<article class="mission-card" data-mission-key="' + esc(key) + '" data-view="' + esc(m.view) + '">';
+    out += '<div class="mission-card-head"><b class="mission-title">' + esc(m.title || key) + '</b>'
+      + '<span class="mission-age" title="' + esc(m.updatedAt) + '">' + esc(age(m.updatedAt)) + '</span></div>';
+    out += '<div class="mission-ident"><span class="mission-key">' + esc(key) + ' / ' + esc(m.phase) + '</span>'
+      + (m.view === 'queued' ? '<span class="mission-tag">Queued</span>' : '') + '</div>';
+    if (m.summary) out += '<p class="mission-summary">' + esc(m.summary) + '</p>';
+    if (m.waitingOn || m.next) {
+      out += '<dl class="mission-facts">'
+        + (m.waitingOn ? '<dt>Waiting on</dt><dd>' + esc(m.waitingOn) + '</dd>' : '')
+        + (m.next ? '<dt>Next</dt><dd>' + esc(m.next) + '</dd>' : '')
+        + '</dl>';
+    }
+    var prs = Array.isArray(m.prs) ? m.prs : [];
+    if (prs.length) {
+      out += '<div class="mission-prs">';
+      for (var p = 0; p < prs.length; p++) {
+        var pr = prs[p];
+        var name = pr.repo + ' #' + pr.number;
+        out += '<a class="mission-pr" data-state="' + esc(pr.state) + '" href="' + esc(pr.url) + '" title="' + esc(name + ': ' + pr.state) + '">'
+          + '<i aria-hidden="true">' + (PR_MARKS[pr.state] || '○') + '</i>' + esc(name) + '</a>';
+      }
+      out += '</div>';
+    }
+    for (var l = 0; l < orders.lines.length; l++) out += '<p class="mission-order" role="status">' + esc(orders.lines[l]) + '</p>';
+    if (state.errors && state.errors[key]) out += '<p class="mission-error" role="alert">' + esc(state.errors[key]) + '</p>';
+
+    var btns = '';
+    if (actions.length) {
+      btns += '<a class="mission-btn primary" href="/b/' + esc(actions[0].board) + '">Open round ' + esc(actions[0].round) + '</a>';
+    } else if (latest) {
+      btns += '<a class="mission-btn' + (m.view === 'needs-you' ? ' primary' : '') + '" href="/b/' + esc(latest.id) + '">Open board</a>';
+    }
+    var shown = {};
+    for (var a = 0; a < actions.length; a++) {
+      var act = actions[a];
+      if (!ACTION_LABELS[act.kind] || shown[act.kind]) continue;
+      shown[act.kind] = true;
+      btns += '<button type="button" class="mission-btn mission-act" data-action="' + esc(act.kind) + '" data-board="' + esc(act.board)
+        + '" data-round="' + esc(act.round) + '" data-question="' + esc(act.question) + '" data-choice="' + esc(act.choice) + '"'
+        + (busy ? ' disabled' : '') + '>' + ACTION_LABELS[act.kind] + '</button>';
+    }
+    if (m.live && !orders.stopPending) {
+      var confirming = pick('confirming', key);
+      btns += '<button type="button" class="mission-stop" aria-label="Stop session" title="Stop: finish the step, hand off, end" aria-expanded="'
+        + (confirming ? 'true' : 'false') + '"' + (busy ? ' disabled' : '') + '>' + STOP_ICON + '</button>';
+    }
+    if (btns) out += '<div class="mission-btns">' + btns + '</div>';
+    if (m.live && !orders.stopPending && pick('confirming', key)) {
+      out += '<div class="mission-confirm" role="group" aria-label="Stop this session">'
+        + '<p class="mission-confirm-text">Stop this session? It finishes its step, writes its Handoff and ends.</p>'
+        + '<div class="mission-btns"><button type="button" class="mission-btn danger mission-stop-confirm"' + (busy ? ' disabled' : '') + '>Stop session</button>'
+        + '<button type="button" class="mission-btn mission-stop-cancel">Keep working</button></div></div>';
+    }
+    if (pick('commenting', key)) {
+      var draft = state.drafts && state.drafts[key] ? state.drafts[key] : '';
+      out += '<div class="mission-comment">'
+        + '<textarea class="mission-comment-text" rows="3" aria-label="' + esc('Comment for ' + (m.title || key)) + '" placeholder="A note for this mission’s session">' + esc(draft) + '</textarea>'
+        + '<div class="mission-btns"><button type="button" class="mission-btn primary mission-comment-send"' + (busy ? ' disabled' : '') + '>Send to session</button>'
+        + '<button type="button" class="mission-btn mission-comment-cancel">Cancel</button></div></div>';
+    }
+    return out + '</article>';
+  }
+
+  if (!missions.length) {
+    return { html: '<p class="empty-state">No missions yet. Work a session records as a mission shows up here.</p>', countsHtml: '', columns: [] };
+  }
+  var columns = COLUMNS.map(function (c) { return { col: c[0], label: c[1], count: 0, cards: [] }; });
+  var byCol = {};
+  columns.forEach(function (c) { byCol[c.col] = c; });
+  missions.forEach(function (m) {
+    var c = byCol[columnOf(m)];
+    if (!c) return;
+    c.count += 1;
+    c.cards.push({ key: m.key, html: card(m) });
+  });
+  var countsHtml = columns.map(function (c) {
+    return '<span class="mission-count"><b>' + c.count + '</b> ' + esc(c.label.toLowerCase()) + '</span>';
+  }).join('');
+  var html = '<div class="mission-counts">' + countsHtml + '</div><div class="mission-cols">' + columns.map(function (c) {
+    return '<section class="mission-col" data-col="' + c.col + '" aria-label="' + esc(c.label) + '">'
+      + '<h2 class="mission-col-head"><span class="mission-badge" data-col="' + c.col + '">' + esc(c.label) + '</span>'
+      + '<span class="mission-col-count">' + c.count + '</span></h2>'
+      + '<div class="mission-col-list">' + c.cards.map(function (k) { return k.html; }).join('') + '</div></section>';
+  }).join('') + '</div>';
+  return { html: html, countsHtml: countsHtml, columns: columns };
 }
 
 /** The one top bar the two home views share: the board page's own header
@@ -1388,7 +1863,7 @@ export function renderTopBar({ active, waitingCount = 0, pomodoroEnabled = true,
 /** A home view's page: the top bar over `body`, in the board page's own shell
  * (`.board-shell`, the window's width up to 2560px), so the bar sits on the same
  * edges a board page's header does. */
-function renderHomePage({ active, title, body, waitingCount, pomodoroEnabled }) {
+function renderHomePage({ active, title, body, waitingCount, pomodoroEnabled, commentable = false }) {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -1401,7 +1876,7 @@ ${faviconLink}
 </head>
 <body class="home-page">
 <div class="board-shell">
-  ${renderTopBar({ active, waitingCount, pomodoroEnabled })}
+  ${renderTopBar({ active, waitingCount, pomodoroEnabled, commentable })}
   <main class="home-view" id="${active}-view">
 ${body}
   </main>
@@ -1412,14 +1887,18 @@ ${body}
 `;
 }
 
-/** The Missions view, the board's home page (`GET /`). Its body is the mount point
- * `section#missions` and nothing else yet: an empty state until the missions columns
- * render into it. */
-export function renderMissionsPage({ waitingCount = 0, pomodoroEnabled = true } = {}) {
-  const body = `    <section class="missions" id="missions" aria-label="Missions">
-      <p class="empty-state">No missions yet. Work a session records as a mission shows up here.</p>
-    </section>`;
-  return renderHomePage({ active: 'missions', title: 'claude-board', body, waitingCount, pomodoroEnabled });
+/** The Missions view, the board's home page (`GET /`): the mount point
+ * `section#missions` holding the columns drawn from `overview` (`GET /api/missions`'s
+ * answer, `missionsOverview` in src/missions.mjs), or the empty state when it holds no
+ * mission. indexScript keeps it live from there. Comment is on offer in the bar while a
+ * card is shown, since a note on a card reaches its session (ADR 46, 98). */
+export function renderMissionsPage({ waitingCount = 0, pomodoroEnabled = true, overview = null } = {}) {
+  const parts = missionsParts(overview, null);
+  const body = `    <section class="missions" id="missions" aria-label="Missions">${parts.html}</section>`;
+  return renderHomePage({
+    active: 'missions', title: 'claude-board', body, waitingCount, pomodoroEnabled,
+    commentable: parts.columns.length > 0,
+  });
 }
 
 /** Render the Boards view (`GET /boards`): the thread list (with rounds-left counts,

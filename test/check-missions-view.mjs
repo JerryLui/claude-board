@@ -1,0 +1,385 @@
+// The Missions view, the board's home page (`GET /`): a column per derived state with the
+// queued shown under waiting, a card's Fire and Merge buttons only while a round on the
+// mission's own board still asks for that answer, a click on one answering that round
+// with option 0, Stop asked once and then posted as an order, a note on a card posted as
+// a comment order, and the columns re-read when the daemon-wide stream says a mission
+// changed. Plus the question `action` field those buttons read, accepted and refused at
+// post time.
+//
+// One layer: a real daemon on a temporary store and ephemeral port, the page it serves
+// parsed by test/dom-stand-in.mjs, and the REAL indexScript run against it with its fetches
+// sent to that daemon under the browser's session cookie (test/support.mjs's
+// `loadIndexAgainstDaemon`, as test/check-index-live.mjs drives the boards list). What is
+// asserted after a click is what the daemon stored, read back with the secret. Layout is
+// test/browser-check-missions.mjs's, in a real Chrome.
+//
+// Rounds posted here wait on an answer and no board is ever opened, the stranded rule's
+// shape: the PATH stub and the day-long grace keep any banner off the screen.
+
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import http from 'node:http';
+import { mkdirSync, rmSync } from 'node:fs';
+import path from 'node:path';
+import { SECRET_HEADER } from '../src/secret.mjs';
+import { startServer } from '../src/server.mjs';
+import { readBoard } from '../src/store.mjs';
+import { StandInEvent, fetchSettler, parseHTML } from './dom-stand-in.mjs';
+import { check, runMain, secretHome, writeStub, rawRequest, writeHeaders, pageHarness, postBoard, sleep } from './support.mjs';
+
+const { loadIndexAgainstDaemon } = await pageHarness();
+
+const { home: workDir, secret: SECRET } = secretHome('claude-board-missions-view-', { secret: 'f'.repeat(64), setHome: false });
+const home = path.join(workDir, 'store');
+mkdirSync(home, { recursive: true });
+process.env.CLAUDE_BOARD_HOME = home;
+process.env.CLAUDE_BOARD_STRANDED_GRACE_MS = String(24 * 60 * 60 * 1000);
+const stubDir = path.join(workDir, 'bin');
+writeStub(stubDir, 'osascript', '#!/bin/sh\nexit 0\n');
+process.env.PATH = `${stubDir}:${process.env.PATH}`;
+
+let port;
+const settler = fetchSettler();
+
+async function post(route, body) {
+  const r = await rawRequest(port, 'POST', route, { headers: writeHeaders(SECRET), body: JSON.stringify(body) });
+  return { status: r.status, body: r.body ? JSON.parse(r.body) : null };
+}
+
+async function mission(key) {
+  const r = await rawRequest(port, 'GET', `/api/mission/${key}`, { headers: { [SECRET_HEADER]: SECRET } });
+  assert.equal(r.status, 200, `setup: reading mission ${key}: ${r.body}`);
+  return JSON.parse(r.body);
+}
+
+/** A mission with a session bound to `pid` (this process is alive for the whole file). */
+async function liveMission(key, fields = {}) {
+  assert.equal((await post(`/api/mission/${key}`, { title: key, phase: 'direct', state: 'working', ...fields })).status, 200);
+  assert.equal((await post(`/api/mission/${key}/session`, { pid: process.pid, id: `sess-${key}` })).status, 200);
+}
+
+/** A pid that belonged to a process that has already exited. */
+function deadPid() {
+  return new Promise(resolve => {
+    const child = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    child.once('exit', () => resolve(child.pid));
+  });
+}
+
+/** A round on `key`'s own board holding one question with `action`, beside an ordinary one. */
+async function actionRound(key, action, labels) {
+  const posted = await postBoard(port, SECRET, {
+    title: `${key} board`,
+    mission: key,
+    blocks: [
+      { kind: 'question', prompt: 'Go?', widget: 'single', action, options: labels.map(label => ({ label })) },
+      { kind: 'question', prompt: 'Anything else?', widget: 'text' },
+    ],
+  });
+  const board = readBoard(posted.boardId, home);
+  const question = board.blocks.find(b => b.action === action);
+  return { boardId: posted.boardId, round: question.round, questionId: question.id };
+}
+
+/** The served Missions page with the real indexScript running in it, its stream a stand-in
+ * the check pushes real daemon events into. */
+async function openMissionsTab() {
+  const page = await rawRequest(port, 'GET', '/', { headers: { [SECRET_HEADER]: SECRET } });
+  assert.equal(page.status, 200);
+  const tab = loadIndexAgainstDaemon(port, { secret: SECRET, html: page.body, stream: true, settler });
+  await settler.settle();
+  return {
+    document: tab.document,
+    async push(name, data) {
+      const listeners = tab.stream && tab.stream.listeners.get(name);
+      assert.ok(listeners && listeners.length, `the Missions page must listen for '${name}' on the daemon-wide stream`);
+      tab.stream.dispatch(name, JSON.stringify(data));
+      await settler.settle();
+    },
+    async click(el) {
+      assert.ok(el, 'setup: the element to click is on the page');
+      el.dispatchEvent(new StandInEvent('click'));
+      await settler.settle();
+    },
+    restoreFetch: tab.restoreFetch,
+  };
+}
+
+const cardFor = (doc, key) => doc.querySelectorAll('article.mission-card').find(c => c.getAttribute('data-mission-key') === key) || null;
+const actionButtons = card => card.querySelectorAll('button.mission-act').map(b => ({ kind: b.getAttribute('data-action'), label: b.textContent }));
+
+/** Column name to the keys its cards carry, in order, for every column on the page. */
+function columns(doc) {
+  const out = {};
+  for (const col of doc.querySelectorAll('section.mission-col')) {
+    out[col.getAttribute('data-col')] = col.querySelectorAll('article.mission-card').map(c => c.getAttribute('data-mission-key')).sort();
+  }
+  return out;
+}
+
+/** A second subscriber on `GET /api/events`, so a push fed to the page is one the daemon
+ * really sent (the shape test/check-index-live.mjs's own wire stream has). */
+function openWireStream() {
+  const events = [];
+  let raw = '';
+  let pending = '';
+  const req = http.request({
+    host: '127.0.0.1', port, method: 'GET', path: '/api/events',
+    headers: { host: `127.0.0.1:${port}`, [SECRET_HEADER]: SECRET },
+  }, res => {
+    res.setEncoding('utf8');
+    res.on('data', chunk => {
+      raw += chunk;
+      pending += chunk;
+      const frames = pending.split('\n\n');
+      pending = frames.pop();
+      for (const frame of frames) {
+        const name = /^event: (.+)$/m.exec(frame);
+        const data = /^data: (.*)$/m.exec(frame);
+        if (name && data) events.push({ name: name[1], data: JSON.parse(data[1]) });
+      }
+    });
+  });
+  req.on('error', () => {});
+  req.end();
+  const until = async (what, ready) => {
+    const deadline = Date.now() + 3000;
+    for (;;) {
+      const hit = ready();
+      if (hit) return hit;
+      if (Date.now() >= deadline) throw new Error(`${what} never arrived: ${JSON.stringify(raw)}`);
+      await sleep(20);
+    }
+  };
+  return {
+    connected: () => until('the stream connecting', () => raw.includes(': connected') || null),
+    next: name => until(`a '${name}' event`, () => {
+      const i = events.findIndex(e => e.name === name);
+      return i === -1 ? null : events.splice(i, 1)[0];
+    }),
+    close() { req.destroy(); },
+  };
+}
+
+async function main() {
+  const started = await startServer({ home, port: 0 });
+  const { server } = started;
+  port = started.port;
+  try {
+    await check('a question carries action fire or merge on a single widget; any other value, or another widget, is refused', async () => {
+      const ok = await postBoard(port, SECRET, { title: 'Action accepted', blocks: [
+        { kind: 'question', prompt: 'Fire?', widget: 'single', action: 'fire', options: [{ label: 'Fire' }, { label: 'Not yet' }] },
+        { kind: 'question', prompt: 'Merge?', action: 'merge', options: [{ label: 'Merge' }] },
+        { kind: 'question', prompt: 'Plain?', widget: 'single', options: [{ label: 'Yes' }] },
+      ] });
+      const stored = readBoard(ok.boardId, home).blocks.map(b => b.action);
+      assert.deepEqual(stored, ['fire', 'merge', undefined]);
+
+      for (const [block, message] of [
+        [{ kind: 'question', prompt: 'Deploy?', widget: 'single', action: 'deploy', options: [{ label: 'Yes' }] },
+          'unknown question action: "deploy" (expected one of fire, merge)'],
+        [{ kind: 'question', prompt: 'Fire?', widget: 'multi', action: 'fire', options: [{ label: 'Yes' }] },
+          "question action 'fire' needs widget 'single', not 'multi'"],
+      ]) {
+        const r = await post('/api/board', { title: 'Action refused', blocks: [block] });
+        assert.equal(r.status, 400);
+        assert.equal(r.body.error, message);
+      }
+    });
+
+    // The fixtures the rest of the file shares: one mission per column, and queued.
+    await liveMission('WORKING_ONE');
+    await liveMission('WORKING_TWO', { summary: 'Wave 2 of 3', waitingOn: 'checks on #12', next: 'merge',
+      prs: [{ repo: 'service', number: 12, url: 'https://github.com/o/service/pull/12', state: 'green' }] });
+    assert.equal((await post('/api/mission/WAITING_ONE', { title: 'Waiting one', state: 'waiting', phase: 'landing' })).status, 200);
+    assert.equal((await post('/api/mission/QUEUED_ONE', { title: 'Queued one', state: 'queued', phase: 'direct' })).status, 200);
+    assert.equal((await post('/api/mission/LANDED_ONE', { title: 'Landed one', state: 'landed', phase: 'landing' })).status, 200);
+    assert.equal((await post('/api/mission/STALLED_ONE', { title: 'Stalled one', state: 'working', phase: 'direct' })).status, 200);
+    assert.equal((await post('/api/mission/STALLED_ONE/session', { pid: await deadPid() })).status, 200);
+    const needsBoard = await postBoard(port, SECRET, { title: 'Needs board', mission: 'NEEDS_ONE',
+      blocks: [{ kind: 'question', prompt: 'Which?', widget: 'single', options: [{ label: 'A' }, { label: 'B' }] }] });
+
+    const expected = {
+      'needs-you': ['NEEDS_ONE'],
+      working: ['WORKING_ONE', 'WORKING_TWO'],
+      waiting: ['QUEUED_ONE', 'WAITING_ONE'],
+      stalled: ['STALLED_ONE'],
+      landed: ['LANDED_ONE'],
+    };
+
+    await check('each mission shows in its derived state\'s column, queued under waiting, on first paint and once live', async () => {
+      const page = await rawRequest(port, 'GET', '/', { headers: { [SECRET_HEADER]: SECRET } });
+      const served = parseHTML(page.body);
+      assert.deepEqual(columns(served), expected);
+      assert.equal(cardFor(served, 'QUEUED_ONE').querySelector('span.mission-tag').textContent, 'Queued');
+      assert.equal(served.querySelector('p.empty-state'), null, 'no empty state once a mission exists');
+
+      const tab = await openMissionsTab();
+      try {
+        assert.deepEqual(columns(tab.document), expected);
+        const card = cardFor(tab.document, 'WORKING_TWO');
+        assert.equal(card.querySelector('b.mission-title').textContent, 'WORKING_TWO');
+        assert.equal(card.querySelector('span.mission-key').textContent, 'WORKING_TWO / direct');
+        assert.equal(card.querySelector('p.mission-summary').textContent, 'Wave 2 of 3');
+        assert.deepEqual(card.querySelectorAll('.mission-facts dt, .mission-facts dd').map(n => n.textContent),
+          ['Waiting on', 'checks on #12', 'Next', 'merge']);
+        const pr = card.querySelector('a.mission-pr');
+        assert.equal(pr.getAttribute('href'), 'https://github.com/o/service/pull/12');
+        assert.equal(pr.textContent, '✓service #12');
+        const needs = cardFor(tab.document, 'NEEDS_ONE').querySelector('a.mission-btn');
+        assert.equal(needs.textContent, 'Open board');
+        assert.equal(needs.getAttribute('href'), `/b/${needsBoard.boardId}`, 'the latest board the mission posted');
+        assert.ok(cardFor(tab.document, 'WORKING_ONE').querySelector('button.mission-stop'), 'a live session offers Stop');
+        assert.equal(cardFor(tab.document, 'STALLED_ONE').querySelector('button.mission-stop'), null, 'a stalled one does not');
+        assert.equal(cardFor(tab.document, 'LANDED_ONE').querySelector('button.mission-stop'), null);
+      } finally {
+        tab.restoreFetch();
+      }
+    });
+
+    for (const [kind, label, labels] of [['fire', 'Fire', ['Fire /direct', 'Not yet']], ['merge', 'Merge', ['Merge both', 'Hold']]]) {
+      await check(`${label} shows while the round asks for it, and a click answers that round with option 0`, async () => {
+        const key = `${kind.toUpperCase()}_CLICK`;
+        await liveMission(key);
+        const { boardId, round, questionId } = await actionRound(key, kind, labels);
+        const tab = await openMissionsTab();
+        try {
+          const card = cardFor(tab.document, key);
+          assert.deepEqual(actionButtons(card), [{ kind, label }]);
+          assert.equal(card.querySelector('a.mission-btn').textContent, `Open round ${round}`);
+          await tab.click(card.querySelector('button.mission-act'));
+
+          const board = readBoard(boardId, home);
+          assert.equal(board.rounds.find(r => r.n === round).status, 'sent');
+          assert.deepEqual(board.answers[questionId], { id: questionId, status: 'answered', choice: labels[0], note: '' });
+          assert.deepEqual(actionButtons(cardFor(tab.document, key)), [], 'the answered round offers the button no more');
+          assert.equal(cardFor(tab.document, key).querySelector('p.mission-error'), null);
+        } finally {
+          tab.restoreFetch();
+        }
+      });
+    }
+
+    await check('a round sent from its board, or abandoned, takes the button off the card', async () => {
+      await liveMission('SENT_ELSEWHERE');
+      const sent = await actionRound('SENT_ELSEWHERE', 'merge', ['Merge', 'Hold']);
+      await liveMission('ABANDONED');
+      const abandoned = await actionRound('ABANDONED', 'fire', ['Fire', 'Not yet']);
+      const tab = await openMissionsTab();
+      const wire = openWireStream();
+      try {
+        await wire.connected();
+        assert.deepEqual(actionButtons(cardFor(tab.document, 'SENT_ELSEWHERE')), [{ kind: 'merge', label: 'Merge' }]);
+        assert.deepEqual(actionButtons(cardFor(tab.document, 'ABANDONED')), [{ kind: 'fire', label: 'Fire' }]);
+
+        const r = await post(`/api/board/${sent.boardId}/submit`, { round: sent.round,
+          answers: [{ id: sent.questionId, status: 'answered', choice: 'Hold', note: '' }] });
+        assert.equal(r.status, 200);
+        assert.equal((await post(`/api/board/${abandoned.boardId}/abandon`, {})).status, 200);
+        await tab.push('waiting', (await wire.next('waiting')).data);
+        assert.deepEqual(actionButtons(cardFor(tab.document, 'SENT_ELSEWHERE')), []);
+        assert.deepEqual(actionButtons(cardFor(tab.document, 'ABANDONED')), []);
+      } finally {
+        wire.close();
+        tab.restoreFetch();
+      }
+    });
+
+    await check('Stop asks once, then posts a stop order, and the card says so until the order is acked', async () => {
+      await liveMission('STOP_ME');
+      const tab = await openMissionsTab();
+      const wire = openWireStream();
+      try {
+        await wire.connected();
+        await tab.click(cardFor(tab.document, 'STOP_ME').querySelector('button.mission-stop'));
+        const asking = cardFor(tab.document, 'STOP_ME');
+        assert.equal(asking.querySelector('p.mission-confirm-text').textContent,
+          'Stop this session? It finishes its step, writes its Handoff and ends.');
+        assert.deepEqual((await mission('STOP_ME')).orders, [], 'the first click only asks');
+
+        await tab.click(asking.querySelector('button.mission-stop-confirm'));
+        const orders = (await mission('STOP_ME')).orders;
+        assert.deepEqual(orders.map(o => [o.kind, o.by, o.relayedAt]), [['stop', 'card', undefined]]);
+        let card = cardFor(tab.document, 'STOP_ME');
+        assert.equal(card.querySelector('p.mission-order').textContent, 'Stop asked: waiting for the Master Chief to relay it');
+        assert.equal(card.querySelector('button.mission-stop'), null, 'no second Stop while one is on its way');
+        assert.equal(card.querySelector('div.mission-confirm'), null);
+
+        assert.equal((await post(`/api/mission/STOP_ME/order/${orders[0].id}/ack`, {})).status, 200);
+        await wire.next('missions'); // the order's own broadcast, from the click
+        await tab.push('missions', (await wire.next('missions')).data);
+        card = cardFor(tab.document, 'STOP_ME');
+        assert.equal(card.querySelector('p.mission-order').textContent, 'Stop relayed: the session finishes its step, writes its Handoff and ends');
+      } finally {
+        wire.close();
+        tab.restoreFetch();
+      }
+    });
+
+    await check('Keep working closes the Stop question and posts nothing', async () => {
+      await liveMission('STOP_KEPT');
+      const tab = await openMissionsTab();
+      try {
+        await tab.click(cardFor(tab.document, 'STOP_KEPT').querySelector('button.mission-stop'));
+        await tab.click(cardFor(tab.document, 'STOP_KEPT').querySelector('button.mission-stop-cancel'));
+        assert.equal(cardFor(tab.document, 'STOP_KEPT').querySelector('div.mission-confirm'), null);
+        assert.deepEqual((await mission('STOP_KEPT')).orders, []);
+      } finally {
+        tab.restoreFetch();
+      }
+    });
+
+    await check('with Comment on, a note on a card posts a comment order for that mission', async () => {
+      await liveMission('COMMENT_ME');
+      const tab = await openMissionsTab();
+      try {
+        const toggle = tab.document.querySelector('button#comment-mode-toggle');
+        assert.equal(toggle.getAttribute('disabled'), null, 'Comment is on offer while a card is shown');
+        await tab.click(cardFor(tab.document, 'COMMENT_ME').querySelector('b.mission-title'));
+        assert.equal(cardFor(tab.document, 'COMMENT_ME').querySelector('textarea'), null, 'with Comment off a click opens nothing');
+
+        await tab.click(toggle);
+        assert.equal(toggle.getAttribute('aria-pressed'), 'true');
+        assert.ok(tab.document.body.classList.contains('comment-mode'));
+        await tab.click(cardFor(tab.document, 'COMMENT_ME').querySelector('b.mission-title'));
+        const box = cardFor(tab.document, 'COMMENT_ME').querySelector('textarea.mission-comment-text');
+        assert.equal(box.getAttribute('aria-label'), 'Comment for COMMENT_ME');
+        box.value = 'Split the second PR before merging';
+        box.dispatchEvent(new StandInEvent('input'));
+        await tab.click(cardFor(tab.document, 'COMMENT_ME').querySelector('button.mission-comment-send'));
+
+        assert.deepEqual((await mission('COMMENT_ME')).orders.map(o => [o.kind, o.text, o.by]),
+          [['comment', 'Split the second PR before merging', 'card']]);
+        const card = cardFor(tab.document, 'COMMENT_ME');
+        assert.equal(card.querySelector('textarea'), null, 'the note closes once sent');
+        assert.equal(card.querySelector('p.mission-order').textContent, 'Comment waiting for the Master Chief');
+        assert.deepEqual((await mission('WORKING_ONE')).orders, [], 'no other mission got it');
+      } finally {
+        tab.restoreFetch();
+      }
+    });
+
+    await check('a missions event on the daemon-wide stream re-reads the columns', async () => {
+      const tab = await openMissionsTab();
+      const wire = openWireStream();
+      try {
+        await wire.connected();
+        assert.equal(cardFor(tab.document, 'ARRIVES_LATE'), null);
+        assert.equal((await post('/api/mission/ARRIVES_LATE', { title: 'Arrives late', state: 'waiting', phase: 'grill' })).status, 200);
+        await tab.push('missions', (await wire.next('missions')).data);
+        assert.ok(columns(tab.document).waiting.includes('ARRIVES_LATE'));
+        assert.equal(tab.document.querySelector('section.mission-col[data-col="waiting"] span.mission-col-count').textContent,
+          String(columns(tab.document).waiting.length));
+      } finally {
+        wire.close();
+        tab.restoreFetch();
+      }
+    });
+  } finally {
+    server.close();
+    server.closeIdleConnections?.();
+    server.closeAllConnections?.();
+  }
+}
+
+runMain('missions-view', main, { cleanup: () => rmSync(workDir, { recursive: true, force: true }) });

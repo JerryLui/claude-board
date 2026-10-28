@@ -3494,7 +3494,7 @@ ${faviconLink}
   <div class="readonly-banner">Read-only: opened from disk, without the daemon running.</div>
   <header class="board-head">
     <div class="board-head-title">
-      <a class="back-to-index" href="/" aria-label="All threads" title="All threads">${markSvg(30)}</a>
+      <a class="back-to-index" href="/" aria-label="Home" title="Home">${markSvg(30)}</a>
       <div class="board-head-ident">
         <h1>${escHtml(board.title || 'Untitled board')}</h1>
         <div class="meta">${escHtml(board.thread)} · ${escHtml(board.id)}</div>

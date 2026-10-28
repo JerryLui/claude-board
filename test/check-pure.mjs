@@ -7304,7 +7304,7 @@ check('the tab mark and the in-page mark are one drawing', () => {
   assert.ok(home, 'expected the home control in the board head');
   assert.ok(home[1].includes(shapes), 'the home control must hold the mark itself, not its own copy of the geometry');
   assert.match(home[1], /width="30" height="30"/, 'sized to the 30px slot it took over');
-  assert.match(home[0], /aria-label="All threads"/,
+  assert.match(home[0], /aria-label="Home"/,
     'the mark replaced a labelled arrow -- losing the label would leave a screen reader an unnamed link');
 
   // The home views' top bar holds the board head's own home control, at its size.

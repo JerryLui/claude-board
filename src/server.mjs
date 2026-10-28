@@ -2819,7 +2819,8 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
         // The Boards tab's count, the same total `GET /api/waiting` serves.
         const waitingCount = waitingCache.rows().length;
         if (url.pathname === '/') {
-          return sendHtml(res, 200, renderMissionsPage({ waitingCount, pomodoroEnabled }), {
+          const overview = missionsOverview({ home });
+          return sendHtml(res, 200, renderMissionsPage({ waitingCount, pomodoroEnabled, overview }), {
             'content-security-policy': INDEX_CSP,
           });
         }
