@@ -191,7 +191,8 @@ async function main() {
     await liveMission('WORKING_ONE');
     await liveMission('WORKING_TWO', { summary: 'Wave 2 of 3', waitingOn: 'checks on #12', next: 'merge',
       prs: [{ repo: 'service', number: 12, url: 'https://github.com/o/service/pull/12', state: 'green' }] });
-    assert.equal((await post('/api/mission/WAITING_ONE', { title: 'Waiting one', state: 'waiting', phase: 'landing' })).status, 200);
+    assert.equal((await post('/api/mission/WAITING_ONE', { title: 'Waiting one', state: 'waiting', phase: 'landing',
+      prs: [{ repo: 'admin', number: 7, url: 'javascript:alert(1)', state: 'open' }] })).status, 200);
     assert.equal((await post('/api/mission/QUEUED_ONE', { title: 'Queued one', state: 'queued', phase: 'direct' })).status, 200);
     assert.equal((await post('/api/mission/LANDED_ONE', { title: 'Landed one', state: 'landed', phase: 'landing' })).status, 200);
     assert.equal((await post('/api/mission/STALLED_ONE', { title: 'Stalled one', state: 'working', phase: 'direct' })).status, 200);
@@ -226,6 +227,9 @@ async function main() {
         const pr = card.querySelector('a.mission-pr');
         assert.equal(pr.getAttribute('href'), 'https://github.com/o/service/pull/12');
         assert.equal(pr.textContent, '✓service #12');
+        const odd = cardFor(tab.document, 'WAITING_ONE').querySelector('.mission-pr');
+        assert.deepEqual([odd.tagName, odd.getAttribute('href'), odd.textContent], ['SPAN', null, '○admin #7'],
+          'a url that is not a web address is shown, never linked');
         const needs = cardFor(tab.document, 'NEEDS_ONE').querySelector('a.mission-btn');
         assert.equal(needs.textContent, 'Open board');
         assert.equal(needs.getAttribute('href'), `/b/${needsBoard.boardId}`, 'the latest board the mission posted');

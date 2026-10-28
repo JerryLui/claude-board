@@ -1757,8 +1757,11 @@ function missionsParts(overview, ui) {
       for (var p = 0; p < prs.length; p++) {
         var pr = prs[p];
         var name = pr.repo + ' #' + pr.number;
-        out += '<a class="mission-pr" data-state="' + esc(pr.state) + '" href="' + esc(pr.url) + '" title="' + esc(name + ': ' + pr.state) + '">'
-          + '<i aria-hidden="true">' + (PR_MARKS[pr.state] || '○') + '</i>' + esc(name) + '</a>';
+        // Only a web address becomes a link: the url is whatever the writing agent sent.
+        var tag = /^https?:\/\//i.test(String(pr.url)) ? 'a' : 'span';
+        out += '<' + tag + ' class="mission-pr" data-state="' + esc(pr.state) + '"' + (tag === 'a' ? ' href="' + esc(pr.url) + '"' : '')
+          + ' title="' + esc(name + ': ' + pr.state) + '">'
+          + '<i aria-hidden="true">' + (PR_MARKS[pr.state] || '○') + '</i>' + esc(name) + '</' + tag + '>';
       }
       out += '</div>';
     }
