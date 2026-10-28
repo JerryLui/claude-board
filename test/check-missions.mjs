@@ -336,6 +336,51 @@ async function main() {
     assert.equal(readdirSync(path.join(home, 'boards')).length, before);
   });
 
+  // --- the relay --------------------------------------------------------------------
+
+  /** A one-question board, answered by nobody yet: its id and the question's id. */
+  async function openQuestionBoard(title) {
+    const posted = await post('/api/board', {
+      title, blocks: [{ kind: 'question', prompt: 'Merge?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] }],
+    });
+    assert.equal(posted.status, 200, JSON.stringify(posted.body));
+    return { boardId: posted.body.boardId, qid: readBoard(posted.body.boardId, home).blocks[0].id };
+  }
+
+  await check('a relay with the cookie alone, or no credential, is a 401 that leaves the round open', async () => {
+    const { boardId, qid } = await openQuestionBoard('cookie relay');
+    const body = JSON.stringify({ round: 1, answers: [{ id: qid, status: 'answered', choice: 'Yes', note: '' }], words: 'yes, merge it' });
+    const cookie = sessionCookieHeader(SECRET);
+    for (const headers of [{ 'content-type': 'application/json', cookie }, { 'content-type': 'application/json' }]) {
+      const r = await rawRequest(port, 'POST', `/api/board/${boardId}/relay`, { headers, body });
+      assert.equal(r.status, 401);
+    }
+    assert.equal(readBoard(boardId, home).rounds[0].status, 'open');
+  });
+
+  await check('a relay with no words, or words over 1 KB, is a 400 that leaves the round open', async () => {
+    const { boardId, qid } = await openQuestionBoard('wordless relay');
+    const answers = [{ id: qid, status: 'answered', choice: 'Yes', note: '' }];
+    for (const words of [undefined, '   ', 'é'.repeat(513)]) {
+      const r = await post(`/api/board/${boardId}/relay`, { round: 1, answers, words });
+      assert.equal(r.status, 400, `words ${JSON.stringify(words)?.slice(0, 20)}: ${JSON.stringify(r.body)}`);
+    }
+    assert.equal(readBoard(boardId, home).rounds[0].status, 'open');
+    const fits = await post(`/api/board/${boardId}/relay`, { round: 1, answers, words: 'a'.repeat(1024) });
+    assert.equal(fits.status, 200, '1024 bytes is inside the cap');
+  });
+
+  await check('a relay on an abandoned round is a 409 that records nothing', async () => {
+    const { boardId, qid } = await openQuestionBoard('abandoned relay');
+    assert.equal((await post(`/api/board/${boardId}/abandon`, {})).status, 200);
+    const answers = [{ id: qid, status: 'answered', choice: 'Yes', note: '' }];
+    const r = await post(`/api/board/${boardId}/relay`, { round: 1, answers, words: 'yes' });
+    assert.equal(r.status, 409, JSON.stringify(r.body));
+    const stored = readBoard(boardId, home).rounds[0];
+    assert.equal(stored.status, 'abandoned');
+    assert.equal(stored.relayed, undefined);
+  });
+
   // --- the stream -------------------------------------------------------------------
 
   await check('the daemon-wide stream emits missions on a mission write and on a linked board\'s post', async () => {
