@@ -220,23 +220,44 @@ function touch(m, now) {
 
 // --- the view -------------------------------------------------------------------------
 
-function sessionStalled(m, now, isAlive) {
-  const s = m.session;
-  if (!s) return false;
+/** The bound process is gone, or a reservation no process bound within `UNBOUND_GRACE_MS`:
+ * nothing holds the mission any more. */
+function sessionGone(s, now, isAlive) {
   if (s.pid != null && !isAlive(s.pid)) return true;
-  if (s.pid == null && s.id == null) {
-    const reserved = Date.parse(s.startedAt);
-    if (!Number.isFinite(reserved) || now - reserved > UNBOUND_GRACE_MS) return true;
-  }
+  if (s.pid != null || s.id != null) return false;
+  const reserved = Date.parse(s.startedAt);
+  return !Number.isFinite(reserved) || now - reserved > UNBOUND_GRACE_MS;
+}
+
+/** A working session that has not heartbeat for `STALL_SILENCE_MS`. */
+function sessionSilent(m, now) {
   if (m.state !== 'working') return false;
-  const seen = Date.parse(s.seenAt);
+  const seen = Date.parse(m.session.seenAt);
   return !Number.isFinite(seen) || now - seen > STALL_SILENCE_MS;
 }
 
-/** True while a session is bound to `m` and has not stalled. A session reserved at launch
- * counts from its reservation, before any process binds to it, for `UNBOUND_GRACE_MS`. */
+/** The mission recorded the end of its session: a grill answered Fire records `fire` and
+ * stops, and a landed mission's session has closed. Its process may linger, idle, but it
+ * holds neither the mission nor a slot. */
+function sessionFinished(m) {
+  return m.state === 'landed' || (m.phase === 'grill' && !!m.fire);
+}
+
+function sessionStalled(m, now, isAlive) {
+  const s = m.session;
+  if (!s) return false;
+  return sessionGone(s, now, isAlive) || sessionSilent(m, now);
+}
+
+/** True while a session holds `m`: bound or reserved, its mission has not recorded its end,
+ * and it is not gone. A reservation counts before any process binds to it, for
+ * `UNBOUND_GRACE_MS`. Silence alone frees the mission only when no pid is bound: a session
+ * whose process lives still holds it while it reads stalled (a long turn, or a director idle
+ * while its owners run), so a successor never runs beside it. */
 function hasLiveSession(m, now, isAlive) {
-  return !!m.session && !sessionStalled(m, now, isAlive);
+  const s = m.session;
+  if (!s || sessionFinished(m) || sessionGone(s, now, isAlive)) return false;
+  return s.pid != null || !sessionSilent(m, now);
 }
 
 /** A round still waiting on the PM: open (neither sent nor abandoned) and one that asks for
@@ -281,7 +302,8 @@ function liveCounts(views) {
   for (const v of views) {
     if (!v.live) continue;
     live.alive += 1;
-    if (v.view === 'working') live.working += 1;
+    // A live session reading stalled is one silent while working: it still works.
+    if (v.view === 'working' || v.view === 'stalled') live.working += 1;
   }
   return live;
 }
@@ -334,7 +356,8 @@ export function upsertMission(key, patch, { home = boardHome(), now = Date.now()
 }
 
 /** `POST /api/mission/:key/launch`: the one check that keeps a mission to one live session.
- * A live session already bound throws a 409 carrying it. Past `MAX_WORKING` working or
+ * A live session already bound throws a 409 carrying it, and `silent: true` when it reads
+ * stalled by silence with its process alive. Past `MAX_WORKING` working or
  * `MAX_ALIVE` alive sessions across the other missions, the mission queues with its launch
  * recorded in `queue` and answers `{ queued: true }`; else a session is reserved, the
  * mission moves to working in `phase`, and it answers `{ launch: true }`. */
@@ -348,8 +371,11 @@ export function launchMission(key, body, { home = boardHome(), now = Date.now(),
 
   const m = readMission(key, home) || newMission(key, now, { phase });
   if (hasLiveSession(m, now, isAlive)) {
-    throw Object.assign(refuse('live', 409), { session: m.session });
+    const silent = sessionSilent(m, now);
+    throw Object.assign(refuse('live', 409), { session: m.session, ...(silent ? { silent } : {}) });
   }
+  // A finished session's process may still run: its pid and id never bind the next one.
+  const ended = m.session && sessionFinished(m) ? endedSession(m.session) : null;
   const others = listMissions(home).filter(o => o.key !== key).map(o => missionView(o, { home, now, isAlive }));
   const live = liveCounts(others);
   const at = iso(now);
@@ -359,7 +385,7 @@ export function launchMission(key, body, { home = boardHome(), now = Date.now(),
     moveTo(m, { phase, state: 'queued' }, now);
     answer = { queued: true };
   } else {
-    m.session = { startedAt: at, seenAt: at, ...(login !== undefined ? { login } : {}) };
+    m.session = { startedAt: at, seenAt: at, ...(login !== undefined ? { login } : {}), ...(ended ? { ended } : {}) };
     delete m.queue;
     moveTo(m, { phase, state: 'working' }, now);
     answer = { launch: true };
@@ -369,10 +395,18 @@ export function launchMission(key, body, { home = boardHome(), now = Date.now(),
   return answer;
 }
 
+/** The `pid` and `id` of a session that ended, kept on the session launched after it. */
+function endedSession(s) {
+  const ended = { ...(s.pid != null ? { pid: s.pid } : {}), ...(s.id != null ? { id: s.id } : {}) };
+  return Object.keys(ended).length ? ended : null;
+}
+
 /** `POST /api/mission/:key/session`: binds a session, or heartbeats the one bound
  * (`seenAt` now). A different pid while the bound one is still alive is a second live
  * session and throws a 409 carrying the bound one; a different pid after the bound one died
- * starts a fresh session. Answers the stored record. */
+ * starts a fresh session. The pid or id of the session that ended before this launch is a
+ * 409 too: that process lingers, and must not take its successor's place. Answers the
+ * stored record. */
 export function bindSession(key, body, { home = boardHome(), now = Date.now(), isAlive = pidAlive } = {}) {
   assertMissionKey(key);
   assertObject(body, 'the body');
@@ -387,7 +421,9 @@ export function bindSession(key, body, { home = boardHome(), now = Date.now(), i
   const at = iso(now);
   const bound = m.session;
   const otherPid = bound && bound.pid != null && given.pid !== undefined && given.pid !== bound.pid;
-  if (otherPid && isAlive(bound.pid)) {
+  const endedOne = bound && bound.ended
+    && ((given.pid !== undefined && given.pid === bound.ended.pid) || (given.id !== undefined && given.id === bound.ended.id));
+  if (endedOne || (otherPid && isAlive(bound.pid))) {
     throw Object.assign(refuse('live', 409), { session: bound });
   }
   m.session = !bound || otherPid
