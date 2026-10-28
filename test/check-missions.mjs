@@ -50,6 +50,35 @@ async function getJson(route) {
   return { status: r.status, body: await r.json() };
 }
 
+/** `GET /api/events` held open, once it has connected: `saw(key)` is whether a `missions`
+ * event for `key` has arrived since. */
+async function missionsStream() {
+  const events = [];
+  let pending = '';
+  let raw = '';
+  const req = http.request({ host: '127.0.0.1', port, method: 'GET', path: '/api/events', headers: { host: `127.0.0.1:${port}`, [SECRET_HEADER]: SECRET } }, res => {
+    res.setEncoding('utf8');
+    res.on('data', chunk => {
+      raw += chunk;
+      pending += chunk;
+      const frames = pending.split('\n\n');
+      pending = frames.pop();
+      for (const frame of frames) {
+        const name = /^event: (.+)$/m.exec(frame);
+        const data = /^data: (.*)$/m.exec(frame);
+        if (name && data) events.push({ name: name[1], data: JSON.parse(data[1]) });
+      }
+    });
+  });
+  req.on('error', () => {});
+  req.end();
+  await waitFor(() => raw.includes(': connected'), { what: 'the stream opened' });
+  return {
+    saw: key => events.some(e => e.name === 'missions' && e.data.key === key),
+    close: () => req.destroy(),
+  };
+}
+
 /** A separate store for the rules checked through the module, so their fixtures never
  * show up in the daemon's lists. */
 function scratchHome(name) {
@@ -574,6 +603,76 @@ async function main() {
     }
   });
 
+  // --- Fire ---------------------------------------------------------------------------
+
+  /** A grill mission whose session's process is gone, and its board holding one round: a
+   * `single` question carrying `action`, with its two labels. */
+  async function grillRound(key, action, labels) {
+    assert.equal((await post(`/api/mission/${key}`, { title: key, phase: 'grill', state: 'waiting' })).status, 200);
+    assert.equal((await post(`/api/mission/${key}/session`, { pid: await deadPid(), id: `grill-${key}` })).status, 200);
+    const posted = await post('/api/board', {
+      title: `${key} grill`, mission: key,
+      blocks: [{ kind: 'question', prompt: 'Go?', widget: 'single', action, options: labels.map(label => ({ label })) }],
+    });
+    assert.equal(posted.status, 200, JSON.stringify(posted.body));
+    return { boardId: posted.body.boardId, qid: readBoard(posted.body.boardId, home).blocks[0].id };
+  }
+
+  for (const [key, action, pick, route, fired] of [
+    ['FIRE_SENT', 'fire', 0, 'submit', true],
+    ['FIRE_RELAYED', 'fire', 0, 'relay', true],
+    ['FIRE_NOT_YET', 'fire', 1, 'submit', false],
+    ['MERGE_SENT', 'merge', 0, 'submit', false],
+  ]) {
+    const label = fired ? `records fire by 'round' on its mission` : 'records no fire';
+    await check(`a ${action} round answered with option ${pick} through ${route}, its grill session gone, ${label} and publishes missions`, async () => {
+      const labels = action === 'fire' ? ['Fire /direct', 'Not yet'] : ['Merge', 'Hold'];
+      const { boardId, qid } = await grillRound(key, action, labels);
+      const stream = await missionsStream();
+      try {
+        const before = Date.now();
+        const answers = [{ id: qid, status: 'answered', choice: labels[pick], note: '' }];
+        const body = route === 'relay' ? { round: 1, answers, words: 'fire it' } : { round: 1, action: 'send', answers, comments: [] };
+        const sent = await post(`/api/board/${boardId}/${route}`, body);
+        assert.equal(sent.status, 200, JSON.stringify(sent.body));
+        await waitFor(() => stream.saw(key), { what: `a missions event for ${key}` });
+        const { fire } = readMission(key, home);
+        if (!fired) return assert.equal(fire, undefined);
+        assert.equal(fire.by, 'round');
+        assert.ok(Date.parse(fire.at) >= before - 1000, `fire.at is the submit's moment: ${fire.at}`);
+        const view = (await getJson(`/api/mission/${key}`)).body;
+        assert.deepEqual([view.live, view.view, view.actions], [false, 'waiting', []], 'the fired grill holds the mission no more and offers no Fire');
+      } finally {
+        stream.close();
+      }
+    });
+  }
+
+  await check('a second Fire on the sent round is a 409 that leaves the first fire as it was', async () => {
+    const { boardId, qid } = await grillRound('FIRE_TWICE', 'fire', ['Fire /direct', 'Not yet']);
+    const body = { round: 1, action: 'send', answers: [{ id: qid, status: 'answered', choice: 'Fire /direct', note: '' }], comments: [] };
+    assert.equal((await post(`/api/board/${boardId}/submit`, body)).status, 200);
+    const first = readMission('FIRE_TWICE', home).fire;
+    assert.equal((await post(`/api/board/${boardId}/submit`, { ...body, via: 'card' })).status, 409);
+    assert.deepEqual(readMission('FIRE_TWICE', home).fire, first);
+  });
+
+  await check('a Fire whose mission record cannot be read or written still answers 200 and sends the round; the record is left as it was', async () => {
+    const { boardId, qid } = await grillRound('FIRE_UNREADABLE', 'fire', ['Fire /direct', 'Not yet']);
+    const record = path.join(home, 'missions', 'FIRE_UNREADABLE.json');
+    writeFileSync(record, '{"key":"FIRE_UN');
+    try {
+      const sent = await post(`/api/board/${boardId}/submit`, {
+        round: 1, action: 'send', answers: [{ id: qid, status: 'answered', choice: 'Fire /direct', note: '' }], comments: [],
+      });
+      assert.equal(sent.status, 200, JSON.stringify(sent.body));
+      assert.equal(readBoard(boardId, home).rounds[0].status, 'sent');
+      assert.equal(readFileSync(record, 'utf8'), '{"key":"FIRE_UN');
+    } finally {
+      rmSync(record, { force: true });
+    }
+  });
+
   await check('an unreadable missions store draws the home page with empty columns, and GET /api/missions answers an error', async () => {
     const dir = path.join(home, 'missions');
     chmodSync(dir, 0o000);
@@ -637,33 +736,14 @@ async function main() {
   // --- the stream -------------------------------------------------------------------
 
   await check('the daemon-wide stream emits missions on a mission write and on a linked board\'s post', async () => {
-    const events = [];
-    let pending = '';
-    let raw = '';
-    const req = http.request({ host: '127.0.0.1', port, method: 'GET', path: '/api/events', headers: { host: `127.0.0.1:${port}`, [SECRET_HEADER]: SECRET } }, res => {
-      res.setEncoding('utf8');
-      res.on('data', chunk => {
-        raw += chunk;
-        pending += chunk;
-        const frames = pending.split('\n\n');
-        pending = frames.pop();
-        for (const frame of frames) {
-          const name = /^event: (.+)$/m.exec(frame);
-          const data = /^data: (.*)$/m.exec(frame);
-          if (name && data) events.push({ name: name[1], data: JSON.parse(data[1]) });
-        }
-      });
-    });
-    req.on('error', () => {});
-    req.end();
+    const stream = await missionsStream();
     try {
-      await waitFor(() => raw.includes(': connected'), { what: 'the stream opened' });
       await post('/api/mission/STREAMED', { summary: 'changed' });
-      await waitFor(() => events.some(e => e.name === 'missions' && e.data.key === 'STREAMED'), { what: 'a missions event for the write' });
+      await waitFor(() => stream.saw('STREAMED'), { what: 'a missions event for the write' });
       await post('/api/board', { title: 'streamed board', mission: 'STREAMED_BOARD', blocks: [{ kind: 'markdown', text: 'x' }] });
-      await waitFor(() => events.some(e => e.name === 'missions' && e.data.key === 'STREAMED_BOARD'), { what: 'a missions event for the board post' });
+      await waitFor(() => stream.saw('STREAMED_BOARD'), { what: 'a missions event for the board post' });
     } finally {
-      req.destroy();
+      stream.close();
     }
   });
 

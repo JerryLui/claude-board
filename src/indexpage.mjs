@@ -481,6 +481,7 @@ function missionsAnswer(key, btn) {
   return missionsSend(key, function () {
     return postMissionJson('/api/board/' + encodeURIComponent(board) + '/submit', {
       action: 'send',
+      via: 'card',
       round: round,
       answers: [{ id: question, status: 'answered', choice: choice, note: '' }],
       comments: [],
