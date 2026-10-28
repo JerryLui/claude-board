@@ -290,6 +290,8 @@ async function main() {
         const asking = cardFor(tab.document, 'STOP_ME');
         assert.equal(asking.querySelector('p.mission-confirm-text').textContent,
           'Stop this session? It finishes its step, writes its Handoff and ends.');
+        assert.deepEqual(asking.querySelectorAll('div.mission-confirm button').map(b => [b.textContent, b.getAttribute('aria-label')]),
+          [['Stop', 'Stop this session'], ['Keep', 'Keep it working']]);
         assert.deepEqual((await mission('STOP_ME')).orders, [], 'the first click only asks');
 
         await tab.click(asking.querySelector('button.mission-stop-confirm'));
@@ -311,7 +313,24 @@ async function main() {
       }
     });
 
-    await check('Keep working closes the Stop question and posts nothing', async () => {
+    await check('a Stop click with Cmd, Ctrl, Shift or Alt held only asks, as a plain one does', async () => {
+      for (const held of ['metaKey', 'ctrlKey', 'shiftKey', 'altKey']) {
+        const key = `STOP_${held.toUpperCase()}`;
+        await liveMission(key);
+        const tab = await openMissionsTab();
+        try {
+          const stop = cardFor(tab.document, key).querySelector('button.mission-stop');
+          stop.dispatchEvent(new StandInEvent('click', { [held]: true, button: 0 }));
+          await settler.settle();
+          assert.ok(cardFor(tab.document, key).querySelector('div.mission-confirm'), `${held}: the question shows`);
+          assert.deepEqual((await mission(key)).orders, [], `${held}: nothing is posted`);
+        } finally {
+          tab.restoreFetch();
+        }
+      }
+    });
+
+    await check('Keep closes the Stop question and posts nothing', async () => {
       await liveMission('STOP_KEPT');
       const tab = await openMissionsTab();
       try {
@@ -376,6 +395,28 @@ async function main() {
         assert.equal(card.querySelector('p.mission-error').textContent, 'Could not send the comment (400)');
         assert.equal(card.querySelector('textarea.mission-comment-text').value, text, 'the note stays open with what was written');
         assert.equal(card.querySelector('button.mission-comment-send').getAttribute('disabled'), null, 'and can be sent again');
+      } finally {
+        tab.restoreFetch();
+      }
+    });
+
+    await check('with a note open on the card, Stop asks there and Keep shuts the question, the note keeping its text', async () => {
+      await liveMission('STOP_NOTED');
+      const tab = await openNote('STOP_NOTED', 'Half a thought');
+      try {
+        await tab.click(cardFor(tab.document, 'STOP_NOTED').querySelector('button.mission-stop'));
+        let card = cardFor(tab.document, 'STOP_NOTED');
+        assert.equal(card.querySelector('p.mission-confirm-text').textContent,
+          'Stop this session? It finishes its step, writes its Handoff and ends.');
+        assert.equal(card.querySelector('button.mission-stop').getAttribute('aria-expanded'), 'true');
+        assert.deepEqual((await mission('STOP_NOTED')).orders, [], 'the click only asks');
+
+        await tab.click(card.querySelector('button.mission-stop-cancel'));
+        card = cardFor(tab.document, 'STOP_NOTED');
+        assert.equal(card.querySelector('div.mission-confirm'), null);
+        assert.equal(card.querySelector('button.mission-stop').getAttribute('aria-expanded'), 'false');
+        assert.equal(card.querySelector('textarea.mission-comment-text').value, 'Half a thought');
+        assert.deepEqual((await mission('STOP_NOTED')).orders, []);
       } finally {
         tab.restoreFetch();
       }

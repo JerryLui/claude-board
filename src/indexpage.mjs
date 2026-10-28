@@ -322,16 +322,26 @@ function missionsCardHeld(node, key) {
 }
 
 // What a repaint would change on a held card, written onto it in place: its buttons
-// disabled while a request is out, and its error line, taken from the card's fresh
-// markup 'html' so it reads as a repainted card's would.
+// disabled while a request is out, its Stop question open or shut, and its error line,
+// taken from the card's fresh markup 'html' so it reads as a repainted card's would.
 function missionsSyncHeld(node, key, html) {
   var busy = !!missionsUi.sending[key];
   var btns = node.querySelectorAll('button.mission-act, button.mission-stop, button.mission-stop-confirm, button.mission-comment-send');
   for (var i = 0; i < btns.length; i++) {
     if (busy) btns[i].setAttribute('disabled', ''); else btns[i].removeAttribute('disabled');
   }
+  var fresh = missionsNode(html);
+  var stop = node.querySelector('button.mission-stop');
+  var freshStop = fresh.querySelector('button.mission-stop');
+  if (stop && freshStop) stop.setAttribute('aria-expanded', freshStop.getAttribute('aria-expanded'));
+  else if (stop) stop.replaceWith();
+  var asking = node.querySelector('div.mission-confirm');
+  var freshAsking = fresh.querySelector('div.mission-confirm');
+  if (asking && freshAsking) asking.replaceWith(freshAsking);
+  else if (asking) asking.replaceWith();
+  else if (freshAsking) node.insertBefore(freshAsking, node.querySelector('div.mission-comment'));
   var was = node.querySelector('p.mission-error');
-  var now = missionsNode(html).querySelector('p.mission-error');
+  var now = fresh.querySelector('p.mission-error');
   if (was && now) { was.replaceWith(now); return; }
   if (was) { was.replaceWith(); return; }
   if (!now) return;
@@ -541,6 +551,17 @@ function onMissionsClick(ev) {
   focusIn(key, 'textarea.mission-comment-text');
 }
 
+// On a Mac, Ctrl with the primary button is the secondary click: the browser fires
+// contextmenu and no click at all. On the Stop icon it asks, as a plain click does.
+function onMissionsContextmenu(ev) {
+  var t = ev.target;
+  if (!ev.ctrlKey || ev.button !== 0 || !t || !t.closest) return;
+  var stop = t.closest('button.mission-stop');
+  if (!stop || stop.disabled) return;
+  ev.preventDefault();
+  onMissionsClick(ev);
+}
+
 function onMissionsInput(ev) {
   var t = ev.target;
   if (!t || !t.closest || !t.classList || !t.classList.contains('mission-comment-text')) return;
@@ -570,6 +591,7 @@ function initMissions() {
   var mount = missionsMount();
   if (!mount) return;
   mount.addEventListener('click', onMissionsClick);
+  mount.addEventListener('contextmenu', onMissionsContextmenu);
   mount.addEventListener('input', onMissionsInput);
   mount.addEventListener('keydown', onMissionsKeydown);
   var toggle = document.querySelector('button#comment-mode-toggle');
@@ -1808,8 +1830,8 @@ function missionsParts(overview, ui) {
     if (m.live && !orders.stopPending && pick('confirming', key)) {
       out += '<div class="mission-confirm" role="group" aria-label="Stop this session">'
         + '<p class="mission-confirm-text">Stop this session? It finishes its step, writes its Handoff and ends.</p>'
-        + '<div class="mission-btns"><button type="button" class="mission-btn danger mission-stop-confirm"' + (busy ? ' disabled' : '') + '>Stop session</button>'
-        + '<button type="button" class="mission-btn mission-stop-cancel">Keep working</button></div></div>';
+        + '<div class="mission-btns"><button type="button" class="mission-btn danger mission-stop-confirm" aria-label="Stop this session"' + (busy ? ' disabled' : '') + '>Stop</button>'
+        + '<button type="button" class="mission-btn mission-stop-cancel" aria-label="Keep it working">Keep</button></div></div>';
     }
     if (pick('commenting', key)) {
       var draft = state.drafts && state.drafts[key] ? state.drafts[key] : '';

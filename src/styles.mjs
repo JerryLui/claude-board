@@ -1949,6 +1949,7 @@ body.home-page .mode-toggle:disabled { opacity: 0.5; cursor: default; }
 .mission-confirm { margin-top: 8px; padding: 8px 10px; border-radius: var(--r-sm); border: 1px solid var(--critical-border);
   background: var(--critical-soft); }
 .mission-confirm-text { margin: 0; font-size: 12.5px; color: var(--ink); }
+.mission-confirm .mission-btns { flex-wrap: nowrap; }
 .mission-comment { margin-top: 8px; }
 .mission-comment-text { display: block; width: 100%; box-sizing: border-box; resize: vertical; min-height: 64px;
   font: inherit; font-size: 13px; color: var(--ink); background: var(--panel-2); border: 1px solid var(--hairline-2);

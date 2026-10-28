@@ -2276,6 +2276,13 @@ chrome band; if that ever surfaces, the fix is this same resend, not a broadcast
 
 Traps that have bitten once. A second bite moves the entry up into the section it belongs to.
 
+- **A Ctrl press in headless Chrome on a Mac is a right-click: `contextmenu`, and no `click`.**
+  `Input.dispatchMouseEvent` with `button: 'left', modifiers: 2` fires `pointerdown`,
+  `mousedown`, `contextmenu`, `mouseup` and never `click`, as a real Ctrl-click does on macOS;
+  Cmd (4), Shift (8) and Alt (1) still fire `click`. A control that must answer a Ctrl press
+  listens for `contextmenu` with `ctrlKey` and `button === 0` (`onMissionsContextmenu`,
+  `src/indexpage.mjs`).
+
 - **A stage loaded inside `withFrameClock` reports its own fixture height on every turn of the
   clock.** `loadSrcdoc()` under the clock books the real `stageAgentScript`'s first report, so the
   next `clock.frames()` overwrites whatever height a check forged just before it (the stand-in's
