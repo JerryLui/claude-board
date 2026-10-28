@@ -64,6 +64,7 @@ import { notifyBoundary, notifyTest } from './notify.mjs';
 import { isCue, cuePath } from './cues.mjs';
 import { resolveRefRoots } from './resolve.mjs';
 import { createStrandedWatch } from './stranded.mjs';
+import { createMissionWatch } from './mission-watch.mjs';
 import { MAX_POST_BYTES, MAX_DRAINED_BYTES, postTooLargeMessage } from './post-limit.mjs';
 import { missionsOverview, getMissionView, missionView, upsertMission, launchMission, bindSession, addOrder, ackOrder, linkBoard, assertMissionKey } from './missions.mjs';
 
@@ -2342,9 +2343,12 @@ function playPreview(cue) {
  * client's wall clock is not the daemon's, and one that computes an offset once from a
  * response it already had to make can then reason about every deadline the daemon mints
  * without ever trusting its own `Date.now()`. */
-function handleWaiting(req, res, waiting) {
+function handleWaiting(req, res, waiting, home) {
   const rows = waiting.rows();
   return sendJson(res, 200, {
+    // The status item's mission counts (ADR 72's client draws them). A missions read that
+    // fails drops the field and keeps the waiting list.
+    ...missionCounts(home),
     // The `url` is the one field built per request rather than cached with the row:
     // it comes off the `Host` this request arrived with (see `boardUrl`), which is
     // right for a URL handed straight back to the caller that sent it -- and wrong to
@@ -2353,6 +2357,15 @@ function handleWaiting(req, res, waiting) {
     total: rows.length,
     now: Date.now(),
   });
+}
+
+function missionCounts(home) {
+  try {
+    const { counts } = missionsOverview({ home });
+    return { missions: { needsYou: counts.needsYou, working: counts.working } };
+  } catch {
+    return {};
+  }
 }
 
 /** Every round in the store still waiting for an answer, cached behind the store's own
@@ -2720,6 +2733,11 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
   // (see `createWaitingCache`). Per handler for the same reason `rowsCache` above is:
   // two daemons in one process must not answer from each other's store.
   const waitingCache = createWaitingCache(home);
+  // The missions watch (src/mission-watch.mjs): a periodic read that publishes the derived
+  // changes no write makes (a stall) and speaks a batch of missions needing the PM,
+  // stalled or landed. Per handler, for the reason everything else here is.
+  const missionWatch = createMissionWatch({ home, broadcast: key => broadcastMissions(streamHub, key) });
+  missionWatch.start();
   // A caller-supplied instance (startServer's, below) is what makes pause/resume/reset/
   // settings and the boot-time clock share the ONE live setTimeout for this daemon —
   // two independent createPomodoro() instances against the same home would each arm
@@ -2887,7 +2905,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
       // answered as JSON to a client with no page. See handleWaiting for why it is not on
       // `isOpenRoute` and why it returns everything rather than a client's first few.
       if (req.method === 'GET' && url.pathname === '/api/waiting') {
-        return handleWaiting(req, res, waitingCache);
+        return handleWaiting(req, res, waitingCache, home);
       }
 
       // The daemon-wide stream (ticket 01): timer, settings and waiting-count changes, for
@@ -3018,7 +3036,10 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
   // never calls it (a check building a handler and dropping it) loses only the pending
   // graces, which are unref'd timers, and the process-wide 'exit' hook still catches any
   // click-serving child.
-  requestHandler.close = () => stranded.close();
+  requestHandler.close = () => {
+    stranded.close();
+    missionWatch.close();
+  };
   return requestHandler;
 }
 

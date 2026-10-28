@@ -161,6 +161,56 @@ async function main() {
     assert.equal(overview.missions[0].view, 'working');
   });
 
+  await check('a working session silent fifteen minutes reads stalled, yet keeps its mission and its slot while its pid lives, and its heartbeat clears the silence', () => {
+    const dir = scratchHome('silent');
+    const t0 = Date.parse('2026-10-28T12:00:00Z');
+    const alive = () => true;
+    launchMission('SILENT', { phase: 'direct' }, { home: dir, now: t0 });
+    bindSession('SILENT', { pid: 4242 }, { home: dir, now: t0 + 1000, isAlive: alive });
+    const silent = t0 + minutes(16);
+
+    const overview = missionsOverview({ home: dir, now: silent, isAlive: alive });
+    assert.equal(overview.missions[0].view, 'stalled');
+    assert.deepEqual(overview.live, { working: 1, alive: 1 }, 'a silent session whose process lives still holds its slots');
+    assert.throws(() => launchMission('SILENT', { phase: 'direct' }, { home: dir, now: silent, isAlive: alive }),
+      err => err.status === 409 && err.message === 'live' && err.silent === true && err.session.pid === 4242);
+
+    bindSession('SILENT', { pid: 4242 }, { home: dir, now: silent, isAlive: alive });
+    assert.equal(missionsOverview({ home: dir, now: silent, isAlive: alive }).missions[0].view, 'working');
+
+    launchMission('SILENT_GONE', { phase: 'direct' }, { home: dir, now: t0 });
+    bindSession('SILENT_GONE', { pid: 4343 }, { home: dir, now: t0 + 1000, isAlive: alive });
+    const gone = pid => pid !== 4343;
+    assert.deepEqual(launchMission('SILENT_GONE', { phase: 'direct' }, { home: dir, now: silent, isAlive: gone }), { launch: true },
+      'a silent session whose process is gone frees its mission');
+  });
+
+  await check('a session whose mission recorded its end (a grill answered Fire, or landed) holds neither the mission nor a slot, and its pid cannot take the next session', () => {
+    const dir = scratchHome('finished');
+    const t0 = Date.parse('2026-10-28T12:00:00Z');
+    const alive = () => true;
+    launchMission('FIRED', { phase: 'grill' }, { home: dir, now: t0 });
+    bindSession('FIRED', { pid: 5151 }, { home: dir, now: t0 + 1000, isAlive: alive });
+    upsertMission('FIRED', { state: 'waiting', fire: { by: 'round' } }, { home: dir, now: t0 + 2000 });
+    launchMission('LANDED', { phase: 'landing' }, { home: dir, now: t0 });
+    bindSession('LANDED', { pid: 5252 }, { home: dir, now: t0 + 1000, isAlive: alive });
+    upsertMission('LANDED', { state: 'landed' }, { home: dir, now: t0 + 2000 });
+
+    const now = t0 + minutes(1);
+    const overview = missionsOverview({ home: dir, now, isAlive: alive });
+    assert.deepEqual(overview.missions.map(m => [m.key, m.live]).sort(), [['FIRED', false], ['LANDED', false]]);
+    assert.deepEqual(overview.live, { working: 0, alive: 0 });
+
+    assert.deepEqual(launchMission('FIRED', { phase: 'direct' }, { home: dir, now, isAlive: alive }), { launch: true });
+    const record = readMission('FIRED', dir);
+    assert.equal(record.phase, 'direct');
+    assert.equal(record.state, 'working');
+    assert.equal(record.session.pid, undefined, 'the direct launch reserves a fresh session');
+    assert.throws(() => bindSession('FIRED', { pid: 5151 }, { home: dir, now, isAlive: alive }), { status: 409, message: 'live' },
+      'the ended grill, still running, cannot bind to the direct session');
+    assert.equal(bindSession('FIRED', { pid: 6161 }, { home: dir, now, isAlive: alive }).session.pid, 6161);
+  });
+
   await check(`a launch queues at ${MAX_WORKING} working sessions, and launches at one fewer`, () => {
     const dir = scratchHome('working-cap');
     const now = Date.now();
