@@ -220,6 +220,13 @@ function touch(m, now) {
 
 // --- the view -------------------------------------------------------------------------
 
+/** The session bound or reserved on `m`, or null. A launch that queued leaves a record
+ * holding only `ended`, the session it replaced: that is no session. */
+function currentSession(m) {
+  const s = m.session;
+  return s && (s.pid != null || s.id != null || s.startedAt) ? s : null;
+}
+
 /** The bound process is gone, or a reservation no process bound within `UNBOUND_GRACE_MS`:
  * nothing holds the mission any more. */
 function sessionGone(s, now, isAlive) {
@@ -243,10 +250,19 @@ function sessionFinished(m) {
   return m.state === 'landed' || (m.phase === 'grill' && !!m.fire);
 }
 
+/** A session that should be running and is not heard from: gone, or silent while working.
+ * A session whose mission recorded its end is expected to stop, so it never stalls. */
 function sessionStalled(m, now, isAlive) {
-  const s = m.session;
-  if (!s) return false;
+  const s = currentSession(m);
+  if (!s || sessionFinished(m)) return false;
   return sessionGone(s, now, isAlive) || sessionSilent(m, now);
+}
+
+/** `s` still holds its mission, whatever the mission recorded: not gone, and bound by a pid
+ * or heard from inside `STALL_SILENCE_MS`. */
+function sessionHolds(m, s, now, isAlive) {
+  if (sessionGone(s, now, isAlive)) return false;
+  return s.pid != null || !sessionSilent(m, now);
 }
 
 /** True while a session holds `m`: bound or reserved, its mission has not recorded its end,
@@ -255,50 +271,43 @@ function sessionStalled(m, now, isAlive) {
  * whose process lives still holds it while it reads stalled (a long turn, or a director idle
  * while its owners run), so a successor never runs beside it. */
 function hasLiveSession(m, now, isAlive) {
-  const s = m.session;
-  if (!s || sessionFinished(m) || sessionGone(s, now, isAlive)) return false;
-  return s.pid != null || !sessionSilent(m, now);
+  const s = currentSession(m);
+  return !!s && !sessionFinished(m) && sessionHolds(m, s, now, isAlive);
+}
+
+/** Each linked board that reads, once, with its question blocks. */
+function linkedBoards(m, home) {
+  const linked = [];
+  for (const link of m.boards || []) {
+    let board;
+    try {
+      board = readBoard(link.id, home);
+    } catch {
+      continue;
+    }
+    if (board) linked.push({ board, questions: questionBlocks(board) });
+  }
+  return linked;
 }
 
 /** A round still waiting on the PM: open (neither sent nor abandoned) and one that asks for
  * an answer, by a question in it or by a wait it was minted with. A round that only shows
  * something stays open for good and asks nothing. */
-function roundWantsAnswer(board, round) {
+function roundWantsAnswer(round, questions) {
   if (round.status !== 'open') return false;
   if (round.awaitDeadline) return true;
-  return questionBlocks(board).some(q => q.round === round.n);
+  return questions.some(q => q.round === round.n);
 }
 
-function boardsNeedYou(m, home) {
-  for (const link of m.boards || []) {
-    let board;
-    try {
-      board = readBoard(link.id, home);
-    } catch {
-      continue;
-    }
-    if (board && (board.rounds || []).some(r => roundWantsAnswer(board, r))) return true;
-  }
-  return false;
+function boardsNeedYou(linked) {
+  return linked.some(({ board, questions }) => (board.rounds || []).some(r => roundWantsAnswer(r, questions)));
 }
 
-/** The buttons `m`'s card offers: one per question carrying an `action` (Fire or Merge)
- * in a round of a linked board still waiting on the PM, as `roundWantsAnswer` reads it. A
- * click answers `question` in `round` of `board` with option 0, whose label is `choice`. A
- * sent or abandoned round offers none. */
-export function missionActions(m, { home = boardHome() } = {}) {
+function actionsOf(linked) {
   const actions = [];
-  for (const link of m.boards || []) {
-    let board;
-    try {
-      board = readBoard(link.id, home);
-    } catch {
-      continue;
-    }
-    if (!board) continue;
-    const questions = questionBlocks(board);
+  for (const { board, questions } of linked) {
     for (const round of board.rounds || []) {
-      if (!roundWantsAnswer(board, round)) continue;
+      if (!roundWantsAnswer(round, questions)) continue;
       for (const q of questions) {
         if (q.round !== round.n || !q.action || q.widget !== 'single' || !q.options?.length) continue;
         actions.push({ kind: q.action, board: board.id, round: round.n, question: q.id, choice: q.options[0].label });
@@ -308,23 +317,36 @@ export function missionActions(m, { home = boardHome() } = {}) {
   return actions;
 }
 
+/** The buttons `m`'s card offers: one per question carrying an `action` (Fire or Merge)
+ * in a round of a linked board still waiting on the PM, as `roundWantsAnswer` reads it. A
+ * click answers `question` in `round` of `board` with option 0, whose label is `choice`. A
+ * sent or abandoned round offers none. */
+export function missionActions(m, { home = boardHome() } = {}) {
+  return actionsOf(linkedBoards(m, home));
+}
+
+function viewState(m, linked, now, isAlive) {
+  if (m.state === 'landed') return 'landed';
+  if (sessionStalled(m, now, isAlive)) return 'stalled';
+  if (boardsNeedYou(linked())) return 'needs-you';
+  return m.state;
+}
+
 /** The column `m` shows in: landed stays landed; a stalled session wins over everything
  * else; then a board waiting on the PM; else the stored state. */
 export function deriveState(m, { home = boardHome(), now = Date.now(), isAlive = pidAlive } = {}) {
-  if (m.state === 'landed') return 'landed';
-  if (sessionStalled(m, now, isAlive)) return 'stalled';
-  if (boardsNeedYou(m, home)) return 'needs-you';
-  return m.state;
+  return viewState(m, () => linkedBoards(m, home), now, isAlive);
 }
 
 /** The record as a reader gets it: every stored field, plus `view` (the derived state),
  * `live` (a session holds the mission, `hasLiveSession`) and `actions` (`missionActions`). */
 export function missionView(m, { home = boardHome(), now = Date.now(), isAlive = pidAlive } = {}) {
+  const linked = linkedBoards(m, home);
   return {
     ...m,
-    view: deriveState(m, { home, now, isAlive }),
+    view: viewState(m, () => linked, now, isAlive),
     live: hasLiveSession(m, now, isAlive),
-    actions: missionActions(m, { home }),
+    actions: actionsOf(linked),
   };
 }
 
@@ -405,14 +427,18 @@ export function launchMission(key, body, { home = boardHome(), now = Date.now(),
     const silent = sessionSilent(m, now);
     throw Object.assign(refuse('live', 409), { session: m.session, ...(silent ? { silent } : {}) });
   }
-  // A finished session's process may still run: its pid and id never bind the next one.
-  const ended = m.session && sessionFinished(m) ? endedSession(m.session) : null;
+  // The session this launch replaces is over, finished or gone or silent, yet its process
+  // may still run: its pid and id never bind the next one. A record that is only `ended`
+  // passes its own on.
+  const ended = m.session ? endedSession(m.session) ?? m.session.ended ?? null : null;
   const others = listMissions(home).filter(o => o.key !== key).map(o => missionView(o, { home, now, isAlive }));
   const live = liveCounts(others);
   const at = iso(now);
   let answer;
   if (live.working >= MAX_WORKING || live.alive >= MAX_ALIVE) {
     m.queue = { phase, prompt: prompt ?? '', ...(login !== undefined ? { login } : {}), at };
+    // A queued mission has no session: one kept here would read live and never dequeue.
+    m.session = ended ? { ended } : null;
     moveTo(m, { phase, state: 'queued' }, now);
     answer = { queued: true };
   } else {
@@ -433,9 +459,9 @@ function endedSession(s) {
 }
 
 /** `POST /api/mission/:key/session`: binds a session, or heartbeats the one bound
- * (`seenAt` now). A different pid while the bound one is still alive is a second live
- * session and throws a 409 carrying the bound one; a different pid after the bound one died
- * starts a fresh session. The pid or id of the session that ended before this launch is a
+ * (`seenAt` now). A different pid or id while the bound session still holds the mission
+ * (`sessionHolds`) is a second live session and throws a 409 carrying the bound one; once
+ * the bound one is gone, or silent with no pid, it starts a fresh session. The pid or id of the session that ended before this launch is a
  * 409 too: that process lingers, and must not take its successor's place. Answers the
  * stored record. */
 export function bindSession(key, body, { home = boardHome(), now = Date.now(), isAlive = pidAlive } = {}) {
@@ -450,15 +476,17 @@ export function bindSession(key, body, { home = boardHome(), now = Date.now(), i
   const m = readMission(key, home);
   if (!m) throw notFound(key);
   const at = iso(now);
-  const bound = m.session;
+  const bound = currentSession(m);
+  const ended = m.session?.ended;
   const otherPid = bound && bound.pid != null && given.pid !== undefined && given.pid !== bound.pid;
-  const endedOne = bound && bound.ended
-    && ((given.pid !== undefined && given.pid === bound.ended.pid) || (given.id !== undefined && given.id === bound.ended.id));
-  if (endedOne || (otherPid && isAlive(bound.pid))) {
-    throw Object.assign(refuse('live', 409), { session: bound });
+  const otherId = bound && bound.id != null && given.id !== undefined && given.id !== bound.id;
+  const endedOne = ended
+    && ((given.pid !== undefined && given.pid === ended.pid) || (given.id !== undefined && given.id === ended.id));
+  if (endedOne || ((otherPid || otherId) && sessionHolds(m, bound, now, isAlive))) {
+    throw Object.assign(refuse('live', 409), { session: m.session });
   }
-  m.session = !bound || otherPid
-    ? { ...given, startedAt: at, seenAt: at }
+  m.session = !bound || otherPid || otherId
+    ? { ...given, startedAt: at, seenAt: at, ...(ended ? { ended } : {}) }
     : { ...bound, ...given, seenAt: at };
   touch(m, now);
   return writeMission(m, home);
