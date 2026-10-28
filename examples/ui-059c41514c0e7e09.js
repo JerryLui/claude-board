@@ -2107,23 +2107,27 @@
     if (typeof ResizeObserver === 'function') new ResizeObserver(measurePillHalf).observe(actions);
   }());
 
-  /** How far an ordinary board's condensed wash
-   * (body:not(.page-board) .board-head::after, src/styles.mjs) reaches to go
-   * full-bleed without a 'vw' unit -- 'vw' includes the scrollbar's own
-   * width, and an ordinary board is exactly the surface that always has a
-   * real document scrollbar (a page board's own full-bleed header never had
-   * to consider this: body.page-board sets 'overflow: hidden', no scrollbar
-   * at all). 'clientWidth' excludes it by definition, the same measured-not-
-   * guessed idiom measurePillHalf above and reportStageBand use elsewhere in
-   * this file. Feature-detected only by existing (documentElement is always
-   * present); harmless without a later resize, since the wash simply keeps
-   * whatever width it last had -- a stale-but-still-full-bleed rectangle is
-   * a far smaller defect than the seam this exists to fix at all. */
+  // How far an ordinary board's condensed wash
+  // (body:not(.page-board) .board-head::after, src/styles.mjs) reaches to go
+  // full-bleed: '--doc-w', kept by measureDocWidth inside trackDocWidth, the one
+  // measurement the home views run too (its own comment, src/ui.mjs).
+  // A page board's own full-bleed header never needed it: body.page-board sets
+  // 'overflow: hidden', no scrollbar at all.
+  var trackDocWidth = function trackDocWidth() {
   function measureDocWidth() {
-    document.body.style.setProperty('--doc-w', document.documentElement.clientWidth + 'px');
+    if (!document.body || !document.documentElement) return;
+    var value = document.documentElement.clientWidth + 'px';
+    if (document.body.style.getPropertyValue('--doc-w') !== value) document.body.style.setProperty('--doc-w', value);
   }
+  if (typeof window === 'undefined' || !window || typeof window.addEventListener !== 'function') return;
   measureDocWidth();
   window.addEventListener('resize', measureDocWidth);
+  window.addEventListener('load', measureDocWidth);
+  if (typeof ResizeObserver === 'function' && document.documentElement) {
+    new ResizeObserver(measureDocWidth).observe(document.documentElement);
+  }
+};
+  trackDocWidth();
 
   /** How wide a scrollbar is inside a stage's frame, written to
    * '--stage-scrollbar-w' for the Pull-out, which moves in by it on a stage
@@ -2143,8 +2147,8 @@
    * does. What a mock does to its OWN scrollbar (a thin one, a hidden one) the
    * page cannot know; the control clears the native width regardless.
    *
-   * Measured again on every resize, measureDocWidth's trigger and the only
-   * one here, so a width that changes while the page is open (the system
+   * Measured again on every resize and on nothing else, so a width that
+   * changes while the page is open (the system
    * going from overlay to classic scrollbars when a mouse is plugged in) is
    * picked up at the next resize, not at once. With no shadow roots nothing
    * is written, and the stylesheet's own fallback, 0, holds. */
