@@ -225,7 +225,7 @@ Every block has `{ id, round, kind }`. Content blocks additionally carry the res
 { kind: 'code',     source: Ref,      text, sha, lang, error? }
 { kind: 'html',     source: Ref|null, html, sha, error? } // path-only source: `lines`/`section` refused
 { kind: 'compare',  left: { label, block }, right: { label, block } }
-{ kind: 'question', prompt, explainer?, explainerHtml?, context: [ContentBlock], widget, options: [Option] }
+{ kind: 'question', prompt, explainer?, explainerHtml?, context: [ContentBlock], widget, options: [Option], action? }
 
 Ref    = { path, section?, lines? }               // lines is [from, to], 1-based inclusive
 Option = { label, description?, preview? }                  // every widget except the one below
@@ -281,6 +281,12 @@ and stores the rendered markup beside it as `explainerHtml`, the same `text`/`ht
 that question renders with the prompt alone on its head row. It is a separate field from `context`
 because the two sit in different places: the explainer takes the card's full row with the prompt,
 while `context` is what the reviewer looks up, laid out beside the options.
+
+**`action`** is `'fire'` or `'merge'`, on a `single` question only, and absent on one that carries
+none: the question's yes is option 0, and while its round waits on an answer, the card of the
+mission whose board it is offers that yes as a Fire or Merge button. A click answers the round
+through `POST /api/board/:id/submit`, that question set to option 0's label, exactly as a Send with
+that pick would. Any other value, or an `action` on another widget, is a 400.
 
 **A widget outside the union is a 400**, not a silent fallback to `single`: an unrenderable
 widget produces a question with no control, which Send then reports back as `unanswered`, so the
