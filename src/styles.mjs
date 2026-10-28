@@ -1647,29 +1647,35 @@ body.readonly:not(.page-board) .board-shell {
 .btn-send:disabled, .btn-discuss:disabled { opacity: 0.5; box-shadow: none; }
 .send-status { color: var(--muted); font-size: 12.5px; align-self: center; margin-right: auto; }
 
-/* thread index (src/indexpage.mjs) — same tokens, its own layout */
-.index-shell { position: relative; z-index: 1; max-width: 900px; margin: 0 auto; padding: var(--space-6) var(--space-5) 96px; }
-/* align-items: center, not flex-start. The lockup used to be two stacked lines
-   (title over a subtitle) and the actions row a single line, so top-aligning
-   them was the only thing that put the controls level with the TITLE rather
-   than floating in the middle of a taller block. With the subtitle gone both
-   sides are one line each, and flex-start left the controls visibly riding
-   above the title's optical centre. */
-.index-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4);
-  margin-bottom: var(--space-5); padding-bottom: var(--space-4); border-bottom: 1px solid var(--hairline); }
-/* The mark leads the index title rather than taking a control over: this page has
-   no back control to absorb it, and it is the one page whose h1 IS the product
-   name, so the two belong in a single lockup. */
-.index-head-titles { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
-.index-head-titles > svg { flex: none; }
-/* the gap separates the pomodoro widget from the theme toggle beside it */
-.index-head-actions { flex: none; display: flex; align-items: center; gap: var(--space-3); }
-/* 30px, up from 22px: the subtitle it used to sit above is gone, and the title
-   takes that vertical space back rather than leaving the row short. Sized to
-   fill the 36px mark's height without exceeding it, and margin: 0 with a
-   line-height of 1 so the lockup's own centring has nothing to fight. */
-.index-head h1 { font-size: 30px; line-height: 1; margin: 0; font-weight: 650; letter-spacing: -0.02em;
-  min-width: 0; }
+/* the home views (src/indexpage.mjs): Missions and Boards, each under the one top
+   bar renderTopBar draws, which is the board page's own '.board-head' in the board
+   page's own '.board-shell' -- the window's width up to 2560px, the same edges, the
+   same mark and title. Nothing caps a view's column narrower than the bar: the
+   boards list used to stop at 900px while a board ran to 2560px. */
+.home-view { padding-bottom: 96px; }
+/* A long boards list scrolls where an empty Missions view does not, and a scrollbar
+   would then narrow the one view and shift the bar between tabs. Both views keep
+   their scrollbar, scrolling or not. Not 'scrollbar-gutter: stable': on a Mac set to
+   overlay scrollbars it reserves nothing, while the restyled bar near the top of this
+   file still takes its 11px once the page scrolls. It also keeps the document's
+   width fixed from the first layout, so the bar's wash measures it once. */
+:root:has(> body.home-page) { overflow-y: scroll; }
+/* The two tabs beside the title. Weight, padding and border are the same whether a
+   tab is on or off -- on only fills it -- so switching views moves nothing in the
+   bar. Links, not buttons: each view is its own route. */
+.view-tabs { display: flex; gap: 4px; margin-left: var(--space-3); flex: none; }
+.view-tab { display: inline-flex; align-items: center; min-height: 32px; padding: 5px 12px;
+  border-radius: var(--r-sm); border: 1px solid transparent; color: var(--ink-2); text-decoration: none;
+  font-size: 13.5px; font-weight: 600; white-space: nowrap;
+  transition: color var(--dur) var(--ease), background var(--dur) var(--ease); }
+.view-tab:hover { color: var(--ink); }
+.view-tab.on { background: var(--panel); color: var(--ink); border-color: var(--hairline); box-shadow: var(--shadow-1); }
+/* the rounds waiting, on the Boards tab: the same amber the waiting rows carry */
+.view-tab-count { margin-left: 6px; font-size: 11.5px; font-weight: 700; color: var(--warning); }
+.view-tab-count[hidden] { display: none; }
+/* Comment where nothing on the view is waiting on one (ADR 46, 98): kept in its
+   place, so the bar holds still across the tabs, and visibly off. */
+body.home-page .mode-toggle:disabled { opacity: 0.5; cursor: default; }
 
 /* the pomodoro widget: src/pomodoro-widget.mjs
    is the markup, src/indexpage.mjs's indexScript is the behaviour -- see that
@@ -2513,7 +2519,7 @@ body:not(.page-board) .blocks .comment-list, body:not(.page-board) .blocks .comm
      Chrome), so every scroll-to-anchor target has to clear that much more --
      see --head-clear's own comment in :root */
   :root { --head-clear: 124px; }
-  .board-shell, .index-shell { padding-left: var(--space-4); padding-right: var(--space-4); }
+  .board-shell { padding-left: var(--space-4); padding-right: var(--space-4); }
   .board-head { flex-direction: column; align-items: flex-start; gap: var(--space-2); }
   .block { padding: var(--space-4); border-radius: var(--r-md); }
   .send-bar { flex-wrap: wrap; }
