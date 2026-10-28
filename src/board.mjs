@@ -816,7 +816,7 @@ function mintAwait(blocks, round, wait, postedAt, awaitTimeoutMs) {
   };
 }
 
-/** Create a new board (round 1) from posted args: `{ title, blocks, cwd, thread, wait }`.
+/** Create a new board (round 1) from posted args: `{ title, blocks, cwd, thread, wait, mission }`.
  * `threadCwd` (additive) is the project directory already bound to `thread`, when the
  * caller is starting a second board in a thread that exists; the request may agree with
  * it but never change it. `wait` is round 1's own declared-awaited flag (ADR.md entry
@@ -827,7 +827,7 @@ function mintAwait(blocks, round, wait, postedAt, awaitTimeoutMs) {
  * `threadCwd`). It only ever narrows what `mintThreadId` may draw -- see its own comment
  * for why a collision is a routing fault rather than a cosmetic one -- and is irrelevant
  * when the caller names the thread. */
-export function createBoard({ title, blocks, cwd = null, thread = null, threadCwd = null, wait = false, awaitTimeoutMs = DEFAULT_AWAIT_TIMEOUT_MS, takenThreads = null }) {
+export function createBoard({ title, blocks, cwd = null, thread = null, threadCwd = null, wait = false, awaitTimeoutMs = DEFAULT_AWAIT_TIMEOUT_MS, takenThreads = null, mission = null }) {
   const now = new Date().toISOString();
   const boundCwd = bindBoardCwd(cwd, threadCwd);
   const counters = {};
@@ -849,6 +849,9 @@ export function createBoard({ title, blocks, cwd = null, thread = null, threadCw
     blocks: normalized,
     answers: {},
     comments: [],
+    // The mission this board belongs to (src/missions.mjs), written only when the post
+    // names one, so a board posted without one keeps the stored shape it always had.
+    ...(mission ? { mission } : {}),
   };
 }
 

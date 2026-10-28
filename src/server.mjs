@@ -65,6 +65,7 @@ import { isCue, cuePath } from './cues.mjs';
 import { resolveRefRoots } from './resolve.mjs';
 import { createStrandedWatch } from './stranded.mjs';
 import { MAX_POST_BYTES, MAX_DRAINED_BYTES, postTooLargeMessage } from './post-limit.mjs';
+import { missionsOverview, getMissionView, missionView, upsertMission, launchMission, bindSession, addOrder, ackOrder, linkBoard, assertMissionKey } from './missions.mjs';
 
 // Declared in src/handoff.mjs (which this module imports, so it cannot import back) and
 // re-exported here, where every caller has always looked for it.
@@ -583,6 +584,19 @@ function isStoreCookieWrite(parts) {
   return parts[0] === 'api' && parts[1] === 'store' && parts.length === 3 && STORE_COOKIE_ACTIONS.has(parts[2]);
 }
 
+/** The mission writes a cookie-holding browser may perform: `order`, and nothing else. A
+ * named closed set for the reason `POMODORO_COOKIE_ACTIONS` above states.
+ *
+ * `order` is the missions view's Stop and comment buttons: it appends a request for the
+ * Master Chief to relay and changes nothing the mission's session reads as its own. Every
+ * other mission write, the record itself, a launch, a session bind and an order's ack, is
+ * a session's or the Master Chief's, and wants the secret. */
+const MISSION_COOKIE_ACTIONS = new Set(['order']);
+
+function isMissionCookieWrite(parts) {
+  return parts[0] === 'api' && parts[1] === 'mission' && parts.length === 4 && MISSION_COOKIE_ACTIONS.has(parts[3]);
+}
+
 /** True iff this write may proceed. Two ways to hold a credential, and they are not
  * interchangeable:
  *
@@ -613,12 +627,12 @@ function isStoreCookieWrite(parts) {
  *
  * Every non-GET goes through here, rather than an enumerated list of write routes: a
  * route added later is then gated by default instead of by remembering to add it. The
- * three exception lists are `BOARD_COOKIE_ACTIONS`, `POMODORO_COOKIE_ACTIONS` and
- * `STORE_COOKIE_ACTIONS` above. */
+ * four exception lists are `BOARD_COOKIE_ACTIONS`, `POMODORO_COOKIE_ACTIONS`,
+ * `STORE_COOKIE_ACTIONS` and `MISSION_COOKIE_ACTIONS` above. */
 function isAuthorizedWrite(req, parts, secret) {
   if (!secret) return false; // no secret on disk: refuse writes rather than fall open
   if (secretMatches(req.headers[SECRET_HEADER], secret)) return true;
-  if (!isBoardCookieWrite(parts) && !isPomodoroCookieWrite(parts) && !isStoreCookieWrite(parts)) return false;
+  if (!isBoardCookieWrite(parts) && !isPomodoroCookieWrite(parts) && !isStoreCookieWrite(parts) && !isMissionCookieWrite(parts)) return false;
   return sessionCookieMatches(req.headers.cookie, secret);
 }
 
@@ -958,6 +972,16 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting) {
     if (err.status === 413) return sendJson(res, 413, { error: postTooLargeMessage(err.bytes) });
     return sendJson(res, err.status || 400, { error: err.status ? err.message : 'invalid JSON body' });
   }
+  // `mission` names the mission this board belongs to (src/missions.mjs), refused before
+  // anything is written when it cannot be a mission's key.
+  if (body.mission !== undefined && body.mission !== null) {
+    try {
+      assertMissionKey(body.mission);
+    } catch (err) {
+      return sendJson(res, 400, { error: err.message });
+    }
+  }
+  const mission = body.mission ?? null;
   let board;
   let round;
   let pushMode = null; // null: a brand-new board, nothing live to push to yet
@@ -1141,6 +1165,7 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting) {
         takenThreads: new Set(boards.map(b => b.thread).filter(Boolean)),
         wait: Boolean(body.wait),
         awaitTimeoutMs: waitTimeoutMs(),
+        mission,
       });
       round = 1;
       // A fresh board defers to an open tab (ADR.md entry 91). The decision is made HERE
@@ -1188,9 +1213,17 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting) {
   // daemon that went away mid-request, so a dedupe table the restart empties would be
   // empty in exactly the case it is needed.
   if (body.requestId) board.lastRequestId = body.requestId;
+  // A later round naming a mission binds a board that had none; a board never moves
+  // from one mission to another. Refused here, before the persist, so nothing is written.
+  if (mission && board.mission && board.mission !== mission) {
+    return sendJson(res, 400, { error: `board ${board.id} belongs to mission ${board.mission}, not ${mission}` });
+  }
+  if (mission && !board.mission) board.mission = mission;
   const html = renderBoardPage(board);
   writeBoard(board, home);
   writePage(board.id, html, home);
+  // The link the mission records is the one this post's reply carries.
+  if (mission) linkBoard(mission, { id: board.id, url: boardUrl(req, board.id) }, { home });
   if (pushMode) {
     sse.broadcast(board.id, 'round', fillsHeld => buildRoundPushPayload(board, round, pushMode, touchedBlockIds, blocksBefore, { wholeStages: !fillsHeld }));
   }
@@ -2374,6 +2407,9 @@ function createWaitingCache(home) {
 function broadcastWaiting(stream, waiting, board = null) {
   if (board) waiting.noteWrite(board);
   stream.broadcast('waiting', { total: waiting.rows().length, now: Date.now() });
+  // A board's rounds decide whether its mission reads needs-you, so a write that moves
+  // the waiting count may have moved that mission's view too.
+  if (board && board.mission) broadcastMissions(stream, board.mission);
 }
 
 /** `{ ...doc, now: Date.now() }` for every pomodoro response, write or read alike. The
@@ -2515,7 +2551,7 @@ async function handlePrune(req, res, home, waiting) {
     return sendJson(res, err.status || 400, { error: err.status ? err.message : 'invalid JSON body' });
   }
   try {
-    const { boards, assets } = pruneStore(body && body.days, home);
+    const { boards, assets, missions } = pruneStore(body && body.days, home);
     // The one mutation that removes boards rather than writing one. Every cached view of
     // the store keyed on "which boards exist" has to hear about it; see
     // `createWaitingCache.reset`.
@@ -2523,12 +2559,64 @@ async function handlePrune(req, res, home, waiting) {
     // Counts, not ids: nothing needs to know WHICH boards went (they are gone; there is
     // nothing left to address), and a list of every id in a large prune is a response
     // body that grows with the store for no reader.
-    return sendJson(res, 200, { ok: true, boards: boards.length, assets: assets.length });
+    return sendJson(res, 200, { ok: true, boards: boards.length, assets: assets.length, missions: missions.length });
   } catch (err) {
     // `status: 400` is what pruneStore tags a refused window with; anything else really
     // is this daemon failing, and says so.
     return sendJson(res, err.status || 500, { error: String((err && err.message) || err) });
   }
+}
+
+/** Every mission route under `/api/mission/:key` (src/missions.mjs holds the rules):
+ *
+ *   GET  /api/mission/:key                  the view, or 404
+ *   POST /api/mission/:key                  upsert the whitelisted fields, answers the view
+ *   POST /api/mission/:key/launch           { launch: true } | { queued: true } | 409 live
+ *   POST /api/mission/:key/session          bind or heartbeat, answers { session } | 409 live
+ *   POST /api/mission/:key/order            { order }
+ *   POST /api/mission/:key/order/:id/ack    { order }
+ *
+ * A refusal is `{ error }` with its status, and a 409 also carries the live `session`.
+ * Every write publishes `missions` on the daemon-wide stream. */
+async function handleMission(req, res, parts, home, stream) {
+  const key = parts[2];
+  const tail = parts.slice(3);
+  try {
+    assertMissionKey(key);
+    if (req.method === 'GET' && tail.length === 0) {
+      return sendJson(res, 200, getMissionView(key, { home }));
+    }
+    if (req.method !== 'POST') return sendText(res, 404, 'not found');
+    const route = tail.length === 0 ? 'upsert'
+      : tail.length === 1 && ['launch', 'session', 'order'].includes(tail[0]) ? tail[0]
+        : tail.length === 3 && tail[0] === 'order' && tail[2] === 'ack' ? 'ack'
+          : null;
+    if (!route) return sendText(res, 404, 'not found');
+    let body;
+    try {
+      body = await readJsonBody(req);
+    } catch (err) {
+      return sendJson(res, err.status || 400, { error: err.status ? err.message : 'invalid JSON body' });
+    }
+    let answer;
+    if (route === 'upsert') answer = missionView(upsertMission(key, body, { home }), { home });
+    else if (route === 'launch') answer = launchMission(key, body, { home });
+    else if (route === 'session') answer = { session: bindSession(key, body, { home }).session };
+    else if (route === 'order') answer = { order: addOrder(key, body, { home }) };
+    else answer = { order: ackOrder(key, tail[1], { home }) };
+    broadcastMissions(stream, key);
+    return sendJson(res, 200, answer);
+  } catch (err) {
+    const status = err && Number.isInteger(err.status) ? err.status : 500;
+    if (status === 409) return sendJson(res, 409, { error: 'live', session: err.session });
+    return sendJson(res, status, { error: String((err && err.message) || err) });
+  }
+}
+
+/** `missions` on the daemon-wide stream: which mission changed and when. A subscriber
+ * re-reads `GET /api/missions` for the rest. */
+function broadcastMissions(stream, key) {
+  stream.broadcast('missions', { key, now: Date.now() });
 }
 
 /** The soonest instant at which a round still waiting anywhere in `boards` will lapse, or
@@ -2844,6 +2932,24 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
 
       if (req.method === 'POST' && url.pathname === '/api/store/prune') {
         return await handlePrune(req, res, home, waitingCache);
+      }
+
+      // The missions ledger (src/missions.mjs). The list is a plain read, so a browser
+      // holding the cookie reads it through gate 4 above.
+      if (req.method === 'GET' && url.pathname === '/api/missions') {
+        return sendJson(res, 200, missionsOverview({ home, all: url.searchParams.get('all') === '1' }));
+      }
+
+      if (parts[0] === 'api' && parts[1] === 'mission' && parts.length >= 3) {
+        // One mission is read by a session or the Master Chief, never a page, so the GET is
+        // narrowed to the secret as `read` is above: `isAuthorizedWrite` with no mission
+        // action on a cookie list.
+        if (req.method === 'GET' && !isAuthorizedWrite(req, parts, secret)) {
+          res.writeHead(401);
+          res.end();
+          return;
+        }
+        return await handleMission(req, res, parts, home, streamHub);
       }
 
       return sendText(res, 404, 'not found');
