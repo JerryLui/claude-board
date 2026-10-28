@@ -8,10 +8,11 @@
 // anything else is refused rather than stored.
 //
 // What a reader sees is a view, derived on every read and never stored: a session whose
-// process is gone, or a working one silent past `STALL_SILENCE_MS`, reads stalled; a mission
-// whose board holds a round still waiting on an answer reads needs-you. The derivation
-// needs the board store and a process table, which is why it is computed here and not
-// written by whoever last touched the record.
+// process is gone, a reservation no process bound within `UNBOUND_GRACE_MS`, or a working
+// one silent past `STALL_SILENCE_MS`, reads stalled; a mission whose board holds a round
+// still waiting on an answer reads needs-you. The derivation needs the board store and a
+// process table, which is why it is computed here and not written by whoever last touched
+// the record.
 
 import { randomBytes } from 'node:crypto';
 import { readBoard, boardHome, readMission, writeMission, listMissions, assertMissionKey, SAFE_MISSION_KEY, MISSION_RETENTION_MS } from './store.mjs';
@@ -34,6 +35,11 @@ export const MAX_ALIVE = 12;
 
 /** A working session silent this long reads stalled. */
 export const STALL_SILENCE_MS = 15 * 60 * 1000;
+
+/** A session reserved at launch that no process has bound (no `pid`, no `id`) this long
+ * after its reservation reads stalled: its start failed, and the mission may launch again.
+ * A good start binds within seconds. */
+export const UNBOUND_GRACE_MS = 5 * 60 * 1000;
 
 /** A landed mission leaves the default list this long after `landedAt`. */
 export const LANDED_VISIBLE_MS = 24 * 60 * 60 * 1000;
@@ -218,13 +224,17 @@ function sessionStalled(m, now, isAlive) {
   const s = m.session;
   if (!s) return false;
   if (s.pid != null && !isAlive(s.pid)) return true;
+  if (s.pid == null && s.id == null) {
+    const reserved = Date.parse(s.startedAt);
+    if (!Number.isFinite(reserved) || now - reserved > UNBOUND_GRACE_MS) return true;
+  }
   if (m.state !== 'working') return false;
   const seen = Date.parse(s.seenAt);
   return !Number.isFinite(seen) || now - seen > STALL_SILENCE_MS;
 }
 
 /** True while a session is bound to `m` and has not stalled. A session reserved at launch
- * counts from its reservation, before any process binds to it. */
+ * counts from its reservation, before any process binds to it, for `UNBOUND_GRACE_MS`. */
 function hasLiveSession(m, now, isAlive) {
   return !!m.session && !sessionStalled(m, now, isAlive);
 }
