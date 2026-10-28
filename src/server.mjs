@@ -65,8 +65,9 @@ import { isCue, cuePath } from './cues.mjs';
 import { resolveRefRoots } from './resolve.mjs';
 import { createStrandedWatch } from './stranded.mjs';
 import { createMissionWatch } from './mission-watch.mjs';
+import { createMissionsCache } from './missions-cache.mjs';
 import { MAX_POST_BYTES, MAX_DRAINED_BYTES, postTooLargeMessage } from './post-limit.mjs';
-import { missionsOverview, getMissionView, missionView, upsertMission, launchMission, bindSession, addOrder, ackOrder, linkBoard, assertMissionKey } from './missions.mjs';
+import { getMissionView, missionView, upsertMission, launchMission, bindSession, addOrder, ackOrder, linkBoard, assertMissionKey } from './missions.mjs';
 
 // Declared in src/handoff.mjs (which this module imports, so it cannot import back) and
 // re-exported here, where every caller has always looked for it.
@@ -973,6 +974,9 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting) {
     if (err.status === 413) return sendJson(res, 413, { error: postTooLargeMessage(err.bytes) });
     return sendJson(res, err.status || 400, { error: err.status ? err.message : 'invalid JSON body' });
   }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return sendJson(res, 400, { error: 'the body must be a JSON object' });
+  }
   // `mission` names the mission this board belongs to (src/missions.mjs), refused before
   // anything is written when it cannot be a mission's key.
   if (body.mission !== undefined && body.mission !== null) {
@@ -1223,8 +1227,18 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting) {
   const html = renderBoardPage(board);
   writeBoard(board, home);
   writePage(board.id, html, home);
-  // The link the mission records is the one this post's reply carries.
-  if (mission) linkBoard(mission, { id: board.id, url: boardUrl(req, board.id) }, { home });
+  // The link the mission records is the one this post's reply carries. A link that fails
+  // (an unreadable or unwritable mission record) is warned and the post goes on: the
+  // board is already written with this requestId, so a 500 here would send the shim's
+  // retry into the dedupe, and the push, the stranded rule and the reply below would
+  // never run for this round.
+  if (mission) {
+    try {
+      linkBoard(mission, { id: board.id, url: boardUrl(req, board.id) }, { home });
+    } catch (err) {
+      console.error(`claude-board: board ${board.id} was not linked to mission ${mission}: ${(err && err.message) || err}`);
+    }
+  }
   if (pushMode) {
     sse.broadcast(board.id, 'round', fillsHeld => buildRoundPushPayload(board, round, pushMode, touchedBlockIds, blocksBefore, { wholeStages: !fillsHeld }));
   }
@@ -2343,12 +2357,12 @@ function playPreview(cue) {
  * client's wall clock is not the daemon's, and one that computes an offset once from a
  * response it already had to make can then reason about every deadline the daemon mints
  * without ever trusting its own `Date.now()`. */
-function handleWaiting(req, res, waiting, home) {
+function handleWaiting(req, res, waiting, missions) {
   const rows = waiting.rows();
   return sendJson(res, 200, {
     // The status item's mission counts (ADR 72's client draws them). A missions read that
     // fails drops the field and keeps the waiting list.
-    ...missionCounts(home),
+    ...missionCounts(missions),
     // The `url` is the one field built per request rather than cached with the row:
     // it comes off the `Host` this request arrived with (see `boardUrl`), which is
     // right for a URL handed straight back to the caller that sent it -- and wrong to
@@ -2359,9 +2373,19 @@ function handleWaiting(req, res, waiting, home) {
   });
 }
 
-function missionCounts(home) {
+/** What `GET /` draws when the missions cannot be read: no missions, every count zero. */
+function emptyMissionsOverview() {
+  return {
+    missions: [],
+    counts: { needsYou: 0, working: 0, waiting: 0, stalled: 0, landed: 0, queued: 0 },
+    live: { working: 0, alive: 0 },
+    now: new Date().toISOString(),
+  };
+}
+
+function missionCounts(missions) {
   try {
-    const { counts } = missionsOverview({ home });
+    const { counts } = missions.overview();
     return { missions: { needsYou: counts.needsYou, working: counts.working } };
   } catch {
     return {};
@@ -2738,7 +2762,14 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
   // The missions watch (src/mission-watch.mjs): a periodic read that publishes the derived
   // changes no write makes (a stall) and speaks a batch of missions needing the PM,
   // stalled or landed. Per handler, for the reason everything else here is.
-  const missionWatch = createMissionWatch({ home, broadcast: key => broadcastMissions(streamHub, key) });
+  // One cache of the missions overview (src/missions-cache.mjs) for every reader this
+  // handler has, the watch's read included.
+  const missionsCache = createMissionsCache({ home });
+  const missionWatch = createMissionWatch({
+    home,
+    read: () => missionsCache.overview({ all: true }).missions,
+    broadcast: key => broadcastMissions(streamHub, key),
+  });
   missionWatch.start();
   // A caller-supplied instance (startServer's, below) is what makes pause/resume/reset/
   // settings and the boot-time clock share the ONE live setTimeout for this daemon —
@@ -2839,7 +2870,15 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
         // The Boards tab's count, the same total `GET /api/waiting` serves.
         const waitingCount = waitingCache.rows().length;
         if (url.pathname === '/') {
-          const overview = missionsOverview({ home });
+          // A missions store that cannot be read draws empty columns rather than failing the
+          // landing page; the page's live re-read then gets `/api/missions`'s error.
+          let overview;
+          try {
+            overview = missionsCache.overview();
+          } catch (err) {
+            console.error(`claude-board: the missions could not be read for the home page: ${(err && err.message) || err}`);
+            overview = emptyMissionsOverview();
+          }
           return sendHtml(res, 200, renderMissionsPage({ waitingCount, pomodoroEnabled, overview }), {
             'content-security-policy': INDEX_CSP,
           });
@@ -2907,7 +2946,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
       // answered as JSON to a client with no page. See handleWaiting for why it is not on
       // `isOpenRoute` and why it returns everything rather than a client's first few.
       if (req.method === 'GET' && url.pathname === '/api/waiting') {
-        return handleWaiting(req, res, waitingCache, home);
+        return handleWaiting(req, res, waitingCache, missionsCache);
       }
 
       // The daemon-wide stream (ticket 01): timer, settings and waiting-count changes, for
@@ -3006,7 +3045,13 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
       // The missions ledger (src/missions.mjs). The list is a plain read, so a browser
       // holding the cookie reads it through gate 4 above.
       if (req.method === 'GET' && url.pathname === '/api/missions') {
-        return sendJson(res, 200, missionsOverview({ home, all: url.searchParams.get('all') === '1' }));
+        try {
+          return sendJson(res, 200, missionsCache.overview({ all: url.searchParams.get('all') === '1' }));
+        } catch (err) {
+          // Not an empty list: a reader told "no missions" would act on it. The page keeps
+          // the columns it has on a failed read.
+          return sendJson(res, 500, { error: `the missions could not be read: ${(err && err.message) || err}` });
+        }
       }
 
       if (parts[0] === 'api' && parts[1] === 'mission' && parts.length >= 3) {

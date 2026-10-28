@@ -136,6 +136,32 @@ async function main() {
     r.watch.close();
   });
 
+  await check('the batch speaks when its window timer fires, though the clock reads a hair before the window closes or the read fails', async () => {
+    for (const readFails of [false, true]) {
+      const clock = { t: T0 };
+      const posted = [];
+      let views = [{ key: 'GOLF', view: 'working', updatedAt: 'u1' }];
+      let failing = false;
+      const watch = createMissionWatch({
+        now: () => clock.t,
+        read: () => { if (failing) throw new Error('missions unreadable'); return views; },
+        notify: line => posted.push(line),
+        level: () => 'always',
+        intervalMs: 24 * 60 * 60 * 1000,
+        windowMs: 40,
+      });
+      watch.tick();
+      views = [{ key: 'GOLF', view: 'needs-you', updatedAt: 'u2' }];
+      watch.tick();
+      // The timer's own read: the clock still 1 ms short of the window's end.
+      clock.t = T0 + 39;
+      failing = readFails;
+      await waitFor(() => posted.length > 0, { timeoutMs: 1000 });
+      watch.close();
+      assert.deepEqual(posted, ['GOLF needs you'], readFails ? 'a failed read' : 'an early clock');
+    }
+  });
+
   await check('ADR 106: Banner level Off silences the missions notification too', () => {
     const r = rig({ bannerLevel: 'off' });
     r.set('GOLF', { state: 'working' });
