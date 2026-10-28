@@ -459,11 +459,12 @@ function endedSession(s) {
 }
 
 /** `POST /api/mission/:key/session`: binds a session, or heartbeats the one bound
- * (`seenAt` now). A different pid or id while the bound session still holds the mission
- * (`sessionHolds`) is a second live session and throws a 409 carrying the bound one; once
- * the bound one is gone, or silent with no pid, it starts a fresh session. The pid or id of the session that ended before this launch is a
- * 409 too: that process lingers, and must not take its successor's place. Answers the
- * stored record. */
+ * (`seenAt` now); the bound pid under a new id is a heartbeat that takes the id. A
+ * different pid, or a different id when the bound session has no pid, while the bound one
+ * still holds the mission (`sessionHolds`) is a second live session and throws a 409
+ * carrying the bound one; once the bound one is gone, or silent with no pid, it starts a
+ * fresh session. The pid or id of the session that ended before this launch is a 409 too:
+ * that process lingers, and must not take its successor's place. Answers the stored record. */
 export function bindSession(key, body, { home = boardHome(), now = Date.now(), isAlive = pidAlive } = {}) {
   assertMissionKey(key);
   assertObject(body, 'the body');
@@ -479,7 +480,9 @@ export function bindSession(key, body, { home = boardHome(), now = Date.now(), i
   const bound = currentSession(m);
   const ended = m.session?.ended;
   const otherPid = bound && bound.pid != null && given.pid !== undefined && given.pid !== bound.pid;
-  const otherId = bound && bound.id != null && given.id !== undefined && given.id !== bound.id;
+  // A session bound by pid is that process: its own bind under a new id (after a /clear)
+  // is its heartbeat. Only a session bound by id alone is told apart by its id.
+  const otherId = bound && bound.pid == null && bound.id != null && given.id !== undefined && given.id !== bound.id;
   const endedOne = ended
     && ((given.pid !== undefined && given.pid === ended.pid) || (given.id !== undefined && given.id === ended.id));
   if (endedOne || ((otherPid || otherId) && sessionHolds(m, bound, now, isAlive))) {

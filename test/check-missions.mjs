@@ -15,7 +15,7 @@ import {
   missionsOverview, launchMission, bindSession, upsertMission, deriveState, MAX_WORKING, MAX_ALIVE, STALL_SILENCE_MS, UNBOUND_GRACE_MS, LANDED_VISIBLE_MS,
 } from '../src/missions.mjs';
 import { createMissionsCache, MISSIONS_CACHE_MS } from '../src/missions-cache.mjs';
-import { check, openSseClient, rawRequest, runMain, secretFetch, secretHome, sessionCookieHeader, waitFor, writeHeaders } from './support.mjs';
+import { check, deadPid, openSseClient, rawRequest, runMain, secretFetch, secretHome, sessionCookieHeader, waitFor, writeHeaders } from './support.mjs';
 
 const { home, secret: SECRET } = secretHome('claude-board-missions-');
 const fetch = secretFetch(SECRET);
@@ -38,13 +38,6 @@ function endProcess(child) {
     child.once('exit', () => resolve());
     child.kill('SIGKILL');
   }).then(() => children.delete(child));
-}
-
-/** A pid that belonged to a process that has already exited. */
-async function deadPid() {
-  const child = liveProcess();
-  await endProcess(child);
-  return child.pid;
 }
 
 async function post(route, body, headers = writeHeaders(SECRET)) {
@@ -335,6 +328,27 @@ async function main() {
     assert.throws(() => bindSession('CODEX', { id: 'sess-c' }, { home: dir, now: silent + 4000 }), live,
       'a second id while the bound one is heard from is a second live session');
     assert.equal(readMission('CODEX', dir).session.id, 'sess-b');
+  });
+
+  await check('a bind from the bound pid under a new session id (a /clear) is its heartbeat and takes the id, while another pid is still a 409', () => {
+    const dir = scratchHome('same-pid-new-id');
+    const t0 = Date.parse('2026-10-28T12:00:00Z');
+    const alive = () => true;
+    launchMission('CLEARED', { phase: 'direct' }, { home: dir, now: t0 });
+    bindSession('CLEARED', { pid: 7272, id: 'sess-a' }, { home: dir, now: t0 + 1000, isAlive: alive });
+
+    const later = t0 + minutes(2);
+    const rebound = bindSession('CLEARED', { pid: 7272, id: 'sess-b' }, { home: dir, now: later, isAlive: alive });
+    assert.equal(rebound.session.id, 'sess-b');
+    assert.equal(rebound.session.pid, 7272);
+    assert.equal(rebound.session.seenAt, iso(later));
+    assert.equal(rebound.session.startedAt, iso(t0), 'the same session, not a fresh one');
+    assert.equal(bindSession('CLEARED', { pid: 7272 }, { home: dir, now: later + 60_000, isAlive: alive }).session.seenAt, iso(later + 60_000),
+      'its pid-only heartbeats keep landing');
+
+    assert.throws(() => bindSession('CLEARED', { pid: 7373, id: 'sess-b' }, { home: dir, now: later + 61_000, isAlive: alive }),
+      { status: 409, message: 'live' }, 'another pid while the bound one lives is a second live session');
+    assert.equal(readMission('CLEARED', dir).session.pid, 7272);
   });
 
   await check('a mission waiting on the PM is alive but not working, so it holds no working slot', () => {

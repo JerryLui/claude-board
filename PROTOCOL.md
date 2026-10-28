@@ -1436,8 +1436,9 @@ POST /api/mission/:key/launch       { phase, login?, prompt? }
 
 The one check that keeps a mission to one live session. The 409 names the live `session`, and
 carries `silent: true` when that session reads stalled by silence while its process lives, which
-is how a launcher tells a hang from a busy session. A finished session's `pid` and `id` move to
-the new session's `ended`.
+is how a launcher tells a hang from a busy session. A launch ends the session it replaces,
+finished, gone or silent, and that session's `pid` and `id` move to the new session's `ended`; a
+queued launch keeps no session, only that `ended`, until it launches.
 
 ```
 POST /api/mission/:key/session      { pid?, id?, name?, login? } -> { session }
@@ -1445,9 +1446,11 @@ POST /api/mission/:key/session      { pid?, id?, name?, login? } -> { session }
 ```
 
 Binds a session, or heartbeats the one bound (`seenAt` now); a hook calls it at every turn's end.
-A different `pid` while the bound one lives is a 409, and so is the `pid` or `id` of the session
-that ended before this launch; a different `pid` once the bound one died starts a fresh session.
-An absent mission is a 404.
+The bound `pid` under a new `id` (after a `/clear`) is a heartbeat that takes the `id`. A
+different `pid`, or a different `id` when the bound session has no `pid`, while the bound session
+holds the mission is a 409, and so is the `pid` or `id` of the session that ended before this
+launch; a different `pid` or `id` once the bound session is gone, or silent with no `pid`, starts a
+fresh session. An absent mission is a 404.
 
 ```
 POST /api/mission/:key/order          { kind: 'stop' | 'comment', text? } -> { order }
