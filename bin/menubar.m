@@ -2684,8 +2684,8 @@ static void cb_open_url(NSURL *url) {
   if (waiting.more > 0) {
     NSString *more = [NSString stringWithUTF8String:waiting.more_label];
     [rows addObject:cb_row_button(more != nil ? more : @"More waiting",
-                                  @"Open the index page, which lists every board waiting for an answer",
-                                  self, @selector(pressIndex:), 0)];
+                                  @"Open Boards, which lists every board waiting for an answer",
+                                  self, @selector(pressBoards:), 0)];
   }
   /* Last, below the boards: the waiting caption stays beside the rows it counts. */
   if (waiting.missions_label[0] != '\0') {
@@ -2893,6 +2893,14 @@ static void cb_open_url(NSURL *url) {
   (void)sender;
   [self.popover performClose:nil];
   cb_open_url(cb_index_url(@""));
+}
+
+/* The overflow row's errand: the Boards view, which lists every board, since the home
+ * page is Missions. */
+- (void)pressBoards:(id)sender {
+  (void)sender;
+  [self.popover performClose:nil];
+  cb_open_url(cb_index_url(@"boards"));
 }
 
 /* The gear's errand, and the whole of this file's settings story: the index page's

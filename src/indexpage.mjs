@@ -14,6 +14,7 @@
 import path from 'node:path';
 import { styles, faviconLink, markSvg } from './styles.mjs';
 import { themeBootScript, themeToggle } from './theme.mjs';
+import { commentModeToggle } from './render.mjs';
 import { roundIsAwaited } from './badge.mjs';
 // formatCountdown only -- src/pomodoro.mjs's document shape, HTTP surface and
 // clock are owned by other tickets and stay untouched here (this file consumes
@@ -450,6 +451,51 @@ function patchRows() {
         patchRows();
       }
     });
+}
+
+// The Boards tab's count of rounds waiting (renderTopBar), the same total GET
+// /api/waiting serves and the stream's 'waiting' event carries. Hidden at zero, so
+// the tab reads 'Boards' alone when nothing waits. Both home views carry the tab,
+// so both keep it live, off the stream alone (initIndexStream below): every change
+// to the total is broadcast, and a reconnect asks again. Not on the tick, which
+// owns one request at a time for the rows.
+function setWaitingCount(total) {
+  var el = document.querySelector('span#waiting-count');
+  if (!el || typeof total !== 'number') return;
+  el.textContent = total > 0 ? total + ' waiting' : '';
+  if (total > 0) el.removeAttribute('hidden'); else el.setAttribute('hidden', '');
+}
+
+// Failures swallowed, as patchRows swallows its own: a daemon mid-restart leaves the
+// count as it was.
+function fetchWaitingCount() {
+  if (!document.querySelector('span#waiting-count')) return;
+  return fetch('/api/waiting', { credentials: 'same-origin' })
+    .then(function (r) {
+      if (!r.ok) throw new Error('waiting fetch failed: ' + r.status);
+      return r.json();
+    })
+    .then(function (data) { if (data) setWaitingCount(data.total); })
+    .catch(function () { /* see this function's own comment */ });
+}
+
+// The top bar's wash runs the window's full width, the board page's own
+// measurement (measureDocWidth, src/ui.mjs; QUIRKS.md on why not 100vw). Measured
+// again whenever the root's box changes, not only on resize: in Chrome the first
+// read here can come before the root's scrollbar has taken its width, and a wash
+// left that much wider scrolls the page sideways by half the difference.
+function measureDocWidth() {
+  if (!document.body || !document.documentElement) return;
+  var value = document.documentElement.clientWidth + 'px';
+  if (document.body.style.getPropertyValue('--doc-w') !== value) document.body.style.setProperty('--doc-w', value);
+}
+if (typeof window !== 'undefined' && window && typeof window.addEventListener === 'function') {
+  measureDocWidth();
+  window.addEventListener('resize', measureDocWidth);
+  window.addEventListener('load', measureDocWidth);
+  if (typeof ResizeObserver === 'function' && document.documentElement) {
+    new ResizeObserver(measureDocWidth).observe(document.documentElement);
+  }
 }
 
 function tick() {
@@ -1231,12 +1277,13 @@ function wakePomodoro() {
 // visible the moment the reviewer presses something in the menu bar popover with
 // this page on screen.
 //
-// A push WAKES A FETCH, and nothing here reads what it carried. The 'waiting' event
-// is a count, not rows, and 'pomodoro' is a document that was current at the instant
-// it was sent -- while patchRows above is the one place that knows how to patch the
-// list without disturbing the page, and fetchPomodoro is the one place that
-// recomputes the clock offset the countdown is rendered from. So neither listener
-// below takes an argument at all: what a push says is only 'ask again now'.
+// A push WAKES A FETCH for the list and the widget, and neither reads what it
+// carried. The 'waiting' event is a count, not rows, and 'pomodoro' is a document
+// that was current at the instant it was sent -- while patchRows above is the one
+// place that knows how to patch the list without disturbing the page, and
+// fetchPomodoro is the one place that recomputes the clock offset the countdown is
+// rendered from. The one thing taken off a push is that count itself, for the Boards
+// tab, since it is exactly the number the tab shows.
 //
 // 'open' fires on the first connection AND on every automatic reconnect, which is
 // exactly the set of moments this tab may have missed something: nothing backfills
@@ -1269,8 +1316,15 @@ function wakePomodoro() {
 function initIndexStream() {
   if (typeof EventSource === 'undefined') return;
   var es = new EventSource('/api/events');
-  es.addEventListener('open', function () { patchRows(); wakePomodoro(); });
-  es.addEventListener('waiting', function () { patchRows(); });
+  es.addEventListener('open', function () { patchRows(); wakePomodoro(); fetchWaitingCount(); });
+  // The one listener that reads what a push carried: the event's total IS the
+  // count the Boards tab shows, so asking again would only fetch the same number.
+  es.addEventListener('waiting', function (ev) {
+    patchRows();
+    var data = null;
+    try { data = JSON.parse(ev && ev.data); } catch (e) { data = null; }
+    if (data) setWaitingCount(data.total);
+  });
   es.addEventListener('pomodoro', function () { wakePomodoro(); });
 }
 initIndexStream();
@@ -1297,51 +1351,97 @@ export function filterThreads(threads, query) {
     .some(v => typeof v === 'string' && v.toLowerCase().includes(q)));
 }
 
-/** Render the complete index page: the thread list (with rounds-left counts, round
- * counts and a visual live/settled distinction), filtered to `query` when one is
- * given — a plain GET-form round trip needing no client JS of its own. The
- * page's one script (`indexScript` above) only ever touches `.rel-time` text
- * content, the contents of `.thread-list`, and the pomodoro widget; nothing here
- * depends on it running, and the served list is correct as of the moment it was
- * served whether or not it ever does.
+/** The one top bar the two home views share: the board page's own header
+ * (`.board-head` in src/render.mjs's renderBoardPage: the mark at 30px, the 20px
+ * title, the actions row), holding the Missions and Boards tabs beside the title
+ * and the timer, Comment and theme controls on the right. Both views call this
+ * with nothing different but `active`, so switching tabs moves nothing in the bar:
+ * both tabs carry the same weight and border whichever is on, and the Boards tab's
+ * count is the daemon's one waiting total (src/server.mjs's `/api/waiting`), the
+ * same number on either view at the same moment.
  *
- * `pomodoroEnabled` (ADR 103, default true — "a settings document without the new
- * key reads as on") is the one piece of pomodoro state this function ever takes: a
- * plain boolean, decided by the CALLER (src/server.mjs's own `GET /` route reads
- * `settings.enabled` off pomodoro.json for it) rather than read here, so this
- * function stays what it always was — a pure render over its arguments, no fs
- * access of its own. It does nothing but pick which of pomodoroWidget()'s two
- * shapes renders into the header below; every other pomodoro field still reaches
- * the page the way src/pomodoro-widget.mjs's own header comment describes, one
- * fetch after load. */
-export function renderIndexPage({ threads = [], query = '', pomodoroEnabled = true } = {}) {
-  const threadsHtml = renderThreadRows({ threads, query });
+ * `active` is 'missions' or 'boards'. `waitingCount` is the rounds waiting when the
+ * page was served; indexScript keeps it live off the stream. `commentable` is false
+ * until a view holds something a comment can reach (ADR 46, 98): the Comment control
+ * then renders disabled, in its place. */
+export function renderTopBar({ active, waitingCount = 0, pomodoroEnabled = true, commentable = false } = {}) {
+  const tab = (view, href, label, extra = '') => {
+    const on = view === active;
+    return `<a class="view-tab${on ? ' on' : ''}" href="${href}"${on ? ' aria-current="page"' : ''}>${label}${extra}</a>`;
+  };
+  const n = Number(waitingCount) || 0;
+  const count = `<span class="view-tab-count" id="waiting-count"${n ? '' : ' hidden'}>${n ? `${n} waiting` : ''}</span>`;
+  return `<header class="board-head">
+    <div class="board-head-title">
+      <a class="back-to-index" href="/" aria-label="Missions" title="Missions">${markSvg(30)}</a>
+      <div class="board-head-ident"><h1>claude-board</h1></div>
+      <nav class="view-tabs" aria-label="Views">${tab('missions', '/', 'Missions')}${tab('boards', '/boards', 'Boards', count)}</nav>
+    </div>
+    <div class="board-head-actions">
+      ${pomodoroWidget({ enabled: pomodoroEnabled })}
+      ${commentModeToggle({ inert: !commentable })}
+      ${themeToggle()}
+    </div>
+  </header>`;
+}
 
+/** A home view's page: the top bar over `body`, in the board page's own shell
+ * (`.board-shell`, the window's width up to 2560px), so the bar sits on the same
+ * edges a board page's header does. */
+function renderHomePage({ active, title, body, waitingCount, pomodoroEnabled }) {
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>claude-board</title>
+<title>${escHtml(title)}</title>
 ${faviconLink}
 <script>${themeBootScript}</script>
 <style>${styles}</style>
 </head>
-<body>
-<div class="index-shell">
-  <header class="index-head">
-    <div class="index-head-titles">
-      ${markSvg(36)}
-      <h1>claude-board</h1>
-    </div>
-    <div class="index-head-actions">
-      ${pomodoroWidget({ enabled: pomodoroEnabled })}
-      ${themeToggle()}
-    </div>
-  </header>
+<body class="home-page">
+<div class="board-shell">
+  ${renderTopBar({ active, waitingCount, pomodoroEnabled })}
+  <main class="home-view" id="${active}-view">
+${body}
+  </main>
+</div>
+<script type="module">${indexScript}</script>
+</body>
+</html>
+`;
+}
 
-  <form class="search-form" action="/" method="get">
-    <input class="search-input" type="text" name="q" placeholder="Filter sessions — by title, project folder or thread id…" value="${escAttr(query)}">
+/** The Missions view, the board's home page (`GET /`). Its body is the mount point
+ * `section#missions` and nothing else yet: an empty state until the missions columns
+ * render into it. */
+export function renderMissionsPage({ waitingCount = 0, pomodoroEnabled = true } = {}) {
+  const body = `    <section class="missions" id="missions" aria-label="Missions">
+      <p class="empty-state">No missions yet. Work a session records as a mission shows up here.</p>
+    </section>`;
+  return renderHomePage({ active: 'missions', title: 'claude-board', body, waitingCount, pomodoroEnabled });
+}
+
+/** Render the Boards view (`GET /boards`): the thread list (with rounds-left counts,
+ * round counts and a visual live/settled distinction), filtered to `query` when one
+ * is given -- a plain GET-form round trip needing no client JS of its own. The
+ * page's one script (`indexScript` above) only ever touches `.rel-time` text
+ * content, the contents of `.thread-list`, the waiting count and the pomodoro
+ * widget; nothing here depends on it running, and the served list is correct as of
+ * the moment it was served whether or not it ever does.
+ *
+ * `pomodoroEnabled` (ADR 103, default true -- "a settings document without the new
+ * key reads as on") is the one piece of pomodoro state this function ever takes: a
+ * plain boolean, decided by the CALLER (src/server.mjs's own route reads
+ * `settings.enabled` off pomodoro.json for it) rather than read here, so this
+ * function stays a pure render over its arguments, no fs access of its own. It does
+ * nothing but pick which of pomodoroWidget()'s two shapes renders into the bar;
+ * every other pomodoro field still reaches the page the way
+ * src/pomodoro-widget.mjs's own header comment describes, one fetch after load. */
+export function renderIndexPage({ threads = [], query = '', pomodoroEnabled = true, waitingCount = 0 } = {}) {
+  const threadsHtml = renderThreadRows({ threads, query });
+  const body = `  <form class="search-form" action="/boards" method="get">
+    <input class="search-input" type="text" name="q" placeholder="Filter sessions — by title, project folder or thread id…" aria-label="Filter sessions" value="${escAttr(query)}">
     <button class="search-btn" type="submit">Filter</button>
   </form>
 
@@ -1352,10 +1452,6 @@ ${faviconLink}
        location carrying a hash and nothing else. -->
   <div class="thread-list" data-query="${escAttr(query)}">
     ${threadsHtml}
-  </div>
-</div>
-<script type="module">${indexScript}</script>
-</body>
-</html>
-`;
+  </div>`;
+  return renderHomePage({ active: 'boards', title: 'Boards - claude-board', body, waitingCount, pomodoroEnabled });
 }

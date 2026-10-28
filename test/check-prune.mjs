@@ -321,14 +321,14 @@ async function main() {
 
     // Both are on the index and in the search before the prune, or afterwards proves
     // nothing about either.
-    const beforeIndex = await (await fetch(`${base}/`)).text();
+    const beforeIndex = await (await fetch(`${base}/boards`)).text();
     assert.ok(beforeIndex.includes('Prunable session') && beforeIndex.includes('Surviving session'), 'setup failure: both rows must be on the index first');
     const beforeSearch = await (await fetch(`${base}/api/search?q=ZARDOZ`)).json();
     assert.ok(beforeSearch.results.some(r => r.boardId === goner) && beforeSearch.results.some(r => r.boardId === keeper), 'setup failure: both boards must match first');
 
     assert.equal((await prune({ days: 30 })).status, 200);
 
-    const indexRes = await fetch(`${base}/`);
+    const indexRes = await fetch(`${base}/boards`);
     assert.equal(indexRes.status, 200, 'the index must still render -- a walk over a store a prune just changed is the case this is about');
     const index = await indexRes.text();
     assert.ok(index.includes('Surviving session'), 'the surviving thread must still be listed');
@@ -357,6 +357,7 @@ async function main() {
 
     await fetch(`${base}/`);
     await fetch(`${base}/?q=Read`);
+    await fetch(`${base}/boards`);
     await fetch(`${base}/b/${ancient}`);
     await fetch(`${base}/api/search?q=five`);
     await fetch(`${base}/api/pomodoro`);

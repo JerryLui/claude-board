@@ -2441,3 +2441,14 @@ Traps that have bitten once. A second bite moves the entry up into the section i
   The same three steps as separate calls (the `git show` redirect alone, the probe written with the
   Write tool, then `node probe.mjs`) all ran. A probe of the pre-change code imports such a copy
   from `src/` so its relative imports resolve, and both files are deleted before committing.
+- **`scrollbar-gutter: stable` reserves nothing on an overlay-scrollbar Mac, yet the restyled
+  bar takes 11px.** `::-webkit-scrollbar { width: 11px }` (`src/styles.mjs`) gives a scrolling
+  page an 11px bar even under overlay scrollbars, where the gutter rule reserves 0 on a page that
+  does not scroll, so a short view and a long one differ by 11px. The home views use
+  `overflow-y: scroll` on the root instead (Chrome 155 headless, jerry-m6, 2026-10-28;
+  `test/browser-check-topbar.mjs` runs both scrollbar kinds).
+- **`documentElement.clientWidth` read in a module script can predate the root's scrollbar.**
+  The index's first `measureDocWidth` read 1440 on a 1440 window whose root had
+  `overflow-y: scroll` (true width 1429), so the centred `--doc-w` wash overflowed by half the
+  difference and the page scrolled sideways 6px. Re-measure on the root's `ResizeObserver` and on
+  `load`, not only on `resize`.

@@ -2051,7 +2051,7 @@ async function main() {
       '-pressRow: opens only when nothing was raised');
 
     // And the two index opens are plain, which is only visible as an absence.
-    for (const method of ['pressIndex', 'pressSettings']) {
+    for (const method of ['pressIndex', 'pressBoards', 'pressSettings']) {
       const start = menubar.indexOf(`- (void)${method}:(id)sender`);
       assert.ok(start > 0, `setup: -${method}: must still exist`);
       const body = menubar.slice(start, menubar.indexOf('\n}', start));
@@ -2196,6 +2196,17 @@ async function main() {
         // remaining row.
         assert.equal(state.rowIndex.gear, 0, 'the gear is still in the (only) row');
       });
+  });
+
+  await check('structurally: the "N more waiting" row opens the Boards view (/boards), and the missions row the home page (/), Missions', () => {
+    const source = readFileSync(path.join(repoRoot, 'bin', 'menubar.m'), 'utf8');
+    const body = method => source.slice(source.indexOf(`- (void)${method}:(id)sender`), source.indexOf('\n}', source.indexOf(`- (void)${method}:(id)sender`)));
+    assert.match(body('pressBoards'), /cb_open_url\(cb_index_url\(@"boards"\)\)/, 'the overflow row\'s action opens /boards');
+    assert.match(body('pressIndex'), /cb_open_url\(cb_index_url\(@""\)\)/, 'the missions row\'s action opens /');
+    assert.match(source, /waiting\.more_label\][^;]*;\s*\n\s*\[rows addObject:cb_row_button\([\s\S]*?@selector\(pressBoards:\)/,
+      'the overflow row is wired to -pressBoards:');
+    assert.match(source, /NSString \*missions = \[NSString stringWithUTF8String:waiting\.missions_label\];[\s\S]{0,300}?@selector\(pressIndex:\)/,
+      'the missions row is wired to -pressIndex:');
   });
 
   await check('criterion 3, structurally: the gear\'s URL is the same #pomodoro-settings anchor whether the switch is on or off -- one gear, one wire, never rebuilt per state', async () => {

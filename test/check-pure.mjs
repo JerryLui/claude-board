@@ -7290,8 +7290,8 @@ check('every page carries the same inline mark, and unbadging has something to r
   assert.ok(renderRefusalPage().includes(faviconLink), 'the refusal page must carry the mark');
 });
 
-check('the tab mark and the in-page mark are one drawing, at two sizes', () => {
-  // The tile in the board head's home control and the one leading the index title
+check('the tab mark and the in-page mark are one drawing', () => {
+  // The tile in the board head's home control and the one in the home views' top bar
   // are the favicon's own rects, not a second copy that a geometry edit would
   // leave behind. Compare shapes, not whole documents: the favicon carries xmlns
   // and no width/height, the in-page mark the reverse.
@@ -7307,10 +7307,11 @@ check('the tab mark and the in-page mark are one drawing, at two sizes', () => {
   assert.match(home[0], /aria-label="All threads"/,
     'the mark replaced a labelled arrow -- losing the label would leave a screen reader an unnamed link');
 
+  // The home views' top bar holds the board head's own home control, at its size.
   const index = renderIndexPage({ threads: [] });
-  const head = index.match(/<div class="index-head-titles">(.*?)<h1>/s);
-  assert.ok(head && head[1].includes(shapes), 'the index mark must lead the title, and be the same drawing');
-  assert.match(head[1], /width="36" height="36"/);
+  const barHome = index.match(/<a class="back-to-index" href="\/"[^>]*>(.*?)<\/a>/s);
+  assert.ok(barHome && barHome[1].includes(shapes), 'the top bar mark must be the same drawing');
+  assert.match(barHome[1], /width="30" height="30"/, 'the top bar mark is the board head mark, at the same 30px');
 });
 
 // --- computeBoardPatch sees NESTED blocks ---------------------------------------
