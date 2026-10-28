@@ -290,8 +290,10 @@ while `context` is what the reviewer looks up, laid out beside the options.
 **`action`** is `'fire'` or `'merge'`, on a `single` question only, and absent on one that carries
 none: the question's yes is option 0, and while its round waits on an answer, the card of the
 mission whose board it is offers that yes as a Fire or Merge button. A click answers the round
-through `POST /api/board/:id/submit`, that question set to option 0's label, exactly as a Send with
-that pick would. Any other value, or an `action` on another widget, is a 400.
+through `POST /api/board/:id/submit`, that question set to option 0's label and the body marked
+`via: 'card'`, exactly as a Send with that pick would. A `fire` question answered yes, from the
+card, the page or a relay, records `fire` on the mission (the submit route below). Any other
+value, or an `action` on another widget, is a 400.
 
 **A widget outside the union is a 400**, not a silent fallback to `single`: an unrenderable
 widget produces a question with no control, which Send then reports back as `unanswered`, so the
@@ -706,7 +708,8 @@ GET  /api/board/:id/read            one board's rounds, answers and comments, in
                                     calls it, never a page
 GET  /api/board/:id/events          SSE: round pushes, state changes; `?stages=held`
                                     declares the page fills held stage frames
-POST /api/board/:id/submit          { round, action: 'send'|'discuss', answers, comments }
+POST /api/board/:id/submit          { round, action: 'send'|'discuss', via?: 'card', answers,
+                                    comments }
 POST /api/board/:id/abandon         {} -> { ok: true, rounds }; closes every round still
                                     open on a board a conversation walked away from
                                     (ADR.md entry 69). Secret only: never cookie-reachable
@@ -1037,6 +1040,8 @@ must name, the round an amend lands on — it means the **latest** open one.
                                                   // any question block with no entry here is
                                                   // synthesised as unanswered server-side
   comments: [ { blockId, anchor, text } ],        // n, createdAt, round assigned server-side
+  via: 'card',                                    // optional: sent by a mission card's
+                                                  // Fire or Merge, absent from the page
 }
 ```
 
@@ -1072,6 +1077,16 @@ shows its comments and no compose form, exactly as a lapsed one does.
 The page renders both as buttons in one `.send-bar` (`#send-btn`, `#discuss-btn`), which
 `body.readonly` hides wholesale — so the standalone `file:` archive offers neither.
 
+**A Fire records itself on the mission.** When the round just sent holds a `single` question
+carrying `action: 'fire'` answered with option 0's label, and its board is linked to a mission
+(`board.mission`), the submit writes `fire: { at, by }` on that mission, `at` the daemon's time
+and `by` `'card'` for a body carrying `via: 'card'` (the mission card's click), else `'round'`. It
+is the board's own write, so a Fire reaches the mission whether or not the grill session that
+asked is still alive to copy it, and `missions` goes out on the daemon-wide stream. Any other pick,
+or a `merge` question, writes nothing. A mission record that cannot be read or written is warned
+and the submit still answers 200, the round sent. A repeat on the sent round is the 409 above, so
+one round writes `fire` once.
+
 ## `POST /api/board/:id/relay`
 
 ```js
@@ -1087,8 +1102,8 @@ Secret only; on no cookie list, so a browser cannot forge one, and answers throu
 instead (ADR 126). The Master Chief answers a session's open round on the PM's own words, typed to
 it rather than on the page. It is a submit with `action: 'send'`, through the submit route's own
 path, so everything above holds: the round is sent, its tabs are pushed, a waiting `ask` wakes,
-`waiting` and the mission's `missions` go out on the daemon-wide stream, and a question with no
-entry in `answers` is unanswered. The round then records `relayed: { words, at }` (`at` the
+`waiting` and the mission's `missions` go out on the daemon-wide stream, a Fire is recorded on the
+mission with `by: 'round'`, and a question with no entry in `answers` is unanswered. The round then records `relayed: { words, at }` (`at` the
 daemon's ISO time of the relay), carried by every packet and `read` of it; the shim's text channel
 says so on its own line, `Relayed: the Master Chief answered this round on the PM's words at
 <at>: "<words>"`.
@@ -1376,7 +1391,7 @@ Mission = {
   boards: [ { id, url, at } ],                     // linked by a post; the last is the latest
   session: { id?, pid?, name?, login?, startedAt, seenAt, ended? } | null,
   handoff?,                  // a Handoff block, at most 4 KB
-  fire?: { at, by },         // by: 'round' | 'card'
+  fire?: { at, by },         // by: 'round' | 'card'; written by a Fire round's submit too
   orders: [ { id, kind, text?, at, by: 'card', relayedAt? } ],   // kind: 'stop' | 'comment'
   queue?: { phase, prompt, login?, at },
   history: [ { at, phase, state } ],               // one entry per phase or state change
@@ -1401,7 +1416,7 @@ actions: [ { kind, board, round, question, choice } ]   // kind: 'fire' | 'merge
 one per `single` question carrying an `action`, in a round of a linked board that still wants its
 answer as `needs-you` reads it: `board` the board id, `round` the round's number, `question` the
 question block's id, and `choice` option 0's label, the one a click submits through
-`POST /api/board/:id/submit` with `action: 'send'`.
+`POST /api/board/:id/submit` with `action: 'send'` and `via: 'card'`.
 
 ```
 GET  /api/missions[?all=1]

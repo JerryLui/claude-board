@@ -233,7 +233,7 @@ async function main() {
     });
 
     for (const [kind, label, labels] of [['fire', 'Fire', ['Fire /direct', 'Not yet']], ['merge', 'Merge', ['Merge both', 'Hold']]]) {
-      await check(`${label} shows while the round asks for it, and a click answers that round with option 0`, async () => {
+      await check(`${label} shows while the round asks for it, and a click answers that round with option 0${kind === 'fire' ? ', recorded on the mission as a card\'s Fire' : ', recording no Fire'}`, async () => {
         const key = `${kind.toUpperCase()}_CLICK`;
         await liveMission(key);
         const { boardId, round, questionId } = await actionRound(key, kind, labels);
@@ -247,6 +247,9 @@ async function main() {
           const board = readBoard(boardId, home);
           assert.equal(board.rounds.find(r => r.n === round).status, 'sent');
           assert.deepEqual(board.answers[questionId], { id: questionId, status: 'answered', choice: labels[0], note: '' });
+          const { fire } = await mission(key);
+          if (kind === 'fire') assert.equal(fire?.by, 'card', `the click records a card's Fire: ${JSON.stringify(fire)}`);
+          else assert.equal(fire, undefined, 'a Merge records no Fire');
           assert.deepEqual(actionButtons(cardFor(tab.document, key)), [], 'the answered round offers the button no more');
           assert.equal(cardFor(tab.document, key).querySelector('p.mission-error'), null);
         } finally {

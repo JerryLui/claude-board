@@ -529,6 +529,27 @@ export function ackOrder(key, id, { home = boardHome(), now = Date.now() } = {})
   return order;
 }
 
+/** True when `round` of `board`, as just submitted, answered a `single` question carrying
+ * `action: 'fire'` with option 0. Any other pick, or a round with no such question, fires
+ * nothing. */
+export function roundFired(board, round) {
+  return questionBlocks(board).some(q => {
+    if (q.round !== round || q.action !== 'fire' || q.widget !== 'single' || !q.options?.length) return false;
+    const answer = board.answers?.[q.id];
+    return !!answer && answer.status === 'answered' && answer.choice === q.options[0].label;
+  });
+}
+
+/** A submit that fired its round (`roundFired`): records `fire: { at, by }` on the board's
+ * mission, `by` being `'card'` for a click on the mission's card and `'round'` for a Send or
+ * a relay. The board writes it itself, so a Fire lands on the mission whether or not the
+ * grill session that asked is still there to copy it. Answers the stored record, or null
+ * when the round fired nothing or the board has no mission. */
+export function recordFire(board, round, by, { home = boardHome(), now = Date.now() } = {}) {
+  if (!board.mission || !roundFired(board, round)) return null;
+  return upsertMission(board.mission, { fire: { by } }, { home, now });
+}
+
 /** A board posted with `mission: <key>`: appends `{ id, url, at }` to the mission's `boards`
  * (a board already listed moves to the end, so the last entry is the latest board), making
  * a stub mission when there is none. Answers the stored record. */

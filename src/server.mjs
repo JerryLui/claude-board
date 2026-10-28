@@ -67,7 +67,7 @@ import { createStrandedWatch } from './stranded.mjs';
 import { createMissionWatch } from './mission-watch.mjs';
 import { createMissionsCache } from './missions-cache.mjs';
 import { MAX_POST_BYTES, MAX_DRAINED_BYTES, postTooLargeMessage } from './post-limit.mjs';
-import { getMissionView, missionView, upsertMission, launchMission, bindSession, addOrder, ackOrder, linkBoard, assertMissionKey } from './missions.mjs';
+import { getMissionView, missionView, upsertMission, launchMission, bindSession, addOrder, ackOrder, linkBoard, recordFire, assertMissionKey } from './missions.mjs';
 
 // Declared in src/handoff.mjs (which this module imports, so it cannot import back) and
 // re-exported here, where every caller has always looked for it.
@@ -2062,6 +2062,16 @@ async function handleSubmit(req, res, id, home, sse, stranded, stream, waiting, 
   const pageHtml = renderBoardPage(board);
   writeBoard(board, home);
   writePage(board.id, pageHtml, home);
+  // A round answered Fire records it on the board's mission here, so the Fire reaches the
+  // mission however the grill session that asked has fared (ADR 125). `via: 'card'` is the
+  // mission card's own submit; a Send or a relay is the round's. Guarded like the post's
+  // `linkBoard`: the round is already sent and written, so a failed mission write is
+  // warned and the submit goes on. `broadcastWaiting` below publishes `missions` for it.
+  try {
+    recordFire(board, round, !relayed && body.via === 'card' ? 'card' : 'round', { home });
+  } catch (err) {
+    console.error(`claude-board: the Fire on board ${board.id} round ${round} was not recorded on mission ${board.mission}: ${(err && err.message) || err}`);
+  }
   // Every connected client -- including the one that just submitted, which is
   // subscribed to its own board like any other -- turns this round sent (and
   // read-only, if it is the page that client is showing -- ADR.md entry 42) on
