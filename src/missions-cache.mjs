@@ -14,12 +14,20 @@
 //    within one interval.
 //
 // A read that throws is not cached: the next caller reads again.
+//
+// The overview also carries the tab cards (src/sessions.mjs `deriveTabs`) when a session
+// list is given: `tabs`, and the needs-you ones added to `counts.needsYou`. The list's
+// `version` joins the print, so a snapshot, an order or the watcher going down is read on
+// the next call rather than up to a bound later. With no session listed nothing more is
+// read; with some, every mission record (a retired mission's session is still not a tab)
+// and every board (a tab's rounds sit on any board it posted).
 
 import { readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { missionsOverview } from './missions.mjs';
+import { deriveTabs } from './sessions.mjs';
 import { missionWatchMs } from './mission-watch.mjs';
-import { boardHome, storeFingerprint } from './store.mjs';
+import { boardHome, storeFingerprint, listBoards, listMissions } from './store.mjs';
 
 export const MISSIONS_CACHE_MS = 5_000;
 
@@ -41,18 +49,29 @@ function missionsFingerprint(home) {
   }
 }
 
+/** `overview` with its tab cards: `tabs`, and `counts.needsYou` counting the needs-you
+ * ones too. Working and waiting tabs count nowhere, the launch caps' `live` included. */
+function withTabs(overview, sessions, home) {
+  const entries = sessions.entries();
+  const tabs = entries.length === 0 ? [] : deriveTabs({ sessions: entries, missions: listMissions(home), boards: listBoards(home) });
+  const needsYou = tabs.filter(t => t.state === 'needs-you').length;
+  return { ...overview, tabs, counts: { ...overview.counts, needsYou: overview.counts.needsYou + needsYou } };
+}
+
 /** The cache over `home`. `overview({ all })` answers what `missionsOverview` would, one
- * entry per `all`. `now` is the clock the bound and the overview read. */
-export function createMissionsCache({ home = boardHome(), now = Date.now } = {}) {
+ * entry per `all`, with `tabs` when `sessions` (src/sessions.mjs `createSessionList`) is
+ * given. `now` is the clock the bound and the overview read. */
+export function createMissionsCache({ home = boardHome(), now = Date.now, sessions = null } = {}) {
   const boundMs = Math.min(MISSIONS_CACHE_MS, missionWatchMs());
   const entries = new Map(); // all -> { print, at, value }
   return {
     overview({ all = false } = {}) {
       const t = now();
-      const print = `${storeFingerprint(home)}#${missionsFingerprint(home)}`;
+      const print = `${storeFingerprint(home)}#${missionsFingerprint(home)}#${sessions ? sessions.version : ''}`;
       const hit = entries.get(all);
       if (hit && hit.print === print && t - hit.at < boundMs) return hit.value;
-      const value = missionsOverview({ home, now: t, all });
+      const plain = missionsOverview({ home, now: t, all });
+      const value = sessions ? withTabs(plain, sessions, home) : plain;
       entries.set(all, { print, at: t, value });
       return value;
     },

@@ -296,8 +296,9 @@ function linkedBoards(m, home) {
 
 /** A round still waiting on the PM: open (neither sent nor abandoned) and one that asks for
  * an answer, by a question in it or by a wait it was minted with. A round that only shows
- * something stays open for good and asks nothing. */
-function roundWantsAnswer(round, questions) {
+ * something stays open for good and asks nothing. A tab card reads needs-you by the same
+ * rule (src/sessions.mjs). */
+export function roundWantsAnswer(round, questions) {
   if (round.status !== 'open') return false;
   if (round.awaitDeadline) return true;
   return questions.some(q => q.round === round.n);
