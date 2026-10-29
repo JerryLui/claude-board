@@ -54,7 +54,7 @@ import { readSecret, secretPath, secretMatches, sessionToken, sessionCookieMatch
 import { createHandoffStore, handoffTarget, recoveryCommand, HANDOFF_TOKEN_RE, DEFAULT_PORT } from './handoff.mjs';
 import { createBoard, addRound, amendRound, abandonOpenRounds, applySubmit, buildPacket, roundAnswers, dropResolved, resolveComments, questionBlocks, SUPPRESSED, ANSWERS_DELIVERED, roundContentDrifted } from './board.mjs';
 import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, renderRefusalPage, boardForClient, holdStages, holdAllStages, stageShas, CSP, INDEX_CSP } from './render.mjs';
-import { buildThreadIndex, renderIndexPage, renderMissionsPage, renderThreadRows, folderName } from './indexpage.mjs';
+import { buildThreadIndex, renderIndexPage, renderMissionsPage, renderThreadRows, folderName, INDEX_BUILD } from './indexpage.mjs';
 // The one shape rule for "is this round a full-viewport page" (ADR.md entry 33),
 // imported rather than restated so the push path and the page path can never
 // disagree about what a page round is -- see buildRoundPushPayload below.
@@ -3124,10 +3124,12 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
       }
 
       // The missions ledger (src/missions.mjs). The list is a plain read, so a browser
-      // holding the cookie reads it through gate 4 above.
+      // holding the cookie reads it through gate 4 above. `build` is the home page's this
+      // daemon serves: a Missions tab served by another reloads.
       if (req.method === 'GET' && url.pathname === '/api/missions') {
         try {
-          return sendJson(res, 200, overviewFor(req, missionsCache.overview({ all: url.searchParams.get('all') === '1' }), sessions));
+          const overview = overviewFor(req, missionsCache.overview({ all: url.searchParams.get('all') === '1' }), sessions);
+          return sendJson(res, 200, { ...overview, build: INDEX_BUILD });
         } catch (err) {
           // Not an empty list: a reader told "no missions" would act on it. The page keeps
           // the columns it has on a failed read.

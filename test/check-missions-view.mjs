@@ -74,13 +74,14 @@ async function actionRound(key, action, labels) {
 
 /** The served Missions page with the real indexScript running in it, its stream a stand-in
  * the check pushes real daemon events into. */
-async function openMissionsTab() {
+async function openMissionsTab({ served = body => body } = {}) {
   const page = await rawRequest(port, 'GET', '/', { headers: { [SECRET_HEADER]: SECRET } });
   assert.equal(page.status, 200);
-  const tab = loadIndexAgainstDaemon(port, { secret: SECRET, html: page.body, stream: true, settler });
+  const tab = loadIndexAgainstDaemon(port, { secret: SECRET, html: served(page.body), stream: true, settler });
   await settler.settle();
   return {
     document: tab.document,
+    location: tab.location,
     async push(name, data) {
       const listeners = tab.stream && tab.stream.listeners.get(name);
       assert.ok(listeners && listeners.length, `the Missions page must listen for '${name}' on the daemon-wide stream`);
@@ -489,6 +490,36 @@ async function main() {
           String(columns(tab.document).waiting.length));
       } finally {
         wire.close();
+        tab.restoreFetch();
+      }
+    });
+
+    await check('a tab served by another build than the daemon runs reloads on its next read, held while a note is open; one served by this build does not', async () => {
+      await liveMission('BUILD_NOTE');
+      const other = '0'.repeat(16);
+      const stale = await openMissionsTab({
+        served: body => {
+          const swapped = body.replace(/data-build="[0-9a-f]{16}"/, `data-build="${other}"`);
+          assert.notEqual(swapped, body, 'the page names the build it was served by');
+          return swapped;
+        },
+      });
+      stale.restoreFetch();
+      assert.equal(stale.location.reloadCount, 1, 'its first read reloads it');
+
+      const tab = await openMissionsTab();
+      try {
+        await tab.push('open', null);
+        assert.equal(tab.location.reloadCount, 0, 'the daemon answers the build it served the page by');
+        await tab.click(tab.document.querySelector('button#comment-mode-toggle'));
+        await tab.click(cardFor(tab.document, 'BUILD_NOTE').querySelector('b.mission-title'));
+        tab.document.querySelector('section#missions').setAttribute('data-build', other);
+        await tab.push('missions', { key: null });
+        assert.equal(tab.location.reloadCount, 0, 'an open note holds the reload');
+        await tab.click(cardFor(tab.document, 'BUILD_NOTE').querySelector('button.mission-comment-cancel'));
+        await tab.push('missions', { key: null });
+        assert.equal(tab.location.reloadCount, 1, 'the first read after the note closes reloads');
+      } finally {
         tab.restoreFetch();
       }
     });
