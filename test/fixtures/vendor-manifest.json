@@ -1,4 +1,9 @@
 {
+  "inter/LICENSE": "18aabf190848725e2576eefb5c29ba06aac1029d02132252a7f312eac2e50cf3",
+  "inter/inter-latin-400-normal.woff2": "dd05e326cf8eac3b55acecf29c842ed73e6e6dd06491cf47f7e8800680ab3e33",
+  "inter/inter-latin-500-normal.woff2": "b0e7558f4710a1e255b93e3deefe3aebb19f3bb41c150f685a74d3b1a1c79e87",
+  "inter/inter-latin-600-normal.woff2": "62553d159189834af73c9a6264704be5b2bee9a08da66a14768d8e5c6ffd2cdb",
+  "inter/inter-latin-700-normal.woff2": "aac638f7503cebb084ec494cf00f75f7d8260d50c2f4e7820bccabba09626a3a",
   "marked/LICENSE": "8e3a3f82f59a60958f56ca08f445647c32a4733dc7ca6c2c46f6eb898471ab9c",
   "marked/marked.esm.js": "2c9b2113f8ef95ad21349952644fc1b3f759f0f92aff2ad4016a574b5ce19de5",
   "mermaid/LICENSE": "ec9fb67dcb25eccc416ed56e1aab819222c805a2a4bfe4cb19e7556bf2ffde80",
