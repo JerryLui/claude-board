@@ -1955,6 +1955,14 @@ body.home-page .mode-toggle:disabled { opacity: 0.5; cursor: default; }
   font: inherit; font-size: 13px; color: var(--ink); background: var(--panel-2); border: 1px solid var(--hairline-2);
   border-radius: var(--r-sm); padding: 6px 10px; }
 .mission-comment-text:focus { border-color: var(--accent); outline: none; box-shadow: var(--ring); }
+/* a tab card: a session no mission launched (ADR 131), the mission card tagged as one */
+.tab-tags { display: inline-flex; flex: none; align-items: center; gap: 4px; }
+.tab-tag { color: var(--accent); background: var(--accent-soft); border-color: transparent; }
+.tab-turn { color: var(--warning); background: var(--warning-soft); border-color: var(--warning-border); }
+.tab-card .mission-title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.missions-notice { margin: 0 0 var(--space-4); padding: 8px 12px; font-size: 13px; color: var(--ink-2);
+  background: var(--warning-soft); border: 1px solid var(--warning-border); border-radius: var(--r-sm); }
+.missions-notice b { color: var(--warning); }
 /* comment mode: a card is the thing a note lands on */
 body.comment-mode .mission-card { cursor: pointer; }
 body.comment-mode .mission-card:hover { border-color: var(--accent); }
