@@ -627,7 +627,7 @@ body.sent-page .comment-btn { display: none; }
 .card-head { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-3); min-width: 0; }
 .card-head > .card-title { flex: 1 1 auto; min-width: 0; margin: 0; color: var(--ink);
   font-size: 16px; font-weight: 650; line-height: 1.4; letter-spacing: -0.01em; }
-.card-head > :first-child:not(.card-title) { margin-left: auto; }
+.card-head > :first-child:not(.card-title), .card-head > .card-title + * { margin-left: auto; }
 .card-status { flex: none; align-self: flex-start; display: inline-flex; align-items: center;
   font-size: 11.5px; font-weight: 600; line-height: 1.3; white-space: nowrap;
   border-radius: var(--r-pill); padding: 3px 10px; background: var(--panel-3); color: var(--ink-2); }
@@ -2594,6 +2594,7 @@ body.page-board .back-to-top.visible {
 .md-content h1, .md-content h2, .md-content h3, .md-content h4, .md-content h5, .md-content h6,
 .question-prompt, .card-choice, .variant-label, .opt-label, .opt-desc, .rank-list, .answer-textarea, .note-field, .resolve-error,
 body:not(.page-board) .blocks .comment-list, body:not(.page-board) .blocks .comment-form { max-width: var(--prose); }
+.card-title, .card-summary, .question-picks { max-width: var(--prose); }
 /* An option's preview image or code is rendered content, not prose, and the
    card's measure would draw it narrower than the old column did (605px for
    992px at 1920). A card carrying one keeps the old column's width instead;
