@@ -2548,12 +2548,16 @@ async function main() {
   // ADR 131: the shim names the session it runs under, its parent process, so the board's
   // open round reaches that session's tab card. This check process is the shim's parent, and
   // every shim above shares it, so the round is read on a daemon of its own: a tab lists
-  // every open round its pid posted.
-  await check('a board the shim posts names its parent process and that process\'s UTC start, and a listed session with that pid and start shows the round in Needs you', async () => {
+  // every open round its pid posted. A Swedish locale makes `ps` print `tors 29 okt.`, so
+  // the shim reads its parent's start in the C locale.
+  for (const [locale, localeEnv] of [
+    ['the inherited locale', {}],
+    ['a Swedish locale', { LC_ALL: 'sv_SE.UTF-8', LC_TIME: 'sv_SE.UTF-8' }],
+  ]) await check(`under ${locale}, a board the shim posts names its parent process and that process's UTC start, and a listed session with that pid and start shows the round in Needs you`, async () => {
     const tabHome = tempHome('session');
     const { server: tabServer, port: tabPort } = await startServer({ home: tabHome, port: 0 });
     const tabBase = `http://127.0.0.1:${tabPort}`;
-    const asker = spawnShim({ ...baseEnv, CLAUDE_BOARD_HOME: tabHome, CLAUDE_BOARD_PORT: String(tabPort) });
+    const asker = spawnShim({ ...baseEnv, ...localeEnv, CLAUDE_BOARD_HOME: tabHome, CLAUDE_BOARD_PORT: String(tabPort) });
     try {
       const asked = asker.request('tools/call', { name: 'ask', arguments: { title: 'A hand tab asks', blocks: [QUESTION] } });
       const boardId = await waitForNewBoardFile(tabHome, new Set());
