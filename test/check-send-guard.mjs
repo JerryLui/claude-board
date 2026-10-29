@@ -633,6 +633,149 @@ check('an armed Send does not carry across a page flip: Send on the arriving pag
   assert.equal(document.querySelector(`.question-block[data-block-id="${board.blocks[0].id}"]`).classList.contains('flagged'), true);
 });
 
+// A comment goes out with its own page's Send: the daemon files every comment a
+// submit carries under the round it names, and the agent waiting on another round
+// never hears it. A page that asks nothing has no Send of its own, so its comments
+// ride the newest unsent page's.
+
+/** Queue a whole-block comment on `blockId` through its real comment button and form. */
+function queueBlockComment(document, blockId, text) {
+  document.querySelector(`button.comment-btn[data-block-id="${blockId}"]`).dispatchEvent(new StandInEvent('click'));
+  const form = document.getElementById('comment-form-' + blockId);
+  assert.ok(form && form.classList.contains('open'), 'setup failure: the comment button did not open its form');
+  form.querySelector('input[type=text]').value = text;
+  form.dispatchEvent(new StandInEvent('submit'));
+}
+
+/** A page's own controls, by round, on a loaded board. */
+function pageControls(document) {
+  return {
+    flip: n => document.querySelector(`.round-page[data-round="${n}"]`).dispatchEvent(new StandInEvent('click')),
+    block: id => document.querySelector(`.question-block[data-block-id="${id}"]`),
+    press: () => withFetchCapture(() => document.getElementById('send-btn').dispatchEvent(new StandInEvent('click'))),
+    queued: () => document.querySelectorAll('.comment-item.comment-pending').length,
+  };
+}
+
+const mockSpec = text => ({ kind: 'html', html: `<div class="mock">${text}</div>` });
+
+await checkAsync('Send on an older unsent page posts none of the newest page\'s comments: the comment stays queued and goes out with the newest page\'s Send', async () => {
+  const board = createBoard({ title: 'Comments by page', blocks: [singleSpec()], wait: true });
+  board.rounds[0].awaitDeadline = new Date(Date.now() - 60_000).toISOString(); // round 1 has lapsed, unsent
+  const round2 = addRound(board, { blocks: [singleSpec(), mockSpec('page 2')], wait: true });
+  const [p1, p2, mock2] = board.blocks.map(b => b.id);
+  const { document, es } = loadBoardWithEventSource(renderBoardPage(board));
+  const { flip, block, press, queued } = pageControls(document);
+
+  queueBlockComment(document, mock2, 'on the page 2 mock');
+  flip(1);
+  answerSingle(block(p1), 'Yes');
+  const fromPage1 = press();
+  await flush(1);
+  assert.equal(fromPage1.length, 1, 'setup failure: page 1 is complete, so Send posts on the first press');
+  assert.equal(fromPage1[0].body.round, 1);
+  assert.deepEqual(fromPage1[0].body.comments, [], 'page 1\'s Send carries no comment on page 2\'s blocks');
+  assert.equal(queued(), 1, 'page 2\'s comment stays queued');
+
+  applySubmit(board, { action: 'send', answers: fromPage1[0].body.answers, comments: [] }, 1);
+  es.dispatch('submitted', JSON.stringify({ round: 1, board, html: renderRoundSection(board, 1, groupCommentsByBlock([])) }));
+  await flush(1);
+  flip(round2);
+  answerSingle(block(p2), 'Yes');
+  const fromPage2 = press();
+  assert.equal(fromPage2.length, 1, 'setup failure: page 2 is complete, so Send posts on the first press');
+  assert.equal(fromPage2[0].body.round, round2);
+  assert.deepEqual(fromPage2[0].body.comments.map(c => [c.blockId, c.text]), [[mock2, 'on the page 2 mock']],
+    'page 2\'s Send carries its own comment');
+});
+
+await checkAsync('a comment on a page that asks nothing rides the newest unsent page\'s Send, never an older page\'s', async () => {
+  const board = createBoard({ title: 'Display page comments', blocks: [singleSpec()] });
+  addRound(board, { blocks: [mockSpec('display'), { kind: 'markdown', text: 'nothing asked here' }] });
+  const round3 = addRound(board, { blocks: [singleSpec(), mockSpec('page 3')], wait: true });
+  const [p1, displayMock, , p3, mock3] = board.blocks.map(b => b.id);
+  const { document, es } = loadBoardWithEventSource(renderBoardPage(board));
+  const { flip, block, press, queued } = pageControls(document);
+
+  queueBlockComment(document, mock3, 'on the page 3 mock');
+  flip(2);
+  queueBlockComment(document, displayMock, 'on the display page');
+  flip(1);
+  answerSingle(block(p1), 'Yes');
+  const fromPage1 = press();
+  await flush(1);
+  assert.deepEqual(fromPage1[0].body.comments, [], 'an older page\'s Send carries neither the display page\'s comment nor the newest page\'s');
+  assert.equal(queued(), 2);
+
+  applySubmit(board, { action: 'send', answers: fromPage1[0].body.answers, comments: [] }, 1);
+  es.dispatch('submitted', JSON.stringify({ round: 1, board, html: renderRoundSection(board, 1, groupCommentsByBlock([])) }));
+  await flush(1);
+  flip(round3);
+  answerSingle(block(p3), 'Yes');
+  const fromPage3 = press();
+  await flush(1);
+  assert.deepEqual(fromPage3[0].body.comments.map(c => [c.blockId, c.text]).sort(),
+    [[displayMock, 'on the display page'], [mock3, 'on the page 3 mock']].sort(),
+    'the newest page\'s Send carries its own comment and the display page\'s');
+  assert.equal(queued(), 0, 'and both leave the queue once it lands');
+});
+
+check('Send and Discuss are off on an older page that asks nothing, and on for the newest page whatever it asks', () => {
+  const display = () => [{ kind: 'markdown', text: 'read this' }, { kind: 'code', text: 'const a = 1;', lang: 'js' }];
+  const board = createBoard({ title: 'Display then ask', blocks: display() });
+  addRound(board, { blocks: [singleSpec()], wait: true });
+  const document = loadBoard(renderBoardPage(board));
+  const { flip } = pageControls(document);
+  const bar = () => [document.getElementById('send-btn').disabled, document.getElementById('discuss-btn').disabled];
+
+  assert.deepEqual(bar(), [false, false], 'setup: the newest page asks, so its bar is live');
+  flip(1);
+  assert.deepEqual(bar(), [true, true], 'no agent waits on the older display page, so neither Send nor Discuss is offered there');
+  flip(2);
+  assert.deepEqual(bar(), [false, false], 'flipping back hands the bar back');
+
+  const onlyDisplay = loadBoard(renderBoardPage(createBoard({ title: 'Display only', blocks: display() })));
+  assert.equal(onlyDisplay.getElementById('send-btn').disabled, false, 'the newest unsent page keeps its Send even when it asks nothing');
+});
+
+check('the send bar\'s countdown shows on the newest unsent page alone', () => {
+  const board = createBoard({ title: 'Countdown by page', blocks: [singleSpec()] });
+  addRound(board, { blocks: [singleSpec()], wait: true });
+  const document = loadBoard(renderBoardPage(board));
+  const countdown = document.querySelector('span#round-countdown');
+  assert.match(countdown.textContent, /^\d+m left$/, 'setup: the newest page is awaited, so its wait counts down');
+  pageControls(document).flip(1);
+  assert.equal(countdown.textContent, '', 'an older page shows no countdown: its Send answers no agent\'s wait');
+  assert.equal(countdown.classList.contains('visible'), false);
+});
+
+await checkAsync('a Send that fails while a sent page is on screen leaves Send off there, and the page it was for gets it back', async () => {
+  const board = createBoard({ title: 'Fail on a sent page', blocks: [singleSpec()] });
+  applySubmit(board, { action: 'send', answers: [], comments: [] }, 1);
+  addRound(board, { blocks: [singleSpec()] });
+  const document = loadBoard(renderBoardPage(board));
+  const { flip } = pageControls(document);
+  const sendBtn = document.getElementById('send-btn');
+  answerSingle(openBlocks(document)[0], 'Yes');
+
+  const original = globalThis.fetch;
+  let fail;
+  globalThis.fetch = () => new Promise((_, reject) => { fail = reject; });
+  try {
+    sendBtn.dispatchEvent(new StandInEvent('click'));
+  } finally {
+    globalThis.fetch = original;
+  }
+  assert.ok(fail, 'setup failure: the complete page must submit on the first press');
+  flip(1);
+  fail(new Error('network down'));
+  await flush(1);
+  assert.equal(sendBtn.disabled, true, 'the sent page on screen is never offered for sending');
+  assert.equal(document.getElementById('discuss-btn').disabled, true);
+  flip(2);
+  assert.equal(sendBtn.disabled, false, 'the page the failed Send was for gets Send back for a retry');
+});
+
 // === what a re-render must keep ================================================
 
 check('a Defer survives an amend that re-renders its question unchanged: the fresh button shows it, matching what Send posts', () => {
