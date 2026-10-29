@@ -155,12 +155,17 @@ async function press(tab, selector, modifiers = 0, times = 1) {
 }
 
 /** The path the tab's top frame has gone to once it leaves the Missions page (`/`), or
- * '/' when it has not left within five seconds. */
+ * '/' when it has not left within five seconds. A read that lands mid-swap ("Not attached
+ * to an active page") is read again. */
 async function landedAt(tab) {
   let path = '/';
   for (let i = 0; i < 100 && path === '/'; i++) {
-    const { currentIndex, entries } = await tab.sp('Page.getNavigationHistory');
-    path = new URL(entries[currentIndex].url).pathname;
+    try {
+      const { currentIndex, entries } = await tab.sp('Page.getNavigationHistory');
+      path = new URL(entries[currentIndex].url).pathname;
+    } catch (err) {
+      if (!/Not attached to an active page/.test(err.message)) throw err;
+    }
     if (path === '/') await new Promise(r => setTimeout(r, 50));
   }
   return path;
@@ -509,7 +514,10 @@ async function main() {
           await row(`a click on a card's body opens its latest board, at ${width}px ${theme}`, async note => {
             const tab = await openTab(send, onEvent, `${origin}/`, cookie, tabAt(width, theme));
             try {
-              await press(tab, 'article.mission-card[data-mission-key="FILETYPE_FOLLOWUP"] b.mission-title');
+              // The release that clicks may answer from a page already navigating away.
+              await press(tab, 'article.mission-card[data-mission-key="FILETYPE_FOLLOWUP"] b.mission-title').catch(err => {
+                if (!/Not attached to an active page/.test(err.message)) throw err;
+              });
               const landed = await landedAt(tab);
               note(`landed on ${landed}`);
               assert.equal(landed, target.FILETYPE_FOLLOWUP);

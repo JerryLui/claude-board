@@ -2491,3 +2491,9 @@ Traps that have bitten once. A second bite moves the entry up into the section i
   board looked empty although it rendered once scrolled into view (2026-10-29). Before a
   full-page shot, raise the viewport to the page's full height, or scroll each stage into view
   first.
+- **A click or key that navigates can fail its own DevTools call.** A `mouseReleased` that
+  clicks a link-like card, or a `keyDown` Enter on one, may answer
+  `{"code":-32000,"message":"Not attached to an active page"}` because the page is already
+  leaving, and so may a `Page.getNavigationHistory` read in the gap. Send Enter as its key-down
+  alone, and tolerate that one error on the press and on the read
+  (`test/browser-check-missions.mjs`'s `landedAt`, `pressKey` and its card-click row).
