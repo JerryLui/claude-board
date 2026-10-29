@@ -3706,10 +3706,13 @@
   // their own delegated listener below, which carries no comment-mode guard: with
   // the Tray unlisted, one press in comment mode both submitted the round AND
   // opened a compose form over the artifact.
-  // .context-tools is the kicker's replacement on a context item (ADR.md entry
-  // 110) and is listed for the reason .block-kicker is: it is a control group
-  // this page drew, so a click beside its button must mint nothing, exactly as
-  // a click beside the kicker's comment button does.
+  // .card-head is a card's title row: its title, a stage's or a diagram's
+  // comment button and the status chip, all drawn by this page around the
+  // content, so a click on or beside any of them mints nothing. .card-summary
+  // and .card-details are the card's own line and fold, about the card rather
+  // than part of the stage or diagram a comment anchors to.
+  // .context-tools is the comment button's group on a context item (ADR.md
+  // entry 110), listed for the same reason as .card-head.
   // .fold-toggle is the Show more control under a folded prose item (ADR.md
   // entry 110), listed for the same reason: it is a control this page drew, not
   // authored content, and it sits directly in the item rather than inside a
@@ -3722,7 +3725,7 @@
   // the whole bar, not just its button, so a click beside the pill mints
   // nothing either. It sits in an html block, whose 'dom' anchors resolve
   // through the iframe's document, where nothing of the bar exists.
-  var ANCHOR_CHROME_SELECTOR = '.block-kicker, .context-tools, .fold-toggle, .pull-out, .comment-btn, .comment-form, .comment-target, '
+  var ANCHOR_CHROME_SELECTOR = '.card-head, .card-summary, .card-details, .context-tools, .fold-toggle, .pull-out, .comment-btn, .comment-form, .comment-target, '
     + '.comment-list, .page-comments, .pin-layer, .anchor-pin, .mode-toggle, .compare-label, .variant-label, .round-label, '
     + 'pre.mermaid, .html-stage, .stage-wrap, .diagram-lens'
     + ', .stage-fold';
@@ -3960,7 +3963,7 @@
     var btn = item.querySelector('.fold-toggle');
     if (!btn) return;
     btn.setAttribute('aria-expanded', folded ? 'false' : 'true');
-    btn.textContent = folded ? 'Show more' : 'Show less';
+    btn.textContent = folded ? 'Show the rest' : 'Show less';
   }
 
   /** Drop the fold on an item that does not actually overflow its clip, so a
@@ -4322,7 +4325,7 @@
   // the clip hides before they can comment on it -- which is why '.fold-toggle'
   // is listed in ANCHOR_CHROME_SELECTOR above: the control is chrome this page
   // drew, so the generic click-to-anchor gesture must mint nothing on it, the
-  // same carve-out '.block-kicker' and '.context-tools' get.
+  // same carve-out '.card-head' and '.context-tools' get.
   document.addEventListener('click', function (ev) {
     var btn = ev.target && ev.target.closest && ev.target.closest('.fold-toggle');
     if (!btn) return;
@@ -5029,10 +5032,27 @@
    * the moment the rail is on screen); text is the button's own accessible name,
    * so no separate aria-label is needed. */
   function updateQuestionsLeftPill() {
+    refreshAnswerChips();
     if (!questionsLeftPill) return;
     var count = outstandingBlocks().length;
     questionsLeftPill.textContent = count + (count === 1 ? ' question left' : ' questions left');
     questionsLeftPill.classList.toggle('visible', count > 0 && !railIntersecting);
+  }
+
+  /** Each open question's chip, in its card head, says where the answer stands
+   * as the reviewer answers: Answered, Deferred, or nothing yet. The same status
+   * collectAnswers would post, read the same way. A question's own chip is the
+   * first in its section, ahead of any question nested in its context. */
+  var ANSWER_CHIP_LABEL = {"answered":"Answered","deferred":"Deferred","unanswered":""};
+  function refreshAnswerChips() {
+    qsa('.round-open .question-block').forEach(function (qb) {
+      var chip = qsa('.answer-status', qb)[0];
+      if (!chip) return;
+      var qid = qb.getAttribute('data-block-id');
+      var status = deferred[qid] ? 'deferred' : (currentAnswer(qid, qb.getAttribute('data-widget')).answered ? 'answered' : 'unanswered');
+      chip.setAttribute('data-status', status);
+      chip.textContent = ANSWER_CHIP_LABEL[status];
+    });
   }
 
   /** The round this page can still submit: the latest round nobody has sent.

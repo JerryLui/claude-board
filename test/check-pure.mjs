@@ -2256,7 +2256,7 @@ check('a page board renders the stage edge to edge -- no card, no kicker, no col
   assertNoCard(section);
 
   // no kicker, and nothing else printed over the artifact
-  assert.equal(document.querySelectorAll('.block-kicker').length, 0, 'a page board renders no kicker at all');
+  assert.equal(document.querySelectorAll('.card-head').length, 0, 'a page board renders no card head at all');
   assert.equal(document.querySelectorAll('.round-label').length, 0, 'nor the "Round 1" chip over a full-viewport artifact');
   assert.equal(document.querySelectorAll('.round-end').length, 0, 'nor the closing rail');
 
@@ -3410,7 +3410,6 @@ check('a stage-carrying question\'s context renders no card, no border-carrying 
   // No card, no border-carrying wrapper, no kicker label anywhere in the context
   // prose -- the markdown context's own "Markdown" kicker text (which the
   // pre-existing renderBlock path would have emitted) must be entirely absent.
-  assert.ok(!contextRegion.includes('block-kicker'), 'no .block-kicker inside the context prose');
   assert.ok(!contextRegion.includes('>Markdown<'), 'no "Markdown" kicker label for the context markdown item');
   assert.ok(!contextRegion.includes('class="block '), 'no .block card wrapper on a context item');
 
@@ -3500,7 +3499,6 @@ check('several markdown context items render as ONE panel -- no per-item card, n
   const panel = panels[0];
   assert.equal(panel.querySelectorAll('.context-item').length, 3, 'all three items live in that one panel');
   assert.equal(panel.querySelector('.block'), null, 'no .block card wrapper on any item');
-  assert.equal(panel.querySelector('.block-kicker'), null, 'and no kind label on any item');
 
   const ids = panel.querySelectorAll('.context-item').map(el => el.getAttribute('data-block-id'));
   assert.deepEqual(ids, board.blocks[0].context.map(c => c.id), 'posted order, not sorted or grouped by kind');
@@ -3527,7 +3525,6 @@ check('AC 2: markdown and a mermaid diagram render in that same one panel, and t
   const panel = document.querySelector('.question-context');
   assert.ok(panel, 'setup failure: this fixture must take the panel path');
   assert.equal(panel.querySelectorAll('.context-item').length, 2, 'both kinds in the one panel');
-  assert.equal(panel.querySelector('.block-kicker'), null, 'neither carries a kind label');
 
   const diagram = document.querySelector('.context-item.mermaid-block');
   assert.ok(diagram, 'the diagram item wears .mermaid-block, which is what src/ui.mjs walks up to');
@@ -3683,7 +3680,6 @@ check('a code context item keeps its source label as a CAPTION under the excerpt
     const caption = codeItem.querySelector('.context-caption');
     assert.ok(caption, 'the source label survives as a caption');
     assert.equal(caption.textContent, 'app.js:2-3', 'naming the path and the line range');
-    assert.equal(codeItem.querySelector('.block-kicker'), null, 'and never as a card kicker');
     const itemHtml = renderedMarkup(renderBoardPage(board));
     assert.ok(itemHtml.indexOf('context-caption') > itemHtml.indexOf('class="code-row"'), 'the caption sits UNDER the excerpt, not over it');
 
