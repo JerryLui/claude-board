@@ -189,6 +189,9 @@
 
   --r-sm: 6px;
   --r-md: 10px;
+  /* a round page's card, and the boxes inside it (an option, the context
+     panel): Linear's tighter corner, at every width */
+  --r-card: 8px;
   --r-lg: 14px;
   --r-pill: 999px;
 
@@ -268,12 +271,9 @@ svg { flex: none; }
    matching the expression the Tray clears the dock with.
 
    The shell is as wide as the window, up to 2560px, the widest common display
-   in CSS px; its header runs that wide. The cards under it stop at 1700px on
-   the title's left edge (the width section near the end of this file), wide
-   enough for a mock to read at a laptop screen's size: the shell used to stop
-   at 1120px, which drew a wide screen's mocks smaller than the screens they
-   stood for. Prose does not follow the cards out: '--prose' (the same
-   section) holds every line of it to a reading measure. */
+   in CSS px; its header runs that wide. From a 1440px window the cards under
+   it, the board's title and its meta line sit in one 1100px column centred on
+   the window (the width section near the end of this file). */
 .board-shell { position: relative; z-index: 1; max-width: 2560px; margin: 0 auto; padding: 0 var(--space-5); }
 
 /* the board's identity stays on screen: a long board scrolls for a while, and
@@ -291,7 +291,7 @@ svg { flex: none; }
      none. One or the other; the fade is the one that survives the scroll. */
 }
 .board-head-title { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
-.board-head h1 { font-size: 20px; margin: 0; font-weight: 650; letter-spacing: -0.015em; }
+.board-head h1 { font-size: 20px; margin: 0; font-weight: 600; letter-spacing: -0.01em; }
 .board-head .meta { color: var(--muted); font-size: 11.5px; font-family: ui-monospace, "SF Mono", Menlo, monospace; margin-top: 2px; }
 /* the one way back to the thread
    index. Absent under body.readonly -- a standalone file://
@@ -441,7 +441,7 @@ body.sent-page .comment-btn { display: none; }
 
    scroll-margin-top clears the sticky .board-head when a flip scrolls the
    arriving page's top back under it. */
-.round { display: none; flex-direction: column; gap: var(--space-4); scroll-margin-top: var(--head-clear); }
+.round { display: none; flex-direction: column; gap: var(--space-2); scroll-margin-top: var(--head-clear); }
 .round.round-current { display: flex; }
 .round-label {
   align-self: flex-start;
@@ -469,12 +469,16 @@ body.sent-page .comment-btn { display: none; }
   color: var(--muted); padding: 0 var(--space-2);
 }
 
+/* A round page's card in Linear's density, at every width: 13px text, 14px by
+   16px of padding, 8px corners, 8px between cards (the '.round' gap above).
+   The home page draws no '.block', so none of it reaches Missions or Boards. */
 .block {
   position: relative;
+  font-size: 13px;
   background: var(--panel);
   border: 1px solid var(--hairline);
-  border-radius: var(--r-lg);
-  padding: var(--space-4) var(--space-5) var(--space-5);
+  border-radius: var(--r-card);
+  padding: 14px var(--space-4);
   box-shadow: var(--shadow-1);
   transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
 }
@@ -484,9 +488,9 @@ body.sent-page .comment-btn { display: none; }
    it sits at the card's own right edge. No block names its own type. A block
    nested in a compare side, a question's context or a variant option takes the
    same head on a smaller scale (below). */
-.card-head { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-3); min-width: 0; }
+.card-head { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-2); min-width: 0; }
 .card-head > .card-title { flex: 1 1 auto; min-width: 0; margin: 0; color: var(--ink);
-  font-size: 16px; font-weight: 650; line-height: 1.4; letter-spacing: -0.01em; }
+  font-size: 13px; font-weight: 600; line-height: 1.4; letter-spacing: 0; }
 .card-head > :first-child:not(.card-title), .card-head > .card-title + * { margin-left: auto; }
 .card-status { flex: none; align-self: flex-start; display: inline-flex; align-items: center;
   font-size: 11.5px; font-weight: 600; line-height: 1.3; white-space: nowrap;
@@ -510,13 +514,15 @@ body.sent-page .comment-btn { display: none; }
 .card-details > .md-content { margin-top: var(--space-2); }
 .card-details > .md-content > :first-child { margin-top: 0; }
 .compare-side .card-head, .context-item .card-head, .variant-card .card-head { margin-bottom: var(--space-2); }
-.compare-side .card-title, .context-item .card-title, .variant-card .card-title { font-size: 13.5px; font-weight: 600; }
+.compare-side .card-title, .context-item .card-title, .variant-card .card-title { font-size: 12.5px; font-weight: 600; }
 
 .md-content h1, .md-content h2, .md-content h3, .md-content h4 { font-weight: 650; line-height: 1.3; letter-spacing: -0.01em; margin: 1.1em 0 0.5em; }
 .md-content > :first-child { margin-top: 0; }
-.md-content h1 { font-size: 19px; }
-.md-content h2 { font-size: 16.5px; }
-.md-content h3, .md-content h4 { font-size: 14px; }
+/* a text card ends on its padding, not on its last paragraph's margin too */
+.markdown-block > .md-content > :last-child { margin-bottom: 0; }
+.md-content h1 { font-size: 16px; }
+.md-content h2 { font-size: 14.5px; }
+.md-content h3, .md-content h4 { font-size: 13px; }
 .md-content p { margin: 0.65em 0; color: var(--ink-2); }
 .md-content ul, .md-content ol { padding-left: 1.35em; color: var(--ink-2); }
 .md-content li { margin: 0.3em 0; }
@@ -613,7 +619,7 @@ body.sent-page .comment-btn { display: none; }
    own gap; each brings its own typography and none brings a card or a kind
    label. */
 .question-context { min-width: 0; background: var(--panel-2); border: 1px solid var(--hairline);
-  border-radius: var(--r-md); padding: var(--space-3) var(--space-4);
+  border-radius: var(--r-card); padding: var(--space-3) var(--space-4);
   display: flex; flex-direction: column; gap: var(--space-3); }
 /* The prose counterpart to '.question-context' above, for a question that
    carries a rendered stage (ADR.md entry 26): no background, no border, no
@@ -678,7 +684,7 @@ body.sent-page .comment-btn { display: none; }
    second control wearing it would be counted as a lens control that is not
    there. */
 .fold-toggle { margin-top: 6px; }
-.question-prompt { font-size: 16px; font-weight: 600; line-height: 1.4; letter-spacing: -0.01em; margin: 0 0 var(--space-3); }
+.question-prompt { font-size: 13px; font-weight: 600; line-height: 1.4; margin: 0 0 var(--space-3); }
 /* A widget that takes several picks says so, in plain words, under the prompt. */
 .question-picks { margin: calc(-1 * var(--space-2)) 0 var(--space-3); font-size: 12.5px; color: var(--muted); }
 
@@ -686,15 +692,15 @@ body.sent-page .comment-btn { display: none; }
 .card-choice {
   display: block; width: 100%; min-height: 44px; text-align: left;
   background: var(--panel-2); border: 1px solid var(--hairline); color: var(--ink);
-  border-radius: var(--r-md); padding: 11px 14px; font: inherit;
+  border-radius: var(--r-card); padding: 10px 12px; font: inherit;
   transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease), transform var(--dur) var(--ease);
 }
 .card-choice:hover:not(:disabled) { border-color: var(--hairline-2); background: var(--panel-3); }
 .card-choice:active:not(:disabled) { transform: scale(0.995); }
 .card-choice.selected { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
 .card-choice:disabled { opacity: 0.75; }
-.card-choice .opt-label { font-weight: 600; font-size: 13.5px; }
-.card-choice .opt-desc { color: var(--muted); font-size: 12.5px; margin-top: 2px; line-height: 1.45; }
+.card-choice .opt-label { font-weight: 600; font-size: 13px; }
+.card-choice .opt-desc { color: var(--muted); font-size: 12px; margin-top: 2px; line-height: 1.45; }
 .card-choice.selected .opt-desc { color: var(--ink-2); }
 
 .unsupported-widget { color: var(--warning); font-size: 12.5px; font-style: italic; }
@@ -750,8 +756,8 @@ body.sent-page .comment-btn { display: none; }
    the escape hatch for a state with no class of its own. */
 .variant-card[aria-disabled="true"] { cursor: default; opacity: 0.75; }
 .variant-label { margin-bottom: var(--space-2); }
-.variant-label .opt-label { font-weight: 600; font-size: 13.5px; }
-.variant-label .opt-desc { color: var(--muted); font-size: 12.5px; margin-top: 2px; line-height: 1.45; display: block; }
+.variant-label .opt-label { font-weight: 600; font-size: 13px; }
+.variant-label .opt-desc { color: var(--muted); font-size: 12px; margin-top: 2px; line-height: 1.45; display: block; }
 /* the nested block renders through the same renderBlock dispatch a compare
    side's own block does, and is stripped of its own card chrome for exactly
    the same reason .compare-side .block is (below): without this, an option
@@ -795,7 +801,7 @@ body.sent-page .comment-btn { display: none; }
 /* free text: a comfortable writing surface, not a cramped input */
 .answer-textarea { width: 100%; min-height: 220px; resize: vertical; background: var(--panel-2);
   border: 1px solid var(--hairline); color: var(--ink); border-radius: var(--r-md); padding: 14px 16px;
-  font: inherit; font-size: 14px; line-height: 1.65; margin-bottom: var(--space-3);
+  font: inherit; font-size: 13px; line-height: 1.65; margin-bottom: var(--space-3);
   transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease); }
 .answer-textarea::placeholder, .note-field textarea::placeholder, .search-input::placeholder,
 .comment-form input[type=text]::placeholder { color: var(--muted); }
@@ -2475,33 +2481,26 @@ body.page-board .back-to-top.visible {
   transform: translateY(calc((1 - var(--stage-p)) * var(--space-2))); }
 .back-to-top:hover:not(:disabled) { border-color: var(--hairline-2); color: var(--ink); }
 
-/* --- width: a round's rendered blocks take the column, its prose keeps a measure ---
-   '.board-shell' runs as wide as the window (up to 2560px), and the cards in
-   it as wide as the column up to 1700px (the 1440px block below), every
-   rendered block with them: a stage, a diagram, a compare, a rendered-variant
-   card, at top level and in a question's context. Prose does not: each element a reader reads as
-   lines carries 'max-width: var(--prose)', resolved in its OWN font, so a 16px
-   prompt and a 14px paragraph each hold their own measure. That is why an
-   option's label and description carry it themselves rather than inheriting
-   their card's: a 12.5px description in a card held to 72ch of 14px runs to
-   81ch of its own. The option card and a variant's label row carry it too:
-   a pick is then not a window-wide button with its words at one end (a card
-   carrying a preview is the one exception, below), and a
-   variant's label, an inline span on which 'max-width' does nothing, wraps at
-   its row's measure. A table or a code fence
-   inside markdown is not prose here and keeps the full width.
+/* --- width: one centred column for a round's cards, its title and meta line ---
+   '.board-shell' runs as wide as the window (up to 2560px). Under 1440px the
+   cards take the shell's width, every rendered block with them (a stage, a
+   diagram, a compare, a rendered-variant card, at top level and in a
+   question's context), and prose keeps a measure: each element a reader reads
+   as lines carries 'max-width: var(--prose)', resolved in its OWN font, so a
+   prompt and a paragraph each hold their own. That is why an option's label
+   and description carry it themselves rather than inheriting their card's.
+   The option card and a variant's label row carry it too: a pick is then not
+   a window-wide button with its words at one end (a card carrying a preview
+   is the one exception, below), and a variant's label, an inline span on
+   which 'max-width' does nothing, wraps at its row's measure. A table or a
+   code fence inside markdown is not prose here and keeps the full width.
 
-   '--prose' has two values. Up to 1440px it is '--column-1120', the widest
-   line the old 1120px column gave a block's prose (the column less its
-   gutters, the card's padding and its border: 1022px). A line set straight in
-   a block, a paragraph or a prompt, so keeps its old length while a window
-   between 1120 and 1440 widens the rendered blocks. A line in a box that
-   splits a block's width, a question's options or context panel or a compare
-   side, still widens with its box: the options column runs from 523px in the
-   old column to about 680px just under 1440. From 1440px '--prose' is 72ch,
-   the longest comfortable line, and the jump happens once, at the width where
-   a stage has gained a third over the old column. Below 1120px neither value
-   binds and the board is as it always was.
+   Under 1440px '--prose' is '--column-1120', the widest line the old 1120px
+   column gave a block's prose (the column less its gutters, the card's
+   padding and its border), so a line set straight in a block keeps its old
+   length while a window between 1120 and 1440 widens the rendered blocks.
+   From 1440px the column is 1100px and '--prose' binds nothing: text fills
+   its card, and long text splits into two columns instead.
 
    The comment list and form are held only on an ordinary board's own blocks:
    a page board's Tray already sets its own width (640px, '.page-comments'),
@@ -2515,56 +2514,71 @@ body:not(.page-board) .blocks .comment-list, body:not(.page-board) .blocks .comm
 /* An option's preview image or code is rendered content, not prose, so a
    choice carrying one is held to the old column's width rather than the
    reading measure; its label and description still hold their own measure.
-   From 1440px the options column, a third of the card and never under 523px
-   (ADR 136), is narrower than that and bounds the preview first. */
+   From 1440px the options column, half the card, is narrower than that and
+   bounds the preview first. */
 .card-choice:has(.opt-preview) { max-width: var(--column-1120); }
 @media (min-width: 1440px) {
-  :root { --prose: 72ch; }
-  /* One card width. From 1440px every card on a board page, a picture's
-     included, is the column's width up to 1700px, on the title's left edge;
-     the window beyond it, up to the shell's 2560px, is plain page. Widths
-     that varied card by card read as a ragged page, and a card the window's
-     full width left short text and narrow tables half empty. '.blocks' is the
-     column every top-level card stretches across, and the send bar under it
-     keeps the same right edge. The header stays the shell's width: its wash
-     and its condensed pill centre on the window (see '.board-head::after'). A
-     page board is one artifact filling the window and keeps no column. Below
-     1440px the column is narrower than the cap, so nothing changes there. */
-  body:not(.page-board) .blocks, body:not(.page-board) .send-bar { max-width: 1700px; }
-  /* A question's options take a third of the card, never under 523px (the
-     options column the old 1120px column gave a question beside a panel),
-     its note and the Defer row on the note's label sit under them at exactly
-     their width, and its context panel takes the other two thirds beside both.
-     The note row is the flexible one: a context panel taller than options and
-     note together grows that row, and the note, aligned to its top, stays
-     right under the options instead of drifting down the card. A question
-     with no panel takes the same columns with the second left empty, so every
-     question's options read at one width. A rendered-variant question, and
-     one carrying a stage in its context, keeps the one full-width column
-     (ADR.md entry 26) and its note at reading width: its options are the
-     rendered variants themselves. src/render.mjs marks a question that takes
-     the columns '.question-split', kept beside '.question-block' so these
-     rules outrank the one-column '.question-block:not(:has(...))' above. */
-  .question-block.question-split {
-    grid-template-columns: minmax(523px, 1fr) minmax(0, 2fr); grid-template-rows: auto auto 1fr auto; }
+  :root { --prose: none; --round-column: 1100px; }
+  /* One column, centred. From 1440px every card on a board page (text,
+     question, compare, stage, diagram, evidence) is 1100px wide, centred on
+     the window, and the space either side of it is plain page. One width for
+     every card keeps the page from reading ragged; centring it puts the page
+     where the eye already is on a wide screen. Long lines are the price, and
+     long text splitting into two columns (below) keeps most of them short.
+     '.blocks' is the column every top-level card stretches across, and the
+     send bar under it keeps the same edges. A page board is one artifact
+     filling the window and keeps no column. */
+  body:not(.page-board) .blocks, body:not(.page-board) .send-bar { max-width: var(--round-column); margin-inline: auto; }
+  /* The board's title and meta line sit in the same column. The header stays
+     the shell's width, so its mark, its controls, its wash and its condensed
+     pill keep their places; the title's block alone moves, by a margin that
+     carries it from the mark to the column's left edge. '100cqw' is the
+     header's width, so the margin needs no measuring script; the 30px is the
+     mark's own width (.back-to-index), and an archive, which hides the mark
+     and so the gap after it, takes the margin without either. Both the
+     margin and the width ride '--stage-p' down to nothing as the header
+     condenses, so the pill holds the mark and the controls alone. Neither is a
+     height, so the header's box never moves (test/check-header-condense.mjs). */
+  body:not(.page-board) .board-head { container-type: inline-size; }
+  body:not(.page-board) .board-head-ident {
+    width: var(--round-column); max-width: calc((1 - var(--stage-p)) * var(--round-column));
+    margin-left: calc((1 - var(--stage-p)) * ((100cqw - var(--round-column)) / 2 - 30px - var(--space-3))); }
+  body.readonly:not(.page-board) .board-head-ident {
+    margin-left: calc((1 - var(--stage-p)) * (100cqw - var(--round-column)) / 2); }
+  /* A question's options take the card's left half, never under 523px (the
+     options column the old 1120px column gave a question beside a panel: the
+     1100px card's half, with this 20px gap), its note and the Defer row on the
+     note's label sit under them at exactly their width, and its context panel
+     takes the right half beside both. The note row is the flexible one: a
+     context panel taller than options and note together grows that row, and
+     the note, aligned to its top, stays right under the options instead of
+     drifting down the card. A question with no panel takes the same columns
+     with the second left empty, so every question's options read at one
+     width. A rendered-variant question, and one carrying a stage in its
+     context, keeps one full-width column with its context over its options
+     (ADR.md entry 26). src/render.mjs marks a question that takes the columns
+     '.question-split', kept beside '.question-block' so these rules outrank
+     the one-column '.question-block:not(:has(...))' above. */
+  .question-block.question-split { column-gap: 20px;
+    grid-template-columns: minmax(523px, 1fr) minmax(0, 1fr); grid-template-rows: auto auto 1fr auto; }
   .question-block.question-split > .question-main { grid-column: 1; grid-row: 2; }
   .question-block.question-split > .question-context { grid-column: 2; grid-row: 2 / 4; }
   .question-block.question-split > .note-field { grid-column: 1; grid-row: 3; }
   .question-block.question-split > .card-details { grid-row: 4; }
-  /* The panel's tables at their natural width: stretched across two thirds of
-     a 1700px card, a two-column table's cells sat far apart. */
+  /* The panel's tables at their natural width: stretched across half the
+     card, a two-column table's cells sat far apart. */
   .question-context .md-content table { width: auto; }
-  /* Long text flows into columns of reading width, two at most (three need
-     more than the 1700px card holds). Long means the fold marked it and it
-     overflowed its clip of about ten lines (src/ui.mjs drops the fold, and its
-     control, from text that fits), and it is open: a folded preview, and
-     short text, stay one column. Text holding a table, code or a diagram
-     stays one column too, as each of those takes the card's width, and so
-     does the card's summary, a '.md-content' of its own. One ':not()'
-     each, never a comma list inside one: test/check-pure.mjs's cascade resolver
-     splits a selector at every comma. A heading never ends a column. */
+  /* Long text flows into two columns, each half the card. Long means the
+     fold marked it and it overflowed its clip of about ten lines (src/ui.mjs
+     drops the fold, and its control, from text that fits), and it is open: a
+     folded preview, and short text, stay one column. Text holding a table,
+     code or a diagram stays one column too, as each of those takes the card's
+     width, and so does the card's summary, a '.md-content' of its own. One
+     ':not()' each, never a comma list inside one: test/check-pure.mjs's
+     cascade resolver splits a selector at every comma. A heading never ends a
+     column. */
   .markdown-block:not(.folded):has(> .fold-toggle) > .md-content:not(.card-summary):not(:has(table)):not(:has(pre)):not(:has(.mermaid)) {
-    columns: 2 var(--prose); column-gap: var(--space-6); max-width: calc(2 * var(--prose) + var(--space-6)); }
+    columns: 2; column-gap: var(--space-6); }
   .md-content h1, .md-content h2, .md-content h3, .md-content h4, .md-content h5, .md-content h6 { break-after: avoid; }
   /* A diagram narrower than its panel sits in the panel's middle rather than
      against its left edge. */
@@ -2584,7 +2598,6 @@ body:not(.page-board) .blocks .comment-list, body:not(.page-board) .blocks .comm
   :root { --head-clear: 124px; }
   .board-shell { padding-left: var(--space-4); padding-right: var(--space-4); }
   .board-head { flex-direction: column; align-items: flex-start; gap: var(--space-2); }
-  .block { padding: var(--space-4); border-radius: var(--r-md); }
   .send-bar { flex-wrap: wrap; }
   .send-status { width: 100%; margin-bottom: var(--space-2); }
   .btn-send, .btn-discuss { flex: 1; }
