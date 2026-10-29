@@ -380,12 +380,13 @@ const QUIET_SCRIPT = `(function () {
 })();`;
 
 /** Opens `url` in a fresh tab at `width` x `height` under `theme` ('light' or 'dark'), with
- * the session cookie `cookie`, waits for load and then for the tab to go quiet (see
+ * the session cookie `cookie`, runs `prepare(sp)` if given (a network condition or a
+ * request interception the tab must load under), waits for load and then for the tab to go quiet (see
  * QUIET_SCRIPT), and reads `expr`. Answers the tab's own `sp(method, params)`,
  * `evalPage(expr)`, `quiet()` (the next quiet moment), `until(expr, what)` (the first truthy
  * value of `expr`, re-read on every DOM change) and `close()`, and `measured`, what `expr`
  * read once quiet. The tab is closed if it never loads or never goes quiet. */
-export async function openTab(send, onEvent, url, cookie, { width, height, theme, expr }) {
+export async function openTab(send, onEvent, url, cookie, { width, height, theme, expr, prepare = null }) {
   const { targetId } = await send('Target.createTarget', { url: 'about:blank' });
   const { sessionId } = await send('Target.attachToTarget', { targetId, flatten: true });
   const sp = (method, params) => send(method, params, sessionId);
@@ -422,6 +423,7 @@ export async function openTab(send, onEvent, url, cookie, { width, height, theme
     await sp('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: theme }] });
     await setSessionCookie(sp, cookie);
     await sp('Page.addScriptToEvaluateOnNewDocument', { source: QUIET_SCRIPT });
+    if (prepare) await prepare(sp, sessionId);
     await sp('Page.navigate', { url });
     await withTimeout(loadFired, 20000, `page never fired load: ${url}`);
     await quiet();

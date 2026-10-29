@@ -6,8 +6,12 @@
 // highlighting cannot be done in one accent -- ADR.md entry 63 states that this
 // discipline stops describing that one surface, and holds everywhere else. Dark by default; a light palette (designed against the accent, not a
 // mechanical inversion) takes over under `prefers-color-scheme: light` — see the
-// DARK/LIGHT objects below. No web fonts and no external assets — the standalone
-// `file:` archive has to look identical with the network off (see src/render.mjs).
+// DARK/LIGHT objects below. No external assets — the standalone `file:` archive has to
+// look identical with the network off (see src/render.mjs). The one web font, Inter, is
+// therefore not fetched but inlined: its Latin woff2 files (src/vendor/inter/, OFL, its
+// licence beside them) ride in this stylesheet as `data:` URLs, under the `font-src data:`
+// both page policies already allow. Inter heads the `body` stack and today's system stack
+// follows it, so a face that fails to load still reads like the page did before it.
 //
 // Everything is driven by the tokens in `:root`. Rules below reference tokens, never
 // a raw hex or rgba literal, so a palette change is a one-block edit (enforced by
@@ -15,7 +19,27 @@
 // test/check-pure.mjs also asserts every class ruled on here is a class the markup
 // actually emits — a rule for a class nothing renders is a failure, not dead code.
 
+import { readFileSync } from 'node:fs';
 import { MERMAID_NODE_SELECTOR } from './anchor.mjs';
+
+/** The Inter weights the stylesheet carries. The rules ask for 400 to 700, 550 and 650
+ * among them; CSS weight matching takes 550 to the 600 face and 650 to the 700 one, so
+ * four static faces cover every weight used without a variable font's extra bytes. */
+export const INTER_WEIGHTS = [400, 500, 600, 700];
+
+/** One '@font-face' per weight, each face's woff2 inlined as a base64 'data:' URL so a
+ * page served by the daemon and a saved copy opened from disk load it the same way:
+ * from the stylesheet's own bytes, with no request. */
+const interFaces = INTER_WEIGHTS.map(weight => {
+  const woff2 = readFileSync(new URL(`./vendor/inter/inter-latin-${weight}-normal.woff2`, import.meta.url));
+  return `@font-face {
+  font-family: Inter;
+  font-style: normal;
+  font-weight: ${weight};
+  font-display: swap;
+  src: url(data:font/woff2;base64,${woff2.toString('base64')}) format("woff2");
+}`;
+}).join('\n');
 
 /** Scope the shared mermaid-node selector list under a prefix. The selector is two
  * alternatives (mermaid 11's prefixed ids and mermaid 10's bare ones), so it cannot
@@ -316,6 +340,8 @@ ${Object.entries(palette).map(([name, value]) => `  ${name}: ${value};`).join('\
 }`;
 
 export const styles = `
+${interFaces}
+
 ${tokenBlock(':root', DARK, 'dark')}
 
 @media (prefers-color-scheme: light) {
@@ -362,7 +388,7 @@ body {
   min-height: 100vh;
   background: var(--bg);
   color: var(--ink);
-  font: 14px/1.6 "Inter var", Inter, -apple-system, BlinkMacSystemFont, "SF Pro Text", ui-sans-serif, system-ui, sans-serif;
+  font: 14px/1.6 Inter, -apple-system, BlinkMacSystemFont, "SF Pro Text", ui-sans-serif, system-ui, sans-serif;
   font-feature-settings: "cv05" 1, "ss01" 1;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;

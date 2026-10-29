@@ -4257,6 +4257,35 @@ check('element-level anchoring on a pushed html stage needs no per-push wiring p
   // this file's own checks.
 });
 
+// The stylesheet is a shared sibling, so whatever it pulls in itself is pulled by every
+// page and every saved copy. Inter is the one font it carries, inlined as woff2 'data:'
+// URLs, so a face that pointed anywhere else would be a request a saved copy with the
+// network off cannot make, and would fall back to the system stack without a word.
+check('the stylesheet pulls nothing off the page: every url() is a data: URL, and the Inter faces body opens on are inlined woff2 under 120 KB', () => {
+  assert.doesNotMatch(styles, /@import\b/, 'an @import is a fetch');
+  const urls = [...styles.matchAll(/url\(\s*(['"]?)([^'")]*)\1\s*\)/g)].map(m => m[2]);
+  const offPage = urls.filter(u => !u.startsWith('data:'));
+  assert.deepEqual(offPage.map(u => u.slice(0, 80)), [], 'every url() in the stylesheet carries its own bytes');
+
+  const faces = [...styles.matchAll(/@font-face\s*\{([^}]*)\}/g)].map(m => m[1]);
+  const interFaces = faces.filter(f => /font-family:\s*["']?Inter["']?\s*;/.test(f));
+  assert.ok(interFaces.length > 0, 'the stylesheet carries an @font-face for Inter');
+  let rawBytes = 0;
+  for (const face of interFaces) {
+    const src = /src:\s*url\(data:font\/woff2;base64,([A-Za-z0-9+/=]+)\)\s*format\("woff2"\)/.exec(face);
+    assert.ok(src, `an Inter face whose src is not an inlined woff2: ${face.slice(0, 120)}`);
+    const bytes = Buffer.from(src[1], 'base64');
+    assert.equal(bytes.subarray(0, 4).toString('latin1'), 'wOF2', 'the inlined bytes are a woff2 file');
+    rawBytes += bytes.length;
+  }
+  assert.ok(rawBytes < 120 * 1024, `the inlined faces weigh ${rawBytes} raw bytes, past the 120 KB every page and saved copy pays`);
+
+  const bodyFont = /\nbody \{[^}]*\n\s*font: [^;]*?\/[\d.]+ ([^;]+);/.exec(styles);
+  assert.ok(bodyFont, 'setup: the body rule sets its font shorthand');
+  assert.equal(bodyFont[1].split(',')[0].trim(), 'Inter', 'body\'s stack opens on the bundled family');
+  assert.match(bodyFont[1], /system-ui, sans-serif$/, 'and the system stack still follows it, for a face that fails to load');
+});
+
 // This check used to read "the emitted page has no external script or stylesheet
 // reference -- everything needed to open standalone is inlined", and rejected any
 // `<link rel=stylesheet>` or `<script src=>` outright (QUIRKS.md, "No external assets —
