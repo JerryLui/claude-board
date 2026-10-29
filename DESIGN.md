@@ -825,8 +825,11 @@ field whole; it takes no room while nothing is cut, and stays open across repain
 is the link: its title is a real `<a href>` whose box stretches over the card under its chips,
 buttons, fold and forms, so a click, Enter, a middle-click, a Cmd-click and the link's own menu all
 work as on any link, and with Comment on a press, the middle one included, opens the card's note
-instead. The key line's age, login and folder sit above the link so a hover reaches their tooltips,
-and a press on one still opens the board. It carries no Open
+instead. The key line stays under the link, so a press on it is the link's own, and the card's one
+tooltip (on the link, or on the card when it has no board) holds the whole title and the key line
+in full: a mission's exact update time, a tab's login path and folder. Lifting the key line's spans
+over the link was tried and dropped: Stop takes the age's place on hover, and a press re-sent from
+a span by script lost the browser's modifier and menu handling. It carries no Open
 board button; Fire and Merge stay shown, since they are calls rather than navigation, and Stop
 waits for hover or focus. An earlier build made the article itself a `role="link"` around its
 buttons, which had none of a link's middle-click, menu or hover address. A tab

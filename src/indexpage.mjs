@@ -709,18 +709,6 @@ function onMissionsClick(ev) {
   // A double-press's second click is not a click on the card: on Stop, the first one
   // took Stop off the card, and the link under it would take the second.
   if (link && ev.detail > 1) ev.preventDefault();
-  else if (!link && ev.detail <= 1 && t.closest(MISSIONS_LIFTED)) missionsFollow(cardEl, ev);
-}
-
-// The spans on a card's key line that carry a tooltip sit above the link's box so a hover
-// reaches them (styles.mjs); a press on one still opens the card's board.
-var MISSIONS_LIFTED = '.mission-age, .tab-login, .tab-folder';
-
-function missionsFollow(cardEl, ev) {
-  var link = cardEl.querySelector('a.mission-link');
-  if (!link) return;
-  if (ev.metaKey || ev.ctrlKey || ev.button === 1) window.open(link.href, '_blank', 'noopener');
-  else link.click();
 }
 
 function missionsOpenNote(key) {
@@ -730,23 +718,16 @@ function missionsOpenNote(key) {
   focusIn(key, 'textarea.mission-comment-text');
 }
 
-// A middle press fires auxclick, never click: with Comment on it opens the card's note
-// rather than its board in a new tab, and on a lifted span it opens the board as the link
-// under it would have.
+// A middle press fires auxclick, never click: with Comment on, a middle press on a card's
+// link opens its note rather than its board in a new tab.
 function onMissionsAuxclick(ev) {
   var t = ev.target;
-  if (ev.button !== 1 || !t || !t.closest) return;
-  var cardEl = t.closest('article.mission-card');
-  if (!cardEl) return;
+  if (ev.button !== 1 || !t || !t.closest || !missionsCommentModeOn()) return;
   var link = t.closest('a.mission-link');
-  var lifted = !link && t.closest(MISSIONS_LIFTED);
-  if (!link && !lifted) return;
-  if (missionsCommentModeOn()) {
-    ev.preventDefault();
-    missionsOpenNote(cardEl.getAttribute('data-mission-key'));
-    return;
-  }
-  if (lifted) missionsFollow(cardEl, ev);
+  var cardEl = link && link.closest('article.mission-card');
+  if (!cardEl) return;
+  ev.preventDefault();
+  missionsOpenNote(cardEl.getAttribute('data-mission-key'));
 }
 
 // On a Mac, Ctrl with the primary button is the secondary click: the browser fires
@@ -2004,7 +1985,9 @@ function missionsParts(overview, ui) {
     var orders = orderLines(o.orders, o.live, pick('stopSent', key));
     var stoppable = o.live && !orders.stopPending;
     var reach = !o.href && stoppable ? ' role="group" tabindex="0" aria-label="' + esc(o.label) + '"' : '';
-    var out = '<article class="' + o.className + '" data-mission-key="' + esc(key) + '" data-view="' + esc(o.view) + '"' + reach + '>';
+    // A card with no board has no link to carry its tooltip (cardTitle), so it carries it.
+    var tip = o.href ? '' : ' title="' + esc(o.tip) + '"';
+    var out = '<article class="' + o.className + '" data-mission-key="' + esc(key) + '" data-view="' + esc(o.view) + '"' + reach + tip + '>';
     out += o.inner;
     if (stoppable) {
       out += '<button type="button" class="mission-stop" aria-label="Stop session" title="Stop: finish the step, hand off, end. Cmd-click stops at once" aria-expanded="'
@@ -2036,9 +2019,17 @@ function missionsParts(overview, ui) {
   }
 
   // A card's title, and the link to its board where it has one (cardShell).
-  function cardTitle(title, href, attrs) {
+  // A card's title, and the link to its board where it has one. The link's box covers the
+  // card, its key line included, so the link carries the card's tooltip: the whole title
+  // and what the key line cuts short (cardTip).
+  function cardTitle(title, href, tip) {
     var text = esc(title);
-    return '<b class="mission-title"' + (attrs || '') + '>' + (href ? '<a class="mission-link" href="' + esc(href) + '">' + text + '</a>' : text) + '</b>';
+    return '<b class="mission-title">' + (href ? '<a class="mission-link" href="' + esc(href) + '" title="' + esc(tip) + '">' + text + '</a>' : text) + '</b>';
+  }
+
+  // The card's tooltip, one fact a line: its whole title, then each key-line fact in full.
+  function cardTip(title, facts) {
+    return [title].concat(facts.filter(Boolean)).join('\n');
   }
 
   function card(m) {
@@ -2052,9 +2043,10 @@ function missionsParts(overview, ui) {
     var title = m.title || key;
     // A card whose title is its key names it once, in the title.
     var ident = title === key ? m.phase : key + ' / ' + m.phase;
+    var tip = cardTip(title, ['Updated ' + m.updatedAt]);
     var out = '<div class="mission-text"><div class="mission-ident"><span class="mission-key">' + esc(ident) + '</span>'
-      + '<span class="mission-age" title="' + esc(m.updatedAt) + '">' + esc(age(m.updatedAt)) + '</span></div>'
-      + cardTitle(title, href);
+      + '<span class="mission-age">' + esc(age(m.updatedAt)) + '</span></div>'
+      + cardTitle(title, href, tip);
     if (m.summary) out += '<p class="mission-summary">' + esc(m.summary) + '</p>';
     if (m.waitingOn) out += '<p class="mission-fact mission-waiting"><span class="mission-label">Waiting on</span>' + esc(m.waitingOn) + '</p>';
     if (m.next) out += '<p class="mission-fact mission-next"><span class="mission-label">Next</span>' + esc(m.next) + '</p>';
@@ -2085,7 +2077,7 @@ function missionsParts(overview, ui) {
     }
     return cardShell({
       key: key, view: m.view, className: 'mission-card', inner: out, orders: m.orders, live: m.live, foot: foot, href: href,
-      label: title, placeholder: 'A note for this mission’s session',
+      label: title, tip: tip, placeholder: 'A note for this mission’s session',
     });
   }
 
@@ -2107,18 +2099,19 @@ function missionsParts(overview, ui) {
     var href = '';
     if (rounds.length) href = /^https?:\/\//i.test(String(rounds[0].url)) ? rounds[0].url : '/b/' + encodeURIComponent(rounds[0].board);
     var where = [];
-    if (t.login) where.push('<span class="tab-login" title="' + esc(t.login) + '">' + esc(loginLabel(t.login)) + '</span>');
-    if (t.folder) where.push('<span class="tab-folder" title="' + esc(t.cwd) + '">' + esc(t.folder) + '</span>');
+    if (t.login) where.push('<span class="tab-login">' + esc(loginLabel(t.login)) + '</span>');
+    if (t.folder) where.push('<span class="tab-folder">' + esc(t.folder) + '</span>');
+    var tip = cardTip(title, [t.login && 'Login ' + t.login, t.folder && 'Folder ' + t.cwd]);
     var out = '<div class="mission-text">';
     if (where.length) out += '<div class="mission-ident"><span class="mission-key">' + where.join(', ') + '</span></div>';
-    out += cardTitle(title, href, ' title="' + esc(title) + '"');
+    out += cardTitle(title, href, tip);
     if (t.reason) out += '<p class="mission-summary tab-reason">' + esc('Blocked: ' + t.reason) + '</p>';
     out += moreFold(key, t.reason || title.length > FOLD_TITLE_CHARS);
     out += '</div>';
     var foot = '<span class="mission-tag tab-tag">tab</span>' + (t.yourTurn ? '<span class="mission-tag tab-turn">your turn</span>' : '');
     return cardShell({
       key: key, view: t.state, className: 'mission-card tab-card', inner: out, orders: t.orders, live: true, foot: foot, href: href,
-      label: title, placeholder: 'A note for this tab’s session',
+      label: title, tip: tip, placeholder: 'A note for this tab’s session',
     });
   }
 

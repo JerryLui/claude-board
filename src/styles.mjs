@@ -2001,11 +2001,9 @@ body.home-page .mode-toggle:disabled { opacity: 0.5; cursor: default; }
 .mission-card:focus-visible, .mission-card:has(.mission-link:focus-visible) { outline: none; border-color: var(--accent); box-shadow: var(--ring); }
 .mission-link { color: inherit; text-decoration: none; outline: none; }
 .mission-link::after { content: ""; position: absolute; inset: 0; border-radius: inherit; }
-/* lifted over the link's box: what a press or a hover must reach. The key line's tooltips
-   come before the link in the card, so they need the z-index too; a press on one still
-   opens the board. */
+/* lifted over the link's box: what a press must reach. The key line stays under it, its
+   facts in full on the link's tooltip. */
 .mission-foot > *, .mission-more > summary, .mission-confirm, .mission-comment { position: relative; }
-.mission-age, .tab-login, .tab-folder { position: relative; z-index: 1; }
 .mission-text { min-width: 0; }
 .mission-ident { display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
   font-size: 12px; line-height: var(--mc-mono-lh); color: var(--muted); }

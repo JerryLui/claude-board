@@ -265,6 +265,8 @@ async function main() {
       summary: longText(280, 'summary'), waitingOn: longText(280, 'waiting'), next: longText(280, 'next') });
     await post('/api/mission/ESTATE_GOLDENS', { title: 'Estate case goldens', phase: 'landing', state: 'released', summary: 'Released, nothing left',
       prs: [{ repo: 'service', number: 1862, url: 'https://github.com/o/service/pull/1862', state: 'merged' }] });
+    // A board for the released mission, so a card with no Stop still opens one.
+    await post('/api/board', { title: 'Estate goldens: notes', mission: 'ESTATE_GOLDENS', blocks: [{ kind: 'markdown', text: 'Notes' }] });
 
     const tabSession = (id, fields) => ({ id, pid: null, procStart: null, kind: 'interactive', jobId: null, cwd: '/Users/pm/work/tab-repo',
       login: '/Users/pm/.claude-a', name: null, status: 'busy', reason: null, ...fields });
@@ -655,20 +657,48 @@ async function main() {
         }
       });
 
-      await row('a hover on a mission card\'s age and on a tab card\'s login and folder reaches that span and its title, not the link over the card; a press on the folder still opens the board', async note => {
+      await row('a real hover on a card, with Stop or without, a link or not, shows its key line in full as a tooltip: a mission\'s exact time, a tab\'s login and folder; on a linked card the press under the age, login and folder is the link\'s own', async note => {
         const tab = await openTab(send, onEvent, `${origin}/`, cookie, tabAt(1440, 'light'));
+        // Read now: rows before this one move some missions on.
+        const fresh = await getJson(`${origin}/api/missions`, daemon.secret);
+        const tabs = Object.fromEntries(fresh.tabs.map(t => [`tab:${t.id}`, t]));
+        const byKey = Object.fromEntries(fresh.missions.map(m => [m.key, m]));
+        // [card, the span hovered, whether the card offers Stop and a link, the lines its tooltip must hold]
+        const cases = [
+          ['FILETYPE_FOLLOWUP', '.mission-key', 'Stop, link', [`Updated ${byKey.FILETYPE_FOLLOWUP.updatedAt}`]],
+          ['ESTATE_GOLDENS', '.mission-age', 'link', [`Updated ${byKey.ESTATE_GOLDENS.updatedAt}`]],
+          ['SCHEDULED', '.mission-age', 'none', [`Updated ${byKey.SCHEDULED.updatedAt}`]],
+          ['ANNOUNCEMENTS', '.mission-key', 'Stop', [`Updated ${byKey.ANNOUNCEMENTS.updatedAt}`]],
+          [ASKING_TAB, '.tab-login', 'Stop, link', [`Login ${tabs[ASKING_TAB].login}`, `Folder ${tabs[ASKING_TAB].cwd}`]],
+          [ASKING_TAB, '.tab-folder', 'Stop, link', [`Login ${tabs[ASKING_TAB].login}`, `Folder ${tabs[ASKING_TAB].cwd}`]],
+          ['tab:tab-short', '.tab-folder', 'Stop', [`Login ${tabs['tab:tab-short'].login}`, `Folder ${tabs['tab:tab-short'].cwd}`]],
+        ];
         try {
-          const hits = await tab.evalPage(`[['FILETYPE_FOLLOWUP', '.mission-age'], [${JSON.stringify(ASKING_TAB)}, '.tab-login'], [${JSON.stringify(ASKING_TAB)}, '.tab-folder']].map(function (e) {
-            var card = document.querySelector('article.mission-card[data-mission-key="' + e[0] + '"]');
-            var span = card.querySelector(e[1]);
-            span.scrollIntoView({ block: 'center' });
-            var r = span.getBoundingClientRect();
-            var hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
-            return e[0] + ' ' + e[1] + ': ' + (hit === span ? 'span' : hit && hit.closest('a.mission-link') ? 'link' : String(hit && hit.className))
-              + ', linked ' + !!card.querySelector('a.mission-link') + ', titled ' + !!span.getAttribute('title');
-          })`);
-          note(hits.join('; '));
-          assert.deepEqual(hits.filter(h => !/: span, linked true, titled true$/.test(h)), []);
+          for (const [key, span, offers, lines] of cases) {
+            const card = `article.mission-card[data-mission-key="${key}"]`;
+            const at = await tab.evalPage(`(function () {
+              var c = document.querySelector('${card}');
+              c.scrollIntoView({ block: 'center' });
+              var r = c.querySelector('${span}').getBoundingClientRect();
+              return { x: r.left + Math.min(6, r.width / 2), y: r.top + r.height / 2,
+                offers: [c.querySelector('button.mission-stop') && 'Stop', c.querySelector('a.mission-link') && 'link'].filter(Boolean).join(', ') || 'none' };
+            })()`);
+            assert.equal(at.offers, offers, `setup: ${key} offers ${offers}`);
+            await tab.sp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: at.x, y: at.y, button: 'none', modifiers: 0, clickCount: 0 });
+            const seen = await tab.evalPage(`(function () {
+              var c = document.querySelector('${card}');
+              var hit = document.elementFromPoint(${at.x}, ${at.y});
+              var tipped = hit && hit.closest('[title]');
+              var age = c.querySelector('.mission-age');
+              return { hovered: c.matches(':hover'), tip: tipped && c.contains(tipped) ? tipped.getAttribute('title') : null,
+                onLink: !!(hit && hit.closest('a.mission-link')), age: age ? getComputedStyle(age).visibility : null };
+            })()`);
+            note(`${key} ${span} (${offers}): hovered ${seen.hovered}, age ${seen.age}, on the link ${seen.onLink}, tooltip ${JSON.stringify(seen.tip)}`);
+            assert.equal(seen.hovered, true, `${key}: the card is hovered`);
+            if (offers.startsWith('Stop') && seen.age !== null) assert.equal(seen.age, 'hidden', `${key}: Stop has taken the age's place`);
+            assert.ok(seen.tip && lines.every(l => seen.tip.split('\n').includes(l)), `${key}: the tooltip holds ${lines.join(' and ')}`);
+            assert.equal(seen.onLink, offers.endsWith('link'), `${key}: a press there is the link's own exactly where the card has one`);
+          }
           // The release that clicks may answer from a page already navigating away.
           await press(tab, `article.mission-card[data-mission-key="${ASKING_TAB}"] .tab-folder`).catch(err => {
             if (!/Not attached to an active page/.test(err.message)) throw err;
