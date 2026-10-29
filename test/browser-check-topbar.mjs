@@ -31,7 +31,7 @@ if (!existsSync(CHROME)) skipFile('browser-check-topbar', `browser-check-topbar:
 const WIDTHS = [1440, 2560];
 const HEIGHT = 900;
 const THEMES = ['light', 'dark'];
-const BOARDS = 14; // enough rows that the boards list scrolls at HEIGHT, with Missions empty
+const BOARDS = 60; // enough that the boards scroll at HEIGHT, six a row at 2560, with Missions empty
 
 guardRun('browser-check-topbar', { deadlineMs: 180000 });
 
