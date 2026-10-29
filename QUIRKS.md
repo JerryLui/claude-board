@@ -2287,6 +2287,12 @@ chrome band; if that ever surfaces, the fix is this same resend, not a broadcast
 
 Traps that have bitten once. A second bite moves the entry up into the section it belongs to.
 
+- **Deleting the last rule that reads a palette token fails the contrast suite, not the pure one.**
+  `test/check-contrast.mjs` ("every palette token is referenced somewhere in the stylesheet, or
+  by another token") fails on a token left in `DARK`/`LIGHT` with no reader; the Boards grid's
+  `.thread-item.live` was `--warning-line`'s only one. Drop the token from both palettes, and
+  from any palette comment listing it, in the same change.
+
 - **Chrome's offline emulation refuses loopback too.** `Network.emulateNetworkConditions` with
   `offline: true` fails a navigation to the scratch daemon at `127.0.0.1` with
   `ERR_INTERNET_DISCONNECTED`, so no served page can load "with the network off". A check that
