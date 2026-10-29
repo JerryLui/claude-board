@@ -26,7 +26,7 @@
 
 import http from 'node:http';
 import readline from 'node:readline';
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
@@ -96,6 +96,33 @@ const BACKGROUND = process.env.CLAUDE_BOARD_CLIENT === 'background';
 const MISSION_KEY_RE = /^[A-Za-z0-9_-]{1,80}$/;
 const MISSION = MISSION_KEY_RE.test(process.env.CLAUDE_MISSION || '') ? process.env.CLAUDE_MISSION : null;
 const MISSION_FIELD = MISSION ? { mission: MISSION } : {};
+
+// The agent session this shim runs under, carried on every board post so the daemon links
+// the board's open round to that session's tab card (ADR 131). Claude Code spawns the shim
+// directly, so the parent process is the `claude` process itself. Its start is read once,
+// as `TZ=UTC ps -o lstart=` prints it, the reading the session watcher matches on. A start
+// that cannot be read sends no `session` at all, never a failed post.
+const SESSION_FIELD = (() => {
+  const procStart = parentStartUtc(process.ppid);
+  return procStart ? { session: { pid: process.ppid, procStart } } : {};
+})();
+
+function parentStartUtc(pid) {
+  if (!Number.isInteger(pid) || pid <= 1) return null;
+  let lstart;
+  try {
+    lstart = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
+      env: { ...process.env, TZ: 'UTC' }, encoding: 'utf8', timeout: 2_000, stdio: ['ignore', 'pipe', 'ignore'],
+    });
+  } catch {
+    return null;
+  }
+  const m = /^\w{3} (\w{3}) (\d{1,2}) (\d\d):(\d\d):(\d\d) (\d{4})$/.exec(lstart.trim().replace(/\s+/g, ' '));
+  const month = m ? ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'].indexOf(m[1]) : -1;
+  if (month < 0) return null;
+  const ms = Date.UTC(Number(m[6]), month, Number(m[2]), Number(m[3]), Number(m[4]), Number(m[5]));
+  return new Date(ms).toISOString().replace('.000Z', 'Z');
+}
 
 function readPkgVersion() {
   try {
@@ -1042,7 +1069,7 @@ async function postThisRound(session, title, blocks, wait, fresh) {
     const creating = (async () => {
       const posted = await httpJson(
         'POST', `${BASE_URL}/api/board`,
-        { title, blocks, wait: Boolean(wait), noWait, cwd: process.cwd(), thread: session.thread ?? null, requestId: createRequestId, ...MISSION_FIELD },
+        { title, blocks, wait: Boolean(wait), noWait, cwd: process.cwd(), thread: session.thread ?? null, requestId: createRequestId, ...MISSION_FIELD, ...SESSION_FIELD },
         { timeoutMs: CREATE_TIMEOUT_MS }
       );
       session.boardId = posted.boardId;
@@ -1102,7 +1129,7 @@ async function postThisRound(session, title, blocks, wait, fresh) {
   try {
     posted = await httpJson(
       'POST', `${BASE_URL}/api/board`,
-      { boardId: session.boardId, blocks, title, wait: Boolean(wait), noWait, requestId, ...MISSION_FIELD },
+      { boardId: session.boardId, blocks, title, wait: Boolean(wait), noWait, requestId, ...MISSION_FIELD, ...SESSION_FIELD },
       { timeoutMs: POST_TIMEOUT_MS }
     );
   } catch (err) {

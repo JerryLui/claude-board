@@ -952,7 +952,9 @@ the one listed session ("The session routes") with that pid and start, else `nul
 names an id itself. The first post to name a session decides the board's: a later post from the
 same pid and start fills an `id` still `null`, a post resolved to the same `id` from a new process
 takes its pid and start, and any other post moves nothing (and still lands). An open round on the
-board then puts that session's tab card in Needs you.
+board then puts that session's tab card in Needs you. The shim sends its parent process (the
+`claude` process that spawned it) and that process's start as `TZ=UTC ps -o lstart=` prints it,
+read once at startup; a start it cannot read sends no `session`, never a failed post.
 
 **`noWait` (boolean) is the caller stating it will not open `/wait` on this post**, which is what
 makes the response the thread's next packet. On it the daemon drains into that response whatever

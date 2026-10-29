@@ -264,6 +264,10 @@ A session started in the background, with nobody at its terminal, declares it wi
 the round reaches you through its notification and the home page. `claude -p` and other
 scripted runs are still refused.
 
+Every board post names the session it came from, the shim's parent process id and that
+process's start time, so a round left open by a session with no mission shows on that
+session's card too ([PROTOCOL.md](PROTOCOL.md), "`session: { pid, procStart }`").
+
 ### An example skill
 
 [`skills/grill-example/SKILL.md`](skills/grill-example/SKILL.md) is a design-interview
