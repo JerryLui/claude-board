@@ -2365,7 +2365,7 @@ function resolvedAtWindow(sheet, el, prop) {
 // no Chrome can still hold is what the cascade gives each element: at a wide
 // window every prose element on a round holds a measure of its own of at most
 // 80ch, and no rendered block, whose width is the whole point, holds any.
-check("on a wide window a round's prose holds a measure of at most 80ch and none of its rendered blocks holds one -- a page board's Tray keeps its own width", () => {
+check("on a wide window a round's prose holds a measure of at most 80ch and none of its rendered blocks holds one but the column's 1700px cap -- a page board's Tray keeps its own width", () => {
   const board = createBoard({
     title: 'measure',
     blocks: [
@@ -2410,11 +2410,14 @@ check("on a wide window a round's prose holds a measure of at most 80ch and none
     .map(([name, el]) => `${name} (${maxWidth(el) || 'unset'})`);
   assert.deepEqual(unheld, [], 'every prose element holds a measure of at most 80ch, resolved in its own font');
 
+  // From 1440px the column itself stops at 1700px (one card width); what is
+  // inside it takes its width.
   const rendered = ['.html-stage', '.stage-wrap', 'pre.mermaid', '.compare-grid', '.compare-side', '.options-variants', '.variant-card',
-    '.question-context', '.table-scroll', '.md-content table', '.md-content pre', '.block', '.round', '.blocks'];
-  for (const [label, sheet] of [['wide', wide], ['1280px', stylesAtWindow(styles, 1280)]]) {
+    '.question-context', '.table-scroll', '.md-content table', '.md-content pre', '.block', '.round'];
+  for (const [label, sheet, column] of [['wide', wide, '1700px'], ['1280px', stylesAtWindow(styles, 1280), '']]) {
     const held = rendered.flatMap(sel => each(sel).filter(el => !['', 'none'].includes(maxWidth(el, sheet))).map(el => `${sel} (${maxWidth(el, sheet)})`));
     assert.deepEqual(held, [], `at a ${label} window no rendered block, and nothing around one, is capped: it takes the column`);
+    assert.equal(maxWidth(document.querySelector('.blocks'), sheet), column, `at a ${label} window the column is capped at ${column || 'nothing'}`);
   }
 
   const tray = renderedPage(pageBoard()).document.querySelector('.page-comments .comment-list');

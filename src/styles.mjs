@@ -2680,11 +2680,12 @@ body:not(.page-board) .blocks .comment-list, body:not(.page-board) .blocks .comm
      overflowed its clip of about ten lines (src/ui.mjs drops the fold, and its
      control, from text that fits), and it is open: a folded preview, and
      short text, stay one column. Text holding a table, code or a diagram
-     stays one column too, as each of those takes the card's width. */
-  .markdown-block:not(.folded):has(> .fold-toggle) > .md-content:not(:has(table, pre, .mermaid)) {
+     stays one column too, as each of those takes the card's width. One ':not()'
+     each, never a comma list inside one: test/check-pure.mjs's cascade resolver
+     splits a selector at every comma. A heading never ends a column. */
+  .markdown-block:not(.folded):has(> .fold-toggle) > .md-content:not(:has(table)):not(:has(pre)):not(:has(.mermaid)) {
     columns: 2 var(--prose); column-gap: var(--space-6); max-width: calc(2 * var(--prose) + var(--space-6)); }
-  .markdown-block:not(.folded):has(> .fold-toggle) > .md-content > :is(h1, h2, h3, h4, h5, h6) { break-after: avoid; }
-  .markdown-block:not(.folded):has(> .fold-toggle) > .md-content > :is(li, ul, ol, blockquote) { break-inside: avoid; }
+  .md-content h1, .md-content h2, .md-content h3, .md-content h4, .md-content h5, .md-content h6 { break-after: avoid; }
   /* A diagram narrower than its panel sits in the panel's middle rather than
      against its left edge. */
   pre.mermaid > svg { display: block; margin-inline: auto; }
