@@ -613,4 +613,22 @@ check('a fold that settles once a pushed round is attached is dropped then, whil
   assert.ok(item(overflows).querySelector('.fold-toggle'), 'and its control');
 });
 
+// A question's chip, at the right edge of its card head, says where its answer
+// stands as the reviewer works, by the same rule Send reads: answered, deferred,
+// or nothing yet.
+check('each open question\'s chip follows its answer live: Answered on a pick, Deferred on Defer, back to nothing when the defer is undone', () => {
+  const document = loadBoard(pageHtml);
+  const blocks = openBlocks(document);
+  const chip = b => {
+    const el = b.querySelectorAll('.answer-status')[0];
+    return [el.getAttribute('data-status'), el.textContent];
+  };
+  assert.deepEqual(blocks.map(chip), [['unanswered', ''], ['unanswered', ''], ['unanswered', '']], 'nothing answered yet');
+  answerSingle(blocks[0], 'Yes');
+  deferBlock(blocks[2]);
+  assert.deepEqual(blocks.map(chip), [['answered', 'Answered'], ['unanswered', ''], ['deferred', 'Deferred']]);
+  deferBlock(blocks[2]);
+  assert.deepEqual(chip(blocks[2]), ['unanswered', ''], 'undoing the defer clears the chip');
+});
+
 finish('send-guard');
