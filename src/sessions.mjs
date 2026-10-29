@@ -101,16 +101,16 @@ function validateEntry(entry, i) {
     if (!SESSION_FIELDS.includes(k)) throw refuse(`${what} has an unknown field`);
   }
   if (typeof entry.id !== 'string' || !SAFE_SESSION_ID.test(entry.id)) throw refuse(`${what}.id must match ${SAFE_SESSION_ID}`);
-  const pid = entry.pid ?? null;
+  const processId = entry.pid ?? null;
   const procStart = entry.procStart ?? null;
-  if (pid !== null && !validPid(pid)) throw refuse(`${what}.pid must be a positive integer or null`);
+  if (processId !== null && !validPid(processId)) throw refuse(`${what}.pid must be a positive integer or null`);
   if (procStart !== null && !validProcStart(procStart)) throw refuse(`${what}.procStart must be a UTC ISO-8601 timestamp or null`);
-  if ((pid === null) !== (procStart === null)) throw refuse(`${what}.pid and procStart are both set or both null`);
+  if ((processId === null) !== (procStart === null)) throw refuse(`${what}.pid and procStart are both set or both null`);
   if (!SESSION_KINDS.includes(entry.kind)) throw refuse(`${what}.kind must be one of ${SESSION_KINDS.join(', ')}`);
   if (!SESSION_STATUSES.includes(entry.status)) throw refuse(`${what}.status must be one of ${SESSION_STATUSES.join(', ')}`);
   // A session with no process is a background job still blocked on its reason; anything
   // else without one has ended and is no card.
-  if (pid === null && !(entry.kind === 'bg' && entry.status === 'blocked')) throw refuse(`${what}.pid may be null only for a blocked bg job`);
+  if (processId === null && !(entry.kind === 'bg' && entry.status === 'blocked')) throw refuse(`${what}.pid may be null only for a blocked bg job`);
   const jobId = entry.jobId ?? null;
   if (jobId !== null && (typeof jobId !== 'string' || !SAFE_JOB_ID.test(jobId))) throw refuse(`${what}.jobId must match ${SAFE_JOB_ID} or be null`);
   if (typeof entry.cwd !== 'string' || !entry.cwd.startsWith('/') || entry.cwd.length > MAX_PATH_CHARS) {
@@ -118,7 +118,7 @@ function validateEntry(entry, i) {
   }
   return {
     id: entry.id,
-    pid,
+    pid: processId,
     procStart,
     kind: entry.kind,
     jobId,
