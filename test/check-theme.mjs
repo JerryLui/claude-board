@@ -129,32 +129,32 @@ function themeToggleEl(document) {
 }
 
 // =================================================================================
-// 2. No-flash, structurally: the boot script's actual text precedes <style> and
-//    precedes <body> in both pages' emitted markup. Asserted by locating the
+// 2. No-flash, structurally: the boot script's actual text precedes the stylesheet
+//    link and precedes <body> in both pages' emitted markup. Asserted by locating the
 //    real, exported `themeBootScript` string in the output -- not a
 //    hand-written stand-in for it that could silently drift from what
 //    src/render.mjs / src/indexpage.mjs actually emit.
 // =================================================================================
 
-check('board page: the real themeBootScript text appears before <style> and before <body>', () => {
+check('board page: the real themeBootScript text appears before the stylesheet link and before <body>', () => {
   const board = createBoard({ title: 'Order', blocks: [{ kind: 'markdown', text: '# A' }] });
   const html = renderBoardPage(board);
   const scriptIdx = html.indexOf(themeBootScript);
-  const styleIdx = html.indexOf('<style>');
+  const styleIdx = html.indexOf('<link rel="stylesheet"');
   const bodyIdx = html.indexOf('<body');
   assert.ok(scriptIdx !== -1, 'the exact themeBootScript text must appear verbatim in the rendered page');
-  assert.ok(styleIdx !== -1 && bodyIdx !== -1, 'setup failure: page missing <style>/<body>');
-  assert.ok(scriptIdx < styleIdx, 'the boot script must run before <style> is parsed, or the first paint can still be dark');
+  assert.ok(styleIdx !== -1 && bodyIdx !== -1, 'setup failure: page missing its stylesheet link or <body>');
+  assert.ok(scriptIdx < styleIdx, 'the boot script must run before the stylesheet loads, or the first paint can still be dark');
   assert.ok(scriptIdx < bodyIdx, 'the boot script must run before <body> -- that ordering is what makes it pre-paint at all');
 });
 
-check('index page: the real themeBootScript text appears before <style> and before <body>', () => {
+check('index page: the real themeBootScript text appears before the stylesheet link and before <body>', () => {
   const html = renderIndexPage({ threads: [] });
   const scriptIdx = html.indexOf(themeBootScript);
-  const styleIdx = html.indexOf('<style>');
+  const styleIdx = html.indexOf('<link rel="stylesheet"');
   const bodyIdx = html.indexOf('<body');
   assert.ok(scriptIdx !== -1, 'the exact themeBootScript text must appear verbatim in the rendered index page');
-  assert.ok(styleIdx !== -1 && bodyIdx !== -1, 'setup failure: index page missing <style>/<body>');
+  assert.ok(styleIdx !== -1 && bodyIdx !== -1, 'setup failure: index page missing its stylesheet link or <body>');
   assert.ok(scriptIdx < styleIdx);
   assert.ok(scriptIdx < bodyIdx);
 });

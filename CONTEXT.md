@@ -280,9 +280,10 @@ for each; switching tabs moves nothing in it. _Avoid_: nav bar, header (unqualif
 page has its own).
 
 **Mission card**: a Mission on the Missions view, as tall as its text: its long fields clamp to a
-line or two, whole behind one Show the rest fold. The whole card is the link to its board, the
-round waiting on the person or else the latest; its Stop shows on hover, keyboard focus or while
-its question is open, while a Fire or Merge it offers stays shown. _Avoid_: tile, row.
+line or two, whole behind one Show the rest fold. The whole card is the link to its board (its
+title's link covers it), the round waiting on the person or else the latest; its Stop shows on
+hover, keyboard focus or while its question is open, and always on a screen with no hover, while
+a Fire or Merge it offers stays shown. _Avoid_: tile, row.
 
 **Mission state**: the column a Mission shows in, derived on every read: needs you, working,
 waiting, stalled or released. Between merge and Released a Mission is working, or needs you

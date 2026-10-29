@@ -17,6 +17,9 @@
 // daemon's own origin instead: every other request is failed as disconnected and
 // recorded. The saved copy needs no daemon, so it loads fully offline.
 //
+// The home page's two views carry no font of their own: they link the board pages' shared,
+// content-addressed stylesheet, which the browser caches, so Inter reaches them from it.
+//
 // `document.fonts.check('13px Inter')` answers true when no face named Inter exists at
 // all, so it proves nothing here: the rows read the FontFace set itself and measure a
 // text run against the fallback stack.
@@ -25,12 +28,25 @@ import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { sessionToken } from '../src/secret.mjs';
+import { STYLE_ASSET } from '../src/assets.mjs';
 import { runMain, skipFile } from './support.mjs';
 import { CHROME, copyArchive, guardRun, openTab, postJson, row, startScratchDaemon, withChrome } from './browser-support.mjs';
 
 if (!existsSync(CHROME)) skipFile('browser-check-font', `browser-check-font: no Chrome at ${CHROME} (set CLAUDE_BOARD_CHROME_BIN to override)`);
 
 guardRun('browser-check-font', { deadlineMs: 120000 });
+
+// The home page's own bytes, as the daemon serves them, and the stylesheets it loaded.
+const HOME_EXPR = `fetch(location.href, { credentials: 'same-origin' }).then(function (r) { return r.text(); }).then(function (html) {
+  return {
+    bytes: html.length,
+    fontFaces: (html.match(/@font-face/g) || []).length,
+    styleTags: document.querySelectorAll('style').length,
+    sheets: [].slice.call(document.styleSheets).map(function (sh) {
+      return { path: sh.href ? new URL(sh.href).pathname : null, rules: sh.cssRules.length };
+    }),
+  };
+})`;
 
 const SAMPLE = 'The quick brown fox jumps over the lazy dog 0123456789';
 
@@ -111,8 +127,8 @@ async function main() {
 
     // Each render in the one theme it is drawn in: Missions and Boards dark, the round page light.
     const surfaces = [
-      { label: 'the home page, Missions (served, network cut but for the daemon)', url: `${origin}/`, theme: 'dark', allowedOrigin: origin },
-      { label: 'the home page, Boards (served, network cut but for the daemon)', url: `${origin}/boards`, theme: 'dark', allowedOrigin: origin },
+      { label: 'the home page, Missions (served, network cut but for the daemon)', url: `${origin}/`, theme: 'dark', allowedOrigin: origin, home: true },
+      { label: 'the home page, Boards (served, network cut but for the daemon)', url: `${origin}/boards`, theme: 'dark', allowedOrigin: origin, home: true },
       { label: 'a board page (served, network cut but for the daemon)', url: `${origin}${new URL(posted.url).pathname}`, theme: 'light', allowedOrigin: origin },
       { label: 'a saved copy of that board (file://, network offline)', url: archive.pageUrl, theme: 'light', allowedOrigin: null },
     ];
@@ -125,11 +141,13 @@ async function main() {
           const tab = await openTab(send, onEvent, surface.url, cookie, {
             width: 1280, height: 900, theme: surface.theme, expr: 'true', prepare: witness.prepare,
           });
-          m = await tab.sp('Runtime.evaluate', { expression: MEASURE_EXPR, awaitPromise: true, returnByValue: true })
+          const measure = expression => tab.sp('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true })
             .then(r => {
               if (r.exceptionDetails) throw new Error(`measure threw: ${r.exceptionDetails.exception?.description || r.exceptionDetails.text}`);
               return r.result.value;
             });
+          m = await measure(MEASURE_EXPR);
+          if (surface.home) m.home = await measure(HOME_EXPR);
           await tab.close();
         } finally {
           witness.stop();
@@ -145,6 +163,17 @@ async function main() {
           assert.deepEqual(fontFetches.map(r => r.url), [], 'no font came over the network');
           assert.deepEqual(refused.map(short), [], 'nothing reached for a host the page cannot have offline');
         });
+
+        if (surface.home) {
+          await row(`${surface.label}: its HTML carries no @font-face, and it loads the shared hashed stylesheet`, note => {
+            const { bytes, fontFaces, styleTags, sheets } = m.home;
+            note(`${bytes} bytes of HTML, ${styleTags} style elements; sheets ${sheets.map(sh => `${sh.path} (${sh.rules} rules)`).join(', ')}`);
+            assert.equal(fontFaces, 0, 'no @font-face in the page\'s own bytes');
+            assert.equal(styleTags, 0, 'no inline stylesheet');
+            assert.deepEqual(sheets.map(sh => sh.path), [`/b/${STYLE_ASSET}`], 'the one stylesheet is the board pages\' shared one');
+            assert.ok(sheets[0].rules > 0, 'and it loaded');
+          });
+        }
 
         await row(`${surface.label}: a 13px run in body's font measures Inter's width, not the fallback stack's`, note => {
           note(`body stack ${m.stack}; drawn ${m.scheme}`);

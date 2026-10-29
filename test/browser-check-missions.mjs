@@ -3,13 +3,16 @@
 // lay out in one row across the bar's whole content width, at 1440 and 2560 wide, light
 // and dark, with nothing scrolling sideways; every mission card at rest, a tab card's too,
 // is as tall as its own text, in a list's density, its long fields cut short with an
-// ellipsis under one fold that shows them whole; a click on a card or Enter on it opens
-// its board, and its Stop shows only on its hover or focus; the Boards view is one grouped
-// list at 1280, 1440 and 2560, a 38px line a board under "Waiting on you" and "Earlier",
-// the whole line a link and the filter narrowing both groups; and Stop, pressed with a
-// real mouse, plain or
-// with Ctrl, Shift or Alt held, asks once and then sends its order, its Stop and Keep on
-// one line, while a Cmd double-press sends one order with no question. Layout and a real press, which the DOM stand-in has none of (QUIRKS.md "The DOM
+// ellipsis under one fold that shows them whole; the card's title is a real link whose box
+// covers the card under its chips and controls, so a click anywhere else on it or Enter on
+// the link opens its board, while in comment mode both open its note instead; its Stop
+// shows only on its hover or focus, on a screen with no hover always, keeps clear of a tab
+// card's key line, and takes the focus back after Keep or Escape; the Boards view is one
+// grouped list at 1280, 1440 and 2560, a 38px line a board under "Waiting on you" and
+// "Earlier", the whole line a link (test/check-pure.mjs owns the filter); and Stop, pressed
+// with a real mouse, plain or with Ctrl, Shift or Alt held, asks once and then sends its
+// order, its Stop and Keep on one line, while a Cmd double-press sends one order with no
+// question. Layout and a real press, which the DOM stand-in has none of (QUIRKS.md "The DOM
 // stand-in's ceilings"): test/check-missions-view.mjs holds the markup and the requests.
 //
 // NOT wired into test/run.mjs's `checks` array, on purpose: that suite has to pass on a
@@ -91,6 +94,12 @@ const MEASURE_EXPR = `(function () {
     var title = c.querySelector('b.mission-title');
     var ident = c.querySelector('span.mission-key');
     var stop = c.querySelector('button.mission-stop');
+    var link = c.querySelector('a.mission-link');
+    // What a press lands on at the card's corners, inside its border.
+    var corners = link ? [[r.left + 3, r.top + 3], [r.right - 3, r.bottom - 3], [r.left + 3, r.bottom - 3]].map(function (p) {
+      var hit = document.elementFromPoint(p[0], p[1]);
+      return hit && hit.closest('a.mission-link') === link;
+    }) : null;
     return Object.assign(rect(c), { key: c.getAttribute('data-mission-key'), index: list.indexOf(c),
       col: c.closest('section.mission-col').getAttribute('data-col'),
       fold: fold ? getComputedStyle(fold).display : null,
@@ -100,6 +109,8 @@ const MEASURE_EXPR = `(function () {
       title: title ? getComputedStyle(title).fontSize + ' ' + getComputedStyle(title).fontWeight : null,
       ident: ident ? getComputedStyle(ident).fontSize : null,
       stop: stop ? getComputedStyle(stop).visibility : null,
+      link: link ? link.getAttribute('href') : null, corners: corners,
+      keyClear: stop && ident && !c.querySelector('.mission-age') ? stop.getBoundingClientRect().left - ident.getBoundingClientRect().right : null,
       openButtons: [].slice.call(c.querySelectorAll('a, button')).filter(function (b) { return /Open (board|round)/.test(b.textContent); }).length });
   });
   var long = document.querySelector('article.mission-card[data-mission-key=${JSON.stringify(LONG)}]');
@@ -192,10 +203,10 @@ async function landedAt(tab) {
   return path;
 }
 
-/** Presses `key` ('Enter' or 'Tab') on whatever has the tab's focus, as a keyboard does.
+/** Presses `key` ('Enter', 'Tab' or 'Escape') on whatever has the tab's focus, as a keyboard does.
  * Enter is its key-down alone: the page may already be navigating away by its key-up. */
 async function pressKey(tab, key) {
-  const code = { Enter: 13, Tab: 9 }[key];
+  const code = { Enter: 13, Tab: 9, Escape: 27 }[key];
   const down = { key, code: key, windowsVirtualKeyCode: code, nativeVirtualKeyCode: code };
   if (key === 'Enter') { await tab.sp('Input.dispatchKeyEvent', { type: 'keyDown', text: '\r', ...down }); return; }
   await tab.sp('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...down });
@@ -238,7 +249,8 @@ async function main() {
     // A board after the merge round: the card still opens the round waiting on the PM.
     await post('/api/board', { title: 'Model vendors: notes', mission: 'MODEL_MAP', blocks: [{ kind: 'markdown', text: 'Notes' }] });
     await live('FILETYPE_FOLLOWUP', { title: 'File types, part 2', summary: 'Wave 2 of 3, 4 owners', next: 'wave 3',
-      prs: [{ repo: 'service', number: 1866, url: 'https://github.com/o/service/pull/1866', state: 'draft' }] });
+      prs: [{ repo: 'service', number: 1866, url: 'https://github.com/o/service/pull/1866', state: 'draft' },
+        { repo: 'admin', number: 77, url: 'admin#77', state: 'draft' }] });
     await post('/api/board', { title: 'File types: wave 2', mission: 'FILETYPE_FOLLOWUP', blocks: [{ kind: 'markdown', text: 'Wave 2' }] });
     await live(TITLE_ONLY, { title: 'Release notes' });
     await live('ANNOUNCEMENTS', { title: 'In-app announcements', summary: 'Wave 1 of 2, 3 owners' });
@@ -256,7 +268,8 @@ async function main() {
     const tabSession = (id, fields) => ({ id, pid: null, procStart: null, kind: 'interactive', jobId: null, cwd: '/Users/pm/work/tab-repo',
       login: '/Users/pm/.claude-a', name: null, status: 'busy', reason: null, ...fields });
     await post('/api/sessions', { intervalMs: 600000, sessions: [
-      tabSession('tab-long', { kind: 'bg', jobId: 'job-long', name: longText(200, 'tabname'), status: 'blocked', reason: longText(300, 'reason') }),
+      tabSession('tab-long', { kind: 'bg', jobId: 'job-long', name: longText(200, 'tabname'), status: 'blocked', reason: longText(300, 'reason'),
+        cwd: `/Users/pm/work/${'a-folder-name-wider-than-its-line-'.repeat(4)}` }),
       tabSession('tab-short', { pid: 61002, procStart: '2026-10-29T11:10:15Z', name: '/grill' }),
     ] });
 
@@ -372,6 +385,23 @@ async function main() {
             assert.deepEqual(offered.filter(c => c.stop !== 'hidden').map(c => c.key), []);
           });
 
+          await row(`${mode}, at ${key}: a card with a board has a real link to it, and a press at the card's corners lands on that link`, note => {
+            const { cards } = m.missions;
+            note(`MODEL_MAP links ${cards.find(c => c.key === 'MODEL_MAP').link}, FILETYPE_FOLLOWUP ${cards.find(c => c.key === 'FILETYPE_FOLLOWUP').link}`);
+            assert.equal(cards.find(c => c.key === 'MODEL_MAP').link, target.MODEL_MAP);
+            assert.equal(cards.find(c => c.key === 'FILETYPE_FOLLOWUP').link, target.FILETYPE_FOLLOWUP);
+            const linked = cards.filter(c => c.link);
+            assert.ok(linked.length >= 4, 'setup: several cards open a board');
+            assert.deepEqual(linked.filter(c => c.corners.some(hit => !hit)).map(c => `${c.key} ${c.corners}`), []);
+          });
+
+          await row(`${mode}, at ${key}: a tab card's Stop keeps clear of its key line's text`, note => {
+            const clear = m.missions.cards.filter(c => c.keyClear !== null);
+            note(clear.map(c => `${c.key} ${px(c.keyClear)}`).join(', '));
+            assert.ok(clear.some(c => c.key === LONG_TAB), 'setup: the long tab card has a key line and Stop');
+            assert.deepEqual(clear.filter(c => c.keyClear < 0).map(c => `${c.key} ${px(c.keyClear)}`), []);
+          });
+
           await row(`${mode}, at ${key}: the long card cuts its title, summary and waiting on at two lines and next at one, with an ellipsis, under one fold`, note => {
             const { cuts, longFolds, cards } = m.missions;
             for (const [field, [, lines]] of Object.entries(CUTS)) {
@@ -463,7 +493,7 @@ async function main() {
         const tab = await openTab(send, onEvent, `${origin}/`, cookie, tabAt(1440, 'light'));
         try {
           const card = 'article.mission-card[data-mission-key="BANK_EXPORT"]';
-          assert.ok(await tab.evalPage(`document.querySelector('${card}').getAttribute('data-href')`), 'setup: the card opens a board');
+          assert.ok(await tab.evalPage(`!!document.querySelector('${card} a.mission-link')`), 'setup: the card opens a board');
           await tab.evalPage(`window.__opened = []; window.open = function (u) { window.__opened.push(u); return null; }`);
           await press(tab, `${card} button.mission-stop`, 4, 2);
           const said = await tab.until(`(document.querySelector('${card} p.mission-order') || {}).textContent`, 'the order line');
@@ -524,6 +554,90 @@ async function main() {
         }
       }
 
+      await row('after Keep and after Escape on the Stop question, the focus is on a visible Stop, which hides again once the focus leaves; the Tab after a card\'s link reaches Stop', async note => {
+        const tab = await openTab(send, onEvent, `${origin}/`, cookie, tabAt(1440, 'light'));
+        const card = 'article.mission-card[data-mission-key="FILETYPE_FOLLOWUP"]';
+        const away = () => tab.sp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 2, y: HEIGHT - 2, button: 'none', modifiers: 0, clickCount: 0 });
+        const focusOnStop = `(function () {
+          var stop = document.querySelector('${card} button.mission-stop');
+          return { on: document.activeElement === stop, seen: getComputedStyle(stop).visibility, hovered: !!document.querySelector('${card}:hover') };
+        })()`;
+        try {
+          for (const [how, shut] of [['Keep', async () => { await pressKey(tab, 'Tab'); await pressKey(tab, 'Enter'); }], ['Escape', () => pressKey(tab, 'Escape')]]) {
+            await press(tab, `${card} button.mission-stop`);
+            await tab.until(`document.activeElement === document.querySelector('${card} button.mission-stop-confirm')`, `the Stop question before ${how}`);
+            await away();
+            await shut();
+            await tab.until(`!document.querySelector('${card} div.mission-confirm')`, `${how} shutting the question`);
+            const after = await tab.evalPage(focusOnStop);
+            note(`${how}: focus on Stop ${after.on}, Stop ${after.seen}, card hovered ${after.hovered}`);
+            assert.deepEqual(after, { on: true, seen: 'visible', hovered: false }, `${how} hands the focus to a visible Stop`);
+            await tab.evalPage('document.activeElement.blur()');
+            assert.equal((await tab.evalPage(focusOnStop)).seen, 'hidden', `${how}: Stop hides once the focus leaves`);
+          }
+          await tab.evalPage(`document.querySelector('${card} a.mission-link').focus()`);
+          await pressKey(tab, 'Tab');
+          const next = await tab.evalPage(focusOnStop);
+          note(`Tab after the link: focus on Stop ${next.on}, Stop ${next.seen}`);
+          assert.deepEqual([next.on, next.seen], [true, 'visible']);
+        } finally {
+          await tab.close();
+        }
+      });
+
+      await row('on a screen with no hover, Stop shows at rest over the age, and a press on it asks rather than opening the board', async note => {
+        const tab = await openTab(send, onEvent, `${origin}/`, cookie, tabAt(1440, 'light'));
+        const card = 'article.mission-card[data-mission-key="FILETYPE_FOLLOWUP"]';
+        try {
+          // Chrome's media emulation takes no 'hover' feature; a touch screen's does.
+          await tab.sp('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 });
+          assert.equal(await tab.evalPage(`matchMedia('(hover: none)').matches`), true, 'setup: the page reads no hover');
+          const seen = await tab.evalPage(`[].slice.call(document.querySelectorAll('article.mission-card')).filter(function (c) { return c.querySelector('button.mission-stop'); }).map(function (c) {
+            var age = c.querySelector('.mission-age');
+            return c.getAttribute('data-mission-key') + ' ' + getComputedStyle(c.querySelector('button.mission-stop')).visibility + ' ' + (age ? getComputedStyle(age).visibility : '-');
+          })`);
+          note(seen.join(', '));
+          assert.deepEqual(seen.map(line => line.split(' ').slice(1).join(' ')).filter(v => v !== 'visible hidden' && v !== 'visible -'), []);
+          await press(tab, `${card} button.mission-stop`);
+          await tab.until(`!!document.querySelector('${card} div.mission-confirm')`, 'the Stop question');
+          assert.equal(await tab.evalPage('location.pathname'), '/', 'still on Missions');
+          await press(tab, `${card} button.mission-stop-cancel`);
+        } finally {
+          await tab.close();
+        }
+      });
+
+      await row('with Comment on, Enter on a card\'s link opens its note and stays on Missions', async note => {
+        const tab = await openTab(send, onEvent, `${origin}/`, cookie, tabAt(1440, 'light'));
+        const card = 'article.mission-card[data-mission-key="MODEL_MAP"]';
+        try {
+          await press(tab, 'button#comment-mode-toggle');
+          await tab.until(`document.body.classList.contains('comment-mode')`, 'Comment on');
+          await tab.evalPage(`document.querySelector('${card} a.mission-link').focus()`);
+          await pressKey(tab, 'Enter');
+          await tab.until(`document.activeElement === document.querySelector('${card} textarea.mission-comment-text')`, 'the note, focused');
+          const landed = await landedAt(tab);
+          note(`note open, on ${landed}`);
+          assert.equal(landed, '/');
+        } finally {
+          await tab.close();
+        }
+      });
+
+      await row('a click on a PR chip that is not a web link opens nothing', async note => {
+        const tab = await openTab(send, onEvent, `${origin}/`, cookie, tabAt(1440, 'light'));
+        const chip = 'article.mission-card[data-mission-key="FILETYPE_FOLLOWUP"] span.mission-pr';
+        try {
+          assert.equal(await tab.evalPage(`document.querySelector('${chip}').textContent`), '○admin #77', 'setup: the chip is not a link');
+          await press(tab, chip);
+          const landed = await landedAt(tab);
+          note(`on ${landed}`);
+          assert.equal(landed, '/');
+        } finally {
+          await tab.close();
+        }
+      });
+
       await row('Stop, pressed with a mouse, asks once, then sends the order and says so on the card', async note => {
         const tab = await openTab(send, onEvent, `${origin}/`, cookie, tabAt(1440, 'light'));
         try {
@@ -549,11 +663,11 @@ async function main() {
 
       for (const width of WIDTHS) {
         for (const theme of THEMES) {
-          await row(`a click on a card's body opens its latest board, at ${width}px ${theme}`, async note => {
+          await row(`a click on a card's body, off its title, opens its latest board, at ${width}px ${theme}`, async note => {
             const tab = await openTab(send, onEvent, `${origin}/`, cookie, tabAt(width, theme));
             try {
               // The release that clicks may answer from a page already navigating away.
-              await press(tab, 'article.mission-card[data-mission-key="FILETYPE_FOLLOWUP"] b.mission-title').catch(err => {
+              await press(tab, 'article.mission-card[data-mission-key="FILETYPE_FOLLOWUP"] p.mission-summary').catch(err => {
                 if (!/Not attached to an active page/.test(err.message)) throw err;
               });
               const landed = await landedAt(tab);
@@ -564,10 +678,10 @@ async function main() {
             }
           });
 
-          await row(`Enter on a focused card opens the round waiting on the PM, not its later board, at ${width}px ${theme}`, async note => {
+          await row(`Enter on a card's focused link opens the round waiting on the PM, not its later board, at ${width}px ${theme}`, async note => {
             const tab = await openTab(send, onEvent, `${origin}/`, cookie, tabAt(width, theme));
             try {
-              await tab.evalPage(`document.querySelector('article.mission-card[data-mission-key="MODEL_MAP"]').focus()`);
+              await tab.evalPage(`document.querySelector('article.mission-card[data-mission-key="MODEL_MAP"] a.mission-link').focus()`);
               await pressKey(tab, 'Enter');
               const landed = await landedAt(tab);
               note(`landed on ${landed}`);
@@ -654,28 +768,7 @@ async function main() {
 
     await withChrome({ tag: 'cb-missions-boards' }, async ({ send, onEvent }) => {
       const cookie = sessionToken(daemon.secret);
-      const groupsExpr = `[].slice.call(document.querySelectorAll('div.thread-group')).map(function (g) {
-        var head = g.querySelector('h2.thread-group-head');
-        var count = head.querySelector('.thread-group-count').textContent;
-        return head.textContent.slice(0, -count.length).trim() + ' ' + count + ': '
-          + [].slice.call(g.querySelectorAll('div.thread-title')).map(function (t) { return t.textContent; }).sort().join(', ');
-      })`;
       for (const width of [NARROW, ...WIDTHS]) {
-        await row(`at ${width}px: the filter narrows both groups and leaves an emptied group out`, async note => {
-          const filtered = {};
-          for (const q of ['invoice reminders', 'session 1']) {
-            const tab = await openTab(send, onEvent, `${origin}/boards?q=${encodeURIComponent(q)}`, cookie, { width, height: HEIGHT, theme: 'dark', expr: groupsExpr });
-            try {
-              filtered[q] = tab.measured;
-              note(`${q}: ${tab.measured.join('; ')}`);
-            } finally {
-              await tab.close();
-            }
-          }
-          assert.deepEqual(filtered['invoice reminders'], ['Waiting on you 1: Invoice reminders: grill', 'Earlier 1: Invoice reminders: notes']);
-          assert.deepEqual(filtered['session 1'], ['Earlier 6: Session 1, Session 10, Session 11, Session 12, Session 13, Session 14'], 'no Waiting on you header with nothing waiting');
-        });
-
         await row(`at ${width}px: a press anywhere on a board's line opens that board, its far end included`, async note => {
           const tab = await openTab(send, onEvent, `${origin}/boards`, cookie, { width, height: HEIGHT, theme: 'dark', expr: '1' });
           try {

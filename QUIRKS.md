@@ -21,7 +21,7 @@ Tooling traps in this repo. Read before fighting something; append when somethin
 - [No external assets — not even mermaid, now three bare sibling filenames](#no-external-assets-not-even-mermaid-now-three-bare-sibling-filenames)
 - [Two stylesheets, one palette](#two-stylesheets-one-palette)
 - [A diagram lens holds a clone, and a theme change replaces what it cloned](#a-diagram-lens-holds-a-clone-and-a-theme-change-replaces-what-it-cloned)
-- [A CSS *comment* is shipped on the index page too, and one check reads its words](#a-css-comment-is-shipped-on-the-index-page-too-and-one-check-reads-its-words)
+- [A CSS *comment* is shipped text, in the stylesheet asset every page links](#a-css-comment-is-shipped-text-in-the-stylesheet-asset-every-page-links)
 - [A backtick inside a template-literal payload ends the whole file](#a-backtick-inside-a-template-literal-payload-ends-the-whole-file)
 - [Readonly is locked twice — CSS and JS — and reusing chrome inherits both](#readonly-is-locked-twice--css-and-js--and-reusing-chrome-inherits-both)
 - [`100vw` is wider than the page whenever the page actually scrolls](#100vw-is-wider-than-the-page-whenever-the-page-actually-scrolls)
@@ -164,16 +164,16 @@ chrome). Only reachable through `src/theme.mjs`'s `matchMedia` listener, since a
 open while macOS switches at sunset. `lensRetheme` re-clones from the fresh svg and
 `test/check-mermaid-theme.mjs` fails when the call is removed.
 
-### A CSS *comment* is shipped on the index page too, and one check reads its words
+### A CSS *comment* is shipped text, in the stylesheet asset every page links
 
-`src/styles.mjs` is one stylesheet, embedded whole by both `renderBoardPage` and
-`renderIndexPage`. `test/check-pure.mjs`'s index-row check asserts the rendered index page
-contains no ordinal wording — `assert.doesNotMatch(html, /\bround \d/i)` — over the WHOLE
-page, comments included. So a CSS comment reading "a control that vanishes at round 1"
-fails an index check that has nothing to do with the rule it sits above, and the failure
-names the index row, not the stylesheet (reproduced; the rule was the round pager's
-chevrons). Two consequences: prose in `src/styles.mjs` is shipped text, not a private
-note, and a check that greps a whole rendered page will read your comments.
+`src/styles.mjs` is one stylesheet, served whole as the content-addressed `styles-<hash>.css`
+that a board page links as a sibling and the home page links at `/b/` (ADR 70, 139). Its
+comments ride in those bytes to every reader, so prose in it is shipped text, not a private
+note. The home page used to inline it, and then `test/check-pure.mjs`'s index-row check
+(`assert.doesNotMatch(html, /\bround \d/i)`, over the whole page) failed on a CSS comment
+reading "a control that vanishes at round 1", naming the index row, not the stylesheet. A
+check that greps the asset's bytes, or a page that inlines the stylesheet again, reads your
+comments the same way.
 
 ### A backtick inside a template-literal payload ends the whole file
 

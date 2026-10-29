@@ -484,9 +484,9 @@ cards half empty).
 in the stylesheet as `data:` URLs, with the system stack after it, so a face that fails to load
 reads as the page did before. The rule it bends was "no web fonts and no external assets"; it is
 now "no external assets": the font rides in the stylesheet's own bytes, so a saved copy still opens
-with the network off. The cost is about 97 KB raw on the shared stylesheet, and on every home page
-load, since the home page inlines it; `test/check-pure.mjs` caps it at 120 KB. Recommended had been
-no font.
+with the network off. The cost is about 97 KB raw on the shared stylesheet, which the home page
+links (at `/b/`) as a board page does rather than inlining it, so the browser's cache carries it
+across loads; `test/check-pure.mjs` caps it at 120 KB. Recommended had been no font.
 
 ### Theme decisions
 
@@ -805,8 +805,9 @@ least 250px wide that wraps on a narrow window. A card is a grey line with its k
 its age at the right, the title, the summary, what it waits on and what comes next, and a foot of
 small chips (Queued under Waiting, a tab card's tags, its PRs with a mark for their state) with
 Fire or Merge while asked. The whole card opens its board, the round asking or else the latest.
-Stop sits over the age while a session is live, shown on the card's hover or keyboard focus or
-while its question is open, asking once before it sends, or sending at once on a Cmd-click.
+Stop sits over the age while a session is live, shown on the card's hover or keyboard focus,
+while its question is open, after Keep or Escape hands it the focus, and always on a screen with
+no hover, asking once before it sends, or sending at once on a Cmd-click.
 Boards is the list of Threads with its filter, the home page before Missions took `/`, now at the
 bar's full width (ADR 137): one panel at every width, a 38px line per board (its dot, the title
 cut with an ellipsis, the rounds-left chip, then folder, round count, last update and thread id as
@@ -821,8 +822,12 @@ Missions, and a grid of cards from 1440px.
 alone when the title is the key. It clamps its long fields: the title and the summary to 2 lines,
 waiting on to 2, next to 1, each ending in an ellipsis. One Show the rest fold per card shows every
 field whole; it takes no room while nothing is cut, and stays open across repaints. The whole card
-is the link, by click or Enter (`role="link"`), so it carries no Open board button; Fire and Merge
-stay shown, since they are calls rather than navigation, and Stop waits for hover or focus. A tab
+is the link: its title is a real `<a href>` whose box stretches over the card under its chips,
+buttons, fold and forms, so a click, Enter, a middle-click, a Cmd-click and the link's own menu all
+work as on any link, and with Comment on a press opens the card's note instead. It carries no Open
+board button; Fire and Merge stay shown, since they are calls rather than navigation, and Stop
+waits for hover or focus. An earlier build made the article itself a `role="link"` around its
+buttons, which had none of a link's middle-click, menu or hover address. A tab
 card with several rounds waiting opens the first, the rest reached through Boards. Rejected:
 the earlier card with only its forced height dropped (it kept the roomy type and padding the
 person called out), Open board and Stop always shown on every card, and relying on the agents that

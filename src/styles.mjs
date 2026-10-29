@@ -6,7 +6,7 @@
 // highlighting cannot be done in one accent -- ADR.md entry 63 states that this
 // discipline stops describing that one surface, and holds everywhere else. Dark by default; a light palette (designed against the accent, not a
 // mechanical inversion) takes over under `prefers-color-scheme: light` — see the
-// DARK/LIGHT objects below. No external assets — the standalone `file:` archive has to
+// DARK/LIGHT objects below. No external assets -- the standalone `file:` archive has to
 // look identical with the network off (see src/render.mjs). The one web font, Inter, is
 // therefore not fetched but inlined: its Latin woff2 files (src/vendor/inter/, OFL, its
 // licence beside them) ride in this stylesheet as `data:` URLs, under the `font-src data:`
@@ -1987,16 +1987,21 @@ body.home-page .mode-toggle:disabled { opacity: 0.5; cursor: default; }
    ending in an ellipsis, and one fold per card ('.mission-more') shows every field whole;
    it takes no room while nothing is cut. The foot holds small chips (queued, tab, your
    turn, PRs) and any Fire or Merge button. The whole card opens its board, so it carries
-   no Open board button; Stop sits where the age does and shows only on the card's hover
-   or focus (or while its question is open), the age hiding under it. */
+   no Open board button: the title is a real link ('.mission-link') whose box stretches over
+   the card, and the chips, buttons, fold and forms sit above it. Stop sits where the age
+   does and shows only on the card's hover or focus, while its question is open, right
+   after Keep or Escape hands it the focus, and always on a screen with no hover; the age
+   hides under it. */
 .mission-card { --mc-pad: 10px; --mc-title-lh: 18px; --mc-mono-lh: 16px; --mc-text-lh: 17px; --mc-label-lh: 17px;
   --mc-fact-lh: 17px; --mc-chip: 20px; --mc-btn: 24px;
   position: relative; background: var(--panel); border: 1px solid var(--hairline); border-radius: 8px;
   padding: var(--mc-pad) 12px; min-width: 0; overflow-wrap: anywhere;
   transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease); }
-.mission-card[data-href] { cursor: pointer; }
 .mission-card:hover { border-color: var(--hairline-2); background: color-mix(in srgb, var(--panel) 94%, var(--ink)); }
-.mission-card:focus-visible { outline: none; border-color: var(--accent); box-shadow: var(--ring); }
+.mission-card:focus-visible, .mission-card:has(.mission-link:focus-visible) { outline: none; border-color: var(--accent); box-shadow: var(--ring); }
+.mission-link { color: inherit; text-decoration: none; outline: none; }
+.mission-link::after { content: ""; position: absolute; inset: 0; border-radius: inherit; }
+.mission-foot > *, .mission-more > summary, .mission-confirm, .mission-comment { position: relative; }
 .mission-text { min-width: 0; }
 .mission-ident { display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
   font-size: 12px; line-height: var(--mc-mono-lh); color: var(--muted); }
@@ -2047,13 +2052,18 @@ body.home-page .mode-toggle:disabled { opacity: 0.5; cursor: default; }
 .mission-stop { position: absolute; top: 7px; right: 8px; display: inline-flex; align-items: center; justify-content: center;
   width: 22px; height: 22px; padding: 0; border: 0; border-radius: 5px; background: var(--panel-2); color: var(--critical);
   cursor: pointer; visibility: hidden; }
-.mission-card:is(:hover, :focus-within) > .mission-stop, .mission-stop[aria-expanded="true"] { visibility: visible; }
-.mission-card:is(:hover, :focus-within) > .mission-stop ~ .mission-text .mission-age,
-.mission-stop[aria-expanded="true"] ~ .mission-text .mission-age { visibility: hidden; }
+.mission-card:is(:hover, :focus-within) > .mission-stop, .mission-stop:is([aria-expanded="true"], .mission-stop-held) { visibility: visible; }
+.mission-card:is(:hover, :focus-within):has(> .mission-stop) .mission-age,
+.mission-card:has(> .mission-stop:is([aria-expanded="true"], .mission-stop-held)) .mission-age { visibility: hidden; }
+@media (hover: none) {
+  .mission-stop { visibility: visible; }
+  .mission-card:has(> .mission-stop) .mission-age { visibility: hidden; }
+}
 .mission-stop:hover:not(:disabled), .mission-stop[aria-expanded="true"] { background: var(--critical-soft); }
 .mission-stop:focus-visible { outline: none; box-shadow: var(--ring); }
-/* a card with no key line (a tab with no login or folder) keeps its title clear of Stop */
-.mission-stop + .mission-text > .mission-title:first-child { padding-right: 24px; }
+/* a tab card has no age for Stop to sit over: its key line, or its title where it has
+   none, keeps clear of Stop */
+.mission-card:has(> .mission-stop) .mission-text > :is(.mission-ident:not(:has(.mission-age)), .mission-title:first-child) { padding-right: 24px; }
 .mission-stop:disabled { opacity: 0.4; cursor: default; }
 .mission-stop svg { display: block; width: 14px; height: 14px; }
 .mission-confirm { margin-top: 8px; padding: 8px 10px; border-radius: var(--r-sm); border: 1px solid var(--critical-border);
@@ -2704,9 +2714,11 @@ body:not(.page-board) .blocks .comment-list, body:not(.page-board) .blocks .comm
      and so the gap after it, takes the margin without either. Both the
      margin and the width ride '--stage-p' down to nothing as the header
      condenses, so the pill holds the mark and the controls alone. Neither is a
-     height, so the header's box never moves (test/check-header-condense.mjs). */
-  body:not(.page-board) .board-head { container-type: inline-size; }
-  body:not(.page-board) .board-head-ident {
+     height, so the header's box never moves (test/check-header-condense.mjs).
+     The home page's top bar shares the header's classes and holds no round,
+     so its title stays beside the mark with the view tabs after it. */
+  body:not(.page-board):not(.home-page) .board-head { container-type: inline-size; }
+  body:not(.page-board):not(.home-page) .board-head-ident {
     width: var(--round-column); max-width: calc((1 - var(--stage-p)) * var(--round-column));
     margin-left: calc((1 - var(--stage-p)) * ((100cqw - var(--round-column)) / 2 - 30px - var(--space-3))); }
   body.readonly:not(.page-board) .board-head-ident {

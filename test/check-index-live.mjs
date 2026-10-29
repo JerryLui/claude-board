@@ -853,14 +853,14 @@ async function main() {
           assert.equal(text(working, 'b.mission-title'), busy.name);
           assert.equal(text(working, 'span.tab-login'), 'jerrylui');
           assert.equal(text(working, 'span.tab-folder'), 'arkivia');
-          assert.deepEqual([working.getAttribute('data-href'), working.getAttribute('tabindex')], [null, '0'],
+          assert.deepEqual([working.querySelector('a.mission-link'), working.getAttribute('tabindex')], [null, '0'],
             `${when}: a tab with no round waiting opens nothing, yet takes the focus that shows its Stop`);
           const waiting = tabCard(doc, idle.id);
           assert.deepEqual(tags(waiting), ['tab', 'your turn'], `${when}: an idle tab waits on the PM's turn`);
           assert.equal(text(waiting, 'span.tab-login'), 'claude', `${when}: ~/.claude reads claude`);
           const needs = tabCard(doc, asking.id);
           assert.deepEqual(tags(needs), ['tab'], `${when}: a tab with a round open needs the PM, it is not merely their turn`);
-          assert.equal(needs.getAttribute('data-href'), `http://127.0.0.1:${port}/b/${round.boardId}`, `${when}: the card opens its waiting round`);
+          assert.equal(needs.querySelector('a.mission-link').getAttribute('href'), `http://127.0.0.1:${port}/b/${round.boardId}`, `${when}: the card opens its waiting round`);
           assert.equal(needs.querySelector('a.mission-btn'), null, `${when}: no Open round button`);
           const stuck = tabCard(doc, blocked.id);
           assert.equal(text(stuck, 'p.tab-reason'), 'Blocked: usage limit nametoken-reason');
