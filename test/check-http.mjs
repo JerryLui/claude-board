@@ -10,6 +10,7 @@ import path from 'node:path';
 import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { SECRET_HEADER, SESSION_COOKIE, sessionToken } from '../src/secret.mjs';
 import { HANDOFF_TOKEN_RE, recoveryCommand, repoRoot } from '../src/handoff.mjs';
 import { startServer, createRequestHandler, activeWaitCount, buildPacketWithUndelivered, createSseHub, DEFAULT_WAIT_TIMEOUT_MS } from '../src/server.mjs';
@@ -34,6 +35,7 @@ import { StandInEvent } from './dom-stand-in.mjs';
 import {
   boardDataOf, check, execFileAsync, freshLog, openSseClient, pageHarness, postBoard, rawRequest, renderedMarkup, runMain,
   secretFetch, secretHome, sessionCookieHeader, sleep, spawnShim, waitForCount, withEnv, withTimeout, writeHeaders,
+  freePort, readJsonLines, repoRoot as checkoutRoot, writeStub, STUB_OSASCRIPT,
 } from './support.mjs';
 
 const { loadBoard, enableCommentMode } = await pageHarness();
@@ -5786,6 +5788,230 @@ if (process.env.STUB_AFPLAY_DURATION_MS === 'until-killed') {
       const finalLines = await waitForCount(() => readPreviewLines(log), 4, { timeoutMs: 10_000 }); // + term:B
       assert.ok(finalLines.some(l => l.startsWith('term:') && l.includes(PREVIEW_CUE_B)), 'cleanup must have killed the second stub in turn');
     });
+  });
+
+  // --- sessions: the watcher's snapshot, tab cards, a round naming its session (ADR 131)
+
+  const TAB_START = '2026-10-29T11:10:15Z';
+  const tabSession = fields => ({
+    id: 'tab-0001', pid: 61001, procStart: TAB_START, kind: 'interactive', jobId: null, cwd: '/Users/pm/work/tab-repo',
+    login: '/Users/pm/.claude-a', name: '/grill the tab', status: 'idle', reason: null, ...fields,
+  });
+  const postSnapshot = (sessions, { intervalMs = 30_000, headers = writeHeaders(SECRET) } = {}) =>
+    rawRequest(port, 'POST', '/api/sessions', { headers, body: JSON.stringify({ intervalMs, sessions }) });
+  const missionsRead = async () => (await fetch(`${base}/api/missions`)).json();
+  const tabOf = (overview, id) => overview.tabs.find(t => t.id === id);
+  const cookieWrite = { 'content-type': 'application/json', cookie: sessionCookieHeader(SECRET) };
+  const questionRound = { title: 'a tab asks', blocks: [{ kind: 'question', prompt: 'Go?', widget: 'single', options: [{ label: 'Yes' }] }] };
+
+  await check('POST /api/sessions takes the secret alone: the cookie or no credential is a 401 that lists nothing', async () => {
+    const fresh = tabSession({ id: 'gate-tab' });
+    for (const headers of [cookieWrite, { 'content-type': 'application/json' }]) {
+      const r = await postSnapshot([fresh], { headers });
+      assert.equal(r.status, 401);
+    }
+    assert.equal(tabOf(await missionsRead(), 'gate-tab'), undefined);
+    const ok = await postSnapshot([fresh]);
+    assert.equal(ok.status, 200, ok.body);
+    assert.deepEqual(JSON.parse(ok.body).sessions, 1);
+  });
+
+  await check('a snapshot shows as tab cards on GET /api/missions at once; a round posted naming a tab\'s process puts it in Needs you with its round\'s link, counted in counts.needsYou; answered, it waits again', async () => {
+    const baseline = (await missionsRead()).counts.needsYou;
+    const posted = await postSnapshot([
+      tabSession({ id: 'tab-busy', pid: 61002, status: 'busy', name: 'fix the flaky test' }),
+      tabSession({ id: 'tab-asks', pid: 61003 }),
+    ]);
+    assert.equal(posted.status, 200, posted.body);
+    const before = await missionsRead();
+    assert.deepEqual(before.tabs.map(t => [t.id, t.state, t.yourTurn]), [['tab-busy', 'working', false], ['tab-asks', 'waiting', true]]);
+    assert.deepEqual(tabOf(before, 'tab-asks'), {
+      id: 'tab-asks', kind: 'interactive', jobId: null, cwd: '/Users/pm/work/tab-repo', folder: 'tab-repo', login: '/Users/pm/.claude-a',
+      name: '/grill the tab', command: '/grill', state: 'waiting', yourTurn: true, reason: null, rounds: [], orders: [],
+    });
+    assert.equal(before.watcher.up, true);
+    assert.ok(Date.parse(before.watcher.lastAt) > Date.now() - 60_000, `lastAt is the snapshot's time: ${before.watcher.lastAt}`);
+    assert.equal(before.counts.needsYou, baseline, 'a working or waiting tab counts nowhere');
+
+    const round = await postBoard(port, SECRET, { ...questionRound, session: { pid: 61003, procStart: TAB_START } });
+    assert.deepEqual(readBoard(round.boardId, home).session, { pid: 61003, procStart: TAB_START, id: 'tab-asks' });
+    const asking = await missionsRead();
+    assert.equal(tabOf(asking, 'tab-asks').state, 'needs-you');
+    assert.deepEqual(tabOf(asking, 'tab-asks').rounds, [{ board: round.boardId, round: 1, url: `http://127.0.0.1:${port}/b/${round.boardId}` }]);
+    assert.equal(tabOf(asking, 'tab-busy').state, 'working');
+    assert.equal(asking.counts.needsYou, baseline + 1);
+
+    const qid = readBoard(round.boardId, home).blocks[0].id;
+    const sent = await fetch(`${base}/api/board/${round.boardId}/submit`, {
+      method: 'POST', headers: writeHeaders(SECRET),
+      body: JSON.stringify({ round: 1, action: 'send', answers: [{ id: qid, status: 'answered', choice: 'Yes', note: '' }], comments: [] }),
+    });
+    assert.equal(sent.status, 200);
+    const answered = await missionsRead();
+    assert.equal(tabOf(answered, 'tab-asks').state, 'waiting');
+    assert.equal(answered.counts.needsYou, baseline);
+  });
+
+  await check('a board post\'s session must be a positive pid and a UTC process start: anything else is a 400 that writes no board', async () => {
+    const before = storeListing();
+    for (const session of [{ pid: 0, procStart: TAB_START }, { pid: 61001, procStart: '2026-10-29 11:10:15' }, { pid: 61001, procStart: '2026-10-29T13:10:15+02:00' },
+      { pid: 61001, procStart: TAB_START, id: 'tab-0001' }, 'tab-0001']) {
+      const r = await rawRequest(port, 'POST', '/api/board', { headers: writeHeaders(SECRET), body: JSON.stringify({ ...questionRound, session }) });
+      assert.equal(r.status, 400, `${JSON.stringify(session)}: ${r.body}`);
+    }
+    assert.deepEqual(storeListing(), before);
+  });
+
+  await check('a board keeps the session that first posted to it: a later round from that process fills the id once the watcher lists it, or takes its new id once it resumed in place, and a round from another process moves nothing', async () => {
+    await postSnapshot([]);
+    const first = await postBoard(port, SECRET, { ...questionRound, session: { pid: 61010, procStart: TAB_START } });
+    assert.deepEqual(readBoard(first.boardId, home).session, { pid: 61010, procStart: TAB_START, id: null }, 'no listed session: no id');
+    await postSnapshot([tabSession({ id: 'tab-late', pid: 61010 }), tabSession({ id: 'tab-other', pid: 61011 })]);
+    const linked = await missionsRead();
+    assert.equal(tabOf(linked, 'tab-late').state, 'needs-you', 'a board with no id links by pid and process start');
+    await postBoard(port, SECRET, { boardId: first.boardId, ...questionRound, session: { pid: 61010, procStart: TAB_START } });
+    assert.deepEqual(readBoard(first.boardId, home).session, { pid: 61010, procStart: TAB_START, id: 'tab-late' });
+    // `/resume` inside the same process: the watcher lists that process under a new id.
+    await postSnapshot([tabSession({ id: 'tab-late-resumed', pid: 61010 }), tabSession({ id: 'tab-other', pid: 61011 })]);
+    await postBoard(port, SECRET, { boardId: first.boardId, ...questionRound, session: { pid: 61010, procStart: TAB_START } });
+    assert.deepEqual(readBoard(first.boardId, home).session, { pid: 61010, procStart: TAB_START, id: 'tab-late-resumed' });
+    await postBoard(port, SECRET, { boardId: first.boardId, ...questionRound, session: { pid: 61011, procStart: TAB_START } });
+    assert.deepEqual(readBoard(first.boardId, home).session, { pid: 61010, procStart: TAB_START, id: 'tab-late-resumed' });
+    const after = await missionsRead();
+    assert.equal(tabOf(after, 'tab-other').state, 'waiting');
+    // Settle the board so later checks start from no open round.
+    await fetch(`${base}/api/board/${first.boardId}/abandon`, { method: 'POST', headers: writeHeaders(SECRET), body: '{}' });
+  });
+
+  await check('a session bound to a mission is no tab card', async () => {
+    const bound = 'cafe0123-4567-4000-8000-000000000000';
+    assert.equal((await rawRequest(port, 'POST', '/api/mission/TAB_BOUND/launch', { headers: writeHeaders(SECRET), body: JSON.stringify({ phase: 'direct' }) })).status, 200);
+    assert.equal((await rawRequest(port, 'POST', '/api/mission/TAB_BOUND/session', { headers: writeHeaders(SECRET), body: JSON.stringify({ pid: process.pid, id: bound }) })).status, 200);
+    await postSnapshot([tabSession({ id: bound, pid: process.pid }), tabSession({ id: 'tab-hand' })]);
+    assert.deepEqual((await missionsRead()).tabs.map(t => t.id), ['tab-hand']);
+  });
+
+  await check('a tab card\'s stop and comment orders are taken with the cookie, acked once with the secret alone, and go with their session', async () => {
+    await postSnapshot([tabSession({ id: 'tab-orders' })]);
+    const order = (body, headers = cookieWrite, id = 'tab-orders') => rawRequest(port, 'POST', `/api/session/${id}/order`, { headers, body: JSON.stringify(body) });
+    const stop = await order({ kind: 'stop' });
+    assert.equal(stop.status, 200, stop.body);
+    const stopOrder = JSON.parse(stop.body).order;
+    assert.match(stopOrder.id, /^o_[0-9a-f]{16}$/);
+    assert.deepEqual(Object.keys(stopOrder).sort(), ['at', 'id', 'kind']);
+    assert.equal((await order({ kind: 'comment', text: 'wrap up' })).status, 200);
+    assert.equal((await order({ kind: 'comment' })).status, 400, 'a comment needs its text');
+    assert.equal((await order({ kind: 'stop' }, cookieWrite, 'tab-nobody')).status, 404);
+    assert.deepEqual(tabOf(await missionsRead(), 'tab-orders').orders.map(o => [o.kind, o.text]), [['stop', undefined], ['comment', 'wrap up']]);
+
+    const ackPath = `/api/session/tab-orders/order/${stopOrder.id}/ack`;
+    assert.equal((await rawRequest(port, 'POST', ackPath, { headers: cookieWrite, body: '{}' })).status, 401, 'the ack is the Master Chief\'s');
+    const acked = JSON.parse((await rawRequest(port, 'POST', ackPath, { headers: writeHeaders(SECRET), body: '{}' })).body).order;
+    assert.ok(acked.relayedAt);
+    const again = JSON.parse((await rawRequest(port, 'POST', ackPath, { headers: writeHeaders(SECRET), body: '{}' })).body).order;
+    assert.equal(again.relayedAt, acked.relayedAt, 'a repeat keeps the first relayedAt');
+
+    await postSnapshot([]);
+    await postSnapshot([tabSession({ id: 'tab-orders' })]);
+    assert.deepEqual(tabOf(await missionsRead(), 'tab-orders').orders, [], 'a session that left the list took its orders');
+  });
+
+  await check('a snapshot changing the tabs publishes missions on the daemon-wide stream and a repeat does not; two intervals with no snapshot read the watcher down, published, its cards gone', async () => {
+    const events = [];
+    let pending = '';
+    const req = http.request({ host: '127.0.0.1', port, method: 'GET', path: '/api/events', headers: { host: `127.0.0.1:${port}`, [SECRET_HEADER]: SECRET } }, res => {
+      res.setEncoding('utf8');
+      res.on('data', chunk => {
+        pending += chunk;
+        const frames = pending.split('\n\n');
+        pending = frames.pop();
+        for (const frame of frames) {
+          const name = /^event: (.+)$/m.exec(frame);
+          const data = /^data: (.*)$/m.exec(frame);
+          if (name && name[1] === 'missions' && data) events.push(JSON.parse(data[1]));
+        }
+      });
+    });
+    req.on('error', () => {});
+    req.end();
+    try {
+      await sleep(200);
+      await postSnapshot([tabSession({ id: 'tab-stream-a' })], { intervalMs: 1_000 });
+      await waitForCount(() => events, 1);
+      await postSnapshot([tabSession({ id: 'tab-stream-a' })], { intervalMs: 1_000 });
+      await postSnapshot([tabSession({ id: 'tab-stream-b' })], { intervalMs: 1_000 });
+      await waitForCount(() => events, 2);
+      assert.equal(events.length, 2, 'the repeat published nothing');
+      assert.deepEqual(events.map(e => e.key), [null, null]);
+      const down = await waitForCount(async () => ((await missionsRead()).watcher.up ? [] : [1]), 1, { timeoutMs: 5_000, intervalMs: 100 });
+      assert.equal(down.length, 1);
+      const read = await missionsRead();
+      assert.equal(read.watcher.up, false);
+      assert.deepEqual(read.tabs, []);
+      await waitForCount(() => events, 3);
+    } finally {
+      req.destroy();
+    }
+  });
+
+  await check('a tab\'s name and a blocked job\'s reason reach no file under the store, no daemon log line and no notification, while GET /api/missions shows them', async () => {
+    const work = mkdtempSync(path.join(tmpdir(), 'claude-board-canary-'));
+    const canaryHome = path.join(work, 'home');
+    mkdirSync(canaryHome);
+    const canarySecret = 'c'.repeat(64);
+    writeFileSync(path.join(canaryHome, 'secret'), `${canarySecret}\n`, { mode: 0o600 });
+    const stubDir = path.join(work, 'stub-bin');
+    writeStub(stubDir, 'osascript', STUB_OSASCRIPT);
+    const notifyLog = path.join(work, 'osascript.log');
+    const wantPort = await freePort();
+    const child = spawn(process.execPath, [path.join(checkoutRoot, 'bin', 'daemon.mjs')], {
+      env: {
+        ...process.env, PATH: `${stubDir}:${process.env.PATH}`, STUB_OSASCRIPT_LOG: notifyLog,
+        CLAUDE_BOARD_HOME: canaryHome, CLAUDE_BOARD_SECRET_FILE: path.join(canaryHome, 'secret'), CLAUDE_BOARD_PORT: String(wantPort),
+        CLAUDE_BOARD_STRANDED_GRACE_MS: '200', CLAUDE_BOARD_MISSION_WATCH_MS: '200',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let out = '';
+    child.stdout.on('data', c => { out += c; });
+    child.stderr.on('data', c => { out += c; });
+    try {
+      await waitForCount(() => (/daemon listening on 127\.0\.0\.1:\d+/.test(out) ? [1] : []), 1, { timeoutMs: 15_000 });
+      const name = 'TABNAME-CANARY review the client file';
+      const reason = 'REASON-CANARY need you at browser';
+      const snapshot = {
+        intervalMs: 30_000,
+        sessions: [
+          tabSession({ id: 'tab-canary', name }),
+          tabSession({ id: 'job-canary', pid: null, procStart: null, kind: 'bg', jobId: 'deadbeef', name: null, status: 'blocked', reason }),
+        ],
+      };
+      const refused = await rawRequest(wantPort, 'POST', '/api/sessions', {
+        headers: writeHeaders(canarySecret), body: JSON.stringify({ ...snapshot, sessions: [...snapshot.sessions, tabSession({ id: 'tab-canary', name })] }),
+      });
+      assert.equal(refused.status, 400);
+      assert.ok(!refused.body.includes('CANARY'), `a refusal echoes no name: ${refused.body}`);
+      assert.equal((await rawRequest(wantPort, 'POST', '/api/sessions', { headers: writeHeaders(canarySecret), body: JSON.stringify(snapshot) })).status, 200);
+      const round = await postBoard(wantPort, canarySecret, { ...questionRound, cwd: work, session: { pid: 61001, procStart: TAB_START } });
+      await postBoard(wantPort, canarySecret, { ...questionRound, mission: 'NAMED_WORK' });
+      const shown = JSON.parse((await rawRequest(wantPort, 'GET', '/api/missions', { headers: { [SECRET_HEADER]: canarySecret } })).body);
+      assert.deepEqual(shown.tabs.map(t => [t.id, t.state, t.name, t.reason]), [['tab-canary', 'needs-you', name, null], ['job-canary', 'needs-you', null, reason]]);
+      const page = await rawRequest(wantPort, 'GET', '/', { headers: { [SECRET_HEADER]: canarySecret } });
+      assert.equal(page.status, 200);
+      // The round's banner (the stranded rule's, its grace cut to 200 ms) is a notification
+      // the daemon did raise, so the grep below reads a log that holds one.
+      await waitForCount(() => readJsonLines(notifyLog), 1, { timeoutMs: 10_000 });
+      assert.equal(readBoard(round.boardId, canaryHome).session.id, 'tab-canary');
+    } finally {
+      child.kill('SIGTERM');
+      await new Promise(resolve => (child.exitCode !== null ? resolve() : child.once('exit', resolve)));
+    }
+    const files = [...snapshotTree(canaryHome)];
+    assert.ok(files.some(([file]) => file.startsWith('missions/')) && files.some(([file]) => file.startsWith('boards/')), 'the grep reads boards and missions');
+    assert.deepEqual(files.filter(([, { bytes }]) => bytes.includes('CANARY')).map(([file]) => file), [], 'no store file holds a name or reason');
+    assert.ok(!out.includes('CANARY'), `the daemon's log holds no name or reason:\n${out}`);
+    assert.ok(!readFileSync(notifyLog, 'utf8').includes('CANARY'), 'no notification carries one');
+    rmSync(work, { recursive: true, force: true });
   });
 
   rmSync(previewStubDir, { recursive: true, force: true });

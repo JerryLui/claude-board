@@ -298,6 +298,18 @@ command, signal, message, kill.
 **Relayed**: of a round, answered by the Master Chief on the person's own words, carried verbatim
 with the answer, rather than by a Send on the page. _Avoid_: forwarded, proxied, approved.
 
+**Tab card**: a card on the Missions view for an agent session no Mission launched, a tab the
+person started by hand or a background job, reported by the Session watcher and held only in the
+daemon's memory: its name shows while it runs and is never stored. In Needs you while a round it
+posted waits on the person or it is blocked, else Working while busy, else Waiting with "your
+turn". It takes Orders like a Mission's card and counts toward no launch cap. A session a Mission
+holds is that Mission's card, never a Tab card. _Avoid_: session card, tab (unqualified: a
+browser tab), orphan, hand mission.
+
+**Session watcher**: the process outside the board that posts the running sessions to the daemon
+every interval; the board reads no agent's folder itself. Two missed intervals read it down, and
+the Missions view says so. _Avoid_: scanner, poller, sessions daemon.
+
 **Missions notification**: the one native notification for a batch of Missions turning needs you,
 stalled or released within a minute, naming the work or counting it. Silent at the daemon's start,
 and silenced by the Banner level's Off. _Avoid_: Banner (that is a round's), mission alert.

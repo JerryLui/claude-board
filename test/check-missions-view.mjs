@@ -492,6 +492,52 @@ async function main() {
         tab.restoreFetch();
       }
     });
+    await check('Stop and comment on a tab card post orders to that session, and the card says each waits for the Master Chief until relayed (ADR 131)', async () => {
+      const snapshot = sessions => post('/api/sessions', { intervalMs: 30000, sessions });
+      const listed = { id: 'tab-orders', pid: 50101, procStart: '2026-10-29T08:00:00Z', kind: 'interactive', jobId: null, cwd: '/Users/pm/Documents/arkivia', login: '/Users/pm/.claude', name: 'catchup', status: 'idle', reason: null };
+      const tabOrders = async () => {
+        const r = await rawRequest(port, 'GET', '/api/missions', { headers: { [SECRET_HEADER]: SECRET } });
+        return JSON.parse(r.body).tabs.find(t => t.id === listed.id).orders;
+      };
+      const key = `tab:${listed.id}`;
+      assert.equal((await snapshot([listed])).status, 200);
+      const tab = await openMissionsTab();
+      const wire = openWireStream();
+      try {
+        await wire.connected();
+        await tab.click(tab.document.querySelector('button#comment-mode-toggle'));
+        await tab.click(cardFor(tab.document, key).querySelector('b.mission-title'));
+        const box = cardFor(tab.document, key).querySelector('textarea.mission-comment-text');
+        assert.equal(box.getAttribute('aria-label'), 'Comment for catchup');
+        box.value = 'Park the rollout until Monday';
+        box.dispatchEvent(new StandInEvent('input'));
+        await tab.click(cardFor(tab.document, key).querySelector('button.mission-comment-send'));
+        assert.deepEqual((await tabOrders()).map(o => [o.kind, o.text]), [['comment', 'Park the rollout until Monday']]);
+        assert.equal(cardFor(tab.document, key).querySelector('p.mission-order').textContent, 'Comment waiting for the Master Chief');
+
+        await tab.click(cardFor(tab.document, key).querySelector('button.mission-stop'));
+        assert.equal(cardFor(tab.document, key).querySelector('p.mission-confirm-text').textContent,
+          'Stop this session? It finishes its step, writes its Handoff and ends.');
+        assert.equal((await tabOrders()).length, 1, 'the first Stop click only asks');
+        await tab.click(cardFor(tab.document, key).querySelector('button.mission-stop-confirm'));
+        const orders = await tabOrders();
+        assert.deepEqual(orders.map(o => [o.kind, o.relayedAt]), [['comment', undefined], ['stop', undefined]]);
+        let card = cardFor(tab.document, key);
+        assert.deepEqual(card.querySelectorAll('p.mission-order').map(p => p.textContent),
+          ['Stop asked: waiting for the Master Chief to relay it', 'Comment waiting for the Master Chief']);
+        assert.equal(card.querySelector('button.mission-stop'), null, 'no second Stop while one is on its way');
+        assert.deepEqual((await mission('WORKING_ONE')).orders, [], 'no mission got either order');
+
+        assert.equal((await post(`/api/session/${listed.id}/order/${orders[1].id}/ack`, {})).status, 200);
+        await tab.push('missions', (await wire.next('missions')).data);
+        card = cardFor(tab.document, key);
+        assert.equal(card.querySelector('p.mission-order').textContent, 'Stop relayed: the session finishes its step, writes its Handoff and ends');
+      } finally {
+        wire.close();
+        tab.restoreFetch();
+        await snapshot([]);
+      }
+    });
   } finally {
     server.close();
     server.closeIdleConnections?.();

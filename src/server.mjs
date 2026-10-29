@@ -68,6 +68,7 @@ import { createMissionWatch } from './mission-watch.mjs';
 import { createMissionsCache } from './missions-cache.mjs';
 import { MAX_POST_BYTES, MAX_DRAINED_BYTES, postTooLargeMessage } from './post-limit.mjs';
 import { getMissionView, missionView, upsertMission, launchMission, bindSession, addOrder, ackOrder, linkBoard, recordFire, assertMissionKey } from './missions.mjs';
+import { createSessionList, validateSessionRef, bindBoardSession } from './sessions.mjs';
 
 // Declared in src/handoff.mjs (which this module imports, so it cannot import back) and
 // re-exported here, where every caller has always looked for it.
@@ -541,10 +542,6 @@ function isSameOriginRead(req) {
  *    notification), so neither adds "can make the machine make a sound". */
 const POMODORO_COOKIE_ACTIONS = new Set(['ensure', 'pause', 'resume', 'reset', 'settings', 'preview', 'notifyTest', 'forward', 'restart']);
 
-function isPomodoroCookieWrite(parts) {
-  return parts[0] === 'api' && parts[1] === 'pomodoro' && parts.length === 3 && POMODORO_COOKIE_ACTIONS.has(parts[2]);
-}
-
 /** The board writes a cookie-holding browser may perform: `submit`, and `attended`
  * (CONTEXT.md "Watcher", "Attended" — ADR.md entry 58). A named closed set for the
  * reason `POMODORO_COOKIE_ACTIONS` above states.
@@ -562,10 +559,6 @@ function isPomodoroCookieWrite(parts) {
  * until the next restart. */
 const BOARD_COOKIE_ACTIONS = new Set(['submit', 'attended']);
 
-function isBoardCookieWrite(parts) {
-  return parts[0] === 'api' && parts[1] === 'board' && parts.length === 4 && BOARD_COOKIE_ACTIONS.has(parts[3]);
-}
-
 /** The store writes a cookie-holding browser may perform: `prune`, and nothing else. A
  * named closed set for the reason `POMODORO_COOKIE_ACTIONS` above states.
  *
@@ -582,10 +575,6 @@ function isBoardCookieWrite(parts) {
  * from — and the window that decides what dies is named in the request, never here. */
 const STORE_COOKIE_ACTIONS = new Set(['prune']);
 
-function isStoreCookieWrite(parts) {
-  return parts[0] === 'api' && parts[1] === 'store' && parts.length === 3 && STORE_COOKIE_ACTIONS.has(parts[2]);
-}
-
 /** The mission writes a cookie-holding browser may perform: `order`, and nothing else. A
  * named closed set for the reason `POMODORO_COOKIE_ACTIONS` above states.
  *
@@ -595,8 +584,27 @@ function isStoreCookieWrite(parts) {
  * a session's or the Master Chief's, and wants the secret. */
 const MISSION_COOKIE_ACTIONS = new Set(['order']);
 
-function isMissionCookieWrite(parts) {
-  return parts[0] === 'api' && parts[1] === 'mission' && parts.length === 4 && MISSION_COOKIE_ACTIONS.has(parts[3]);
+/** The session writes a cookie-holding browser may perform: a tab card's `order`, on the
+ * footing `MISSION_COOKIE_ACTIONS` gives a mission card's (ADR 131). The snapshot itself
+ * (`POST /api/sessions`) is the watcher's and an order's ack the Master Chief's, and both
+ * want the secret: a page that could post a snapshot could put a card on the board naming
+ * any session it liked. */
+const SESSION_COOKIE_ACTIONS = new Set(['order']);
+
+/** Every write a cookie-holding browser may perform, one row per route family: the route's
+ * second segment, its length, and the segment holding the action, which must be on that
+ * family's named set above. A write matching no row wants the secret. */
+const COOKIE_WRITES = new Map([
+  ['board', { length: 4, at: 3, actions: BOARD_COOKIE_ACTIONS }],
+  ['pomodoro', { length: 3, at: 2, actions: POMODORO_COOKIE_ACTIONS }],
+  ['store', { length: 3, at: 2, actions: STORE_COOKIE_ACTIONS }],
+  ['mission', { length: 4, at: 3, actions: MISSION_COOKIE_ACTIONS }],
+  ['session', { length: 4, at: 3, actions: SESSION_COOKIE_ACTIONS }],
+]);
+
+function isCookieWrite(parts) {
+  const row = parts[0] === 'api' ? COOKIE_WRITES.get(parts[1]) : undefined;
+  return !!row && parts.length === row.length && row.actions.has(parts[row.at]);
 }
 
 /** True iff this write may proceed. Two ways to hold a credential, and they are not
@@ -629,12 +637,12 @@ function isMissionCookieWrite(parts) {
  *
  * Every non-GET goes through here, rather than an enumerated list of write routes: a
  * route added later is then gated by default instead of by remembering to add it. The
- * four exception lists are `BOARD_COOKIE_ACTIONS`, `POMODORO_COOKIE_ACTIONS`,
- * `STORE_COOKIE_ACTIONS` and `MISSION_COOKIE_ACTIONS` above. */
+ * exceptions are `COOKIE_WRITES` above: `BOARD_COOKIE_ACTIONS`, `POMODORO_COOKIE_ACTIONS`,
+ * `STORE_COOKIE_ACTIONS`, `MISSION_COOKIE_ACTIONS` and `SESSION_COOKIE_ACTIONS`. */
 function isAuthorizedWrite(req, parts, secret) {
   if (!secret) return false; // no secret on disk: refuse writes rather than fall open
   if (secretMatches(req.headers[SECRET_HEADER], secret)) return true;
-  if (!isBoardCookieWrite(parts) && !isPomodoroCookieWrite(parts) && !isStoreCookieWrite(parts) && !isMissionCookieWrite(parts)) return false;
+  if (!isCookieWrite(parts)) return false;
   return sessionCookieMatches(req.headers.cookie, secret);
 }
 
@@ -966,7 +974,7 @@ function boundCwdForThread(thread, boards) {
   return inThread.length ? inThread[0].cwd : null;
 }
 
-async function handlePostBoard(req, res, home, sse, stranded, stream, waiting) {
+async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, sessions) {
   let body;
   try {
     body = await readJsonBody(req);
@@ -987,6 +995,17 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting) {
     }
   }
   const mission = body.mission ?? null;
+  // `session` names the agent session posting (its pid and process start), so a round can
+  // put that session's tab card in Needs you (ADR 131). Refused before anything is written
+  // when it is not that shape; absent, the board records no session.
+  let sessionRef = null;
+  if (body.session !== undefined && body.session !== null) {
+    try {
+      sessionRef = validateSessionRef(body.session);
+    } catch (err) {
+      return sendJson(res, 400, { error: err.message });
+    }
+  }
   let board;
   let round;
   let pushMode = null; // null: a brand-new board, nothing live to push to yet
@@ -1224,6 +1243,10 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting) {
     return sendJson(res, 400, { error: `board ${board.id} belongs to mission ${board.mission}, not ${mission}` });
   }
   if (mission && !board.mission) board.mission = mission;
+  // The session's id comes from the watcher's list, never from the post: a caller names
+  // only a process, and the list says which session that process is (src/sessions.mjs
+  // `bindBoardSession` for what a later post may change).
+  if (sessionRef) bindBoardSession(board, sessionRef, sessions ? sessions.matchId(sessionRef.pid, sessionRef.procStart) : null);
   const html = renderBoardPage(board);
   writeBoard(board, home);
   writePage(board.id, html, home);
@@ -2387,6 +2410,7 @@ function handleWaiting(req, res, waiting, missions) {
 function emptyMissionsOverview() {
   return {
     missions: [],
+    tabs: [],
     counts: { needsYou: 0, working: 0, waiting: 0, stalled: 0, released: 0, queued: 0 },
     live: { working: 0, alive: 0 },
     now: new Date().toISOString(),
@@ -2500,8 +2524,10 @@ function broadcastWaiting(stream, waiting, board = null) {
   if (board) waiting.noteWrite(board);
   stream.broadcast('waiting', { total: waiting.rows().length, now: Date.now() });
   // A board's rounds decide whether its mission reads needs-you, so a write that moves
-  // the waiting count may have moved that mission's view too.
+  // the waiting count may have moved that mission's view too; and a tab card's, for a
+  // board a session posted.
   if (board && board.mission) broadcastMissions(stream, board.mission);
+  else if (board && board.session) broadcastMissions(stream, null);
 }
 
 /** `{ ...doc, now: Date.now() }` for every pomodoro response, write or read alike. The
@@ -2707,10 +2733,51 @@ async function handleMission(req, res, parts, home, stream) {
   }
 }
 
-/** `missions` on the daemon-wide stream: which mission changed and when. A subscriber
- * re-reads `GET /api/missions` for the rest. */
+/** `missions` on the daemon-wide stream: which mission changed and when, `key` null for a
+ * change to the tab cards or the watcher (src/sessions.mjs). A subscriber re-reads
+ * `GET /api/missions` for the rest. */
 function broadcastMissions(stream, key) {
   stream.broadcast('missions', { key, now: Date.now() });
+}
+
+/** The overview a request answers: the cached one, each tab round given its `url` off this
+ * request's host (as `boardUrl` gives every board link it hands back, so it is built per
+ * request and never cached), and the watcher's state read now. */
+function overviewFor(req, overview, sessions) {
+  const tabs = (overview.tabs || []).map(t => ({ ...t, rounds: t.rounds.map(r => ({ ...r, url: boardUrl(req, r.board) })) }));
+  return { ...overview, tabs, watcher: sessions.watcher() };
+}
+
+/** The session routes (src/sessions.mjs holds the rules):
+ *
+ *   POST /api/sessions                      the watcher's snapshot -> { sessions, watcher }
+ *   POST /api/session/:id/order             { order }
+ *   POST /api/session/:id/order/:oid/ack    { order }
+ *
+ * Nothing a snapshot carries is logged or echoed: a refusal names the field, never its
+ * value. A change publishes `missions` (key null) on the daemon-wide stream through the
+ * list's own `onChange`. */
+async function handleSessions(req, res, parts, sessions) {
+  const route = parts.length === 2 && parts[1] === 'sessions' ? 'snapshot'
+    : parts[1] !== 'session' ? null
+      : parts.length === 4 && parts[3] === 'order' ? 'order'
+        : parts.length === 6 && parts[3] === 'order' && parts[5] === 'ack' ? 'ack'
+          : null;
+  if (req.method !== 'POST' || !route) return sendText(res, 404, 'not found');
+  let body;
+  try {
+    body = await readJsonBody(req);
+  } catch (err) {
+    return sendJson(res, err.status || 400, { error: err.status ? err.message : 'invalid JSON body' });
+  }
+  try {
+    if (route === 'snapshot') return sendJson(res, 200, sessions.replace(body));
+    if (route === 'order') return sendJson(res, 200, { order: sessions.addOrder(parts[2], body) });
+    return sendJson(res, 200, { order: sessions.ackOrder(parts[2], parts[4]) });
+  } catch (err) {
+    const status = err && Number.isInteger(err.status) ? err.status : 500;
+    return sendJson(res, status, { error: status === 500 ? 'the sessions could not be updated' : err.message });
+  }
 }
 
 /** The soonest instant at which a round still waiting anywhere in `boards` will lapse, or
@@ -2774,7 +2841,10 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
   // stalled or released. Per handler, for the reason everything else here is.
   // One cache of the missions overview (src/missions-cache.mjs) for every reader this
   // handler has, the watch's read included.
-  const missionsCache = createMissionsCache({ home });
+  // The sessions a watcher reports (src/sessions.mjs), in memory only, per handler for the
+  // reason everything else here is. A change re-reads the Missions view's tab cards.
+  const sessions = createSessionList({ onChange: () => broadcastMissions(streamHub, null) });
+  const missionsCache = createMissionsCache({ home, sessions });
   const missionWatch = createMissionWatch({
     home,
     read: () => missionsCache.overview({ all: true }).missions,
@@ -2889,6 +2959,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
             console.error(`claude-board: the missions could not be read for the home page: ${(err && err.message) || err}`);
             overview = emptyMissionsOverview();
           }
+          overview = overviewFor(req, overview, sessions);
           return sendHtml(res, 200, renderMissionsPage({ waitingCount, pomodoroEnabled, overview }), {
             'content-security-policy': INDEX_CSP,
           });
@@ -2973,7 +3044,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
       }
 
       if (req.method === 'POST' && url.pathname === '/api/board') {
-        return await handlePostBoard(req, res, home, sse, stranded, streamHub, waitingCache);
+        return await handlePostBoard(req, res, home, sse, stranded, streamHub, waitingCache, sessions);
       }
 
       if (req.method === 'GET' && parts[0] === 'b' && parts.length === 2) {
@@ -3056,12 +3127,19 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
       // holding the cookie reads it through gate 4 above.
       if (req.method === 'GET' && url.pathname === '/api/missions') {
         try {
-          return sendJson(res, 200, missionsCache.overview({ all: url.searchParams.get('all') === '1' }));
+          return sendJson(res, 200, overviewFor(req, missionsCache.overview({ all: url.searchParams.get('all') === '1' }), sessions));
         } catch (err) {
           // Not an empty list: a reader told "no missions" would act on it. The page keeps
           // the columns it has on a failed read.
           return sendJson(res, 500, { error: `the missions could not be read: ${(err && err.message) || err}` });
         }
+      }
+
+      // The watcher's snapshot and a tab card's orders (src/sessions.mjs). Every one is a
+      // write, gated above: the snapshot and an ack by the secret alone, an order by the
+      // cookie too (`SESSION_COOKIE_ACTIONS`).
+      if (parts[0] === 'api' && (url.pathname === '/api/sessions' || (parts[1] === 'session' && parts.length >= 3))) {
+        return await handleSessions(req, res, parts, sessions);
       }
 
       if (parts[0] === 'api' && parts[1] === 'mission' && parts.length >= 3) {
@@ -3096,6 +3174,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
   requestHandler.close = () => {
     stranded.close();
     missionWatch.close();
+    sessions.close();
   };
   return requestHandler;
 }

@@ -259,10 +259,27 @@ sessions to carry to the mission's session; the board itself stops nothing. That
 can also answer a round on your typed words, and the round then says it was relayed
 and quotes them.
 
+A session no mission launched, a tab you started by hand or a background job, shows as a
+**tab card** in the same columns once a session watcher reports it: tagged "tab", with its
+login and folder, in Needs you while a round it posted waits on you (an **Open round**
+link each) or its job is blocked (with the reason), in Working while it is busy, and in
+Waiting, tagged "your turn", when its turn has ended. Stop and a comment on a tab card
+are orders like a mission's, carried by the same fronting agent. The watcher is not part
+of the board: it lives in your own agent config and posts a full list of its sessions to
+`POST /api/sessions` every interval ([PROTOCOL.md](PROTOCOL.md), "The session routes"),
+so any agent can have one. The board holds that list in memory only, a session's name
+included, and never writes it to disk. Once a watcher has posted, two intervals with no
+post and the page says "Session watcher down" until the next one; a board with no
+watcher says nothing.
+
 A session started in the background, with nobody at its terminal, declares it with
 `CLAUDE_BOARD_CLIENT=background`: its boards post and wait as ever, and open no tab, so
 the round reaches you through its notification and the home page. `claude -p` and other
 scripted runs are still refused.
+
+Every board post names the session it came from, the shim's parent process id and that
+process's start time, so a round left open by a session with no mission shows on that
+session's card too ([PROTOCOL.md](PROTOCOL.md), "`session: { pid, procStart }`").
 
 ### An example skill
 
