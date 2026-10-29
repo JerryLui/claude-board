@@ -136,14 +136,17 @@ const TEXT_SITES = [
   ['--code-number', '--panel-2'],
   ['--code-comment', '--panel-2'],
   ['--code-base', '--panel-2'],
-  // `.answer-status[data-status="answered"]` -- an answer stays visible (and
-  // its status color with it) on a sent round's own page, not just live.
+  // A card's status chip, text on its own tinted fill: good (and a question's
+  // Answered chip) on --good-soft; warn and Deferred are --warning-ink on
+  // --warning-soft, bad is --critical on --critical-soft, neutral is --ink-2 on
+  // --panel-3 (all three asserted below or by the cross product).
+  ['--good', '--good-soft'],
   ['--good', '--panel'],
   ['--good', '--history-bg'],
   // `.unsupported-widget` (a compare side with no content: always its own
   // --panel-2, compare-side's own explicit background).
   ['--warning', '--panel-2'],
-  // `.answer-status[data-status="deferred"]`, `.mermaid-block .missing`.
+  // `.mermaid-block .missing`.
   ['--warning', '--panel'],
   ['--warning', '--history-bg'],
   // `.btn-defer.active`, `.rounds-left-badge` -- both are text

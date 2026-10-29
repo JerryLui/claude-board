@@ -112,6 +112,10 @@ const DARK = {
   // resolveSurface's default alpha-surface treatment does -- dark --code-ink on this
   // fill 8.92:1, on --diff-del-fill 9.61:1.
   '--diff-add-fill': 'rgba(86, 214, 138, 0.12)',
+  // A status chip's good fill (a card's good status, a question's Answered), its
+  // text --good. Its own token beside --diff-add-fill, so the two can move apart:
+  // light needs a paler fill than a diff row for --good text to clear 4.5:1.
+  '--good-soft': 'rgba(86, 214, 138, 0.12)',
   '--warning': '#e5b04d',
   // The owed-round dot's hue, theme-dependent where every other "waiting on you"
   // surface is not (ADR.md entry 66). Dark takes the accent: amber sits too close
@@ -219,6 +223,7 @@ const LIGHT = {
   // full account. light --code-ink on this fill (composited over --panel-2)
   // 6.59:1, on --diff-del-fill 6.40:1.
   '--diff-add-fill': 'rgba(0, 117, 48, 0.12)',
+  '--good-soft': 'rgba(0, 117, 48, 0.08)',
   '--warning': '#805300',
   // Amber, taken from DARK rather than from this palette's own --warning (ADR.md
   // entry 66): #805300 is the brown entry 30 already rules out for the tab mark,
@@ -626,7 +631,7 @@ body.sent-page .comment-btn { display: none; }
 .card-status { flex: none; align-self: flex-start; display: inline-flex; align-items: center;
   font-size: 11.5px; font-weight: 600; line-height: 1.3; white-space: nowrap;
   border-radius: var(--r-pill); padding: 3px 10px; background: var(--panel-3); color: var(--ink-2); }
-.card-status[data-tone="good"], .answer-status[data-status="answered"] { background: var(--diff-add-fill); color: var(--good); }
+.card-status[data-tone="good"], .answer-status[data-status="answered"] { background: var(--good-soft); color: var(--good); }
 .card-status[data-tone="warn"], .answer-status[data-status="deferred"] { background: var(--warning-soft); color: var(--warning-ink); }
 .card-status[data-tone="bad"] { background: var(--critical-soft); color: var(--critical); }
 .answer-status[data-status="unanswered"] { display: none; }
