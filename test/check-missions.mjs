@@ -10,7 +10,9 @@ import { readdirSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync,
 import path from 'node:path';
 import { startServer } from '../src/server.mjs';
 import { SECRET_HEADER } from '../src/secret.mjs';
-import { readBoard, readMission, writeMission, pruneStore, MISSION_RETENTION_MS } from '../src/store.mjs';
+import { readBoard, readMission, writeBoard, writeMission, pruneStore, MISSION_RETENTION_MS } from '../src/store.mjs';
+import { createBoard } from '../src/board.mjs';
+import { createSessionList } from '../src/sessions.mjs';
 import {
   missionsOverview, launchMission, bindSession, upsertMission, deriveState, MAX_WORKING, MAX_ALIVE, STALL_SILENCE_MS, UNBOUND_GRACE_MS, RELEASED_VISIBLE_MS,
 } from '../src/missions.mjs';
@@ -423,6 +425,60 @@ async function main() {
     upsertMission('WRITTEN', { title: 'Written' }, { home: dir, now: clock.t });
     clock.t += 1;
     assert.equal(viewOf('WRITTEN'), 'waiting', 'a record written inside the bound is read');
+  });
+
+  await check('with sessions listed, the overview counts each tab in its column and never in the caps; a tab\'s rounds follow board writes and removals, a board file is read again only once it moved, and an unreadable one warns once', () => {
+    const dir = scratchHome('cache-tabs');
+    const start = '2026-10-29T11:00:00Z';
+    const tab = (id, pid, status) => ({ id, pid, procStart: start, kind: 'interactive', jobId: null, cwd: '/Users/pm/work/repo', login: null, name: null, status, reason: null });
+    const sessions = createSessionList();
+    const warnings = [];
+    const warn = console.warn;
+    console.warn = (...args) => warnings.push(args.join(' '));
+    try {
+      sessions.replace({
+        intervalMs: 60_000,
+        sessions: [tab('asks', 7001, 'idle'), tab('busy-1', 7002, 'busy'), tab('busy-2', 7003, 'busy'), tab('busy-3', 7004, 'busy'), tab('idle', 7005, 'idle')],
+      });
+      const asking = createBoard({ title: 'a tab asks', blocks: [{ kind: 'question', prompt: 'Go?', widget: 'single', options: [{ label: 'Yes' }] }] });
+      asking.session = { pid: 7001, procStart: start, id: 'asks' };
+      writeBoard(asking, dir);
+      writeFileSync(path.join(dir, 'boards', 'broken.json'), '{');
+      const clock = { t: Date.parse('2026-10-29T12:00:00Z') };
+      const cache = createMissionsCache({ home: dir, now: () => clock.t, sessions });
+      const stateOf = (overview, id) => overview.tabs.find(t => t.id === id).state;
+
+      const first = cache.overview();
+      assert.deepEqual(first.counts, { needsYou: 1, working: 3, waiting: 1, stalled: 0, released: 0, queued: 0 });
+      assert.deepEqual(first.live, { working: 0, alive: 0 }, 'the launch caps count no tab');
+      assert.deepEqual(first.tabs.find(t => t.id === 'asks').rounds, [{ board: asking.id, round: 1 }]);
+
+      // A board that has not moved is not read again: one this process can no longer open
+      // keeps its round when another board's write sends the next call to the store.
+      const boardFile = path.join(dir, 'boards', `${asking.id}.json`);
+      const unreadable = typeof process.getuid !== 'function' || process.getuid() !== 0;
+      if (unreadable) chmodSync(boardFile, 0o000);
+      writeBoard(createBoard({ title: 'another', blocks: [{ kind: 'markdown', text: 'x' }] }), dir);
+      clock.t += 1;
+      try {
+        assert.equal(stateOf(cache.overview({ all: true }), 'asks'), 'needs-you');
+      } finally {
+        if (unreadable) chmodSync(boardFile, 0o644);
+      }
+      sessions.replace({ intervalMs: 60_000, sessions: [tab('asks', 7001, 'idle')] });
+      clock.t += 1;
+      assert.equal(stateOf(cache.overview(), 'asks'), 'needs-you');
+
+      rmSync(boardFile);
+      clock.t += 1;
+      const after = cache.overview();
+      assert.equal(stateOf(after, 'asks'), 'waiting', 'a removed board takes its round with it');
+      assert.equal(after.counts.needsYou, 0);
+      assert.equal(warnings.filter(w => w.includes('broken.json')).length, 1, `warned once: ${JSON.stringify(warnings)}`);
+    } finally {
+      console.warn = warn;
+      sessions.close();
+    }
   });
 
   await check('a mission shows stalled when its session\'s process is gone', async () => {

@@ -5862,7 +5862,7 @@ if (process.env.STUB_AFPLAY_DURATION_MS === 'until-killed') {
     assert.deepEqual(storeListing(), before);
   });
 
-  await check('a board keeps the session that first posted to it: a later round from that process fills the id once the watcher lists it, and a round from another process moves nothing', async () => {
+  await check('a board keeps the session that first posted to it: a later round from that process fills the id once the watcher lists it, or takes its new id once it resumed in place, and a round from another process moves nothing', async () => {
     await postSnapshot([]);
     const first = await postBoard(port, SECRET, { ...questionRound, session: { pid: 61010, procStart: TAB_START } });
     assert.deepEqual(readBoard(first.boardId, home).session, { pid: 61010, procStart: TAB_START, id: null }, 'no listed session: no id');
@@ -5871,8 +5871,12 @@ if (process.env.STUB_AFPLAY_DURATION_MS === 'until-killed') {
     assert.equal(tabOf(linked, 'tab-late').state, 'needs-you', 'a board with no id links by pid and process start');
     await postBoard(port, SECRET, { boardId: first.boardId, ...questionRound, session: { pid: 61010, procStart: TAB_START } });
     assert.deepEqual(readBoard(first.boardId, home).session, { pid: 61010, procStart: TAB_START, id: 'tab-late' });
+    // `/resume` inside the same process: the watcher lists that process under a new id.
+    await postSnapshot([tabSession({ id: 'tab-late-resumed', pid: 61010 }), tabSession({ id: 'tab-other', pid: 61011 })]);
+    await postBoard(port, SECRET, { boardId: first.boardId, ...questionRound, session: { pid: 61010, procStart: TAB_START } });
+    assert.deepEqual(readBoard(first.boardId, home).session, { pid: 61010, procStart: TAB_START, id: 'tab-late-resumed' });
     await postBoard(port, SECRET, { boardId: first.boardId, ...questionRound, session: { pid: 61011, procStart: TAB_START } });
-    assert.deepEqual(readBoard(first.boardId, home).session, { pid: 61010, procStart: TAB_START, id: 'tab-late' });
+    assert.deepEqual(readBoard(first.boardId, home).session, { pid: 61010, procStart: TAB_START, id: 'tab-late-resumed' });
     const after = await missionsRead();
     assert.equal(tabOf(after, 'tab-other').state, 'waiting');
     // Settle the board so later checks start from no open round.

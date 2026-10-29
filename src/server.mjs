@@ -542,10 +542,6 @@ function isSameOriginRead(req) {
  *    notification), so neither adds "can make the machine make a sound". */
 const POMODORO_COOKIE_ACTIONS = new Set(['ensure', 'pause', 'resume', 'reset', 'settings', 'preview', 'notifyTest', 'forward', 'restart']);
 
-function isPomodoroCookieWrite(parts) {
-  return parts[0] === 'api' && parts[1] === 'pomodoro' && parts.length === 3 && POMODORO_COOKIE_ACTIONS.has(parts[2]);
-}
-
 /** The board writes a cookie-holding browser may perform: `submit`, and `attended`
  * (CONTEXT.md "Watcher", "Attended" — ADR.md entry 58). A named closed set for the
  * reason `POMODORO_COOKIE_ACTIONS` above states.
@@ -563,10 +559,6 @@ function isPomodoroCookieWrite(parts) {
  * until the next restart. */
 const BOARD_COOKIE_ACTIONS = new Set(['submit', 'attended']);
 
-function isBoardCookieWrite(parts) {
-  return parts[0] === 'api' && parts[1] === 'board' && parts.length === 4 && BOARD_COOKIE_ACTIONS.has(parts[3]);
-}
-
 /** The store writes a cookie-holding browser may perform: `prune`, and nothing else. A
  * named closed set for the reason `POMODORO_COOKIE_ACTIONS` above states.
  *
@@ -583,10 +575,6 @@ function isBoardCookieWrite(parts) {
  * from — and the window that decides what dies is named in the request, never here. */
 const STORE_COOKIE_ACTIONS = new Set(['prune']);
 
-function isStoreCookieWrite(parts) {
-  return parts[0] === 'api' && parts[1] === 'store' && parts.length === 3 && STORE_COOKIE_ACTIONS.has(parts[2]);
-}
-
 /** The mission writes a cookie-holding browser may perform: `order`, and nothing else. A
  * named closed set for the reason `POMODORO_COOKIE_ACTIONS` above states.
  *
@@ -596,10 +584,6 @@ function isStoreCookieWrite(parts) {
  * a session's or the Master Chief's, and wants the secret. */
 const MISSION_COOKIE_ACTIONS = new Set(['order']);
 
-function isMissionCookieWrite(parts) {
-  return parts[0] === 'api' && parts[1] === 'mission' && parts.length === 4 && MISSION_COOKIE_ACTIONS.has(parts[3]);
-}
-
 /** The session writes a cookie-holding browser may perform: a tab card's `order`, on the
  * footing `MISSION_COOKIE_ACTIONS` gives a mission card's (ADR 131). The snapshot itself
  * (`POST /api/sessions`) is the watcher's and an order's ack the Master Chief's, and both
@@ -607,8 +591,20 @@ function isMissionCookieWrite(parts) {
  * any session it liked. */
 const SESSION_COOKIE_ACTIONS = new Set(['order']);
 
-function isSessionCookieWrite(parts) {
-  return parts[0] === 'api' && parts[1] === 'session' && parts.length === 4 && SESSION_COOKIE_ACTIONS.has(parts[3]);
+/** Every write a cookie-holding browser may perform, one row per route family: the route's
+ * second segment, its length, and the segment holding the action, which must be on that
+ * family's named set above. A write matching no row wants the secret. */
+const COOKIE_WRITES = new Map([
+  ['board', { length: 4, at: 3, actions: BOARD_COOKIE_ACTIONS }],
+  ['pomodoro', { length: 3, at: 2, actions: POMODORO_COOKIE_ACTIONS }],
+  ['store', { length: 3, at: 2, actions: STORE_COOKIE_ACTIONS }],
+  ['mission', { length: 4, at: 3, actions: MISSION_COOKIE_ACTIONS }],
+  ['session', { length: 4, at: 3, actions: SESSION_COOKIE_ACTIONS }],
+]);
+
+function isCookieWrite(parts) {
+  const row = parts[0] === 'api' ? COOKIE_WRITES.get(parts[1]) : undefined;
+  return !!row && parts.length === row.length && row.actions.has(parts[row.at]);
 }
 
 /** True iff this write may proceed. Two ways to hold a credential, and they are not
@@ -641,12 +637,12 @@ function isSessionCookieWrite(parts) {
  *
  * Every non-GET goes through here, rather than an enumerated list of write routes: a
  * route added later is then gated by default instead of by remembering to add it. The
- * five exception lists are `BOARD_COOKIE_ACTIONS`, `POMODORO_COOKIE_ACTIONS`,
- * `STORE_COOKIE_ACTIONS`, `MISSION_COOKIE_ACTIONS` and `SESSION_COOKIE_ACTIONS` above. */
+ * exceptions are `COOKIE_WRITES` above: `BOARD_COOKIE_ACTIONS`, `POMODORO_COOKIE_ACTIONS`,
+ * `STORE_COOKIE_ACTIONS`, `MISSION_COOKIE_ACTIONS` and `SESSION_COOKIE_ACTIONS`. */
 function isAuthorizedWrite(req, parts, secret) {
   if (!secret) return false; // no secret on disk: refuse writes rather than fall open
   if (secretMatches(req.headers[SECRET_HEADER], secret)) return true;
-  if (!isBoardCookieWrite(parts) && !isPomodoroCookieWrite(parts) && !isStoreCookieWrite(parts) && !isMissionCookieWrite(parts) && !isSessionCookieWrite(parts)) return false;
+  if (!isCookieWrite(parts)) return false;
   return sessionCookieMatches(req.headers.cookie, secret);
 }
 
