@@ -48,8 +48,19 @@ prefer that shape for any new rule whose whole job is to select something.
 
 ### No external assets — not even mermaid, now three bare sibling filenames
 
-`renderBoardPage` output must open from Finder with the network off. So: no web fonts
-(system stack only), no icon fonts, no CDN CSS. Icons are inline SVG. Mermaid used to be
+`renderBoardPage` output must open from Finder with the network off. So: no fetched
+fonts, no icon fonts, no CDN CSS. Icons are inline SVG. The one web font, Inter, rides
+inside the stylesheet: its Latin woff2 faces (`src/vendor/inter/`, digest-pinned, OFL
+licence beside them) are inlined as `data:font/woff2;base64,` URLs, which the pages'
+`font-src data:` already admits, so a served page and a saved copy load it from the
+stylesheet's own bytes. The rule this used to state, "no web fonts", narrowed to "no
+external assets": a face whose `src` points at a host, a path or a sibling file is still
+a failure (`test/check-pure.mjs`'s "the stylesheet pulls nothing off the page" row), and
+so is a face past 120 KB raw, which every page and saved copy pays. Inter heads the
+`body` stack with the system stack after it, so a face that fails to load reads like the
+page did before Inter. `document.fonts.check('13px Inter')` answers true when no face
+named Inter exists at all, so a check reads the `FontFace` set and measures a text run
+instead (`test/browser-check-font.mjs`). Mermaid used to be
 the one exception here — imported at runtime from a CDN, degrading to raw source when it
 could not be reached — until it was vendored (`src/vendor/mermaid/`, digest-pinned like
 every other vendored engine): it is now a THIRD bare sibling asset, loaded and degrading
@@ -2275,6 +2286,19 @@ chrome band; if that ever surfaces, the fix is this same resend, not a broadcast
 ## First bites
 
 Traps that have bitten once. A second bite moves the entry up into the section it belongs to.
+
+- **Deleting the last rule that reads a palette token fails the contrast suite, not the pure one.**
+  `test/check-contrast.mjs` ("every palette token is referenced somewhere in the stylesheet, or
+  by another token") fails on a token left in `DARK`/`LIGHT` with no reader; the Boards grid's
+  `.thread-item.live` was `--warning-line`'s only one. Drop the token from both palettes, and
+  from any palette comment listing it, in the same change.
+
+- **Chrome's offline emulation refuses loopback too.** `Network.emulateNetworkConditions` with
+  `offline: true` fails a navigation to the scratch daemon at `127.0.0.1` with
+  `ERR_INTERNET_DISCONNECTED`, so no served page can load "with the network off". A check that
+  wants a served page to load with no outside network cuts it with `Fetch.enable` instead,
+  continuing the daemon's own origin and failing the rest (`networkWitness` in
+  `test/browser-check-font.mjs`); a `file://` copy loads under the real offline emulation.
 
 - **A Ctrl press in headless Chrome on a Mac is a right-click: `contextmenu`, and no `click`.**
   `Input.dispatchMouseEvent` with `button: 'left', modifiers: 2` fires `pointerdown`,

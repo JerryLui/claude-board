@@ -4263,6 +4263,35 @@ check('element-level anchoring on a pushed html stage needs no per-push wiring p
   // this file's own checks.
 });
 
+// The stylesheet is a shared sibling, so whatever it pulls in itself is pulled by every
+// page and every saved copy. Inter is the one font it carries, inlined as woff2 'data:'
+// URLs, so a face that pointed anywhere else would be a request a saved copy with the
+// network off cannot make, and would fall back to the system stack without a word.
+check('the stylesheet pulls nothing off the page: every url() is a data: URL, and the Inter faces body opens on are inlined woff2 under 120 KB', () => {
+  assert.doesNotMatch(styles, /@import\b/, 'an @import is a fetch');
+  const urls = [...styles.matchAll(/url\(\s*(['"]?)([^'")]*)\1\s*\)/g)].map(m => m[2]);
+  const offPage = urls.filter(u => !u.startsWith('data:'));
+  assert.deepEqual(offPage.map(u => u.slice(0, 80)), [], 'every url() in the stylesheet carries its own bytes');
+
+  const faces = [...styles.matchAll(/@font-face\s*\{([^}]*)\}/g)].map(m => m[1]);
+  const interFaces = faces.filter(f => /font-family:\s*["']?Inter["']?\s*;/.test(f));
+  assert.ok(interFaces.length > 0, 'the stylesheet carries an @font-face for Inter');
+  let rawBytes = 0;
+  for (const face of interFaces) {
+    const src = /src:\s*url\(data:font\/woff2;base64,([A-Za-z0-9+/=]+)\)\s*format\("woff2"\)/.exec(face);
+    assert.ok(src, `an Inter face whose src is not an inlined woff2: ${face.slice(0, 120)}`);
+    const bytes = Buffer.from(src[1], 'base64');
+    assert.equal(bytes.subarray(0, 4).toString('latin1'), 'wOF2', 'the inlined bytes are a woff2 file');
+    rawBytes += bytes.length;
+  }
+  assert.ok(rawBytes < 120 * 1024, `the inlined faces weigh ${rawBytes} raw bytes, past the 120 KB every page and saved copy pays`);
+
+  const bodyFont = /\nbody \{[^}]*\n\s*font: [^;]*?\/[\d.]+ ([^;]+);/.exec(styles);
+  assert.ok(bodyFont, 'setup: the body rule sets its font shorthand');
+  assert.equal(bodyFont[1].split(',')[0].trim(), 'Inter', 'body\'s stack opens on the bundled family');
+  assert.match(bodyFont[1], /system-ui, sans-serif$/, 'and the system stack still follows it, for a face that fails to load');
+});
+
 // This check used to read "the emitted page has no external script or stylesheet
 // reference -- everything needed to open standalone is inlined", and rejected any
 // `<link rel=stylesheet>` or `<script src=>` outright (QUIRKS.md, "No external assets —
@@ -7535,11 +7564,8 @@ function visibleText(item) {
   return item.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-// Tolerates the leading live-dot span every fresh board carries (round 1 is always
-// `status: 'open'`), so a check that only cares about the headline text is not
-// coupled to liveness, which none of these checks are about.
 function headlineRe(text) {
-  return new RegExp(`<div class="thread-title"[^>]*>(?:<span class="live-dot"[^>]*></span> )?${text}</div>`);
+  return new RegExp(`<div class="thread-title"[^>]*>${text}</div>`);
 }
 
 check('folderName: the last path segment only, and null for no cwd', () => {
@@ -7780,7 +7806,7 @@ check('three threads sharing one cwd render as three visibly distinct rows -- ti
   boards.forEach((b, i) => assert.ok(texts[i].includes(b.thread), `row ${i}'s VISIBLE text must identify its own thread even when headline and path do not`));
 });
 
-check('.thread-meta carries the thread id unconditionally, not just when a collision makes it necessary', () => {
+check('every row shows its thread id, unconditionally, not just when a collision makes it necessary', () => {
   const board = createBoard({ title: 'Has a title, has a cwd', cwd: fixturesDir });
   const threads = buildThreadIndex([board]);
   const html = renderIndexPage({ threads });
@@ -7838,6 +7864,33 @@ check('the round segment reads as a count, not an ordinal, is pluralized correct
   assert.match(twoItem, /\b2 rounds\b/, 'plural for more than one');
   assert.doesNotMatch(html, /\bround \d/i, 'never worded as an ordinal ("round N") anywhere on the page');
   assert.doesNotMatch(zeroItem, /\b0 rounds?\b/, 'the segment is suppressed, not shown as "0 rounds", for a board with no rounds at all');
+});
+
+check('the Boards list groups its rows: Waiting on you first, then Earlier, each header with its count, an empty group left out, the filter applied inside both', () => {
+  const dir = path.join(fixturesDir, 'indexpage-fixtures', 'groups');
+  mkdirSync(dir, { recursive: true });
+  const asking = ['Pick a vendor', 'Pick a region'].map(title => createBoard({ title, cwd: dir, blocks: [{ kind: 'question', prompt: 'which?', widget: 'text' }] }));
+  const settled = ['Vendor notes', 'Release notes', 'Region notes'].map(title => createBoard({ title, cwd: dir, blocks: [{ kind: 'markdown', text: 'fyi' }] }));
+  const threads = buildThreadIndex([...settled, ...asking]);
+  const groups = html => parseHTML(html).querySelectorAll('div.thread-group').map(g => {
+    const head = g.querySelector('h2.thread-group-head');
+    const count = head.querySelector('.thread-group-count').textContent;
+    return {
+      head: head.textContent.slice(0, -count.length).trim() + ' ' + count,
+      rows: g.querySelectorAll('div.thread-title').map(t => t.textContent),
+    };
+  });
+  const sorted = list => [...list].sort();
+
+  const all = groups(renderIndexPage({ threads }));
+  assert.deepEqual(all.map(g => g.head), ['Waiting on you 2', 'Earlier 3']);
+  assert.deepEqual(sorted(all[0].rows), ['Pick a region', 'Pick a vendor']);
+  assert.deepEqual(sorted(all[1].rows), ['Region notes', 'Release notes', 'Vendor notes']);
+
+  const both = groups(renderIndexPage({ threads, query: 'vendor' }));
+  assert.deepEqual(both, [{ head: 'Waiting on you 1', rows: ['Pick a vendor'] }, { head: 'Earlier 1', rows: ['Vendor notes'] }]);
+  assert.deepEqual(groups(renderIndexPage({ threads, query: 'notes' })).map(g => g.head), ['Earlier 3'], 'nothing waiting: no Waiting on you header');
+  assert.deepEqual(groups(renderIndexPage({ threads, query: 'pick' })).map(g => g.head), ['Waiting on you 2'], 'nothing earlier: no Earlier header');
 });
 
 check('the row\'s time element carries both a machine-readable datetime and the exact formatted value for hover', () => {

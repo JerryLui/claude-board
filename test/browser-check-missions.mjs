@@ -3,8 +3,9 @@
 // lay out in one row across the bar's whole content width, at 1440 and 2560 wide, light
 // and dark, with nothing scrolling sideways; every mission card at rest, a tab card's too,
 // is one height whatever its text, its long fields cut short with an ellipsis under one
-// fold that shows them whole; the Boards view is a card grid filling the width from 1440 up and today's
-// list at 1280; and Stop, pressed with a real mouse, plain or
+// fold that shows them whole; the Boards view is one grouped list at 1280, 1440 and 2560, a
+// 38px line a board under "Waiting on you" and "Earlier", the whole line a link and the
+// filter narrowing both groups; and Stop, pressed with a real mouse, plain or
 // with Ctrl, Shift or Alt held, asks once and then sends its order, its Stop and Keep on
 // one line, while a Cmd double-press sends one order with no question. Layout and a real press, which the DOM stand-in has none of (QUIRKS.md "The DOM
 // stand-in's ceilings"): test/check-missions-view.mjs holds the markup and the requests.
@@ -24,7 +25,7 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { sessionToken } from '../src/secret.mjs';
-import { deadPid, runMain, skipFile } from './support.mjs';
+import { deadPid, runMain, skipFile, sleep } from './support.mjs';
 import { CHROME, getJson, guardRun, measureTab, openTab, postJson, row, startScratchDaemon, withChrome } from './browser-support.mjs';
 
 if (!existsSync(CHROME)) skipFile('browser-check-missions', `browser-check-missions: no Chrome at ${CHROME} (set CLAUDE_BOARD_CHROME_BIN to override)`);
@@ -34,13 +35,15 @@ const HEIGHT = 900;
 const THEMES = ['light', 'dark'];
 const BOARDS = 14; // enough rows that the boards list scrolls at HEIGHT
 const COLUMNS = ['needs-you', 'working', 'waiting', 'stalled', 'released'];
-const NARROW = 1280; // under the wide layout: the Boards view stays a list
+const NARROW = 1280; // the Boards view is measured here too, so it is checked at every width
+const LINE = 38; // a board's line on the Boards view
 const LONG = 'LONG_CARD'; // every field at the store's longest
 const LONG_TAB = 'tab:tab-long'; // a tab card with its name and blocked reason at their longest (ADR 131)
 // The lines each long field stops at, and the class that draws it.
 const CUTS = { title: ['b.mission-title', 2], summary: ['p.mission-summary', 2], 'waiting on': ['dd.mission-waiting', 2], next: ['dd.mission-next', 1] };
 const words = (n, seed) => Array.from({ length: n }, (_, i) => `${seed}${i}`).join(' ');
 const longText = (max, seed) => words(200, seed).slice(0, max);
+const LONG_BOARD = longText(400, 'boardtitle'); // a board title far wider than its line
 
 guardRun('browser-check-missions', { deadlineMs: 240000 });
 
@@ -102,7 +105,24 @@ const MEASURE_EXPR = `(function () {
     longFolds: long ? long.querySelectorAll('details.mission-more').length : 0,
     tabCuts: tabCuts,
     longTabFolds: longTab ? longTab.querySelectorAll('details.mission-more').length : 0,
-    threads: [].slice.call(document.querySelectorAll('a.thread-item')).map(rect),
+    boardList: (function () {
+      var lists = document.querySelectorAll('div.thread-list');
+      if (!lists.length) return null;
+      var long = [].slice.call(document.querySelectorAll('div.thread-title')).filter(function (t) { return t.textContent === ${JSON.stringify(LONG_BOARD)}; })[0];
+      var ls = long && getComputedStyle(long);
+      return {
+        panels: lists.length,
+        list: rect(lists[0]),
+        form: rect(document.querySelector('form.search-form')),
+        groups: [].slice.call(document.querySelectorAll('div.thread-group')).map(function (g) {
+          var head = g.querySelector('h2.thread-group-head');
+          var count = head.querySelector('.thread-group-count').textContent;
+          return { key: g.getAttribute('data-group'), label: head.textContent.slice(0, -count.length).trim(), count: Number(count), head: rect(head),
+            lines: [].slice.call(g.querySelectorAll('a.thread-item')).map(function (a) { return Object.assign(rect(a), { live: a.getAttribute('data-live') }); }) };
+        }),
+        longTitle: long ? { whiteSpace: ls.whiteSpace, textOverflow: ls.textOverflow, lineHeight: parseFloat(ls.lineHeight), height: long.getBoundingClientRect().height, client: long.clientWidth, scroll: long.scrollWidth } : null,
+      };
+    })(),
     commentOn: !!document.querySelector('button#comment-mode-toggle:not([disabled])'),
     background: getComputedStyle(document.body).backgroundColor,
     docW: document.documentElement.clientWidth,
@@ -149,6 +169,8 @@ async function main() {
     for (let i = 0; i < BOARDS; i++) {
       await post('/api/board', { title: `Session ${i + 1}`, blocks: [{ kind: 'markdown', text: `Board ${i + 1}` }] });
     }
+    await post('/api/board', { title: LONG_BOARD, blocks: [{ kind: 'markdown', text: 'A title wider than its line' }] });
+    await post('/api/board', { title: 'Invoice reminders: notes', blocks: [{ kind: 'markdown', text: 'Settled, beside the waiting grill board' }] });
     const live = async (key, fields) => {
       await post(`/api/mission/${key}`, { phase: 'direct', state: 'working', ...fields });
       await post(`/api/mission/${key}/session`, { pid: process.pid, id: `sess-${key}` });
@@ -295,27 +317,42 @@ async function main() {
             assert.equal(cards.find(c => c.key === LONG_TAB).fold, 'visible', 'the fold shows while text is cut');
             assert.equal(cards.find(c => c.key === 'tab:tab-short').fold, null, 'a short tab card has no fold');
           });
-
-          await row(`${mode}, at ${key}: the Boards view lays its boards in a grid of at least three columns across the bar's content width`, note => {
-            const { content, threads } = m.boards;
-            assert.ok(threads.length >= BOARDS, 'setup: every board is on the view');
-            const firstRow = threads.filter(t => Math.abs(t.top - threads[0].top) <= 0.5);
-            note(`${firstRow.length} across: ${firstRow.map(t => `${px(t.left)}+${px(t.width)}`).join(', ')}; content ${px(content.left)} + ${px(content.width)}`);
-            assert.ok(firstRow.length >= 3, 'at least three columns');
-            assert.ok(threads.every(t => Math.abs(t.width - threads[0].width) <= 0.5), 'one card width');
-            assert.ok(Math.abs(firstRow[0].left - content.left) <= 0.5, 'the first starts where the bar\'s content does');
-            const last = firstRow[firstRow.length - 1];
-            assert.ok(Math.abs(last.left + last.width - (content.left + content.width)) <= 0.5, 'the last ends where it does');
-          });
         }
 
-        for (const [theme, m] of Object.entries(narrow)) {
-          await row(`${mode}, at ${NARROW} ${theme}: the Boards view is a list, one board a line across the bar's content width`, note => {
-            const { content, threads } = m;
-            note(`${threads.length} boards at ${[...new Set(threads.map(t => `${px(t.left)}+${px(t.width)}`))].join(', ')}; content ${px(content.left)} + ${px(content.width)}`);
-            assert.ok(threads.length >= BOARDS, 'setup: every board is on the view');
-            for (let i = 1; i < threads.length; i++) assert.ok(threads[i].top >= threads[i - 1].top + threads[i - 1].height, 'one a line');
-            assert.ok(threads.every(t => Math.abs(t.left - content.left) <= 0.5 && Math.abs(t.width - content.width) <= 0.5), 'each the content\'s width');
+        const boardsAt = [
+          ...Object.entries(at).map(([key, m]) => [key, m.boards]),
+          ...Object.entries(narrow).map(([theme, m]) => [`${NARROW} ${theme}`, m]),
+        ];
+        for (const [key, m] of boardsAt) {
+          await row(`${mode}, at ${key}: the Boards view is one list in one panel under the filter, a ${LINE}px line a board, Waiting on you over Earlier, each header with its count`, note => {
+            const { content, boardList: b } = m;
+            assert.ok(b, 'setup: the Boards view has its list');
+            assert.equal(b.panels, 1, 'one panel');
+            note(`list ${px(b.list.left)} + ${px(b.list.width)} at ${px(b.list.top)}; filter ends at ${px(b.form.top + b.form.height)}; content ${px(content.left)} + ${px(content.width)}`);
+            assert.ok(b.form.top + b.form.height <= b.list.top, 'the filter sits above the list');
+            assert.ok(Math.abs(b.list.left - content.left) <= 0.5 && Math.abs(b.list.width - content.width) <= 0.5, 'the list runs the bar\'s content width');
+            note(b.groups.map(g => `${g.label} ${g.count}: ${g.lines.length} lines`).join('; '));
+            assert.deepEqual(b.groups.map(g => [g.key, g.label]), [['waiting', 'Waiting on you'], ['earlier', 'Earlier']]);
+            const lines = b.groups.flatMap(g => g.lines);
+            assert.ok(lines.length >= BOARDS + 2, 'setup: every board is on the view');
+            for (const g of b.groups) {
+              assert.equal(g.count, g.lines.length, `${g.label} counts its own lines`);
+              assert.ok(g.lines.every(l => l.live === (g.key === 'waiting' ? 'true' : 'false')), `${g.label} holds exactly the boards ${g.key === 'waiting' ? 'with' : 'without'} a round waiting`);
+              assert.ok(g.head.top + g.head.height <= g.lines[0].top + 0.5, `${g.label}'s header sits above its boards`);
+            }
+            const lastWaiting = b.groups[0].lines[b.groups[0].lines.length - 1];
+            assert.ok(lastWaiting.top + lastWaiting.height <= b.groups[1].head.top + 0.5, 'Earlier starts under the last waiting board');
+            const heights = [...new Set(lines.map(l => px(l.height)))];
+            note(`line heights ${heights.join(', ')}`);
+            assert.ok(lines.every(l => Math.abs(l.height - LINE) <= 1), `every line ${LINE}px tall, within 1px`);
+            for (let i = 1; i < lines.length; i++) assert.ok(lines[i].top >= lines[i - 1].top + lines[i - 1].height - 0.5, 'one board a line');
+            assert.ok(lines.every(l => l.left >= b.list.left && l.left + l.width <= b.list.left + b.list.width + 0.5), 'every line inside the one panel');
+            const t = b.longTitle;
+            assert.ok(t, 'setup: the long-titled board is on the view');
+            note(`long title: ${px(t.client)} shown of ${px(t.scroll)}, ${px(t.height)} tall at line-height ${px(t.lineHeight)}`);
+            assert.deepEqual([t.whiteSpace, t.textOverflow], ['nowrap', 'ellipsis'], 'cut on one line with an ellipsis');
+            assert.ok(t.scroll > t.client + 1, 'the title has more than it shows');
+            assert.ok(t.height <= t.lineHeight + 1, 'one line tall');
           });
         }
 
@@ -462,6 +499,60 @@ async function main() {
           await tab.close();
         }
       });
+    });
+
+    await withChrome({ tag: 'cb-missions-boards' }, async ({ send, onEvent }) => {
+      const cookie = sessionToken(daemon.secret);
+      const groupsExpr = `[].slice.call(document.querySelectorAll('div.thread-group')).map(function (g) {
+        var head = g.querySelector('h2.thread-group-head');
+        var count = head.querySelector('.thread-group-count').textContent;
+        return head.textContent.slice(0, -count.length).trim() + ' ' + count + ': '
+          + [].slice.call(g.querySelectorAll('div.thread-title')).map(function (t) { return t.textContent; }).sort().join(', ');
+      })`;
+      for (const width of [NARROW, ...WIDTHS]) {
+        await row(`at ${width}px: the filter narrows both groups and leaves an emptied group out`, async note => {
+          const filtered = {};
+          for (const q of ['invoice reminders', 'session 1']) {
+            const tab = await openTab(send, onEvent, `${origin}/boards?q=${encodeURIComponent(q)}`, cookie, { width, height: HEIGHT, theme: 'dark', expr: groupsExpr });
+            try {
+              filtered[q] = tab.measured;
+              note(`${q}: ${tab.measured.join('; ')}`);
+            } finally {
+              await tab.close();
+            }
+          }
+          assert.deepEqual(filtered['invoice reminders'], ['Waiting on you 1: Invoice reminders: grill', 'Earlier 1: Invoice reminders: notes']);
+          assert.deepEqual(filtered['session 1'], ['Earlier 6: Session 1, Session 10, Session 11, Session 12, Session 13, Session 14'], 'no Waiting on you header with nothing waiting');
+        });
+
+        await row(`at ${width}px: a press anywhere on a board's line opens that board, its far end included`, async note => {
+          const tab = await openTab(send, onEvent, `${origin}/boards`, cookie, { width, height: HEIGHT, theme: 'dark', expr: '1' });
+          try {
+            const target = await tab.evalPage(`(function () {
+              var a = [].slice.call(document.querySelectorAll('a.thread-item')).filter(function (l) {
+                return l.querySelector('div.thread-title').textContent === 'Session 3';
+              })[0];
+              a.scrollIntoView({ block: 'center' });
+              var r = a.getBoundingClientRect();
+              return { href: a.getAttribute('href'), x: r.right - 6, y: r.top + r.height / 2 };
+            })()`);
+            note(`press at ${px(target.x)},${px(target.y)}, the line's last 6px`);
+            await tab.sp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: target.x, y: target.y, button: 'left', clickCount: 0 });
+            for (const type of ['mousePressed', 'mouseReleased']) {
+              await tab.sp('Input.dispatchMouseEvent', { type, x: target.x, y: target.y, button: 'left', clickCount: 1 });
+            }
+            let at = null;
+            for (let i = 0; i < 50 && at !== target.href; i++) {
+              await sleep(100);
+              at = await tab.evalPage('location.pathname + location.hash').catch(() => null);
+            }
+            note(`landed on ${at}`);
+            assert.equal(at, target.href, 'the board the line names opened');
+          } finally {
+            await tab.close();
+          }
+        });
+      }
     });
   } finally {
     await daemon.stop();

@@ -157,16 +157,21 @@ function formatDate(iso) {
   }
 }
 
-/** The row's headline is the board title; a title-less board falls back to the
- * project's folder name, and a board with neither falls back to a plain label —
- * never the literal word this codebase used to headline ("untitled"), since that
- * would now read as if it WERE the title. The full `cwd` moves to a `title`
- * attribute wherever it is the only thing standing in for a name. */
+/** One board's line in the Boards list: a 38px row of cells, its dot, the headline (one
+ * line, cut with an ellipsis), the rounds-left chip where any, then the folder, round
+ * count, last update and thread id as fixed columns at the line's end. The whole line is
+ * the link.
+ *
+ * The headline is the board title; a title-less board falls back to the project's folder
+ * name, and a board with neither falls back to a plain label, never the literal word this
+ * codebase used to headline ("untitled"), since that would now read as if it WERE the
+ * title. The folder column carries only the basename, the full `cwd` on its `title`
+ * attribute; it is left out when the headline already is the folder, or there is none. */
 function threadRow(t) {
   const liveCls = t.live ? ' live' : '';
   // Absent entirely at zero, never a zero-reading badge: `roundsLeft` and
   // `live` are both derived from `openAwaitedRounds` (src/indexpage.mjs), so this
-  // element and the pulsing `.live-dot` above it can never disagree about whether
+  // chip and the pulsing `.live-dot` beside it can never disagree about whether
   // the row owes the reader anything.
   const badge = t.roundsLeft > 0
     ? `<div class="thread-status"><span class="rounds-left-badge">${t.roundsLeft} round${t.roundsLeft === 1 ? '' : 's'} left</span></div>`
@@ -174,10 +179,12 @@ function threadRow(t) {
   const folder = folderName(t.cwd);
   const headline = t.title || folder || '(untitled)';
   const headlineIsFolder = !t.title && !!folder;
-  const liveDot = t.live ? '<span class="live-dot" aria-hidden="true"></span> ' : '';
-  const pathLine = headlineIsFolder
-    ? ''
-    : `<div class="thread-path"${folder ? ` title="${escAttr(t.cwd)}"` : ''}>${escHtml(folder || '(no project directory)')}</div>`;
+  const dot = t.live
+    ? '<span class="live-dot" aria-hidden="true"></span>'
+    : '<span class="settled-dot" aria-hidden="true"></span>';
+  const pathCell = t.title && folder
+    ? `<div class="thread-path" title="${escAttr(t.cwd)}">${escHtml(folder)}</div>`
+    : '';
   const updatedIso = escAttr(t.updatedAt);
   // escAttr, not escHtml: this value lands in BOTH the `title` attribute and the
   // element's text content below, and escHtml alone does not escape `"` -- a
@@ -188,16 +195,16 @@ function threadRow(t) {
   // A count, not an ordinal: "round N" reads as a position (which round you're
   // ON), and `rounds` here is a total, not a position -- the exact confusion
   // src/badge.mjs's own doc comment names as a real bug rather than a wording
-  // nitpick. Suppressed entirely at zero (a board-shaped object with no rounds
-  // at all) rather than reading "0 rounds", which nothing on a live board ever
-  // is: `rounds` is always >= 1 once a board exists.
-  const roundsText = t.rounds > 0 ? `${t.rounds} round${t.rounds === 1 ? '' : 's'} · ` : '';
+  // nitpick. Empty at zero (a board-shaped object with no rounds at all) rather
+  // than reading "0 rounds", which nothing on a live board ever is: `rounds` is
+  // always >= 1 once a board exists. The cell stays, so the columns line up.
+  const roundsText = t.rounds > 0 ? `${t.rounds} round${t.rounds === 1 ? '' : 's'}` : '';
   // Two threads can headline identically -- the same title, or both title-less
   // with the same folder, the ordinary shape for a repo run without ever setting
-  // a title -- and in the title-less case `pathLine` above is also suppressed,
+  // a title -- and in the title-less case the folder column is also left out,
   // leaving nothing else on the row to vary. The thread id is always emitted
-  // here for exactly that: a discriminator that survives however the headline
-  // and path happen to collide — and, since the search box became a filter over
+  // for exactly that: a discriminator that survives however the headline
+  // and folder happen to collide, and, since the search box became a filter over
   // these rows, the only thing on the row a reader can type to isolate one of
   // two identically-headlined sessions (filterThreads matches it).
   // A live row opens the board AT the round that still needs an answer, not at
@@ -214,20 +221,31 @@ function threadRow(t) {
   const href = `/b/${escAttr(t.boardId)}${t.live ? '#open-round' : ''}`;
   return `
 <a class="thread-item${liveCls}" href="${href}" data-thread-id="${escAttr(t.thread)}" data-rounds-left="${t.roundsLeft}" data-live="${t.live}">
-  <div class="thread-main">
-    <div class="thread-title"${headlineIsFolder ? ` title="${escAttr(t.cwd)}"` : ''}>${liveDot}${escHtml(headline)}</div>
-    ${pathLine}
-    <div class="thread-meta">${roundsText}updated <time class="rel-time" datetime="${updatedIso}" title="${updatedAbs}">${updatedAbs}</time> · ${escHtml(t.thread)}</div>
-  </div>
+  ${dot}
+  <div class="thread-title"${headlineIsFolder ? ` title="${escAttr(t.cwd)}"` : ''}>${escHtml(headline)}</div>
   ${badge}
+  ${pathCell}
+  <span class="thread-rounds">${roundsText}</span>
+  <span class="thread-updated"><time class="rel-time" datetime="${updatedIso}" title="${updatedAbs}">${updatedAbs}</time></span>
+  <span class="thread-id">${escHtml(t.thread)}</span>
 </a>`;
 }
 
-/** The contents of `.thread-list`: the filtered rows, or whichever empty state
- * applies. The ONE renderer for that markup, called both by `renderIndexPage`
- * below (server-rendered first paint) and by `GET /api/index/rows` (the poll the
- * page runs on its own fifteen-second tick, ADR 77) — so what the poll patches in
- * can never drift from what the page was served with.
+/** The Boards list's two groups, in this order: boards with a round waiting on the PM
+ * (`live`, the same `openAwaitedRounds` fact the dot, the chip and the bar's waiting
+ * count read), then every other board. */
+const THREAD_GROUPS = [
+  { key: 'waiting', label: 'Waiting on you', has: t => t.live },
+  { key: 'earlier', label: 'Earlier', has: t => !t.live },
+];
+
+/** The contents of `.thread-list`: the filtered rows split into THREAD_GROUPS, each under
+ * a header with its count, an empty group left out; or whichever empty state applies.
+ * The ONE renderer for that markup, called both by `renderIndexPage` below
+ * (server-rendered first paint) and by `GET /api/index/rows` (the poll the page runs on
+ * its own fifteen-second tick and on every stream push, ADR 77), so what a repaint
+ * patches in can never drift from what the page was served with, and a board whose
+ * round is answered or posted moves group on the next repaint.
  *
  * Two different empty states, because they mean two different things: an empty
  * STORE is "nothing has happened yet, here is what would put something here",
@@ -237,7 +255,15 @@ function threadRow(t) {
 export function renderThreadRows({ threads = [], query = '' } = {}) {
   const filtering = query.trim().length > 0;
   const shown = filterThreads(threads, query);
-  if (shown.length) return shown.map(threadRow).join('\n');
+  if (shown.length) {
+    return THREAD_GROUPS.map(g => {
+      const rows = shown.filter(g.has);
+      if (!rows.length) return '';
+      return `<div class="thread-group" data-group="${g.key}">
+<h2 class="thread-group-head"><span class="thread-group-dot" aria-hidden="true"></span>${g.label}<span class="thread-group-count">${rows.length}</span></h2>${rows.map(threadRow).join('')}
+</div>`;
+    }).join('\n');
+  }
   return filtering
     ? `<p class="empty-state">No sessions match “${escHtml(query.trim())}”.</p>`
     : '<p class="empty-state">No threads yet. Boards posted by a session will show up here.</p>';
@@ -2118,8 +2144,8 @@ export function renderMissionsPage({ waitingCount = 0, pomodoroEnabled = true, o
   });
 }
 
-/** Render the Boards view (`GET /boards`): the thread list (with rounds-left counts,
- * round counts and a visual live/settled distinction), filtered to `query` when one
+/** Render the Boards view (`GET /boards`): the thread list, one panel at every width,
+ * grouped into "Waiting on you" and "Earlier" (renderThreadRows), filtered to `query` when one
  * is given -- a plain GET-form round trip needing no client JS of its own. The
  * page's one script (`indexScript` above) only ever touches `.rel-time` text
  * content, the contents of `.thread-list`, the waiting count and the pomodoro
@@ -2137,7 +2163,7 @@ export function renderMissionsPage({ waitingCount = 0, pomodoroEnabled = true, o
 export function renderIndexPage({ threads = [], query = '', pomodoroEnabled = true, waitingCount = 0 } = {}) {
   const threadsHtml = renderThreadRows({ threads, query });
   const body = `  <form class="search-form" action="/boards" method="get">
-    <input class="search-input" type="text" name="q" placeholder="Filter sessions — by title, project folder or thread id…" aria-label="Filter sessions" value="${escAttr(query)}">
+    <input class="search-input" type="text" name="q" placeholder="Filter sessions by title, project folder or thread id…" aria-label="Filter sessions" value="${escAttr(query)}">
     <button class="search-btn" type="submit">Filter</button>
   </form>
 
