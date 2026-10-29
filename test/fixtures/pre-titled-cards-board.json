@@ -1,0 +1,89 @@
+{
+  "id": "b_f8b275b54c6e6c95778827688fd5a05d",
+  "thread": "th_9a3a436f",
+  "title": "Before titled cards",
+  "cwd": null,
+  "createdAt": "2026-10-29T14:21:35.449Z",
+  "updatedAt": "2026-10-29T14:21:35.449Z",
+  "state": "open",
+  "rounds": [
+    {
+      "n": 1,
+      "postedAt": "2026-10-29T14:21:35.449Z",
+      "status": "open",
+      "sentAt": null,
+      "title": "Before titled cards",
+      "awaited": true,
+      "awaitDeadline": "2026-10-29T15:01:35.449Z"
+    }
+  ],
+  "blocks": [
+    {
+      "round": 1,
+      "id": "d1",
+      "kind": "markdown",
+      "source": null,
+      "text": "## Where the grill stands\n\nSettled: release steps run at merge.\n\nRiding: the parked-lines sweep.",
+      "sha": "bcbb2e53f3ab82b528de8fe5910cbf5bf862072b845b5cfa8e2e8cc461ee193e",
+      "html": "<h2 id=\"where-the-grill-stands\">Where the grill stands</h2><p>Settled: release steps run at merge.</p><p>Riding: the parked-lines sweep.</p>",
+      "anchors": [
+        {
+          "kind": "md",
+          "ref": "where-the-grill-stands",
+          "label": "Where the grill stands"
+        }
+      ]
+    },
+    {
+      "round": 1,
+      "id": "q1",
+      "kind": "question",
+      "prompt": "How far does a merge yes reach?",
+      "explainer": "A redeploy undoes a bad deploy.",
+      "explainerHtml": "<p>A redeploy undoes a bad deploy.</p>",
+      "context": [],
+      "widget": "single",
+      "options": [
+        {
+          "label": "Clicks only",
+          "description": "",
+          "preview": null
+        },
+        {
+          "label": "Every step",
+          "description": "",
+          "preview": null
+        }
+      ]
+    }
+  ],
+  "answers": {},
+  "comments": [
+    {
+      "n": 1,
+      "blockId": "d1",
+      "anchor": {
+        "kind": "dom",
+        "ref": "2.2",
+        "hint": "Settled: release steps run at merge."
+      },
+      "text": "on the first paragraph",
+      "createdAt": "2026-10-29T12:00:00.000Z",
+      "round": 1,
+      "mintBlockKind": "markdown"
+    },
+    {
+      "n": 2,
+      "blockId": "q1",
+      "anchor": {
+        "kind": "dom",
+        "ref": "1.2",
+        "hint": "How far does a merge yes reach?"
+      },
+      "text": "on the prompt",
+      "createdAt": "2026-10-29T12:00:00.000Z",
+      "round": 1,
+      "mintBlockKind": "question"
+    }
+  ]
+}

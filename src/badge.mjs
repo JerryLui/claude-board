@@ -390,3 +390,9 @@ export function pageBoardPillMeta(round, nowMs, fullpage = true) {
   const title = (!fullpage && round && round.status !== 'sent') ? ROUND_OPEN_UNAWAITED_TITLE : PILL_READONLY_TITLE;
   return { text: 'read-only', title };
 }
+
+/** What a question's answer chip reads, by answer status: the chip at the right
+ * edge of its card head. Unanswered reads nothing and the stylesheet hides it.
+ * src/render.mjs draws it from the stored answer, src/ui.mjs rewrites it as the
+ * reviewer answers. */
+export const ANSWER_CHIP_LABEL = Object.freeze({ answered: 'Answered', deferred: 'Deferred', unanswered: '' });

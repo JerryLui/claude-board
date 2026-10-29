@@ -856,7 +856,7 @@ function bodyRootChildren(root) {
 const CHROME_CLASSES = new Set([
   'block-kicker', 'context-tools', 'fold-toggle', 'comment-btn', 'comment-form', 'comment-target',
   'comment-list', 'pin-layer', 'anchor-pin', 'mode-toggle', 'compare-label',
-  'round-label', 'html-stage',
+  'round-label', 'html-stage', 'card-head', 'card-summary', 'card-details',
 ]);
 
 /** Ancestor-or-self chrome test, mirroring src/ui.mjs's `isAnchorChrome`
@@ -906,6 +906,12 @@ function resolveStepsRejectingChrome(root, steps) {
  * anchor on a `<video>` also resolves under the video's fallback text: the name the
  * stage gave a video before videoIdentity, which comments stored then still carry. */
 export function resolveAtRoot(root, ref, hint, time) {
+  if (resolveAtRootAsIs(root, ref, hint, time)) return true;
+  const legacy = legacySectionRoot(root);
+  return !!legacy && resolveAtRootAsIs(legacy, ref, hint, time);
+}
+
+function resolveAtRootAsIs(root, ref, hint, time) {
   const steps = pathToSteps(ref);
   if (!steps.length) return false;
   const node = resolveStepsRejectingChrome(root, steps);
@@ -917,6 +923,61 @@ export function resolveAtRoot(root, ref, hint, time) {
   const timedHint = String(hint ?? '').replace(/\s+/g, ' ').trim();
   const suffix = videoTimeSuffix(second);
   return domIdentityHintMatches(node, timedHint.endsWith(suffix) ? timedHint.slice(0, -suffix.length) : timedHint);
+}
+
+// --- anchors stored against the captioned card ---------------------------------
+//
+// Until the titled card, every block section opened with a type caption (a
+// '.block-kicker' reading Markdown, Compare, Mermaid, HTML stage, Code; inside
+// '.question-head' on a question, ahead of the prompt), and a page-scoped 'dom'
+// ref counts it: '2.2' on a markdown block is the body's second element, the
+// caption being child 1. The caption is gone and the card head is new, so such a
+// ref walked over today's section lands one element off or nowhere. Resolution
+// tries today's section first (every anchor minted since), then this view of it
+// as the captioned markup had it: the card head, summary and details out, a
+// caption back in as child 1, a lifted opening heading back at the top of the
+// markdown body, and a question's prompt back beside the caption in its head.
+// The caption stand-in is chrome, as the real one was, so a ref into it still
+// never resolves.
+const LEGACY_CAPTION = Object.freeze({ tag: 'div', cls: ['block-kicker'], children: [], content: [] });
+// Only on today's section, never in the captioned one.
+const TITLED_CARD_ONLY = new Set(['card-head', 'card-summary', 'card-details', 'question-picks']);
+
+const hasClass = (node, c) => !!(node && node.cls && node.cls.includes(c));
+const titledCardOnly = node => !!(node && node.cls && node.cls.some(c => TITLED_CARD_ONLY.has(c)));
+const isHeadingTag = tag => /^h[1-6]$/.test(tag || '');
+
+// A section's legacy view is the same for every comment on it, and the batch
+// resolver (src/board.mjs's resolveComments) hands the same parsed root to each.
+const legacyViews = new WeakMap();
+
+/** The captioned-markup view of a block section's parsed tree (see above), or
+ * null for any root that is not a block section, an html stage's body above all.
+ * Built over the same nodes, so an element found through it is the element the
+ * live page shows. */
+export function legacySectionRoot(root) {
+  if (!root || typeof root !== 'object' || root.tag !== 'section' || !hasClass(root, 'block')) return null;
+  if (legacyViews.has(root)) return legacyViews.get(root);
+  const head = root.children.find(c => hasClass(c, 'card-head')) || null;
+  let kids = root.children.filter(c => !titledCardOnly(c));
+  let view;
+  if (hasClass(root, 'question-block')) {
+    // A question's caption sat inside its head row, ahead of the prompt the card
+    // head now holds as its title.
+    kids = kids.map(c => {
+      if (!hasClass(c, 'question-head')) return c;
+      const cardHead = c.children.find(k => hasClass(k, 'card-head'));
+      const fromCardHead = cardHead ? cardHead.children.filter(k => !hasClass(k, 'card-status')) : [];
+      return { ...c, children: [LEGACY_CAPTION, ...fromCardHead, ...c.children.filter(k => !titledCardOnly(k))] };
+    });
+    view = { ...root, children: kids };
+  } else {
+    const lifted = hasClass(root, 'markdown-block') && head ? head.children.find(k => isHeadingTag(k.tag)) : null;
+    if (lifted) kids = kids.map(c => (hasClass(c, 'md-content') ? { ...c, children: [lifted, ...c.children] } : c));
+    view = { ...root, children: [LEGACY_CAPTION, ...kids] };
+  }
+  legacyViews.set(root, view);
+  return view;
 }
 
 /** How many nodes an html stage's tree holds at most: one per byte of the 512 KiB

@@ -47,6 +47,7 @@ import { MERMAID_ASSET } from './vendor/mermaid/index.mjs';
 import {
   roundPageLabel, isPageRound, roundHasCommentable,
   roundIsAwaitedOpen, PILL_READONLY_TITLE, ROUND_OPEN_UNAWAITED_TITLE, PILL_SUBMITTED_TITLE,
+  ANSWER_CHIP_LABEL,
 } from './badge.mjs';
 
 /** Content-Security-Policy for every board page, both as the HTTP response
@@ -229,6 +230,83 @@ function pullOut(blockId, what) {
  * no inline/anchored variant any more. */
 function commentButton(blockId) {
   return `<button type="button" class="comment-btn" data-block-id="${escAttr(blockId)}" data-anchor-kind="block">${COMMENT_ICON}comment</button>`;
+}
+
+// --- the titled card -----------------------------------------------------------
+//
+// Every block is a card in one look: a head row holding the title and, at the
+// card's own right edge, the status chip; then an optional summary line, the
+// content, and the folds. No block names its own type: the MARKDOWN, HTML STAGE,
+// COMPARE, MERMAID and question-kind captions this replaced said nothing the card
+// itself does not show.
+//
+// The title is the block's `title`, a question's prompt, else a markdown block's
+// opening heading (lifted out of the body, so it is not said twice), else none.
+// The chip is the block's `status`, or a question's answer state. A stage or a
+// diagram also carries its comment button in the head, before the chip. The
+// head, the summary and the details fold are chrome to the comment gesture
+// (src/ui.mjs's ANCHOR_CHROME_SELECTOR, src/anchor.mjs's CHROME_CLASSES), and
+// a comment stored against the old captioned markup resolves through
+// src/anchor.mjs's legacy view of the section.
+
+const STATUS_TONES = new Set(['good', 'warn', 'bad', 'neutral']);
+
+/** The `status` chip, or '' when the block carries none. A tone outside the four
+ * is drawn neutral rather than refused: the board stores what was validated at
+ * post time, and a render never throws on a stored board. */
+function statusChip(status) {
+  if (!status || typeof status.label !== 'string' || !status.label.trim()) return '';
+  const tone = STATUS_TONES.has(status.tone) ? status.tone : 'neutral';
+  return `<span class="card-status" data-tone="${tone}">${escHtml(status.label)}</span>`;
+}
+
+function cardTitle(text) {
+  return typeof text === 'string' && text.trim() ? `<h3 class="card-title">${escHtml(text)}</h3>` : '';
+}
+
+/** The head row: title first, then the tools, then the chip, which is always
+ * last so it sits at the card's right edge. Absent when there is nothing to put
+ * in it, so an untitled markdown card starts with its text. */
+function cardHead(titleHtml, tools = '', chip = '') {
+  if (!titleHtml && !tools && !chip) return '';
+  return `<div class="card-head">${titleHtml}${tools}${chip}</div>`;
+}
+
+function cardSummary(block) {
+  return block.summaryHtml ? `<div class="card-summary md-content">${block.summaryHtml}</div>` : '';
+}
+
+/** `details`, closed, under the content. A native disclosure, so it opens in a
+ * read-only archive and on a sent round with no script and no carve-out. */
+function cardDetails(block) {
+  if (!block.detailsHtml) return '';
+  const label = typeof block.detailsLabel === 'string' && block.detailsLabel.trim() ? block.detailsLabel : 'Details';
+  return `<details class="card-details"><summary>${escHtml(label)}</summary><div class="md-content">${block.detailsHtml}</div></details>`;
+}
+
+/** A markdown body's opening heading, lifted out to be the card's title:
+ * `{ heading, rest }`, or null when the body does not open with one. The heading
+ * element moves whole, its `id` included, so a link to it still lands; it gains
+ * the title's class. src/markdown.mjs writes a heading as `<hN>` or
+ * `<hN id="...">` with escaped inline content, so the first `</hN>` closes it. */
+function liftOpeningHeading(html) {
+  const src = String(html ?? '');
+  const open = /^\s*<h([1-6])[\s>]/.exec(src);
+  if (!open) return null;
+  const close = `</h${open[1]}>`;
+  const end = src.indexOf(close);
+  if (end === -1) return null;
+  const start = open.index + open[0].indexOf('<');
+  const heading = src.slice(start, end + close.length).replace(/^<h([1-6])/, '<h$1 class="card-title"');
+  return { heading, rest: src.slice(end + close.length) };
+}
+
+/** A block's title and the body left once its title is lifted. Only a markdown
+ * block lifts anything, and only when it carries no `title` of its own. */
+function titleParts(block) {
+  if (block.title) return { titleHtml: cardTitle(block.title), lifted: null };
+  const lifted = block.kind === 'markdown' && !block.error ? liftOpeningHeading(block.html) : null;
+  return { titleHtml: lifted ? lifted.heading : '', lifted };
 }
 
 /** The short label shown next to a comment's number in its block's comment list:
@@ -418,7 +496,7 @@ function foldParts(source, idSeed) {
     itemClass: ' folded',
     bodyClass: ' fold-body',
     bodyId: ` id="${bodyId}"`,
-    control: `<button type="button" class="fold-toggle" aria-expanded="false" aria-controls="${bodyId}">Show more</button>`,
+    control: `<button type="button" class="fold-toggle" aria-expanded="false" aria-controls="${bodyId}">Show the rest</button>`,
   };
 }
 
@@ -433,23 +511,27 @@ function foldParts(source, idSeed) {
  * test/check-archive-ids.mjs's collision guard is about) — what is gone is the
  * `md` COMMENT anchor kind that used to point at them. */
 function renderMarkdownBlock(block) {
+  const { titleHtml, lifted } = titleParts(block);
+  const head = cardHead(titleHtml, '', statusChip(block.status));
   if (block.error) {
     return `
 <section class="block markdown-block" data-block-id="${escAttr(block.id)}" data-block-kind="markdown">
-  <div class="block-kicker">Markdown</div>
+  ${head}${cardSummary(block)}
   <p class="resolve-error">Could not resolve: ${escHtml(block.error)}</p>
+  ${cardDetails(block)}
 </section>`;
   }
   // Top-level prose folds at the same cap as prose in a question's context, with
   // no exception for a round that is one lone document (ADR.md entry 110): one
-  // rule, and the reader clicks Show more once. The section itself is the item
-  // -- '.md-content' is the body that gets clipped, and the control sits under
-  // it inside the same card.
+  // rule, and the reader clicks Show the rest once. The section itself is the
+  // item -- '.md-content' is the body that gets clipped, and the control sits
+  // under it inside the same card.
   const fold = foldParts(block.text, block.id);
   return `
 <section class="block markdown-block${fold.itemClass}" data-block-id="${escAttr(block.id)}" data-block-kind="markdown">
-  <div class="block-kicker">Markdown</div>
-  <div class="md-content${fold.bodyClass}"${fold.bodyId}>${block.html}</div>${fold.control}
+  ${head}${cardSummary(block)}
+  <div class="md-content${fold.bodyClass}"${fold.bodyId}>${lifted ? lifted.rest : block.html}</div>${fold.control}
+  ${cardDetails(block)}
 </section>`;
 }
 
@@ -704,13 +786,14 @@ function questionCarriesStage(block) {
  * `opened` is an html stage's stageRendersOpened answer, decided by
  * renderContextItem below, which needs the same answer for the item's own
  * class. */
-function renderContextInner(block, board, commentsByBlock, historical, fold = NO_FOLD, opened = false) {
+function renderContextInner(block, board, commentsByBlock, historical, fold = NO_FOLD, opened = false, body = block.html) {
   switch (block.kind) {
     case 'markdown':
       // The one kind that folds here (ADR.md entry 110, prose only): `fold` is
       // decided by renderContextItem, which needs the same answer for the
-      // item's own state class and for the control under this body.
-      return block.error ? resolveErrorNote(block) : `<div class="md-content${fold.bodyClass}"${fold.bodyId}>${block.html}</div>`;
+      // item's own state class and for the control under this body. `body` is
+      // the markdown with its opening heading lifted into the item's head.
+      return block.error ? resolveErrorNote(block) : `<div class="md-content${fold.bodyClass}"${fold.bodyId}>${body}</div>`;
     case 'code': {
       // The panel drops the CARD, never the excerpt's provenance (ADR.md entry
       // 110). So a code item renders through the code block's OWN body --
@@ -819,7 +902,13 @@ function renderContextItem(block, board, commentsByBlock, historical) {
   // stage holding a comment renders opened (stageRendersOpened). The class goes
   // on this item, the stage's own '.html-block'; the bar renderContextInner draws.
   const opened = block.kind === 'html' && !block.error && stageRendersOpened(block, commentsByBlock, true);
-  return `<div class="context-item${kindClass}${opened ? ' stage-opened' : ''}${fold.itemClass}" data-block-id="${escAttr(block.id)}" data-block-kind="${escAttr(block.kind)}">${renderContextInner(block, board, commentsByBlock, historical, fold, opened)}${fold.control}${affordance}</div>`;
+  // The same titled head a top-level card wears, on the nested scale
+  // (src/styles.mjs), and only when there is a title or a chip to show: an
+  // untitled item stays bare prose in the panel.
+  const { titleHtml, lifted } = titleParts(block);
+  const head = cardHead(titleHtml, '', statusChip(block.status)) + cardSummary(block);
+  const inner = renderContextInner(block, board, commentsByBlock, historical, fold, opened, lifted ? lifted.rest : block.html);
+  return `<div class="context-item${kindClass}${opened ? ' stage-opened' : ''}${fold.itemClass}" data-block-id="${escAttr(block.id)}" data-block-kind="${escAttr(block.kind)}">${head}${inner}${fold.control}${cardDetails(block)}${affordance}</div>`;
 }
 
 /** No commentButton/commentArea/pageDomPinLayer here (ADR "Commenting is
@@ -847,18 +936,19 @@ function renderContextItem(block, board, commentsByBlock, historical) {
  * exactly that reason: a single wrapper class would put a rendered-variants
  * question back at half width, which is the failure entry 26 fixed.
  *
- * The head row (`.question-head`) is the kicker, the prompt and the optional
- * `explainer` (ADR.md entry 111), spanning the card's full grid row so the
+ * The head row (`.question-head`) is the card head (the prompt as the title, the
+ * answer chip at the right edge), the plain-words picks line for a widget that
+ * takes several, and the optional `explainer` (ADR.md entry 111), spanning the card's full grid row so the
  * options and the context panel start UNDER them rather than beside the
- * prompt. The note field and the footer are children of the `section` for the
- * same reason: all three answer FOR the question rather than for either
- * column, so they take their own full-width rows (the stylesheet spans them
- * `1 / -1`). Keeping the note inside `.question-main` cost it half the card's
+ * prompt. The note field, its Defer button on the label's row, is a child of
+ * the `section` for the same reason: both answer FOR the question rather than
+ * for either column, so they take their own full-width rows (the stylesheet
+ * spans them `1 / -1`). Keeping the note inside `.question-main` cost it half the card's
  * width for no reason -- a two-column question got a note box as narrow as
  * its options while the context panel sat beside empty space. */
 function renderQuestionBlock(block, board, commentsByBlock, historical) {
   const answer = board.answers[block.id];
-  const statusText = `status: ${answer ? answer.status : 'unanswered'}`;
+  const status = answer ? answer.status : 'unanswered';
   const isDeferred = !!(answer && answer.status === 'deferred');
   const widgetHtml = renderWidget(block, answer, historical, board, commentsByBlock);
   const contextItems = block.context || [];
@@ -877,18 +967,19 @@ function renderQuestionBlock(block, board, commentsByBlock, historical) {
   // class rides on '.question-head' because that is the element the explainer
   // already sits in -- the explainer is the head row's own prose, and giving it
   // a wrapper of its own would be a second element for nothing. Only the
-  // explainer is ever a '.fold-body', so the clip reaches the kicker and the
-  // prompt on that row no more than it reaches the kicker of a folded markdown
-  // block.
+  // explainer is ever a '.fold-body', so the clip never reaches the prompt
+  // and the chip on that row, as it never reaches a folded markdown card's
+  // title.
   const explainerFold = block.explainerHtml ? foldParts(block.explainer, `${block.id}-explainer`) : NO_FOLD;
   const explainerHtml = block.explainerHtml
     ? `<div class="question-explainer md-content${explainerFold.bodyClass}"${explainerFold.bodyId}>${block.explainerHtml}</div>${explainerFold.control}`
     : '';
+  const picks = PICKS_LINE[block.widget] ? `<p class="question-picks">${PICKS_LINE[block.widget]}</p>` : '';
   return `
 <section class="block question-block" data-block-id="${escAttr(block.id)}" data-block-kind="question" data-widget="${escAttr(block.widget)}">
   <div class="question-head${explainerFold.itemClass}">
-    <div class="block-kicker">Question · ${escHtml(block.widget)}</div>
-    <p class="question-prompt">${escHtml(block.prompt)}</p>
+    <div class="card-head"><p class="question-prompt card-title">${escHtml(block.prompt)}</p>${answerChip(status)}</div>
+    ${picks}
     ${explainerHtml}
   </div>
   <div class="question-main">
@@ -897,14 +988,27 @@ function renderQuestionBlock(block, board, commentsByBlock, historical) {
   </div>
   ${panelContextHtml}
   <div class="note-field">
-    <label for="note-${escAttr(block.id)}">Note</label>
+    <div class="note-head">
+      <label for="note-${escAttr(block.id)}">Note</label>
+      <button type="button" class="btn-defer${isDeferred ? ' active' : ''}" data-defer-for="${escAttr(block.id)}"${historical ? ' disabled' : ''}>Defer</button>
+    </div>
     <textarea id="note-${escAttr(block.id)}" data-note-for="${escAttr(block.id)}" placeholder="Optional note"${historical ? ' disabled' : ''}>${escHtml(answer ? answer.note : '')}</textarea>
   </div>
-  <div class="question-footer">
-    <button type="button" class="btn-defer${isDeferred ? ' active' : ''}" data-defer-for="${escAttr(block.id)}"${historical ? ' disabled' : ''}>Defer</button>
-    <span class="answer-status" data-status="${escAttr(answer ? answer.status : 'unanswered')}">${escHtml(statusText)}</span>
-  </div>
+  ${cardDetails(block)}
 </section>`;
+}
+
+/** The plain-words line under a prompt whose widget takes more than one pick.
+ * A single pick and free text need none: one choice is what a list of options
+ * already says. */
+const PICKS_LINE = {
+  multi: 'Pick as many as apply.',
+  rank: 'Drag them into order, most important first.',
+};
+
+function answerChip(status) {
+  const known = Object.prototype.hasOwnProperty.call(ANSWER_CHIP_LABEL, status) ? status : 'unanswered';
+  return `<span class="card-status answer-status" data-status="${known}">${ANSWER_CHIP_LABEL[known]}</span>`;
 }
 
 function resolveErrorNote(block) {
@@ -940,9 +1044,10 @@ function renderMermaidBlock(block, board, commentsByBlock, historical) {
   </div>`;
   return `
 <section class="block mermaid-block" data-block-id="${escAttr(block.id)}" data-block-kind="mermaid">
-  <div class="block-kicker">Mermaid ${commentButton(block.id)}</div>
+  ${cardHead(cardTitle(block.title), commentButton(block.id), statusChip(block.status))}${cardSummary(block)}
   ${body}
   ${pageDomPinLayer(block.id)}
+  ${cardDetails(block)}
   ${commentArea(block.id, commentsByBlock, historical)}
 </section>`;
 }
@@ -1187,13 +1292,16 @@ function highlightRows(text, grammar) {
  * (just outside any row's span, uncounted, exactly as a text editor shows no
  * phantom blank line number after a file's final newline either). */
 function renderCodeBlock(block) {
-  const label = sourceLabel(block.source);
-  const kicker = ['Code', block.lang, label].filter(Boolean).map(escHtml).join(' · ');
+  // The provenance (the language and the file it was cut from) is a caption
+  // under the excerpt, as it is for a code item in a question's context: it
+  // says where the code came from, never what kind of block this is.
+  const source = [block.lang, sourceLabel(block.source)].filter(Boolean).map(escHtml).join(' · ');
   const body = block.error ? resolveErrorNote(block) : codeBody(block);
   return `
 <section class="block code-block" data-block-id="${escAttr(block.id)}" data-block-kind="code">
-  <div class="block-kicker">${kicker}</div>
-  ${body}
+  ${cardHead(cardTitle(block.title), '', statusChip(block.status))}${cardSummary(block)}
+  ${body}${source ? `<div class="context-caption">${source}</div>` : ''}
+  ${cardDetails(block)}
 </section>`;
 }
 
@@ -2960,9 +3068,10 @@ function renderHtmlBlock(block, board, commentsByBlock, historical, fullpage = f
   if (block.error) {
     return `
 <section class="block html-block" data-block-id="${escAttr(block.id)}" data-block-kind="html">
-  <div class="block-kicker">HTML stage ${commentButton(block.id)}</div>
+  ${cardHead(cardTitle(block.title), commentButton(block.id), statusChip(block.status))}${cardSummary(block)}
   ${resolveErrorNote(block)}
   ${pageDomPinLayer(block.id)}
+  ${cardDetails(block)}
   ${commentArea(block.id, commentsByBlock, historical)}
 </section>`;
   }
@@ -3007,13 +3116,14 @@ function renderHtmlBlock(block, board, commentsByBlock, historical, fullpage = f
   const opened = stageRendersOpened(block, commentsByBlock, folds);
   return `
 <section class="block html-block${opened ? ' stage-opened' : ''}" data-block-id="${escAttr(block.id)}" data-block-kind="html">
-  <div class="block-kicker">HTML stage ${commentButton(block.id)}</div>
+  ${cardHead(cardTitle(block.title), commentButton(block.id), statusChip(block.status))}${cardSummary(block)}
   <div class="stage-wrap">
     ${frame}
     <div class="pin-layer" data-block-id="${escAttr(block.id)}"></div>
     ${pullOut(block.id, 'stage')}
   </div>
   ${folds ? stageFoldBar(opened) : ''}
+  ${cardDetails(block)}
   ${commentArea(block.id, commentsByBlock, historical)}
 </section>`;
 }
@@ -3053,11 +3163,12 @@ function renderCompareSide(side, board, commentsByBlock, historical, folds = tru
 function renderCompareBlock(block, board, commentsByBlock, historical, folds = true) {
   return `
 <section class="block compare-block" data-block-id="${escAttr(block.id)}" data-block-kind="compare">
-  <div class="block-kicker">Compare</div>
+  ${cardHead(cardTitle(block.title), '', statusChip(block.status))}${cardSummary(block)}
   <div class="compare-grid">
     ${renderCompareSide(block.left, board, commentsByBlock, historical, folds)}
     ${renderCompareSide(block.right, board, commentsByBlock, historical, folds)}
   </div>
+  ${cardDetails(block)}
 </section>`;
 }
 
