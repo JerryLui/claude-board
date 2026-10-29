@@ -1771,8 +1771,9 @@ export function filterThreads(threads, query) {
  * card of its own in its state's column, after the missions: tagged "tab", its login and
  * folder, "your turn" while it waits, an Open round link per round it has waiting, a
  * blocked job's reason, and the mission card's Stop and comment. Its key is 'tab:' and its
- * session id, which no mission key can be. `watcher.up` false puts a notice over the
- * columns. Columns count their cards, so a needs-you tab counts once there.
+ * session id, which no mission key can be. A watcher that posted in this daemon's life
+ * and then went quiet (`watcher.up` false, `lastAt` set) puts a notice over the columns;
+ * a board that never had a watcher shows none. Columns count their cards, so a needs-you tab counts once there.
  *
  * Answers `{ html, countsHtml, noticeHtml, columns: [{ col, label, count, cards: [{ key, html }] }] }`,
  * `html` being the mount's whole contents: the empty state when there is no card. */
@@ -1946,7 +1947,7 @@ function missionsParts(overview, ui) {
     return out + '</article>';
   }
 
-  var watcherDown = !!(data.watcher && data.watcher.up === false);
+  var watcherDown = !!(data.watcher && data.watcher.up === false && data.watcher.lastAt);
   var noticeHtml = watcherDown
     ? '<p class="missions-notice" role="status"><b>Session watcher down.</b> Tabs started by hand show again once it reports.</p>'
     : '';

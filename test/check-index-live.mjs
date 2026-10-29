@@ -37,6 +37,7 @@ import path from 'node:path';
 import http from 'node:http';
 import { SECRET_HEADER } from '../src/secret.mjs';
 import { startServer } from '../src/server.mjs';
+import { renderMissionsPage } from '../src/indexpage.mjs';
 import { StandInEvent, fetchSettler, parseHTML } from './dom-stand-in.mjs';
 import { check, runMain, secretHome, writeStub, rawRequest, projectFor, pageHarness, postBoard, sleep } from './support.mjs';
 
@@ -797,7 +798,7 @@ async function main() {
       }
     });
 
-    await check('a session the watcher reports is a tab card in its state\'s column on first paint and live, leaves with its process, and a watcher gone quiet says so; no name reaches the store (ADR 131)', async () => {
+    await check('a session the watcher reports is a tab card in its state\'s column on first paint and live, leaves with its process, a watcher gone quiet says so while one that never posted says nothing; no name reaches the store (ADR 131)', async () => {
       const START = '2026-10-29T08:00:00Z';
       const session = (id, fields) => ({ id, pid: null, procStart: null, kind: 'interactive', jobId: null, login: null, name: null, status: 'idle', reason: null, ...fields });
       const busy = session('tab-busy', { pid: 50001, procStart: START, cwd: '/Users/pm/Documents/arkivia', login: '/Users/pm/.claude-jerrylui', name: '/direct DEPLOY_ON_MERGE nametoken-busy', status: 'busy' });
@@ -866,6 +867,11 @@ async function main() {
         await tab.push('missions', (await wire.next('missions')).data);
         assert.equal(tab.document.querySelector('p.missions-notice'), null, 'a snapshot takes the notice down');
         assert.equal(columnOf(tab.document, idle.id), 'waiting');
+
+        // A daemon no watcher ever posted to reads down two default intervals after its
+        // start, with no lastAt (src/sessions.mjs); a board run with no watcher says nothing.
+        const neverPosted = parseHTML(renderMissionsPage({ overview: { missions: [], tabs: [], watcher: { up: false, lastAt: null }, now: new Date().toISOString() } }));
+        assert.equal(neverPosted.querySelector('p.missions-notice'), null, 'no snapshot ever: no notice');
 
         const onDisk = readdirSync(workDir, { recursive: true }).map(f => path.join(workDir, f)).filter(f => statSync(f).isFile());
         assert.ok(onDisk.length > 0, 'setup: the store holds files to search');
