@@ -10,7 +10,7 @@ import { readdirSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync,
 import path from 'node:path';
 import { startServer } from '../src/server.mjs';
 import { SECRET_HEADER } from '../src/secret.mjs';
-import { readBoard, readMission, writeBoard, writeMission, pruneStore, MISSION_RETENTION_MS } from '../src/store.mjs';
+import { readBoard, readMission, writeBoard, writeMission, migrateMissions, pruneStore, MISSION_RETENTION_MS } from '../src/store.mjs';
 import { createBoard } from '../src/board.mjs';
 import { createSessionList } from '../src/sessions.mjs';
 import {
@@ -539,6 +539,13 @@ async function main() {
     assert.deepEqual(keys(missionsOverview({ home: dir, now, all: true })), ['RELEASED_NEW', 'RELEASED_OLD']);
     assert.equal(readMission('RELEASED_OLD', dir).releasedAt, iso(now - RELEASED_VISIBLE_MS - 1000));
 
+    // A released record with no releasedAt leaves 24 hours after its last change.
+    const unstamped = scratchHome('released-unstamped');
+    seed(unstamped, 'UNSTAMPED_OLD', { state: 'released', now: now - RELEASED_VISIBLE_MS - 1000 });
+    seed(unstamped, 'UNSTAMPED_NEW', { state: 'released', now: now - RELEASED_VISIBLE_MS + 60_000 });
+    assert.deepEqual(keys(missionsOverview({ home: unstamped, now })), ['UNSTAMPED_NEW']);
+    assert.deepEqual(keys(missionsOverview({ home: unstamped, now, all: true })), ['UNSTAMPED_NEW', 'UNSTAMPED_OLD']);
+
     // The same over the route, on the daemon's store.
     seed(home, 'ROUTE_RELEASED', { state: 'released', releasedAt: iso(Date.now() - RELEASED_VISIBLE_MS - 60_000) });
     const listed = (await getJson('/api/missions')).body.missions.map(m => m.key);
@@ -566,6 +573,21 @@ async function main() {
     assert.deepEqual(overview.missions.map(m => [m.key, m.state, m.view, m.releasedAt]), [['RAW_LANDED', 'released', 'released', landedAt]]);
     assert.equal(overview.counts.released, 1);
     assert.equal(readFileSync(file, 'utf8'), stored, 'a read never writes');
+
+    // Each sign of the old name moves on its own, and a releasedAt already stored outlives the
+    // landedAt beside it.
+    const rows = scratchHome('read-shim-rows');
+    const step = state => ({ at: '2026-10-27T08:00:00.000Z', phase: 'landing', state });
+    for (const [key, fields, read] of [
+      ['STATE_ONLY', { state: 'landed', history: [step('working')] }, ['released', undefined, false, ['working']]],
+      ['LANDED_AT_ONLY', { state: 'working', landedAt, history: [step('working')] }, ['working', undefined, false, ['working']]],
+      ['HISTORY_ONLY', { state: 'working', history: [step('landed'), step('working')] }, ['working', undefined, false, ['released', 'working']]],
+      ['BOTH_STAMPS', { state: 'landed', landedAt, releasedAt: '2026-10-28T11:30:00.000Z', history: [step('working')] }, ['released', '2026-10-28T11:30:00.000Z', false, ['working']]],
+    ]) {
+      seed(rows, key, fields);
+      const r = readMission(key, rows);
+      assert.deepEqual([r.state, r.releasedAt, 'landedAt' in r, r.history.map(h => h.state)], read, key);
+    }
   });
 
   await check('a record stored landed, from before ADR 130, is rewritten released once the daemon holds its port, its landedAt as releasedAt; a start that cannot bind and a second start rewrite nothing', async () => {
@@ -610,6 +632,58 @@ async function main() {
     const second = await startServer({ home: dir, port: 0 });
     await new Promise(resolve => second.server.close(resolve));
     assert.equal(inode('OLD_LANDED'), migrated, 'a second start finds nothing to move');
+  });
+
+  await check('a migration leaves as stored a file holding another mission\'s key and one that does not parse; a write the store refuses warns under its key, and the next migration moves that record', () => {
+    const dir = scratchHome('migrate-refused');
+    const missions = path.join(dir, 'missions');
+    const file = key => path.join(missions, `${key}.json`);
+    const stored = key => readFileSync(file(key), 'utf8');
+    const landed = { phase: 'landing', state: 'landed', landedAt: '2026-10-27T09:30:00.000Z' };
+    seed(dir, 'MOVES', landed);
+    seed(dir, 'OTHER', { state: 'working' });
+    // Moved, ALIAS.json's record would land on OTHER's own file.
+    writeFileSync(file('ALIAS'), JSON.stringify({ ...JSON.parse(stored('MOVES')), key: 'OTHER' }));
+    writeFileSync(file('BROKEN'), '{"key":"BROKEN","state":"landed"');
+    const kept = ['ALIAS', 'OTHER', 'BROKEN'].map(key => [key, stored(key)]);
+    const warnings = [];
+    const warn = console.warn;
+    console.warn = (...args) => warnings.push(args.join(' '));
+    try {
+      assert.deepEqual(migrateMissions(dir), ['MOVES']);
+      for (const [key, text] of kept) assert.equal(stored(key), text, `${key}.json is left as stored`);
+
+      seed(dir, 'REFUSED', landed);
+      chmodSync(missions, 0o500);
+      try {
+        assert.deepEqual(migrateMissions(dir), []);
+      } finally {
+        chmodSync(missions, 0o700);
+      }
+      assert.equal(JSON.parse(stored('REFUSED')).state, 'landed');
+      assert.equal(readMission('REFUSED', dir).state, 'released', 'a record left stored landed still reads as released');
+      assert.match(warnings.find(w => w.includes('REFUSED')) ?? '', /^claude-board: mission record REFUSED not migrated: EACCES/);
+      assert.deepEqual(migrateMissions(dir), ['REFUSED']);
+    } finally {
+      console.warn = warn;
+    }
+  });
+
+  await check('a start whose missions cannot be listed stays up, its migration skipped', async () => {
+    const dir = scratchHome('migrate-unlisted');
+    seed(dir, 'UNLISTED', { phase: 'landing', state: 'landed', landedAt: '2026-10-27T09:30:00.000Z' });
+    const missions = path.join(dir, 'missions');
+    chmodSync(missions, 0o000);
+    try {
+      const started = await startServer({ home: dir, port: 0 });
+      try {
+        assert.equal((await rawRequest(started.port, 'GET', '/api/health')).status, 200);
+      } finally {
+        await new Promise(resolve => started.server.close(resolve));
+      }
+    } finally {
+      chmodSync(missions, 0o700);
+    }
   });
 
   await check('a POST carrying state landed, from a session open before ADR 130, stores released and stamps releasedAt', async () => {

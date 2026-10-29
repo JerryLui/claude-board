@@ -99,7 +99,7 @@ function missionPath(key, home = boardHome()) {
 /** `m` as the state list stands since ADR 130, which renamed a mission's last state from
  * `landed` to `released`: `state`, `landedAt` and every `history` entry moved over. Answers
  * `m` itself when it holds nothing to move, so a caller tells a migration by identity. */
-export function releasedRecord(m) {
+function releasedRecord(m) {
   if (!m || typeof m !== 'object') return m;
   const history = Array.isArray(m.history) ? m.history : null;
   const stale = m.state === 'landed' || 'landedAt' in m || !!history?.some(h => h && h.state === 'landed');
@@ -167,14 +167,20 @@ export function listMissions(home = boardHome()) {
 /** Rewrites every mission record from before ADR 130 as `releasedRecord` reads it, once the
  * daemon holds its port, so a start that cannot bind leaves the store as an older daemon
  * still serving it reads it. A record already migrated is left untouched, so a second start
- * rewrites nothing. Answers the keys rewritten. */
+ * rewrites nothing. A write the store refuses leaves that record for the next start, warned
+ * under its key, apart from a file that cannot be read. Answers the keys rewritten. */
 export function migrateMissions(home = boardHome()) {
   const migrated = [];
   eachMissionKey(home, key => {
     const stored = readMissionFile(key, home);
     const m = releasedRecord(stored);
     if (m === stored || !m || m.key !== key) return;
-    writeMission(m, home);
+    try {
+      writeMission(m, home);
+    } catch (err) {
+      console.warn(`claude-board: mission record ${key} not migrated: ${(err && err.message) || err}`);
+      return;
+    }
     migrated.push(key);
   });
   return migrated;
