@@ -5583,11 +5583,12 @@ async function main() {
   const STUB_AFPLAY = `#!/usr/bin/env node
 import fs from 'node:fs';
 const log = process.env.STUB_AFPLAY_LOG;
-fs.appendFileSync(log, 'start:' + JSON.stringify(process.argv.slice(2)) + '\\n');
+// The handler before the start line: a kill that lands once 'start:' is logged is logged too.
 process.on('SIGTERM', () => {
   fs.appendFileSync(log, 'term:' + JSON.stringify(process.argv.slice(2)) + '\\n');
   process.exit(0);
 });
+fs.appendFileSync(log, 'start:' + JSON.stringify(process.argv.slice(2)) + '\\n');
 if (process.env.STUB_AFPLAY_DURATION_MS === 'until-killed') {
   // Plays until a signal ends it, however long the kill takes to come; it leaves only once
   // orphaned, when the check process that spawned it is gone.
