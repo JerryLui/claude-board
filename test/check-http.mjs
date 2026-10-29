@@ -1816,6 +1816,96 @@ async function main() {
     assert.ok(markup.includes('class="mermaid"'), 'the accepted explainer diagram reaches the served page');
   });
 
+  // The card fields of the shared look: any block carries a title, a status chip, a
+  // one-line summary and folded details, stored with their rendered markup, and absent,
+  // never empty, when not sent.
+  const CARD_SENT = {
+    title: '  Criterion 2: the pager keeps its place  ',
+    status: { label: ' Pass ', tone: 'good' },
+    summary: 'The pager **stays** on round 3.',
+    details: 'Shot at `1440px`.\n\nFrom *main*.',
+    detailsLabel: 'Where the shots came from',
+  };
+  const CARD_STORED = {
+    title: 'Criterion 2: the pager keeps its place',
+    status: { label: 'Pass', tone: 'good' },
+    summary: 'The pager **stays** on round 3.',
+    summaryHtml: '<p>The pager <strong>stays</strong> on round 3.</p>',
+    details: 'Shot at `1440px`.\n\nFrom *main*.',
+    detailsHtml: '<p>Shot at <code>1440px</code>.</p><p>From <em>main</em>.</p>',
+    detailsLabel: 'Where the shots came from',
+  };
+  const CARD_KEYS = Object.keys(CARD_STORED);
+  const cardOf = block => Object.fromEntries(CARD_KEYS.filter(k => k in block).map(k => [k, block[k]]));
+  const everyBlock = blocks => blocks.flatMap(b => [
+    b,
+    ...everyBlock([...(b.context || []), ...(b.options || []).map(o => o.block), b.left?.block, b.right?.block].filter(Boolean)),
+  ]);
+  const cardBlocks = card => [
+    { kind: 'markdown', text: 'Body', ...card },
+    { kind: 'html', html: '<p>stage</p>', ...card },
+    { kind: 'compare', ...card, left: { label: 'Before', block: { kind: 'html', html: '<p>a</p>', ...card } }, right: { label: 'After', block: { kind: 'html', html: '<p>b</p>' } } },
+    {
+      kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }],
+      ...(card.details ? { details: card.details, detailsLabel: card.detailsLabel } : {}),
+      context: [{ kind: 'mermaid', text: 'flowchart LR\n a --> b', ...card }],
+    },
+  ];
+
+  await check('card fields on every block kind and position are stored with their rendered summary and details, and a board posted without them stores none', async () => {
+    const posted = await postBoard(port, SECRET, { title: 'Card fields', blocks: cardBlocks(CARD_SENT) });
+    const [markdown, html, compare, question] = readBoard(posted.boardId, home).blocks;
+    for (const [where, block] of [
+      ['a markdown block', markdown], ['an html block', html], ['a compare block', compare],
+      ['a compare side', compare.left.block], ['a question context block', question.context[0]],
+    ]) {
+      assert.deepEqual(cardOf(block), CARD_STORED, `${where} stores every card field`);
+    }
+    assert.deepEqual(cardOf(compare.right.block), {}, 'a block sent without card fields beside one sent with them stores none');
+    assert.deepEqual(cardOf(question), {
+      details: CARD_STORED.details, detailsHtml: CARD_STORED.detailsHtml, detailsLabel: CARD_STORED.detailsLabel,
+    }, 'a question stores its details and their label');
+
+    const bare = await postBoard(port, SECRET, { title: 'No card fields', blocks: cardBlocks({}) });
+    const stored = everyBlock(readBoard(bare.boardId, home).blocks);
+    assert.equal(stored.length, 7, 'the walk reaches every block of the bare board');
+    for (const block of stored) assert.deepEqual(cardOf(block), {}, `${block.id} stores no card field`);
+
+    const amend = await postBoard(port, SECRET, {
+      boardId: bare.boardId,
+      blocks: [{ kind: 'markdown', text: 'Added', title: 'Amended card', status: { label: 'Open', tone: 'warn' } }],
+    });
+    assert.equal(amend.round, 1, 'the post amends the open question round');
+    const amended = readBoard(bare.boardId, home).blocks.at(-1);
+    assert.deepEqual(cardOf(amended), { title: 'Amended card', status: { label: 'Open', tone: 'warn' } },
+      'an amend into the open round stores the card fields it carries');
+  });
+
+  await check('a card field of the wrong shape, a refused one on a question, or a details label without details is a 400 naming the field, and nothing is stored', async () => {
+    const cases = [
+      ['a tone outside the four', { kind: 'markdown', text: 'x', status: { label: 'Loud', tone: 'loud' } }, /`status\.tone` must be one of 'good', 'warn', 'bad', 'neutral', not "loud"/],
+      ['a status label past 40 characters', { kind: 'markdown', text: 'x', status: { label: 'x'.repeat(41), tone: 'bad' } }, /`status\.label` is 41 characters, over its 40-character cap/],
+      ['a title on a question', { kind: 'question', prompt: 'Ship?', widget: 'text', title: 'Ship' }, /question block q\d+: a question takes no `title`/],
+      ['a summary on a question', { kind: 'question', prompt: 'Ship?', widget: 'text', summary: 'Why' }, /a question takes no `summary`/],
+      ['a details label without details', { kind: 'html', html: '<p>x</p>', detailsLabel: 'Sources' }, /`detailsLabel` names the details fold, so it needs `details` beside it/],
+      ['a title that is not a string', { kind: 'markdown', text: 'x', title: 7 }, /`title` must be a string, not a number/],
+      ['a title of only whitespace', { kind: 'markdown', text: 'x', title: '   ' }, /`title` is empty; leave it out instead/],
+      ['a title past 200 characters', { kind: 'markdown', text: 'x', title: 'é'.repeat(201) }, /`title` is 201 characters, over its 200-character cap/],
+      ['a summary past 600 characters', { kind: 'markdown', text: 'x', summary: 's'.repeat(601) }, /`summary` is 601 characters, over its 600-character cap/],
+      ['a status that is a string', { kind: 'markdown', text: 'x', status: 'good' }, /`status` must be an object \{ label, tone \}, not a string/],
+      ['a card field on a nested block', { kind: 'compare', left: { label: 'L', block: { kind: 'html', html: '<p>x</p>', status: { label: 'Hm', tone: 'loud' } } } }, /html block h\d+ on left side of compare block x\d+: `status\.tone`/],
+    ];
+    for (const [what, block, message] of cases) {
+      const before = storeListing();
+      const r = await rawRequest(port, 'POST', '/api/board', {
+        headers: writeHeaders(SECRET), body: JSON.stringify({ title: 'Card field refusal', blocks: [block] }),
+      });
+      assert.equal(r.status, 400, `${what} is a 400`);
+      assert.match(JSON.parse(r.body).error, message, `${what}: the refusal names the field`);
+      assert.deepEqual(storeListing(), before, `${what} stores nothing`);
+    }
+  });
+
   await check('a refused reference names the boundary and the ways across it, and says nothing whatever about what is out there', async () => {
     // A refusal is the agent's only feedback -- the post is gone and nothing reached the
     // reviewer's page -- so "no" without the way out costs a round of guessing at a rule
