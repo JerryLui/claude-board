@@ -2362,10 +2362,12 @@ function resolvedAtWindow(sheet, el, prop) {
 
 // The widths themselves are layout, which the stand-in has none of:
 // test/browser-check-round-width.mjs measures them in Chrome. What a machine with
-// no Chrome can still hold is what the cascade gives each element: at a wide
-// window every prose element on a round holds a measure of its own of at most
-// 80ch, and no rendered block, whose width is the whole point, holds any.
-check("on a wide window a round's prose holds a measure of at most 80ch and none of its rendered blocks holds one but the column's 1700px cap -- a page board's Tray keeps its own width", () => {
+// no Chrome can still hold is what the cascade gives each element: from a 1440px
+// window the cards sit in one 1100px column centred on the window and a round's
+// prose holds no measure of its own, so it fills its card; under 1440px the column
+// is uncapped and every prose element keeps the old 1120px column's line. No
+// rendered block, whose width is the whole point, is capped at either width.
+check("from a 1440px window a round's cards sit in one centred 1100px column and its prose fills them; under it prose keeps the old column's line -- a page board's Tray keeps its own width", () => {
   const board = createBoard({
     title: 'measure',
     blocks: [
@@ -2388,8 +2390,8 @@ check("on a wide window a round's prose holds a measure of at most 80ch and none
   });
   const { document } = renderedPage(board);
   const wide = stylesAtWindow(styles, 1920);
+  const narrow = stylesAtWindow(styles, 1280);
   const maxWidth = (el, sheet = wide) => resolvedAtWindow(sheet, el, 'max-width');
-  const inCh = value => (/^\d+(\.\d+)?ch$/.test(value) ? parseFloat(value) : null);
   const each = sel => {
     const found = [...document.querySelectorAll(sel)];
     assert.ok(found.length, `setup: the fixture renders no ${sel}`);
@@ -2406,18 +2408,22 @@ check("on a wide window a round's prose holds a measure of at most 80ch and none
   const prose = [...markdown.map(el => [`markdown ${el.tagName.toLowerCase()}`, el]),
     ...['.question-prompt', '.card-choice', '.variant-label', '.opt-label', '.opt-desc', '.note-field', '.answer-textarea',
       '.rank-list', '.comment-list', '.comment-form'].flatMap(sel => each(sel).map(el => [sel, el]))];
-  const unheld = prose.filter(([, el]) => !(inCh(maxWidth(el)) > 0 && inCh(maxWidth(el)) <= 80))
-    .map(([name, el]) => `${name} (${maxWidth(el) || 'unset'})`);
-  assert.deepEqual(unheld, [], 'every prose element holds a measure of at most 80ch, resolved in its own font');
+  const OLD_LINE = 'calc(1120px - 4 * 24px - 2px)';
+  for (const [label, sheet, want] of [['1920px', wide, 'none'], ['1280px', narrow, OLD_LINE]]) {
+    const off = prose.filter(([, el]) => maxWidth(el, sheet) !== want).map(([name, el]) => `${name} (${maxWidth(el, sheet) || 'unset'})`);
+    assert.deepEqual(off, [], `at a ${label} window every prose element's max-width is ${want}`);
+  }
 
-  // From 1440px the column itself stops at 1700px (one card width); what is
+  // The column: 1100px and centred from 1440px, uncapped under it; what is
   // inside it takes its width.
   const rendered = ['.html-stage', '.stage-wrap', 'pre.mermaid', '.compare-grid', '.compare-side', '.options-variants', '.variant-card',
     '.question-context', '.table-scroll', '.md-content table', '.md-content pre', '.block', '.round'];
-  for (const [label, sheet, column] of [['wide', wide, '1700px'], ['1280px', stylesAtWindow(styles, 1280), '']]) {
+  const blocks = document.querySelector('.blocks');
+  for (const [label, sheet, column, centred] of [['1920px', wide, '1100px', 'auto'], ['1280px', narrow, '', '']]) {
     const held = rendered.flatMap(sel => each(sel).filter(el => !['', 'none'].includes(maxWidth(el, sheet))).map(el => `${sel} (${maxWidth(el, sheet)})`));
     assert.deepEqual(held, [], `at a ${label} window no rendered block, and nothing around one, is capped: it takes the column`);
-    assert.equal(maxWidth(document.querySelector('.blocks'), sheet), column, `at a ${label} window the column is capped at ${column || 'nothing'}`);
+    assert.equal(maxWidth(blocks, sheet), column, `at a ${label} window the column is capped at ${column || 'nothing'}`);
+    assert.equal(resolvedAtWindow(sheet, blocks, 'margin-inline'), centred, `at a ${label} window the column is ${centred ? 'centred' : 'not centred by a margin'}`);
   }
 
   const tray = renderedPage(pageBoard()).document.querySelector('.page-comments .comment-list');

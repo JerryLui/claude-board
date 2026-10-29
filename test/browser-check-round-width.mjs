@@ -1,18 +1,19 @@
 // Real-browser check for how wide a board page lays out. From a 1440px window
 // every card on the page (text, question, compare, stage, diagram, an
-// evidence-shaped compare) is one width, the column's up to 1700px, on the
-// header's left edge, and at 2560px the window right of it is plain page. Inside
-// a card the content spreads to fill it: long open text in columns of reading
-// width (short text and a folded preview in one), a question's options a third of
-// the card and never under 523px with its note and Defer row exactly as wide
-// under them and its context panel the rest, that panel's tables at their natural
-// width, a compare's two sides each half, a diagram centred in its panel, and a
-// picture carrying a corner control that opens it full size. Its prose (a
-// markdown paragraph, heading or list item, a question prompt, an option label or
-// description, a note or answer field, a rank item, a comment list) holds a
-// reading measure of at most 80ch of its own font. Under 1440px the cap and the
-// thirds do not apply: the 1280px rows hold the board to the layout it had. A page
-// board, one html block and nothing else, still fills the window. All of that is
+// evidence-shaped compare), the board's title and its meta line sit in one 1100px
+// column centred on the window, and at 2560px the window right of it is plain
+// page. Inside a card the content fills it: text runs the card's width, long open
+// text in two columns (short text and a folded preview in one), a question's
+// options the card's left half and never under 523px with its note and Defer row
+// exactly as wide under them and its context panel the right half, that panel's
+// tables at their natural width, a question carrying a stage or rendered variants
+// stacked at the card's full width with its context over its options, a compare's
+// two sides each half, a diagram centred in its panel, and a picture carrying a
+// corner control that opens it full size. At every width a card has 13px text,
+// 14px by 16px of padding, 8px corners and 8px to the next card, a 13px semibold
+// title, under a 20px board title. Under 1440px the column and the halves do not
+// apply: the 1280px rows hold the board to the layout it had. A page board, one html block and
+// nothing else, still fills the window. All of that is
 // layout, and the DOM stand-in the suite runs on has none (QUIRKS.md "The DOM
 // stand-in's ceilings"): test/check-pure.mjs holds the rules on declared values
 // and this file looks at real ones.
@@ -50,10 +51,10 @@ import {
 // from src/styles.mjs, so a drift there turns a row red instead of moving the
 // expectation with it.
 const OLD_COLUMN = 1120; // the column a round was capped at before it widened
-const MEASURE_CH = 80; // the longest prose line, in `ch` of the element's own font
-const READING_CH = 72; // the reading measure a long text's columns and a variant question's note keep
-const CARD_CAP = 1700; // the widest a card gets, from a 1440px window up
+const COLUMN = 1100; // every card's width, centred, from a 1440px window up
 const OPTIONS_MIN = 523; // the narrowest a question's options column gets, from 1440px up
+// A round-page card's type and spacing, at every width.
+const CARD = { text: 13, padY: 14, padX: 16, radius: 8, between: 8, title: 13, titleWeight: 600, boardTitle: 20 };
 const WIDE = [1920, 2560];
 const NARROW = 1280;
 const HEIGHT = 1200;
@@ -192,12 +193,12 @@ const evidenceBody = () => ({
   ],
 });
 
-/** How a question lays out from 1440px, by its prompt's opening words: options a
- * third of the card with the note under them, or (a rendered-variant question,
- * and one carrying a stage in its context, ADR.md entry 26) the full-width column
- * with its note at reading width. */
-const THIRD_QUESTIONS = ['Beside a panel', 'Pick by its preview', 'In your words', 'In order'];
-const READING_NOTE_QUESTIONS = ['Over a stage', 'Between mocks', 'Between drawings'];
+/** How a question lays out from 1440px, by its prompt's opening words: options
+ * the card's left half with the note under them, or (a rendered-variant question,
+ * and one carrying a stage in its context, ADR.md entry 26) stacked at the card's
+ * full width, its context over its options. */
+const HALF_QUESTIONS = ['Beside a panel', 'Pick by its preview', 'In your words', 'In order'];
+const STACKED_QUESTIONS = ['Over a stage', 'Between mocks', 'Between drawings'];
 
 // Read in any board page: where each top-level card sits against the column and
 // the header, what lies right of the cards, and inside them the questions' columns,
@@ -214,17 +215,6 @@ const LAYOUT_FN = `function (chOf) {
     var cs = getComputedStyle(el);
     return el.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
   }
-  // The reading measure in el's own font, as CSS lays it out: a box 'width: 72ch'.
-  function readingOf(el) {
-    var cs = getComputedStyle(el), d = document.createElement('div');
-    d.style.cssText = 'position:absolute;left:0;top:0;visibility:hidden;width:${READING_CH}ch';
-    d.style.fontFamily = cs.fontFamily; d.style.fontSize = cs.fontSize; d.style.fontWeight = cs.fontWeight;
-    d.style.fontStyle = cs.fontStyle; d.style.fontStretch = cs.fontStretch;
-    document.body.appendChild(d);
-    var w = d.getBoundingClientRect().width;
-    d.remove();
-    return w;
-  }
   function titleOf(el) {
     var t = el.querySelector(':scope > .card-head > .card-title');
     return t ? t.textContent.trim() : null;
@@ -234,8 +224,18 @@ const LAYOUT_FN = `function (chOf) {
   var column = { left: shellBox.left + parseFloat(shellCs.paddingLeft), w: inner(shell) };
   var cards = [].slice.call(document.querySelectorAll('.round-current > .block')).map(function (b, i) {
     var name = b.getAttribute('data-block-kind') + ' #' + (i + 1) + (titleOf(b) ? ' "' + titleOf(b).slice(0, 30) + '"' : '');
-    return { name: name, box: box(b) };
+    var cs = getComputedStyle(b), title = b.querySelector(':scope > .card-head > .card-title, :scope > .question-head > .card-head > .card-title');
+    var tcs = title && getComputedStyle(title);
+    return { name: name, box: box(b), inner: inner(b),
+      look: { text: parseFloat(cs.fontSize), padT: parseFloat(cs.paddingTop), padB: parseFloat(cs.paddingBottom),
+        padL: parseFloat(cs.paddingLeft), padR: parseFloat(cs.paddingRight), radius: parseFloat(cs.borderTopLeftRadius),
+        title: tcs ? parseFloat(tcs.fontSize) : null, titleWeight: tcs ? Number(tcs.fontWeight) : null } };
   });
+  // Every paragraph a top-level text card sets straight in one column, with its card's inside.
+  var paragraphs = [].slice.call(document.querySelectorAll('.round-current > .markdown-block > .md-content:not(.card-summary) > p'))
+    .filter(function (p) { return getComputedStyle(p.parentElement).columnCount === 'auto'; })
+    .map(function (p) { return { w: p.getBoundingClientRect().width, card: inner(p.closest('.block')) }; });
+  var h1 = document.querySelector('.board-head h1');
   // Every box in the cards' column, the send bar included, to find the rightmost.
   var reach = 0;
   [].slice.call(document.querySelectorAll('.blocks, .blocks *, .send-bar, .send-bar *')).forEach(function (el) {
@@ -267,9 +267,11 @@ const LAYOUT_FN = `function (chOf) {
     }
     return {
       prompt: q.querySelector('.question-prompt').textContent,
-      inner: inner(q), gap: parseFloat(getComputedStyle(q).columnGap),
+      inner: inner(q), left: q.getBoundingClientRect().left + q.clientLeft + parseFloat(getComputedStyle(q).paddingLeft),
+      gap: parseFloat(getComputedStyle(q).columnGap),
       options: box(main.lastElementChild), context: box(q.querySelector(':scope > .question-context')),
-      note: box(note), noteReading: readingOf(note), defer: box(note.querySelector('.note-head')),
+      prose: box(main.querySelector(':scope > .question-context-prose')),
+      note: box(note), defer: box(note.querySelector('.note-head')),
       textarea: box(note.querySelector('textarea')),
       table: table ? { w: table.getBoundingClientRect().width, natural: natural } : null,
     };
@@ -306,12 +308,14 @@ const LAYOUT_FN = `function (chOf) {
     var summary = b.querySelector(':scope > .card-summary') ? linesUnder(b, ':scope > .card-summary > *') : null;
     return { title: titleOf(b), folded: b.classList.contains('folded'),
       lefts: linesUnder(b, ':scope > .md-content:not(.card-summary) > *').lefts, summary: summary,
-      reading: readingOf(body), gap: parseFloat(getComputedStyle(body).columnGap) || 0 };
+      w: body.clientWidth, card: inner(b), gap: parseFloat(getComputedStyle(body).columnGap) || 0 };
   });
   var pullOuts = [].slice.call(document.querySelectorAll('.round-current > .html-block > .stage-wrap')).map(function (w) {
     return { wrap: box(w), control: box(w.querySelector(':scope > .pull-out')) };
   });
   return { column: column, head: box(document.querySelector('.board-head')),
+    title: box(h1), meta: box(document.querySelector('.board-head .meta')),
+    boardTitle: parseFloat(getComputedStyle(h1).fontSize), paragraphs: paragraphs,
     label: box(document.querySelector('.round-current > .round-label')), cards: cards, reach: reach, beyond: beyond,
     questions: questions, compares: compares, diagrams: diagrams, texts: texts, pullOuts: pullOuts };
 }`;
@@ -544,22 +548,58 @@ const isCapped = width => width >= 1440;
 async function runRows({ column, at, evidence, scrollbar, pageBoard, round }) {
   // --- one card width -------------------------------------------------------
   for (const [board, byWidth] of [['the round board', at], ['the evidence board', evidence]]) {
-    for (const width of [NARROW, ...WIDE]) {
-      const want = isCapped(width) ? `the column's up to ${CARD_CAP}px` : "the column's, uncapped";
-      await row(`at a ${width}px window, every card on ${board} is one width, ${want}, its left edge on the header's`, note => {
-        const l = byWidth[width].layout;
-        assert.ok(l.cards.length >= 3 && l.head && l.label, `setup: the header, the round label and the cards found on ${board}`);
-        const expect = isCapped(width) ? Math.min(l.column.w, CARD_CAP) : l.column.w;
-        note(`column ${px(l.column.w)} from x=${l.column.left}; header from x=${l.head.left}; round label from x=${l.label.left}; ${l.cards.length} cards, ${px(expect)} each expected`);
+    await row(`at a ${NARROW}px window, every card on ${board} is one width, the column's, uncapped, its left edge on the header's`, note => {
+      const l = byWidth[NARROW].layout;
+      assert.ok(l.cards.length >= 3 && l.head && l.label, `setup: the header, the round label and the cards found on ${board}`);
+      const expect = l.column.w;
+      note(`column ${px(l.column.w)} from x=${l.column.left}; header from x=${l.head.left}; round label from x=${l.label.left}; ${l.cards.length} cards, ${px(expect)} each expected`);
+      const wrong = [];
+      if (!near(l.head.left, l.column.left)) wrong.push(`header from x=${l.head.left}`);
+      if (!near(l.label.left, l.column.left)) wrong.push(`round label from x=${l.label.left}`);
+      for (const c of l.cards) {
+        if (!near(c.box.w, expect) || !near(c.box.left, l.column.left)) wrong.push(`${c.name}: ${px(c.box.w)} from x=${c.box.left}`);
+      }
+      assert.deepEqual(wrong, []);
+    });
+    for (const width of WIDE) {
+      await row(`at a ${width}px window, every card on ${board}, the board's title and its meta line are ${COLUMN}px wide with equal space left and right`, note => {
+        const m = byWidth[width], l = m.layout;
+        assert.ok(l.cards.length >= 3 && l.title && l.meta && l.label, `setup: the title, the meta line, the round label and the cards found on ${board}`);
         const wrong = [];
-        if (!near(l.head.left, l.column.left)) wrong.push(`header from x=${l.head.left}`);
-        if (!near(l.label.left, l.column.left)) wrong.push(`round label from x=${l.label.left}`);
-        for (const c of l.cards) {
-          if (!near(c.box.w, expect) || !near(c.box.left, l.column.left)) wrong.push(`${c.name}: ${px(c.box.w)} from x=${c.box.left}`);
-        }
+        const centred = (name, b) => {
+          const left = b.left, right = m.docW - b.right;
+          note(`${name}: ${px(b.w)}, ${px(left)} left and ${px(right)} right`);
+          if (!near(b.w, COLUMN, 1) || !near(left, right, 1)) wrong.push(`${name}: ${px(b.w)}, ${left} left and ${right} right`);
+        };
+        centred('board title', l.title);
+        centred('meta line', l.meta);
+        for (const c of l.cards) centred(c.name, c.box);
+        if (!near(l.label.left, l.cards[0].box.left)) wrong.push(`round label from x=${l.label.left}, the cards from x=${l.cards[0].box.left}`);
         assert.deepEqual(wrong, []);
       });
     }
+  }
+
+  // --- a card's type and spacing ----------------------------------------------
+  for (const width of [NARROW, ...WIDE]) {
+    await row(`at a ${width}px window, every card has ${CARD.text}px text, ${CARD.padY}px by ${CARD.padX}px of padding, ${CARD.radius}px corners and ${CARD.between}px to the next, a ${CARD.title}px semibold title, under a ${CARD.boardTitle}px board title`, note => {
+      const wrong = [];
+      for (const [board, m] of [['round board', at[width]], ['evidence board', evidence[width]]]) {
+        const l = m.layout;
+        note(`${board}: board title ${l.boardTitle}px; first card ${JSON.stringify(l.cards[0].look)}`);
+        if (l.boardTitle !== CARD.boardTitle) wrong.push(`${board}: board title ${l.boardTitle}px`);
+        l.cards.forEach((c, i) => {
+          const k = c.look;
+          const got = [k.text, k.padT, k.padB, k.padL, k.padR, k.radius];
+          if (JSON.stringify(got) !== JSON.stringify([CARD.text, CARD.padY, CARD.padY, CARD.padX, CARD.padX, CARD.radius])) wrong.push(`${board} ${c.name}: text, padding and corner ${got.join(', ')}`);
+          if (k.title !== null && (k.title !== CARD.title || k.titleWeight !== CARD.titleWeight)) wrong.push(`${board} ${c.name}: title ${k.title}px at ${k.titleWeight}`);
+          const next = l.cards[i + 1];
+          if (next && !near(next.box.top - c.box.bottom, CARD.between)) wrong.push(`${board} ${c.name}: ${Math.round(next.box.top - c.box.bottom)}px to the next card`);
+        });
+        assert.ok(l.cards.filter(c => c.look.title !== null).length >= 3, `setup: titled cards found on the ${board}`);
+      }
+      assert.deepEqual(wrong, []);
+    });
   }
 
   await row(`at a ${WIDE[1]}px window, the window right of the cards is plain page, on both boards`, note => {
@@ -583,13 +623,13 @@ async function runRows({ column, at, evidence, scrollbar, pageBoard, round }) {
   };
   for (const width of WIDE) {
     const m = at[width];
-    await row(`at a ${width}px window, a question's options take a third of the card and never under ${OPTIONS_MIN}px, its note field and Defer row exactly as wide right under them, its context the rest`, note => {
+    await row(`at a ${width}px window, a question's options take the card's left half and never under ${OPTIONS_MIN}px, its note field and Defer row exactly as wide right under them, its context the right half`, note => {
       const wrong = [];
-      for (const name of THIRD_QUESTIONS) {
+      for (const name of HALF_QUESTIONS) {
         const q = question(m, name);
-        const third = Math.max(OPTIONS_MIN, (q.inner - q.gap) / 3);
-        note(`${name}: ${px(q.inner)} inside the card; options ${px(q.options.w)} (a third: ${px(third)}); note ${px(q.note.w)}, Defer row ${px(q.defer.w)}, box ${px(q.textarea.w)}; context ${q.context ? px(q.context.w) : 'none'}`);
-        if (q.options.w < OPTIONS_MIN - 0.5 || !near(q.options.w, third, 1)) wrong.push(`${name}: options ${px(q.options.w)}, a third is ${px(third)}`);
+        const half = Math.max(OPTIONS_MIN, (q.inner - q.gap) / 2);
+        note(`${name}: ${px(q.inner)} inside the card; options ${px(q.options.w)} from x=${q.options.left} (half: ${px(half)} from x=${q.left}); note ${px(q.note.w)}, Defer row ${px(q.defer.w)}, box ${px(q.textarea.w)}; context ${q.context ? px(q.context.w) : 'none'}`);
+        if (q.options.w < OPTIONS_MIN - 0.5 || !near(q.options.w, half, 1) || !near(q.options.left, q.left, 1)) wrong.push(`${name}: options ${px(q.options.w)} from x=${q.options.left}, the left half is ${px(half)} from x=${q.left}`);
         for (const [part, b] of [['note field', q.note], ['Defer row', q.defer], ['note box', q.textarea]]) {
           if (!near(b.w, q.options.w) || !near(b.left, q.options.left)) wrong.push(`${name}: ${part} ${px(b.w)} from x=${b.left}, options ${px(q.options.w)} from x=${q.options.left}`);
         }
@@ -599,23 +639,26 @@ async function runRows({ column, at, evidence, scrollbar, pageBoard, round }) {
           wrong.push(`${name}: context ${px(q.context.w)} from x=${q.context.left}, the rest is ${px(q.inner - q.gap - q.options.w)} from x=${q.options.right + q.gap}`);
         }
       }
-      assert.ok(question(m, THIRD_QUESTIONS[0]).context, `setup: "${THIRD_QUESTIONS[0]}" has its context panel`);
+      assert.ok(question(m, HALF_QUESTIONS[0]).context, `setup: "${HALF_QUESTIONS[0]}" has its context panel`);
       assert.deepEqual(wrong, []);
     });
 
-    await row(`at a ${width}px window, a question whose options are rendered variants, or whose context holds a stage, keeps its note at reading width`, note => {
+    await row(`at a ${width}px window, a question whose options are rendered variants, or whose context holds a stage, stacks its context over its options at the card's full width, its note too`, note => {
       const wrong = [];
-      for (const name of READING_NOTE_QUESTIONS) {
+      for (const name of STACKED_QUESTIONS) {
         const q = question(m, name);
-        const reading = q.noteReading;
-        note(`${name}: note ${px(q.note.w)}, ${READING_CH}ch of its font ${px(reading)}, in a card ${px(q.inner)} inside`);
-        if (!near(q.note.w, reading, 1)) wrong.push(`${name}: note ${px(q.note.w)}, reading width ${px(reading)}`);
+        note(`${name}: ${px(q.inner)} inside the card; options ${px(q.options.w)}, note ${px(q.note.w)}${q.prose ? `, context ${px(q.prose.w)} ending at y=${Math.round(q.prose.bottom)}, options from y=${Math.round(q.options.top)}` : ''}`);
+        for (const [part, b] of [['options', q.options], ['note', q.note], ...(q.prose ? [['context', q.prose]] : [])]) {
+          if (!near(b.w, q.inner, 1) || !near(b.left, q.left, 1)) wrong.push(`${name}: ${part} ${px(b.w)} from x=${b.left}, the card's inside ${px(q.inner)} from x=${q.left}`);
+        }
+        if (q.prose && q.prose.bottom > q.options.top + 0.5) wrong.push(`${name}: its context ends at y=${q.prose.bottom}, under its options' top y=${q.options.top}`);
       }
+      assert.ok(question(m, STACKED_QUESTIONS[0]).prose, `setup: "${STACKED_QUESTIONS[0]}" carries its context over its options`);
       assert.deepEqual(wrong, []);
     });
 
     await row(`at a ${width}px window, a table in a question's context panel is at its natural width`, note => {
-      const q = question(m, THIRD_QUESTIONS[0]);
+      const q = question(m, HALF_QUESTIONS[0]);
       assert.ok(q.table && q.context && q.table.natural < q.context.w - 200, 'setup: a context table whose natural width is well under its panel');
       note(`table ${px(q.table.w)}, natural ${px(q.table.natural)}, panel ${px(q.context.w)}`);
       assert.ok(near(q.table.w, q.table.natural, 1), `table ${px(q.table.w)} against its natural ${px(q.table.natural)}`);
@@ -646,15 +689,17 @@ async function runRows({ column, at, evidence, scrollbar, pageBoard, round }) {
       assert.deepEqual(wrong, []);
     });
 
-    await row(`at a ${width}px window, an opened long text flows into columns of reading width; its summary, a short text and a folded preview stay one column`, note => {
+    await row(`at a ${width}px window, an opened long text flows into two columns, each half its card; its summary, a short text and a folded preview stay one column`, note => {
       const texts = Object.fromEntries(m.layout.texts.map(t => [t.title, t]));
       const open = texts[LONG_OPEN_TITLE], folded = texts[LONG_FOLDED_TITLE], short = texts[SHORT_TITLE];
       assert.ok(open && folded && short, 'setup: the three titled texts found');
       assert.ok(!open.folded && folded.folded, 'setup: the long read is opened, its twin still folded');
       for (const t of [open, folded, short]) note(`"${t.title}": lines start at x=${t.lefts.join(', ')}`);
-      const step = open.reading + open.gap;
+      const step = (open.w - open.gap) / 2 + open.gap;
+      note(`"${open.title}": body ${px(open.w)} in a card ${px(open.card)} inside`);
+      assert.ok(near(open.w, open.card, 1), `the opened text's body ${px(open.w)} runs its card's ${px(open.card)}`);
       assert.equal(open.lefts.length, 2, 'the opened long text runs in two columns');
-      assert.ok(near(open.lefts[1] - open.lefts[0], step, 1), `its second column starts ${open.lefts[1] - open.lefts[0]}px after the first, one reading width and a gap is ${px(step)}`);
+      assert.ok(near(open.lefts[1] - open.lefts[0], step, 1), `its second column starts ${open.lefts[1] - open.lefts[0]}px after the first, half the body and a gap is ${px(step)}`);
       assert.equal(folded.lefts.length, 1, 'the folded preview stays one column');
       assert.equal(short.lefts.length, 1, 'the short text stays one column');
       note(`"${open.title}" summary: ${open.summary && open.summary.lines} lines starting at x=${open.summary && open.summary.lefts.join(', ')}`);
@@ -697,43 +742,33 @@ async function runRows({ column, at, evidence, scrollbar, pageBoard, round }) {
   // --- the rendered blocks and the prose --------------------------------------
   for (const width of WIDE) {
     const m = at[width];
-    await row(`at a ${width}px window, every rendered block in the round is wider than in the ${OLD_COLUMN}px column, and one outside a context panel wider than ${OLD_COLUMN}px`, note => {
+    await row(`at a ${width}px window, no rendered block in the round is narrower than in the ${OLD_COLUMN}px column`, note => {
       setupColumn(column, scrollbar, note);
       setupBlocks(column);
       setupBlocks(m);
       const wrong = [];
-      for (const [name, w] of Object.entries(m.blocks)) {
-        const was = column.blocks[name];
-        const line = `${name}: ${px(w)} (${px(was)} in the column)`;
-        note(line);
-        const inPanel = /^(compare|mermaid).*in a question's context/.test(name);
-        if (!(w > was + 1 && (inPanel || w > OLD_COLUMN))) wrong.push(line);
-      }
-      for (const [name, w] of Object.entries(m.shared)) {
-        const was = column.shared[name];
-        const line = `${name}: ${px(w)} (${px(was)} in the column)`;
-        note(line);
-        if (!(w > was + 1)) wrong.push(line);
+      for (const group of ['blocks', 'shared']) {
+        for (const [name, w] of Object.entries(m[group])) {
+          const was = column[group][name];
+          const line = `${name}: ${px(w)} (${px(was)} in the column)`;
+          note(line);
+          if (w < was - 0.5) wrong.push(line);
+        }
       }
       assert.deepEqual(wrong, []);
     });
 
-    await row(`at a ${width}px window, every prose element measures at most ${MEASURE_CH}ch of its own font`, note => {
-      setupProse(m);
+    await row(`at a ${width}px window, a text card's paragraphs run the card's width`, note => {
+      const ps = m.layout.paragraphs;
+      assert.ok(ps.length >= 3, 'setup: the text cards\' paragraphs found');
       const wrong = [];
-      const widest = {};
-      for (const [name, { w, ch }] of Object.entries(m.prose)) {
-        const inCh = w / ch;
-        const kind = name.replace(/ #\d+$/, '');
-        if (!widest[kind] || inCh > widest[kind].inCh) widest[kind] = { inCh, w };
-        if (w > MEASURE_CH * ch + 0.5) wrong.push(`${name}: ${px(w)} = ${inCh.toFixed(1)}ch`);
-      }
-      for (const [kind, { inCh, w }] of Object.entries(widest)) note(`widest ${kind}: ${px(w)} = ${inCh.toFixed(1)}ch`);
+      for (const [i, p] of ps.entries()) if (!near(p.w, p.card, 1)) wrong.push(`paragraph #${i + 1}: ${px(p.w)} in a card ${px(p.card)} inside`);
+      note(`${ps.length} paragraphs; widest ${px(Math.max(...ps.map(p => p.w)))}, in cards ${px(ps[0].card)} inside`);
       assert.deepEqual(wrong, []);
     });
   }
 
-  await row(`every rendered block is as wide at a ${WIDE[1]}px window as at ${WIDE[0]}px: both are past the ${CARD_CAP}px cap`, note => {
+  await row(`every rendered block is as wide at a ${WIDE[1]}px window as at ${WIDE[0]}px: both are in the ${COLUMN}px column`, note => {
     setupBlocks(at[WIDE[0]]);
     setupBlocks(at[WIDE[1]]);
     const wrong = [];
@@ -770,18 +805,18 @@ async function runRows({ column, at, evidence, scrollbar, pageBoard, round }) {
   });
 
   await row(`at a ${NARROW}px window the wide layout is not in force: a question's note spans its row past its options, and an opened long text stays one column`, note => {
-    const q = question(at[NARROW], THIRD_QUESTIONS[0]);
+    const q = question(at[NARROW], HALF_QUESTIONS[0]);
     const open = at[NARROW].layout.texts.find(t => t.title === LONG_OPEN_TITLE);
     assert.ok(open && !open.folded, 'setup: the long read is opened');
-    note(`${THIRD_QUESTIONS[0]}: options ${px(q.options.w)}, note ${px(q.note.w)}; the opened long text's lines start at x=${open.lefts.join(', ')}`);
+    note(`${HALF_QUESTIONS[0]}: options ${px(q.options.w)}, note ${px(q.note.w)}; the opened long text's lines start at x=${open.lefts.join(', ')}`);
     assert.ok(q.note.w > q.options.w + 100, `the note ${px(q.note.w)} runs past its options' ${px(q.options.w)}`);
     assert.equal(open.lefts.length, 1);
   });
 
   // An option's preview is rendered content in a card whose words hold the
   // measure. Below 1440px the card's cap must not take the preview narrower
-  // than the old column drew it; from 1440px an option is a third of its card,
-  // and its preview fills it where that is narrower than the column drew it.
+  // than the old column drew it; from 1440px an option is half its card, and
+  // its preview fills it where that is narrower than the column drew it.
   for (const width of [NARROW, ...WIDE]) {
     const rule = isCapped(width) ? `as wide as the ${OLD_COLUMN}px column drew them, or the whole of their option` : `at least as wide as in the ${OLD_COLUMN}px column`;
     await row(`at a ${width}px window, every option's preview image and code are ${rule}`, note => {
