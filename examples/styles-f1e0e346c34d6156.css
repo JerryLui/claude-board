@@ -1802,7 +1802,7 @@ body.home-page .mode-toggle:disabled { opacity: 0.5; cursor: default; }
 .mission-col[data-col="needs-you"] { border-color: var(--warning-border); }
 .mission-col-head { display: flex; align-items: center; justify-content: space-between; font-size: 13px; margin: 2px 4px 10px; font-weight: 600; }
 .mission-col-count { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; color: var(--muted); }
-.mission-col-list { display: flex; flex-direction: column; gap: 8px; }
+.mission-col-list { display: flex; flex-direction: column; gap: 6px; }
 .mission-col-list:empty::after { content: "None"; color: var(--muted); font-size: 12.5px; padding: 2px 4px; }
 .mission-badge { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; padding: 1px 9px;
   border-radius: var(--r-pill); border: 1px solid var(--hairline-2); white-space: nowrap; color: var(--muted); background: var(--panel-2); }
@@ -1811,61 +1811,60 @@ body.home-page .mode-toggle:disabled { opacity: 0.5; cursor: default; }
 .mission-badge[data-col="working"] { color: var(--accent); background: var(--accent-soft); border-color: transparent; }
 .mission-badge[data-col="stalled"] { color: var(--critical); background: var(--critical-soft); border-color: var(--critical-border); }
 .mission-badge[data-col="released"] { color: var(--good); background: var(--panel); }
-/* A mission card has the board's titled-card look ('.block': panel, hairline, 14px
-   corners, a bold title, its age at the right edge), and every card is one height
-   whatever its text. The title and summary stop at two lines, waiting on at two, next
-   at one, each ending in an ellipsis, and the card's least height is that whole stack
-   at full length plus one line of PRs and one of buttons, so a card with less text
-   is as tall as one with more and the columns' cards line up row by row. The text
-   takes the spare height, holding the PRs and buttons to the card's foot. One fold
-   per card ('.mission-more') shows every field whole; opening it may grow that card. */
-.mission-card { --mc-pad: 14px; --mc-title-lh: 20px; --mc-mono-lh: 18px; --mc-text-lh: 19px; --mc-label-lh: 17px;
-  --mc-fact-lh: 18px; --mc-chip: 22px; --mc-btn: 32px;
-  display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--hairline); border-radius: var(--r-lg);
-  padding: var(--mc-pad) 16px; box-shadow: var(--shadow-1); min-width: 0; overflow-wrap: anywhere;
-  min-height: calc(2 * var(--mc-pad) + 2px + 2 * var(--mc-title-lh) + 2px + var(--mc-mono-lh) + 8px + 2 * var(--mc-text-lh)
-    + 8px + var(--mc-label-lh) + 2 * var(--mc-fact-lh) + 6px + var(--mc-label-lh) + var(--mc-fact-lh)
-    + 8px + var(--mc-mono-lh) + 8px + var(--mc-chip) + 10px + var(--mc-btn)); }
-.mission-text { flex: 1 0 auto; min-width: 0; }
-.mission-card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
-.mission-title { flex: 1 1 auto; min-width: 0; font-size: 14px; line-height: var(--mc-title-lh); font-weight: 650; letter-spacing: -0.01em; color: var(--ink); }
-.mission-age, .mission-key { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; line-height: var(--mc-mono-lh); color: var(--muted); white-space: nowrap; }
-.mission-age { line-height: var(--mc-title-lh); }
-.mission-ident { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 2px; line-height: var(--mc-mono-lh); }
-.mission-key { white-space: normal; }
-.mission-tag { flex: none; white-space: nowrap; font-size: 11px; line-height: 16px; padding: 0 7px; border-radius: var(--r-pill); color: var(--muted); border: 1px solid var(--hairline-2); }
-.mission-summary { margin: 8px 0 0; color: var(--ink-2); font-size: 13px; line-height: var(--mc-text-lh); }
-.mission-facts { font-size: 12.5px; color: var(--ink-2); margin: 8px 0 0; }
-.mission-facts dt { color: var(--muted); font-size: 12px; line-height: var(--mc-label-lh); font-weight: 600; }
-.mission-facts dd { margin: 0; line-height: var(--mc-fact-lh); }
-.mission-facts dd + dt { margin-top: 6px; }
+/* A mission card is as tall as its text, in a list's density: a grey line with its key
+   and phase and its age at the right, the title (13px medium), then the summary, waiting
+   on and next. The title, summary and waiting on stop at two lines, next at one, each
+   ending in an ellipsis, and one fold per card ('.mission-more') shows every field whole;
+   it takes no room while nothing is cut. The foot holds small chips (queued, tab, your
+   turn, PRs) and any Fire or Merge button. The whole card opens its board, so it carries
+   no Open board button; Stop sits where the age does and shows only on the card's hover
+   or focus (or while its question is open), the age hiding under it. */
+.mission-card { --mc-pad: 10px; --mc-title-lh: 18px; --mc-mono-lh: 16px; --mc-text-lh: 17px; --mc-label-lh: 17px;
+  --mc-fact-lh: 17px; --mc-chip: 20px; --mc-btn: 24px;
+  position: relative; background: var(--panel); border: 1px solid var(--hairline); border-radius: 8px;
+  padding: var(--mc-pad) 12px; min-width: 0; overflow-wrap: anywhere;
+  transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease); }
+.mission-card[data-href] { cursor: pointer; }
+.mission-card:hover { border-color: var(--hairline-2); background: color-mix(in srgb, var(--panel) 94%, var(--ink)); }
+.mission-card:focus-visible { outline: none; border-color: var(--accent); box-shadow: var(--ring); }
+.mission-text { min-width: 0; }
+.mission-ident { display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  font-size: 12px; line-height: var(--mc-mono-lh); color: var(--muted); }
+.mission-key { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mission-age { flex: none; white-space: nowrap; }
+.mission-ident + .mission-title { margin-top: 3px; }
+.mission-title { font-size: 13px; line-height: var(--mc-title-lh); font-weight: 500; color: var(--ink); }
+.mission-summary { margin: 4px 0 0; color: var(--ink-2); font-size: 12px; line-height: var(--mc-text-lh); }
+.mission-fact { margin: 5px 0 0; color: var(--ink-2); font-size: 12px; line-height: var(--mc-fact-lh); }
+.mission-label { color: var(--muted); margin-right: 5px; line-height: var(--mc-label-lh); }
 .mission-title, .mission-summary, .mission-waiting, .mission-next { display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; }
 .mission-title, .mission-summary, .mission-waiting { -webkit-line-clamp: 2; }
 .mission-next { -webkit-line-clamp: 1; }
 .mission-text:has(> .mission-more[open]) :is(.mission-title, .mission-summary, .mission-waiting, .mission-next) { display: block; -webkit-line-clamp: none; overflow: visible; }
-.mission-more { margin-top: 8px; font-size: 12px; line-height: var(--mc-mono-lh); }
-.mission-more > summary { display: inline-block; cursor: pointer; color: var(--muted); font-weight: 600; list-style: none; border-radius: var(--r-sm); }
+.mission-more { margin-top: 5px; font-size: 11.5px; line-height: var(--mc-mono-lh); }
+.mission-more > summary { display: inline-block; cursor: pointer; color: var(--muted); list-style: none; border-radius: var(--r-sm); }
 .mission-more > summary::-webkit-details-marker { display: none; }
 .mission-more > summary::before { content: "\25B8"; display: inline-block; margin-right: 5px; transition: transform var(--dur) var(--ease); }
 .mission-more[open] > summary::before { transform: rotate(90deg); }
 .mission-more > summary:hover { color: var(--ink); }
 .mission-more > summary:focus-visible { outline: none; box-shadow: var(--ring); }
-.mission-more[data-fits] { visibility: hidden; }
-.mission-prs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.mission-card > .mission-btns { margin-top: 10px; }
-.mission-pr { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; line-height: 18px; padding: 1px 8px; border-radius: var(--r-sm);
-  border: 1px solid var(--hairline-2); color: var(--ink-2); background: var(--panel-2); white-space: nowrap; text-decoration: none; }
+.mission-more[data-fits] { display: none; }
+.mission-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 8px; }
+.mission-tag, .mission-pr { display: inline-flex; align-items: center; gap: 4px; height: var(--mc-chip); box-sizing: border-box; padding: 0 7px;
+  border-radius: var(--r-pill); border: 1px solid var(--hairline-2); font-size: 11.5px; line-height: 1; white-space: nowrap;
+  color: var(--ink-2); text-decoration: none; }
 .mission-pr:hover { border-color: var(--accent); color: var(--ink); }
 .mission-pr i { font-style: normal; font-weight: 700; color: var(--muted); }
 .mission-pr[data-state="green"] i { color: var(--good); }
 .mission-pr[data-state="merged"] i { color: var(--accent); }
-.mission-order { margin: 8px 0 0; font-size: 12.5px; color: var(--ink-2); }
-.mission-error { margin: 8px 0 0; font-size: 12.5px; color: var(--critical); }
+.mission-order { margin: 6px 0 0; font-size: 12px; line-height: 17px; color: var(--ink-2); }
+.mission-error { margin: 6px 0 0; font-size: 12px; line-height: 17px; color: var(--critical); }
 .mission-btns { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
 .mission-btn { display: inline-flex; align-items: center; min-height: 30px; padding: 3px 12px; border-radius: var(--r-sm);
   font: inherit; font-size: 12.5px; font-weight: 600; text-decoration: none; white-space: nowrap; cursor: pointer;
   border: 1px solid var(--hairline-2); color: var(--ink-2); background: var(--panel);
   transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease), background var(--dur) var(--ease); }
+.mission-foot .mission-btn { min-height: var(--mc-btn); padding: 0 10px; font-size: 12px; }
 .mission-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--ink); }
 .mission-btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 .mission-btn.primary:hover:not(:disabled) { color: var(--accent-ink); background: var(--accent-hi); }
@@ -1874,23 +1873,29 @@ body.home-page .mode-toggle:disabled { opacity: 0.5; cursor: default; }
 .mission-btn.danger { background: var(--critical-soft); color: var(--critical); border-color: var(--critical-border); }
 .mission-btn.danger:hover:not(:disabled) { color: var(--critical); border-color: var(--critical); }
 .mission-btn:disabled { opacity: 0.6; cursor: default; }
-/* Stop: the circle-slash icon at the card's right, at a 32px target */
-.mission-stop { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; margin-left: auto;
-  padding: 0; border: 0; border-radius: var(--r-sm); background: transparent; color: var(--critical); opacity: 0.85; cursor: pointer; }
-.mission-stop:hover:not(:disabled), .mission-stop[aria-expanded="true"] { opacity: 1; background: var(--critical-soft); }
+/* Stop: the circle-slash icon in the card's top-right corner, over the age */
+.mission-stop { position: absolute; top: 7px; right: 8px; display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; padding: 0; border: 0; border-radius: 5px; background: var(--panel-2); color: var(--critical);
+  cursor: pointer; visibility: hidden; }
+.mission-card:is(:hover, :focus-within) > .mission-stop, .mission-stop[aria-expanded="true"] { visibility: visible; }
+.mission-card:is(:hover, :focus-within) > .mission-stop ~ .mission-text .mission-age,
+.mission-stop[aria-expanded="true"] ~ .mission-text .mission-age { visibility: hidden; }
+.mission-stop:hover:not(:disabled), .mission-stop[aria-expanded="true"] { background: var(--critical-soft); }
+.mission-stop:focus-visible { outline: none; box-shadow: var(--ring); }
+/* a card with no key line (a tab with no login or folder) keeps its title clear of Stop */
+.mission-stop + .mission-text > .mission-title:first-child { padding-right: 24px; }
 .mission-stop:disabled { opacity: 0.4; cursor: default; }
-.mission-stop svg { display: block; }
+.mission-stop svg { display: block; width: 14px; height: 14px; }
 .mission-confirm { margin-top: 8px; padding: 8px 10px; border-radius: var(--r-sm); border: 1px solid var(--critical-border);
-  background: var(--critical-soft); }
+  background: var(--critical-soft); cursor: default; }
 .mission-confirm-text { margin: 0; font-size: 12.5px; color: var(--ink); }
 .mission-confirm .mission-btns { flex-wrap: nowrap; }
-.mission-comment { margin-top: 8px; }
+.mission-comment { margin-top: 8px; cursor: default; }
 .mission-comment-text { display: block; width: 100%; box-sizing: border-box; resize: vertical; min-height: 64px;
   font: inherit; font-size: 13px; color: var(--ink); background: var(--panel-2); border: 1px solid var(--hairline-2);
   border-radius: var(--r-sm); padding: 6px 10px; }
 .mission-comment-text:focus { border-color: var(--accent); outline: none; box-shadow: var(--ring); }
 /* a tab card: a session no mission launched (ADR 131), the mission card tagged as one */
-.tab-tags { display: inline-flex; flex: none; align-items: center; gap: 4px; }
 .tab-tag { color: var(--accent); background: var(--accent-soft); border-color: transparent; }
 .tab-turn { color: var(--warning); background: var(--warning-soft); border-color: var(--warning-border); }
 .missions-notice { margin: 0 0 var(--space-4); padding: 8px 12px; font-size: 13px; color: var(--ink-2);
