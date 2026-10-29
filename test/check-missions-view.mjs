@@ -185,7 +185,7 @@ async function main() {
     assert.equal((await post('/api/mission/WAITING_ONE', { title: 'Waiting one', state: 'waiting', phase: 'landing',
       prs: [{ repo: 'admin', number: 7, url: 'javascript:alert(1)', state: 'open' }] })).status, 200);
     assert.equal((await post('/api/mission/QUEUED_ONE', { title: 'Queued one', state: 'queued', phase: 'direct' })).status, 200);
-    assert.equal((await post('/api/mission/LANDED_ONE', { title: 'Landed one', state: 'landed', phase: 'landing' })).status, 200);
+    assert.equal((await post('/api/mission/RELEASED_ONE', { title: 'Released one', state: 'released', phase: 'landing' })).status, 200);
     assert.equal((await post('/api/mission/STALLED_ONE', { title: 'Stalled one', state: 'working', phase: 'direct' })).status, 200);
     assert.equal((await post('/api/mission/STALLED_ONE/session', { pid: await deadPid() })).status, 200);
     const needsBoard = await postBoard(port, SECRET, { title: 'Needs board', mission: 'NEEDS_ONE',
@@ -196,13 +196,15 @@ async function main() {
       working: ['WORKING_ONE', 'WORKING_TWO'],
       waiting: ['QUEUED_ONE', 'WAITING_ONE'],
       stalled: ['STALLED_ONE'],
-      landed: ['LANDED_ONE'],
+      released: ['RELEASED_ONE'],
     };
 
     await check('each mission shows in its derived state\'s column, queued under waiting, on first paint and once live', async () => {
       const page = await rawRequest(port, 'GET', '/', { headers: { [SECRET_HEADER]: SECRET } });
       const served = parseHTML(page.body);
       assert.deepEqual(columns(served), expected);
+      assert.deepEqual(served.querySelectorAll('h2.mission-col-head span.mission-badge').map(n => n.textContent),
+        ['Needs you', 'Working', 'Waiting', 'Stalled', 'Released'], 'the last column reads Released (ADR 130)');
       assert.equal(cardFor(served, 'QUEUED_ONE').querySelector('span.mission-tag').textContent, 'Queued');
       assert.equal(served.querySelector('p.empty-state'), null, 'no empty state once a mission exists');
 
@@ -226,7 +228,7 @@ async function main() {
         assert.equal(needs.getAttribute('href'), `/b/${needsBoard.boardId}`, 'the latest board the mission posted');
         assert.ok(cardFor(tab.document, 'WORKING_ONE').querySelector('button.mission-stop'), 'a live session offers Stop');
         assert.equal(cardFor(tab.document, 'STALLED_ONE').querySelector('button.mission-stop'), null, 'a stalled one does not');
-        assert.equal(cardFor(tab.document, 'LANDED_ONE').querySelector('button.mission-stop'), null);
+        assert.equal(cardFor(tab.document, 'RELEASED_ONE').querySelector('button.mission-stop'), null);
       } finally {
         tab.restoreFetch();
       }

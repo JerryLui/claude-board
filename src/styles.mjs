@@ -1905,7 +1905,7 @@ body.home-page .mode-toggle:disabled { opacity: 0.5; cursor: default; }
 .mission-badge[data-col="needs-you"] { color: var(--warning); background: var(--warning-soft); border-color: var(--warning-border); }
 .mission-badge[data-col="working"] { color: var(--accent); background: var(--accent-soft); border-color: transparent; }
 .mission-badge[data-col="stalled"] { color: var(--critical); background: var(--critical-soft); border-color: var(--critical-border); }
-.mission-badge[data-col="landed"] { color: var(--good); background: var(--panel); }
+.mission-badge[data-col="released"] { color: var(--good); background: var(--panel); }
 .mission-card { background: var(--panel); border: 1px solid var(--hairline); border-radius: var(--r-sm); padding: 10px 12px;
   box-shadow: var(--shadow-1); min-width: 0; overflow-wrap: anywhere; }
 .mission-card-head { display: flex; justify-content: space-between; gap: 8px; }

@@ -1762,8 +1762,8 @@ async function main() {
         `with the switch off and nothing waiting: the caption+gear row, then the missions row; got ${JSON.stringify(rows.map(r => r.class))}`);
       assertRowsSpanPanel(rows, 'row (missions)');
 
-      await setMission('CHARLIE', 'landed');
-      await setMission('DELTA', 'landed');
+      await setMission('CHARLIE', 'released');
+      await setMission('DELTA', 'released');
       assert.equal((await probe({ home: probeHome, port })).missionsrow, 'Missions: 1 working');
     });
   });

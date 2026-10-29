@@ -11,7 +11,7 @@ structured data.
 
 Beside the decisions, the board keeps the status of the work around them. Each piece of
 work is a **mission**, written by whichever agent works on it, and the board's home page
-shows every mission in a column by state: needs you, working, waiting, stalled, landed.
+shows every mission in a column by state: needs you, working, waiting, stalled, released.
 
 **macOS only, by construction**: launchd supervision, `plutil` linting, `open` for the
 tab. No Linux or Windows path exists or is planned.

@@ -30,7 +30,7 @@ const WIDTHS = [1440, 2560];
 const HEIGHT = 900;
 const THEMES = ['light', 'dark'];
 const BOARDS = 14; // enough rows that the boards list scrolls at HEIGHT
-const COLUMNS = ['needs-you', 'working', 'waiting', 'stalled', 'landed'];
+const COLUMNS = ['needs-you', 'working', 'waiting', 'stalled', 'released'];
 
 guardRun('browser-check-missions', { deadlineMs: 240000 });
 
@@ -137,7 +137,7 @@ async function main() {
     await post('/api/mission/PAGE_READ_ROLLOUT', { title: 'Page reading rollout', phase: 'direct', state: 'queued', next: 'starts when a slot frees' });
     await post('/api/mission/SMALL_FIXES', { title: 'Security small fixes', phase: 'direct', state: 'working', summary: 'Silent since its last step' });
     await post('/api/mission/SMALL_FIXES/session', { pid: await deadPid() });
-    await post('/api/mission/ESTATE_GOLDENS', { title: 'Estate case goldens', phase: 'landing', state: 'landed', summary: 'Landed, nothing left',
+    await post('/api/mission/ESTATE_GOLDENS', { title: 'Estate case goldens', phase: 'landing', state: 'released', summary: 'Released, nothing left',
       prs: [{ repo: 'service', number: 1862, url: 'https://github.com/o/service/pull/1862', state: 'merged' }] });
 
     const counts = Object.fromEntries(COLUMNS.map(c => [c, 0]));
@@ -163,6 +163,7 @@ async function main() {
             note(`background light ${light.missions.background}, dark ${dark.missions.background}`);
             assert.notEqual(light.missions.background, dark.missions.background);
             for (const m of [light, dark]) {
+              assert.deepEqual(Object.keys(m.missions.cols), COLUMNS, 'the five columns, in state order, and no other');
               assert.deepEqual(Object.fromEntries(COLUMNS.map(c => [c, m.missions.cols[c]?.cards])), counts);
               assert.equal(m.missions.commentOn, true);
             }

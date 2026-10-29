@@ -48,7 +48,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { randomBytes, createHash } from 'node:crypto';
-import { readBoard, writeBoard, writePage, readAsset, boardHome, listBoards, storeFingerprint, searchBoards, pruneStore } from './store.mjs';
+import { readBoard, writeBoard, writePage, readAsset, boardHome, listBoards, storeFingerprint, searchBoards, pruneStore, migrateMissions } from './store.mjs';
 import { ASSET_NAME, MERMAID_ASSET_NAME, SHARED_ASSETS, assetContentType } from './assets.mjs';
 import { readSecret, secretPath, secretMatches, sessionToken, sessionCookieMatches, SECRET_HEADER, SESSION_COOKIE, SESSION_MAX_AGE_S } from './secret.mjs';
 import { createHandoffStore, handoffTarget, recoveryCommand, HANDOFF_TOKEN_RE, DEFAULT_PORT } from './handoff.mjs';
@@ -2387,7 +2387,7 @@ function handleWaiting(req, res, waiting, missions) {
 function emptyMissionsOverview() {
   return {
     missions: [],
-    counts: { needsYou: 0, working: 0, waiting: 0, stalled: 0, landed: 0, queued: 0 },
+    counts: { needsYou: 0, working: 0, waiting: 0, stalled: 0, released: 0, queued: 0 },
     live: { working: 0, alive: 0 },
     now: new Date().toISOString(),
   };
@@ -2771,7 +2771,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
   const waitingCache = createWaitingCache(home);
   // The missions watch (src/mission-watch.mjs): a periodic read that publishes the derived
   // changes no write makes (a stall) and speaks a batch of missions needing the PM,
-  // stalled or landed. Per handler, for the reason everything else here is.
+  // stalled or released. Per handler, for the reason everything else here is.
   // One cache of the missions overview (src/missions-cache.mjs) for every reader this
   // handler has, the watch's read included.
   const missionsCache = createMissionsCache({ home });
@@ -3155,8 +3155,23 @@ export function startServer({ home = boardHome(), port = Number(process.env.CLAU
   });
 
   return new Promise((resolve, reject) => {
-    server.once('error', reject);
+    // A failed bind closes the server, so the clocks above stop with it.
+    let bound = false;
+    server.once('error', err => {
+      if (!bound) server.close();
+      reject(err);
+    });
     server.listen(port, '127.0.0.1', () => {
+      bound = true;
+      // Mission records from before ADR 130 move from landed to released on disk here, once
+      // the port is ours: a start that cannot bind, beside an older daemon still serving
+      // this store, leaves its records as that daemon reads them. A failure leaves the
+      // daemon up, and every read still sees such a record as released.
+      try {
+        migrateMissions(home);
+      } catch (err) {
+        console.warn(`claude-board: mission records not migrated: ${(err && err.message) || err}`);
+      }
       resolve({ server, port: server.address().port, home });
     });
   });

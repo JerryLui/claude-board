@@ -346,7 +346,7 @@ static int is_safe_folder_name(const char *s) {
 }
 
 /* The missions row's argument filter: is_safe_folder_name's set plus the comma, which a
- * list of groups ("2 missions need you, FRONT_AGENT landed") needs. The line is composed
+ * list of groups ("2 missions need you, FRONT_AGENT released") needs. The line is composed
  * by src/mission-watch.mjs from work names and counts; src/notify.mjs's
  * isSafeMissionLine mirrors this, MAX_MISSION_LINE_LEN included. */
 #define MAX_MISSION_LINE_LEN 120
@@ -937,7 +937,7 @@ static const struct {
    * crossing here exactly as a cue name always has: as argv[3], filtered before it
    * reaches this table at all. */
   { "round",     "Board",    NULL, "%s: a round is waiting.",   "A round is waiting." },
-  /* A batch of missions turning needs-you, stalled or landed. Its argument is the whole
+  /* A batch of missions turning needs-you, stalled or released. Its argument is the whole
    * line, under is_safe_mission_line rather than the folder filter; it carries no click. */
   { "missions",  "Missions", NULL, "%s",                        "A mission changed." },
 };

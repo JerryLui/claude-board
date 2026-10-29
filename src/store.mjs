@@ -96,8 +96,23 @@ function missionPath(key, home = boardHome()) {
   return path.join(missionsDir(home), `${assertMissionKey(key)}.json`);
 }
 
-/** The stored mission record for `key`, or null when there is none. */
-export function readMission(key, home = boardHome()) {
+/** `m` as the state list stands since ADR 130, which renamed a mission's last state from
+ * `landed` to `released`: `state`, `landedAt` and every `history` entry moved over. Answers
+ * `m` itself when it holds nothing to move, so a caller tells a migration by identity. */
+export function releasedRecord(m) {
+  if (!m || typeof m !== 'object') return m;
+  const history = Array.isArray(m.history) ? m.history : null;
+  const stale = m.state === 'landed' || 'landedAt' in m || !!history?.some(h => h && h.state === 'landed');
+  if (!stale) return m;
+  const { landedAt, ...rest } = m;
+  const out = { ...rest };
+  if (out.state === 'landed') out.state = 'released';
+  if (out.state === 'released' && !out.releasedAt && landedAt) out.releasedAt = landedAt;
+  if (history) out.history = history.map(h => (h && h.state === 'landed' ? { ...h, state: 'released' } : h));
+  return out;
+}
+
+function readMissionFile(key, home) {
   try {
     return JSON.parse(readFileSync(missionPath(key, home), 'utf8'));
   } catch (err) {
@@ -106,34 +121,63 @@ export function readMission(key, home = boardHome()) {
   }
 }
 
+/** The stored mission record for `key`, or null when there is none. A record from before
+ * ADR 130 reads as `releasedRecord` makes it; the file itself is rewritten only by
+ * `migrateMissions`, so a read never writes. */
+export function readMission(key, home = boardHome()) {
+  return releasedRecord(readMissionFile(key, home));
+}
+
 /** Atomically writes `mission` to its record, by the same temp-and-rename a board takes. */
 export function writeMission(mission, home = boardHome()) {
   atomicWrite(missionPath(mission.key, home), JSON.stringify(mission, null, 2));
   return mission;
 }
 
-/** Every readable mission record. An unreadable file is skipped with a warning, as
- * `listBoards` skips one. */
-export function listMissions(home = boardHome()) {
+/** Calls `visit(key)` for every mission record file in the store, temp files left out. A
+ * throw from `visit` skips that file with a warning, as `listBoards` skips an unreadable one. */
+function eachMissionKey(home, visit) {
   let files;
   try {
     files = readdirSync(missionsDir(home));
   } catch (err) {
-    if (err.code === 'ENOENT') return [];
+    if (err.code === 'ENOENT') return;
     throw err;
   }
-  const missions = [];
   for (const f of files) {
     if (!f.endsWith('.json') || f.includes('.tmp-')) continue;
-    const key = f.slice(0, -'.json'.length);
     try {
-      const m = readMission(key, home);
-      if (m && m.key === key) missions.push(m);
+      visit(f.slice(0, -'.json'.length));
     } catch (err) {
       console.warn(`claude-board: skipping unreadable store file missions/${f}: ${(err && err.message) || err}`);
     }
   }
+}
+
+/** Every readable mission record. */
+export function listMissions(home = boardHome()) {
+  const missions = [];
+  eachMissionKey(home, key => {
+    const m = readMission(key, home);
+    if (m && m.key === key) missions.push(m);
+  });
   return missions;
+}
+
+/** Rewrites every mission record from before ADR 130 as `releasedRecord` reads it, once the
+ * daemon holds its port, so a start that cannot bind leaves the store as an older daemon
+ * still serving it reads it. A record already migrated is left untouched, so a second start
+ * rewrites nothing. Answers the keys rewritten. */
+export function migrateMissions(home = boardHome()) {
+  const migrated = [];
+  eachMissionKey(home, key => {
+    const stored = readMissionFile(key, home);
+    const m = releasedRecord(stored);
+    if (m === stored || !m || m.key !== key) return;
+    writeMission(m, home);
+    migrated.push(key);
+  });
+  return migrated;
 }
 
 /** How long a mission's record outlives its work's retirement before a prune removes it. */
