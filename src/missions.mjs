@@ -9,8 +9,8 @@
 //
 // What a reader sees is a view, derived on every read and never stored: a session whose
 // process is gone, a reservation no process bound within `UNBOUND_GRACE_MS`, or a working
-// one silent past `STALL_SILENCE_MS`, reads stalled; a mission whose board holds a round
-// still waiting on an answer reads needs-you. The derivation needs the board store and a
+// one silent past `STALL_SILENCE_MS`, reads stalled; a mission whose board's newest round
+// still waits on an answer reads needs-you. The derivation needs the board store and a
 // process table, which is why it is computed here and not written by whoever last touched
 // the record.
 
@@ -303,28 +303,37 @@ function roundWantsAnswer(round, questions) {
   return questions.some(q => q.round === round.n);
 }
 
+/** The round of `board` that can hold its mission at needs you: its newest, when that one
+ * still wants an answer. An older page left open is answered from its own page on the
+ * board, and never holds the mission there. */
+function waitingRound({ board, questions }) {
+  const rounds = board.rounds || [];
+  const newest = rounds[rounds.length - 1];
+  return newest && roundWantsAnswer(newest, questions) ? newest : null;
+}
+
 function boardsNeedYou(linked) {
-  return linked.some(({ board, questions }) => (board.rounds || []).some(r => roundWantsAnswer(r, questions)));
+  return linked.some(entry => waitingRound(entry) !== null);
 }
 
 function actionsOf(linked) {
   const actions = [];
-  for (const { board, questions } of linked) {
-    for (const round of board.rounds || []) {
-      if (!roundWantsAnswer(round, questions)) continue;
-      for (const q of questions) {
-        if (q.round !== round.n || !q.action || q.widget !== 'single' || !q.options?.length) continue;
-        actions.push({ kind: q.action, board: board.id, round: round.n, question: q.id, choice: q.options[0].label });
-      }
+  for (const entry of linked) {
+    const round = waitingRound(entry);
+    if (!round) continue;
+    const { board, questions } = entry;
+    for (const q of questions) {
+      if (q.round !== round.n || !q.action || q.widget !== 'single' || !q.options?.length) continue;
+      actions.push({ kind: q.action, board: board.id, round: round.n, question: q.id, choice: q.options[0].label });
     }
   }
   return actions;
 }
 
 /** The buttons `m`'s card offers: one per question carrying an `action` (Fire or Merge)
- * in a round of a linked board still waiting on the PM, as `roundWantsAnswer` reads it. A
+ * in a linked board's newest round while it waits on the PM, as `waitingRound` reads it. A
  * click answers `question` in `round` of `board` with option 0, whose label is `choice`. A
- * sent or abandoned round offers none. */
+ * sent or abandoned round, or an older one, offers none. */
 export function missionActions(m, { home = boardHome() } = {}) {
   return actionsOf(linkedBoards(m, home));
 }

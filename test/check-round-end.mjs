@@ -553,6 +553,32 @@ check('never shown at a count of zero, even while the rail is reported off scree
   assert.equal(pill.textContent, '0 questions left');
 });
 
+check('with two pages open, the dock and the pill watch the end of the page on screen, and a flip moves them to the arriving page\'s end', () => {
+  const board = createBoard({ title: 'Pill - two open pages', blocks: [Q1] });
+  addRound(board, { blocks: [Q2] });
+  const originalIO = globalThis.IntersectionObserver;
+  const observers = [];
+  globalThis.IntersectionObserver = class extends StandInIntersectionObserver {
+    constructor(callback) { super(callback); observers.push(this); }
+  };
+  try {
+    const document = loadBoard(renderBoardPage(board));
+    const railOf = n => document.querySelector(`.round[data-round="${n}"] .round-end`);
+    const pill = document.getElementById('questions-left-pill');
+    const watching = n => observers.filter(o => o.targets.includes(railOf(n)));
+    assert.equal(watching(1).length, 0, 'the earlier, hidden page\'s end is not watched');
+    assert.equal(watching(2).length, 1, 'the page on screen\'s end is');
+    watching(2)[0]._setIntersecting(railOf(2), true);
+    assert.equal(pill.classList.contains('visible'), false, 'reaching the end of the page on screen hides the pill');
+
+    document.querySelector('.round-page[data-round="1"]').dispatchEvent(new StandInEvent('click'));
+    assert.deepEqual([watching(1).length, watching(2).length], [1, 0], 'a flip watches the arriving page\'s end instead');
+    assert.equal(pill.classList.contains('visible'), true, 'off the end of page 1, its blank shows the pill');
+  } finally {
+    globalThis.IntersectionObserver = originalIO;
+  }
+});
+
 check('guarded for absence -- with no IntersectionObserver at all, the pill still renders (assuming the rail is permanently off screen, matching the send bar\'s own floating fallback) and its count still tracks live answers', () => {
   const original = globalThis.IntersectionObserver;
   delete globalThis.IntersectionObserver;

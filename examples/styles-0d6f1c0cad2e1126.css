@@ -1724,6 +1724,16 @@ body.home-page .mode-toggle:disabled { opacity: 0.5; cursor: default; }
   color: var(--warning); background: var(--warning-soft); border: 1px solid var(--warning-border-strong);
   border-radius: var(--r-pill); padding: 4px 12px; }
 
+/* The Boards view on a wide window: boards as a grid of cards filling the bar's
+   content width, at least 400px each (three across at 1440, six at 2560), each card
+   its row's height with its rounds-left chip at the top right. Under 1440 the list
+   stays one card a line. */
+@media (min-width: 1440px) {
+  .thread-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(400px, 1fr)); }
+  .thread-list > .empty-state { grid-column: 1 / -1; }
+  .thread-item { align-items: flex-start; }
+}
+
 /* the Missions view (src/indexpage.mjs missionsParts): five columns by derived state,
    a card per mission. Columns share the width the bar's content has, at least 250px
    each, so they wrap only on a narrow window. */
@@ -1745,20 +1755,49 @@ body.home-page .mode-toggle:disabled { opacity: 0.5; cursor: default; }
 .mission-badge[data-col="working"] { color: var(--accent); background: var(--accent-soft); border-color: transparent; }
 .mission-badge[data-col="stalled"] { color: var(--critical); background: var(--critical-soft); border-color: var(--critical-border); }
 .mission-badge[data-col="released"] { color: var(--good); background: var(--panel); }
-.mission-card { background: var(--panel); border: 1px solid var(--hairline); border-radius: var(--r-sm); padding: 10px 12px;
-  box-shadow: var(--shadow-1); min-width: 0; overflow-wrap: anywhere; }
-.mission-card-head { display: flex; justify-content: space-between; gap: 8px; }
-.mission-title { font-weight: 600; }
-.mission-age, .mission-key { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; color: var(--muted); white-space: nowrap; }
-.mission-ident { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 2px; }
+/* A mission card has the board's titled-card look ('.block': panel, hairline, 14px
+   corners, a bold title, its age at the right edge), and every card is one height
+   whatever its text. The title and summary stop at two lines, waiting on at two, next
+   at one, each ending in an ellipsis, and the card's least height is that whole stack
+   at full length plus one line of PRs and one of buttons, so a card with less text
+   is as tall as one with more and the columns' cards line up row by row. The text
+   takes the spare height, holding the PRs and buttons to the card's foot. One fold
+   per card ('.mission-more') shows every field whole; opening it may grow that card. */
+.mission-card { --mc-pad: 14px; --mc-title-lh: 20px; --mc-mono-lh: 18px; --mc-text-lh: 19px; --mc-label-lh: 17px;
+  --mc-fact-lh: 18px; --mc-chip: 22px; --mc-btn: 32px;
+  display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--hairline); border-radius: var(--r-lg);
+  padding: var(--mc-pad) 16px; box-shadow: var(--shadow-1); min-width: 0; overflow-wrap: anywhere;
+  min-height: calc(2 * var(--mc-pad) + 2px + 2 * var(--mc-title-lh) + 2px + var(--mc-mono-lh) + 8px + 2 * var(--mc-text-lh)
+    + 8px + var(--mc-label-lh) + 2 * var(--mc-fact-lh) + 6px + var(--mc-label-lh) + var(--mc-fact-lh)
+    + 8px + var(--mc-mono-lh) + 8px + var(--mc-chip) + 10px + var(--mc-btn)); }
+.mission-text { flex: 1 0 auto; min-width: 0; }
+.mission-card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+.mission-title { flex: 1 1 auto; min-width: 0; font-size: 14px; line-height: var(--mc-title-lh); font-weight: 650; letter-spacing: -0.01em; color: var(--ink); }
+.mission-age, .mission-key { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; line-height: var(--mc-mono-lh); color: var(--muted); white-space: nowrap; }
+.mission-age { line-height: var(--mc-title-lh); }
+.mission-ident { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 2px; line-height: var(--mc-mono-lh); }
 .mission-key { white-space: normal; }
-.mission-tag { flex: none; white-space: nowrap; font-size: 11px; padding: 0 7px; border-radius: var(--r-pill); color: var(--muted); border: 1px solid var(--hairline-2); }
-.mission-summary { margin: 6px 0 0; color: var(--ink-2); font-size: 13px; }
-.mission-facts { font-size: 12.5px; color: var(--ink-2); margin: 6px 0 0; display: grid; grid-template-columns: auto 1fr; gap: 1px 10px; }
-.mission-facts dt { color: var(--muted); font-weight: 600; }
-.mission-facts dd { margin: 0; }
+.mission-tag { flex: none; white-space: nowrap; font-size: 11px; line-height: 16px; padding: 0 7px; border-radius: var(--r-pill); color: var(--muted); border: 1px solid var(--hairline-2); }
+.mission-summary { margin: 8px 0 0; color: var(--ink-2); font-size: 13px; line-height: var(--mc-text-lh); }
+.mission-facts { font-size: 12.5px; color: var(--ink-2); margin: 8px 0 0; }
+.mission-facts dt { color: var(--muted); font-size: 12px; line-height: var(--mc-label-lh); font-weight: 600; }
+.mission-facts dd { margin: 0; line-height: var(--mc-fact-lh); }
+.mission-facts dd + dt { margin-top: 6px; }
+.mission-title, .mission-summary, .mission-waiting, .mission-next { display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; }
+.mission-title, .mission-summary, .mission-waiting { -webkit-line-clamp: 2; }
+.mission-next { -webkit-line-clamp: 1; }
+.mission-text:has(> .mission-more[open]) :is(.mission-title, .mission-summary, .mission-waiting, .mission-next) { display: block; -webkit-line-clamp: none; overflow: visible; }
+.mission-more { margin-top: 8px; font-size: 12px; line-height: var(--mc-mono-lh); }
+.mission-more > summary { display: inline-block; cursor: pointer; color: var(--muted); font-weight: 600; list-style: none; border-radius: var(--r-sm); }
+.mission-more > summary::-webkit-details-marker { display: none; }
+.mission-more > summary::before { content: "\25B8"; display: inline-block; margin-right: 5px; transition: transform var(--dur) var(--ease); }
+.mission-more[open] > summary::before { transform: rotate(90deg); }
+.mission-more > summary:hover { color: var(--ink); }
+.mission-more > summary:focus-visible { outline: none; box-shadow: var(--ring); }
+.mission-more[data-fits] { visibility: hidden; }
 .mission-prs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.mission-pr { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; padding: 1px 8px; border-radius: var(--r-sm);
+.mission-card > .mission-btns { margin-top: 10px; }
+.mission-pr { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; line-height: 18px; padding: 1px 8px; border-radius: var(--r-sm);
   border: 1px solid var(--hairline-2); color: var(--ink-2); background: var(--panel-2); white-space: nowrap; text-decoration: none; }
 .mission-pr:hover { border-color: var(--accent); color: var(--ink); }
 .mission-pr i { font-style: normal; font-weight: 700; color: var(--muted); }
