@@ -1001,10 +1001,10 @@ async function main() {
     assert.equal((await rawRequest(port, 'POST', '/api/mission/COOKIE/order', { headers: { 'content-type': 'application/json' }, body: '{"kind":"stop"}' })).status, 401);
   });
 
-  await check('GET /api/missions answers missions, tab cards, counts, live, now, the session watcher and the home page\'s build', async () => {
+  await check('GET /api/missions answers missions, tab cards, counts, live, now and the session watcher', async () => {
     const r = await getJson('/api/missions');
     assert.equal(r.status, 200);
-    assert.deepEqual(Object.keys(r.body).sort(), ['build', 'counts', 'live', 'missions', 'now', 'tabs', 'watcher']);
+    assert.deepEqual(Object.keys(r.body).sort(), ['counts', 'live', 'missions', 'now', 'tabs', 'watcher']);
     assert.deepEqual(Object.keys(r.body.watcher).sort(), ['lastAt', 'up']);
     assert.deepEqual(Object.keys(r.body.counts).sort(), ['needsYou', 'queued', 'released', 'stalled', 'waiting', 'working']);
     assert.deepEqual(Object.keys(r.body.live).sort(), ['alive', 'working']);

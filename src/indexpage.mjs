@@ -12,7 +12,6 @@
 // of keying by project directory instead.
 
 import path from 'node:path';
-import { createHash } from 'node:crypto';
 import { styles, faviconLink, markSvg } from './styles.mjs';
 import { themeBootScript, themeToggle } from './theme.mjs';
 import { commentModeToggle } from './render.mjs';
@@ -429,16 +428,6 @@ function paintMissions() {
   Object.keys(missionsCardHtml).forEach(function (key) { if (!seen[key]) delete missionsCardHtml[key]; });
 }
 
-// The daemon now runs another build than the one this tab was served by (an upgrade
-// restarted it under the open tab), whose states this script may not know: the columns
-// would drop such a card. A note being written holds the reload until it closes.
-function missionsTabStale(data) {
-  var mount = missionsMount();
-  var served = mount && mount.getAttribute('data-build');
-  return !!served && typeof data.build === 'string' && data.build !== served
-    && !Object.keys(missionsUi.commenting).length;
-}
-
 function patchMissions() {
   if (!missionsMount()) return;
   if (missionsInFlight) { missionsPending = true; return; }
@@ -450,10 +439,6 @@ function patchMissions() {
     })
     .then(function (data) {
       if (!data || !Array.isArray(data.missions)) return;
-      if (missionsTabStale(data) && typeof location !== 'undefined' && location && typeof location.reload === 'function') {
-        location.reload();
-        return;
-      }
       missionsData = data;
       missionsSettleStops(data);
       paintMissions();
@@ -1755,12 +1740,6 @@ initIndexStream();
 ` + '\nvar TAB_KEY_PREFIX = ' + JSON.stringify(TAB_KEY_PREFIX) + ';\n' + missionsParts.toString() + '\n' + missionsScript
   + '\n' + trackDocWidth.toString() + '\ntrackDocWidth();\n';
 
-/** The build a home page is served by: 16 hex of SHA-256 over the script and stylesheet it
- * carries. The Missions view names it on its mount, and `GET /api/missions` answers the
- * daemon's, so a tab left open while the daemon restarts on other code reloads
- * (`missionsTabStale` in missionsScript). */
-export const INDEX_BUILD = createHash('sha256').update(indexScript + styles, 'utf8').digest('hex').slice(0, 16);
-
 /** Filter the thread index down to the sessions a query names. Matches on what
  * IDENTIFIES a session and nothing else — its title, its project folder, the
  * full `cwd` behind that folder, and the thread id — never on what was asked or
@@ -2072,7 +2051,7 @@ ${body}
  * card is shown, since a note on a card reaches its session (ADR 46, 98). */
 export function renderMissionsPage({ waitingCount = 0, pomodoroEnabled = true, overview = null } = {}) {
   const parts = missionsParts(overview, null);
-  const body = `    <section class="missions" id="missions" data-build="${INDEX_BUILD}" aria-label="Missions">${parts.html}</section>`;
+  const body = `    <section class="missions" id="missions" aria-label="Missions">${parts.html}</section>`;
   return renderHomePage({
     active: 'missions', title: 'claude-board', body, waitingCount, pomodoroEnabled,
     commentable: parts.columns.length > 0,

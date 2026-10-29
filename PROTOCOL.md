@@ -1446,16 +1446,13 @@ question block's id, and `choice` option 0's label, the one a click submits thro
 ```
 GET  /api/missions[?all=1]
        -> { missions: [View], tabs: [Tab], counts: { needsYou, working, waiting, stalled, released, queued },
-            live: { working, alive }, now, watcher: { up, lastAt }, build }
+            live: { working, alive }, now, watcher: { up, lastAt } }
 ```
 
 Newest change first. A released mission is listed until 24 hours after `releasedAt`, or always with
 `all=1`. `tabs` and `watcher` are "The session routes"' below. `counts` are per `view` over the
 missions listed, each tab added to its `state`'s count as the Missions view counts its cards; `live` counts every mission holding a
-live session, `working` including one that reads stalled. `build` names the home page's script and
-stylesheet this daemon serves, as the Missions view names the one it was served with
-(`data-build`): a tab whose read answers another, after the daemon restarted on other code, reloads,
-unless a note is open on a card. Secret or cookie.
+live session, `working` including one that reads stalled. Secret or cookie.
 
 ```
 GET  /api/mission/:key              -> View; 404 { error } when absent. Secret only
