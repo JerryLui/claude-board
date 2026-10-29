@@ -21,7 +21,7 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { sessionToken } from '../src/secret.mjs';
-import { deadPid, runMain, sleep, skipFile } from './support.mjs';
+import { deadPid, runMain, skipFile } from './support.mjs';
 import { CHROME, getJson, guardRun, measureTab, openTab, postJson, row, startScratchDaemon, withChrome } from './browser-support.mjs';
 
 if (!existsSync(CHROME)) skipFile('browser-check-missions', `browser-check-missions: no Chrome at ${CHROME} (set CLAUDE_BOARD_CHROME_BIN to override)`);
@@ -95,14 +95,11 @@ async function press(tab, selector, modifiers = 0, times = 1) {
   }
 }
 
-async function waitFor(tab, expr, what) {
-  const deadline = Date.now() + 5000;
-  for (;;) {
-    const v = await tab.evalPage(expr);
-    if (v) return v;
-    if (Date.now() >= deadline) throw new Error(`${what} never happened`);
-    await sleep(50);
-  }
+/** The stop orders `key`'s card has sent from this tab, once every request the press
+ * started, and the repaint after it, has landed (openTab's `quiet`). */
+async function ordersSent(tab, key) {
+  await tab.quiet();
+  return tab.evalPage(`window.__cbNet.requests.filter(function (r) { return r === 'POST /api/mission/${key}/order'; }).length`);
 }
 
 async function main() {
@@ -222,10 +219,10 @@ async function main() {
         try {
           const card = 'article.mission-card[data-mission-key="BANK_EXPORT"]';
           await press(tab, `${card} button.mission-stop`, 4, 2);
-          const said = await waitFor(tab, `(document.querySelector('${card} p.mission-order') || {}).textContent`, 'the order line');
+          const said = await tab.until(`(document.querySelector('${card} p.mission-order') || {}).textContent`, 'the order line');
           note(said);
           assert.equal(said, 'Stop asked: waiting for the Master Chief to relay it');
-          await sleep(300); // room for a second order's request to land before it is looked for
+          assert.equal(await ordersSent(tab, 'BANK_EXPORT'), 1, 'one order left the tab for the two presses');
           assert.equal(await tab.evalPage(`!!document.querySelector('${card} div.mission-confirm')`), false, 'no question');
           const orders = (await getJson(`${origin}/api/mission/BANK_EXPORT`, daemon.secret)).orders;
           note(`orders: ${orders.map(o => o.kind).join(', ')}`);
@@ -241,11 +238,11 @@ async function main() {
           const card = 'article.mission-card[data-mission-key="ANNOUNCEMENTS"]';
           for (const [held, modifiers] of [['plain', 0], ['Ctrl', 2], ['Shift', 8], ['Alt', 1]]) {
             await press(tab, `${card} button.mission-stop`, modifiers);
-            await waitFor(tab, `!!document.querySelector('${card} div.mission-confirm')`, `the Stop question on a ${held} press`);
-            await sleep(300); // room for a stray order's request to land before it is looked for
+            await tab.until(`!!document.querySelector('${card} div.mission-confirm')`, `the Stop question on a ${held} press`);
+            assert.equal(await ordersSent(tab, 'ANNOUNCEMENTS'), 0, `${held}: no order left the tab`);
             assert.deepEqual((await getJson(`${origin}/api/mission/ANNOUNCEMENTS`, daemon.secret)).orders, [], `${held}: nothing is posted`);
             await press(tab, `${card} button.mission-stop-cancel`);
-            await waitFor(tab, `!document.querySelector('${card} div.mission-confirm')`, `Keep after a ${held} press`);
+            await tab.until(`!document.querySelector('${card} div.mission-confirm')`, `Keep after a ${held} press`);
             note(`${held}: asked, nothing posted`);
           }
         } finally {
@@ -260,7 +257,7 @@ async function main() {
             try {
               const card = 'article.mission-card[data-mission-key="FILETYPE_FOLLOWUP"]';
               await press(tab, `${card} button.mission-stop`);
-              const boxes = await waitFor(tab, `(function () {
+              const boxes = await tab.until(`(function () {
                 var stop = document.querySelector('${card} button.mission-stop-confirm');
                 var keep = document.querySelector('${card} button.mission-stop-cancel');
                 if (!stop || !keep) return null;
@@ -284,14 +281,15 @@ async function main() {
         try {
           const card = 'article.mission-card[data-mission-key="ANNOUNCEMENTS"]';
           await press(tab, `${card} button.mission-stop`);
-          const asked = await waitFor(tab, `(document.querySelector('${card} p.mission-confirm-text') || {}).textContent`, 'the Stop question');
+          const asked = await tab.until(`(document.querySelector('${card} p.mission-confirm-text') || {}).textContent`, 'the Stop question');
           note(asked);
+          assert.equal(await ordersSent(tab, 'ANNOUNCEMENTS'), 0, 'the first press sends no order');
           assert.deepEqual((await getJson(`${origin}/api/mission/ANNOUNCEMENTS`, daemon.secret)).orders, [], 'the first press only asks');
           const focused = await tab.evalPage(`document.activeElement && document.activeElement.textContent`);
           assert.equal(focused, 'Stop', 'the question takes the focus to its own Stop');
 
           await press(tab, `${card} button.mission-stop-confirm`);
-          const said = await waitFor(tab, `(document.querySelector('${card} p.mission-order') || {}).textContent`, 'the order line');
+          const said = await tab.until(`(document.querySelector('${card} p.mission-order') || {}).textContent`, 'the order line');
           note(said);
           assert.equal(said, 'Stop asked: waiting for the Master Chief to relay it');
           const orders = (await getJson(`${origin}/api/mission/ANNOUNCEMENTS`, daemon.secret)).orders;

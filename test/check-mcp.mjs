@@ -2361,17 +2361,46 @@ async function main() {
   // ADR.md entry 116: Codex and OpenCode export no entrypoint an MCP server can read, so
   // install.sh bakes CLAUDE_BOARD_CLIENT into their registrations and that declaration
   // is what passes the guard. HEADLESS=1 still wins over it.
+  // Waits on the ask's own reply, which a round with no question sends the moment the post
+  // lands. Watching the store instead and closing the shim once the file appeared raced the
+  // reply: the file lands before the response, and a shim closed in between never answers.
   await check('CLAUDE_BOARD_CLIENT set with no CLAUDE_CODE_ENTRYPOINT is accepted, and posts', async () => {
     const knownIds = listBoardIds(home);
     const declaredClient = spawnShim({ ...baseEnv, CLAUDE_CODE_ENTRYPOINT: undefined, CLAUDE_BOARD_CLIENT: 'codex' });
-    const pending = declaredClient.request('tools/call', {
-      name: 'ask',
-      arguments: { title: 'Declared client check', blocks: [{ kind: 'markdown', text: '# x' }] },
-    });
-    const boardId = await waitForNewBoardFile(home, knownIds);
-    assert.ok(boardId, 'a declared client must get its board posted');
-    declaredClient.close();
-    await pending.catch(() => {});
+    try {
+      const res = await declaredClient.request('tools/call', {
+        name: 'ask',
+        arguments: { title: 'Declared client check', blocks: [{ kind: 'markdown', text: '# x' }] },
+      });
+      assert.equal(res.result.isError, false, res.result.content[0].text);
+      assert.equal(res.result.status, 'posted');
+      assert.ok(!knownIds.has(res.result.board) && listBoardIds(home).has(res.result.board), `a declared client must get its board posted to the store, got ${res.result.board}`);
+    } finally {
+      declaredClient.close();
+    }
+  });
+
+  // bin/mcp.mjs exits on stdin close without answering the requests it holds, so a check
+  // awaiting one across that exit relies on test/support.mjs's McpClient to reject it, or it
+  // waits until the suite's per-check cap kills the whole file.
+  await check('a request still pending when its shim exits rejects, naming the exit, instead of waiting forever', async () => {
+    const knownIds = listBoardIds(home);
+    const client = spawnShim(baseEnv);
+    try {
+      const pending = client.request('tools/call', { name: 'ask', arguments: { title: 'Exit before answer', blocks: [QUESTION] } });
+      await waitForNewBoardFile(home, knownIds); // posted: the ask now holds its wait open, unanswered
+      client.child.stdin.end();
+      await assert.rejects(
+        withTimeout(pending, 10_000, 'timed out after 10000ms: the pending ask never settled after its shim exited'),
+        /^Error: the shim exited \(code 0, signal null\) before answering request 1 \(tools\/call\)$/,
+      );
+      await assert.rejects(
+        withTimeout(client.request('ping', {}), 1000, 'timed out after 1000ms: a request to an exited shim never settled'),
+        /^Error: the shim exited \(code 0, signal null\) before request 2 \(ping\) was sent$/,
+      );
+    } finally {
+      client.close();
+    }
   });
 
   await check('CLAUDE_BOARD_HEADLESS=1 still refuses a declared client, a background one included', async () => {
@@ -2392,23 +2421,29 @@ async function main() {
   // A session the Master Chief starts in the background declares itself with
   // CLAUDE_BOARD_CLIENT=background: it posts, and opens no tab. The declared codex client
   // beside it, on the same daemon and the same recorded opener, opens one, so the empty log
-  // is the background flag's doing and not a Suppressed open (ADR 91).
+  // is the background flag's doing and not a Suppressed open (ADR 91). A tab is opened
+  // through a handoff the shim mints from the daemon, awaited before its ask answers, so
+  // the daemon's count of handoff requests says, at each answer, whether a tab was opened.
   await check('CLAUDE_BOARD_CLIENT=background posts a board and opens no tab, where a declared codex client opens one', async () => {
     const dir = tempHome('background');
     const recorder = makeOpenRecorder(dir);
     const openerEnv = { ...baseEnv, CLAUDE_CODE_ENTRYPOINT: undefined, CLAUDE_BOARD_NO_OPEN: undefined, CLAUDE_BOARD_OPEN_CMD: recorder.script, CLAUDE_BOARD_OPEN_LOG: recorder.log };
     const background = spawnShim({ ...openerEnv, CLAUDE_BOARD_CLIENT: 'background' });
     const codex = spawnShim({ ...openerEnv, CLAUDE_BOARD_CLIENT: 'codex' });
+    let handoffs = 0;
+    const countHandoffs = req => { if (req.method === 'POST' && req.url === '/api/handoff') handoffs += 1; };
+    server.on('request', countHandoffs);
     try {
       const posted = await background.request('tools/call', { name: 'ask', arguments: { title: 'Background board', blocks: [NOTE] } });
       assert.equal(posted.result.isError, false, posted.result.content[0].text);
       assert.equal(posted.result.status, 'posted');
+      assert.equal(handoffs, 0, 'the background session opened no tab');
       const control = await codex.request('tools/call', { name: 'ask', arguments: { title: 'Codex board', blocks: [NOTE] } });
       assert.equal(control.result.isError, false, control.result.content[0].text);
-      assert.equal((await recorder.waitForOpens(1, 10_000)).length, 1, 'the codex client opens its tab');
-      await sleep(300);
-      assert.equal(recorder.opened().length, 1, 'the background session opened none');
+      assert.equal(handoffs, 1, 'the codex client opens its tab');
+      assert.equal((await recorder.waitForOpens(1, 10_000)).length, 1, 'the codex client\'s tab reaches the opener');
     } finally {
+      server.off('request', countHandoffs);
       background.close();
       codex.close();
     }
@@ -2502,8 +2537,8 @@ async function main() {
       knownIds = listBoardIds(home);
       const plain = (await invalid.request('tools/call', { name: 'ask', arguments: { title: 'Unlinked board', blocks: [NOTE] } })).result;
       assert.equal(plain.isError, false, plain.content[0].text);
-      const boardId = await waitForNewBoardFile(home, knownIds);
-      assert.equal(JSON.parse(readFileSync(path.join(home, 'boards', `${boardId}.json`), 'utf8')).mission ?? null, null);
+      assert.ok(!knownIds.has(plain.board), 'the unlinked ask posted a board of its own');
+      assert.equal(JSON.parse(readFileSync(path.join(home, 'boards', `${plain.board}.json`), 'utf8')).mission ?? null, null);
     } finally {
       linked.close();
       invalid.close();

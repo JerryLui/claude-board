@@ -315,11 +315,76 @@ export function getJson(urlStr, secret) {
   }), 10000, `GET ${u.pathname} never answered`);
 }
 
+// Run in a tab before any of its own scripts, so the tab can say when it is quiet: loaded,
+// fonts in, every EventSource it opened has opened, no fetch and no response body read in
+// flight, and its finite animations done. A home view's timer and counts land one fetch
+// after load, and an EventSource 'open' starts another round of them; a body read starts
+// in the microtask after its fetch settles, so a check made a task later sees one or the
+// other in flight until the page has painted what came back. `window.__cbQuiet()` answers
+// a promise for the next quiet moment; `window.__cbNet.requests` lists `METHOD path` for
+// every fetch the page made.
+const QUIET_SCRIPT = `(function () {
+  var t = { fetches: 0, bodies: 0, sources: [], waiters: [], requests: [] };
+  window.__cbNet = t;
+  function poke() { setTimeout(settle, 0); }
+  function quiet() {
+    return document.readyState === 'complete' && document.fonts.status === 'loaded'
+      && t.fetches === 0 && t.bodies === 0 && t.sources.every(function (s) { return s.opened; });
+  }
+  function settle() {
+    if (!t.waiters.length || !quiet()) return;
+    var running = document.getAnimations().filter(function (a) {
+      return a.playState === 'running' && a.effect && a.effect.getComputedTiming().endTime !== Infinity;
+    });
+    Promise.all(running.map(function (a) { return a.finished.catch(function () {}); })).then(function () {
+      requestAnimationFrame(function () {
+        setTimeout(function () {
+          if (!quiet()) return;
+          var w = t.waiters;
+          t.waiters = [];
+          w.forEach(function (f) { f(); });
+        }, 0);
+      });
+    });
+  }
+  var realFetch = window.fetch;
+  window.fetch = function (input, init) {
+    var u = new URL(typeof input === 'string' ? input : input.url, location.href);
+    t.requests.push(((init && init.method) || (input && input.method) || 'GET').toUpperCase() + ' ' + u.pathname);
+    t.fetches++;
+    return realFetch.apply(this, arguments).finally(function () { t.fetches--; poke(); });
+  };
+  ['json', 'text', 'blob', 'arrayBuffer'].forEach(function (m) {
+    var read = Response.prototype[m];
+    Response.prototype[m] = function () {
+      t.bodies++;
+      return read.apply(this, arguments).finally(function () { t.bodies--; poke(); });
+    };
+  });
+  var RealSource = window.EventSource;
+  if (RealSource) {
+    var Source = function (u, o) {
+      var es = new RealSource(u, o);
+      var entry = { opened: false };
+      t.sources.push(entry);
+      es.addEventListener('open', function () { entry.opened = true; poke(); });
+      return es;
+    };
+    Source.prototype = RealSource.prototype;
+    ['CONNECTING', 'OPEN', 'CLOSED'].forEach(function (k) { Source[k] = RealSource[k]; });
+    window.EventSource = Source;
+  }
+  window.addEventListener('load', poke);
+  document.fonts.ready.then(poke);
+  window.__cbQuiet = function () { return new Promise(function (r) { t.waiters.push(r); settle(); }); };
+})();`;
+
 /** Opens `url` in a fresh tab at `width` x `height` under `theme` ('light' or 'dark'), with
- * the session cookie `cookie`, waits for load, then polls `expr` until it reads the same for
- * 500ms (a home view's timer and counts settle one fetch after load). Answers the tab's own
- * `sp(method, params)`, `evalPage(expr)` and `close()`, and `measured`, the value `expr`
- * held still at. The tab is closed if it never loads or never holds still. */
+ * the session cookie `cookie`, waits for load and then for the tab to go quiet (see
+ * QUIET_SCRIPT), and reads `expr`. Answers the tab's own `sp(method, params)`,
+ * `evalPage(expr)`, `quiet()` (the next quiet moment), `until(expr, what)` (the first truthy
+ * value of `expr`, re-read on every DOM change) and `close()`, and `measured`, what `expr`
+ * read once quiet. The tab is closed if it never loads or never goes quiet. */
 export async function openTab(send, onEvent, url, cookie, { width, height, theme, expr }) {
   const { targetId } = await send('Target.createTarget', { url: 'about:blank' });
   const { sessionId } = await send('Target.attachToTarget', { targetId, flatten: true });
@@ -328,6 +393,22 @@ export async function openTab(send, onEvent, url, cookie, { width, height, theme
     if (r.exceptionDetails) throw new Error(`page eval threw: ${r.exceptionDetails.exception?.description || r.exceptionDetails.text}`);
     return r.result.value;
   });
+  const evalAwait = (e, what) => sp('Runtime.evaluate', { expression: e, awaitPromise: true, returnByValue: true }).then(r => {
+    if (r.exceptionDetails) throw new Error(`${what}: ${r.exceptionDetails.exception?.description || r.exceptionDetails.text}`);
+    return r.result.value;
+  });
+  const quiet = () => evalAwait('window.__cbQuiet()', `the tab never went quiet: ${url}`);
+  // Re-read on every DOM change until truthy; the 15s a devtools command may take bounds it.
+  const until = (e, what) => evalAwait(`new Promise(function (resolve) {
+    function read() { return (${e}); }
+    var first = read();
+    if (first) return resolve(first);
+    var obs = new MutationObserver(function () {
+      var v = read();
+      if (v) { obs.disconnect(); resolve(v); }
+    });
+    obs.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+  })`, `${what} never happened`);
   const close = () => send('Target.closeTarget', { targetId });
   try {
     const loadFired = new Promise(resolve => {
@@ -340,18 +421,11 @@ export async function openTab(send, onEvent, url, cookie, { width, height, theme
     await sp('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
     await sp('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: theme }] });
     await setSessionCookie(sp, cookie);
+    await sp('Page.addScriptToEvaluateOnNewDocument', { source: QUIET_SCRIPT });
     await sp('Page.navigate', { url });
     await withTimeout(loadFired, 20000, `page never fired load: ${url}`);
-    const deadline = Date.now() + 15000;
-    let last = null;
-    let since = Date.now();
-    for (;;) {
-      await sleep(100);
-      const now = JSON.stringify(await evalPage(expr));
-      if (now !== last) { last = now; since = Date.now(); }
-      else if (Date.now() - since >= 500) return { sp, evalPage, close, measured: JSON.parse(now) };
-      if (Date.now() >= deadline) throw new Error(`layout never held still at ${width}px: ${url}`);
-    }
+    await quiet();
+    return { sp, evalPage, quiet, until, close, measured: await evalPage(expr) };
   } catch (err) {
     await close();
     throw err;

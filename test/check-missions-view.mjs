@@ -24,7 +24,7 @@ import { SECRET_HEADER } from '../src/secret.mjs';
 import { startServer } from '../src/server.mjs';
 import { readBoard } from '../src/store.mjs';
 import { StandInEvent, fetchSettler, parseHTML } from './dom-stand-in.mjs';
-import { check, deadPid, runMain, secretHome, writeStub, rawRequest, writeHeaders, pageHarness, postBoard, sleep } from './support.mjs';
+import { check, deadPid, runMain, secretHome, writeStub, rawRequest, writeHeaders, pageHarness, postBoard } from './support.mjs';
 
 const { loadIndexAgainstDaemon } = await pageHarness();
 
@@ -114,6 +114,9 @@ function openWireStream() {
   const events = [];
   let raw = '';
   let pending = '';
+  // Each wait is re-tried on every chunk the stream delivers, so it resolves on the frame
+  // itself; the timeout only bounds a stream that never sends it.
+  const waits = new Set();
   const req = http.request({
     host: '127.0.0.1', port, method: 'GET', path: '/api/events',
     headers: { host: `127.0.0.1:${port}`, [SECRET_HEADER]: SECRET },
@@ -129,19 +132,26 @@ function openWireStream() {
         const data = /^data: (.*)$/m.exec(frame);
         if (name && data) events.push({ name: name[1], data: JSON.parse(data[1]) });
       }
+      for (const wait of waits) wait();
     });
   });
   req.on('error', () => {});
   req.end();
-  const until = async (what, ready) => {
-    const deadline = Date.now() + 3000;
-    for (;;) {
+  const until = (what, ready) => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      waits.delete(wait);
+      reject(new Error(`${what} never arrived: ${JSON.stringify(raw)}`));
+    }, 30_000);
+    const wait = () => {
       const hit = ready();
-      if (hit) return hit;
-      if (Date.now() >= deadline) throw new Error(`${what} never arrived: ${JSON.stringify(raw)}`);
-      await sleep(20);
-    }
-  };
+      if (!hit) return;
+      waits.delete(wait);
+      clearTimeout(timer);
+      resolve(hit);
+    };
+    waits.add(wait);
+    wait();
+  });
   return {
     connected: () => until('the stream connecting', () => raw.includes(': connected') || null),
     next: name => until(`a '${name}' event`, () => {

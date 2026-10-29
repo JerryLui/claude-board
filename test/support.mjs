@@ -463,7 +463,9 @@ export function boardDataOf(page) {
  * the whole response message, `requestWithId` hands back the id too (to cancel a call),
  * `answered(id)` says whether a response came, `notify` sends a notification, `notifications`
  * collects what the shim sent unprompted, `stderr` collects its stderr, and `close` ends stdin
- * and kills the child. */
+ * and kills the child. Once the shim has exited, every request still pending rejects, and so
+ * does any made after: the shim exits on stdin close without answering what it holds
+ * (bin/mcp.mjs), so a request awaited across that exit would otherwise never settle. */
 export class McpClient {
   constructor(child) {
     this.child = child;
@@ -472,8 +474,17 @@ export class McpClient {
     this.pending = new Map();
     this.notifications = [];
     this.stderr = '';
+    this.exited = null;
+    this.responded = new Set();
     child.stdout.on('data', chunk => this._onData(chunk));
     child.stderr.on('data', chunk => { this.stderr += chunk.toString(); });
+    // 'close', not 'exit': it fires after stdout has drained, so a response the shim wrote
+    // just before it exited still resolves its request rather than losing to the rejection.
+    child.on('close', (code, signal) => {
+      this.exited = `the shim exited (code ${code}, signal ${signal})`;
+      for (const [id, pend] of this.pending) pend.reject(new Error(`${this.exited} before answering request ${id} (${pend.method})`));
+      this.pending.clear();
+    });
   }
 
   _onData(chunk) {
@@ -493,7 +504,8 @@ export class McpClient {
         const pend = this.pending.get(msg.id);
         if (pend) {
           this.pending.delete(msg.id);
-          pend(msg);
+          this.responded.add(msg.id);
+          pend.resolve(msg);
         }
       } else {
         this.notifications.push(msg);
@@ -507,13 +519,19 @@ export class McpClient {
 
   requestWithId(method, params) {
     const id = this.nextId++;
-    const promise = new Promise(resolve => this.pending.set(id, resolve));
+    const promise = this.exited
+      ? Promise.reject(new Error(`${this.exited} before request ${id} (${method}) was sent`))
+      : new Promise((resolve, reject) => this.pending.set(id, { resolve, reject, method }));
+    // Marked handled here so a check that closes a shim over a request it never awaits is
+    // not failed by an unhandled rejection; a caller that awaits still sees the rejection.
+    promise.catch(() => {});
+    if (this.exited) return { id, promise };
     this.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
     return { id, promise };
   }
 
   answered(id) {
-    return !this.pending.has(id);
+    return this.responded.has(id);
   }
 
   notify(method, params) {

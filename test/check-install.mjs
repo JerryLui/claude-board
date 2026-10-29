@@ -1820,7 +1820,10 @@ async function main() {
     // called launchctl" is all that happened -- which is precisely the state the old
     // script called "installed and running". (Ablation: without the health gate this
     // exits 0 and prints that line.)
-    const deadPort = healthPort + 1; // nothing bound here; the poll below has a short budget
+    // A port the kernel just handed out and released, so nothing listens on it now.
+    // `healthPort + 1` was a guess, and whatever else the suite had running could hold it:
+    // install.sh then reported "something else is listening" instead of NOT running.
+    const deadPort = await freePort();
     const r = spawnSync('bash', [installScript], {
       env: {
         ...env,
