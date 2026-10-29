@@ -428,7 +428,35 @@ function onMissionsToggle(ev) {
   missionsMarkFits();
 }
 
+// A repaint replaces a card whose markup changed (its age moves every minute), and the
+// focus inside it would fall to the page: the card's link, its Stop or the card itself
+// takes it back on the fresh card.
+function missionsFocusMark() {
+  var el = document.activeElement;
+  var cardEl = el && el.closest && el.closest('article.mission-card');
+  if (!cardEl) return null;
+  var cl = el.classList;
+  var sel = el === cardEl ? '' : cl.contains('mission-link') ? 'a.mission-link' : cl.contains('mission-stop') ? 'button.mission-stop' : null;
+  return sel === null ? null : { key: cardEl.getAttribute('data-mission-key'), sel: sel };
+}
+
+function missionsFocusRestore(mark) {
+  if (!mark) return;
+  var el = document.activeElement;
+  if (el && el !== document.body && el.isConnected !== false) return;
+  if (mark.sel === 'button.mission-stop') { focusStop(mark.key); return; }
+  var node = missionsFind(mark.key);
+  var target = node && (mark.sel ? node.querySelector(mark.sel) : node);
+  if (target && target.focus) target.focus();
+}
+
 function paintMissionsCards() {
+  var mark = missionsFocusMark();
+  paintMissionsCardsIn();
+  missionsFocusRestore(mark);
+}
+
+function paintMissionsCardsIn() {
   var mount = missionsMount();
   if (!mount || !missionsData) return;
   var parts = missionsParts(missionsData, missionsUi);
@@ -674,16 +702,51 @@ function onMissionsClick(ev) {
   var link = t.closest('a.mission-link');
   if (missionsCommentModeOn()) {
     if (link) ev.preventDefault();
-    if (missionsUi.commenting[key]) return;
     if (!link && (t.closest('a') || t.closest('button') || t.closest('textarea') || t.closest('summary'))) return;
-    missionsUi.commenting[key] = true;
-    paintMissions();
-    focusIn(key, 'textarea.mission-comment-text');
+    missionsOpenNote(key);
     return;
   }
   // A double-press's second click is not a click on the card: on Stop, the first one
   // took Stop off the card, and the link under it would take the second.
   if (link && ev.detail > 1) ev.preventDefault();
+  else if (!link && ev.detail <= 1 && t.closest(MISSIONS_LIFTED)) missionsFollow(cardEl, ev);
+}
+
+// The spans on a card's key line that carry a tooltip sit above the link's box so a hover
+// reaches them (styles.mjs); a press on one still opens the card's board.
+var MISSIONS_LIFTED = '.mission-age, .tab-login, .tab-folder';
+
+function missionsFollow(cardEl, ev) {
+  var link = cardEl.querySelector('a.mission-link');
+  if (!link) return;
+  if (ev.metaKey || ev.ctrlKey || ev.button === 1) window.open(link.href, '_blank', 'noopener');
+  else link.click();
+}
+
+function missionsOpenNote(key) {
+  if (missionsUi.commenting[key]) return;
+  missionsUi.commenting[key] = true;
+  paintMissions();
+  focusIn(key, 'textarea.mission-comment-text');
+}
+
+// A middle press fires auxclick, never click: with Comment on it opens the card's note
+// rather than its board in a new tab, and on a lifted span it opens the board as the link
+// under it would have.
+function onMissionsAuxclick(ev) {
+  var t = ev.target;
+  if (ev.button !== 1 || !t || !t.closest) return;
+  var cardEl = t.closest('article.mission-card');
+  if (!cardEl) return;
+  var link = t.closest('a.mission-link');
+  var lifted = !link && t.closest(MISSIONS_LIFTED);
+  if (!link && !lifted) return;
+  if (missionsCommentModeOn()) {
+    ev.preventDefault();
+    missionsOpenNote(cardEl.getAttribute('data-mission-key'));
+    return;
+  }
+  if (lifted) missionsFollow(cardEl, ev);
 }
 
 // On a Mac, Ctrl with the primary button is the secondary click: the browser fires
@@ -726,6 +789,7 @@ function initMissions() {
   var mount = missionsMount();
   if (!mount) return;
   mount.addEventListener('click', onMissionsClick);
+  mount.addEventListener('auxclick', onMissionsAuxclick);
   mount.addEventListener('contextmenu', onMissionsContextmenu);
   mount.addEventListener('input', onMissionsInput);
   mount.addEventListener('keydown', onMissionsKeydown);

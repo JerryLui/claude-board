@@ -824,7 +824,9 @@ waiting on to 2, next to 1, each ending in an ellipsis. One Show the rest fold p
 field whole; it takes no room while nothing is cut, and stays open across repaints. The whole card
 is the link: its title is a real `<a href>` whose box stretches over the card under its chips,
 buttons, fold and forms, so a click, Enter, a middle-click, a Cmd-click and the link's own menu all
-work as on any link, and with Comment on a press opens the card's note instead. It carries no Open
+work as on any link, and with Comment on a press, the middle one included, opens the card's note
+instead. The key line's age, login and folder sit above the link so a hover reaches their tooltips,
+and a press on one still opens the board. It carries no Open
 board button; Fire and Merge stay shown, since they are calls rather than navigation, and Stop
 waits for hover or focus. An earlier build made the article itself a `role="link"` around its
 buttons, which had none of a link's middle-click, menu or hover address. A tab
