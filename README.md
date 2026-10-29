@@ -268,8 +268,9 @@ are orders like a mission's, carried by the same fronting agent. The watcher is 
 of the board: it lives in your own agent config and posts a full list of its sessions to
 `POST /api/sessions` every interval ([PROTOCOL.md](PROTOCOL.md), "The session routes"),
 so any agent can have one. The board holds that list in memory only, a session's name
-included, and never writes it to disk; two intervals with no post and the page says
-"Session watcher down" until the next one.
+included, and never writes it to disk. Once a watcher has posted, two intervals with no
+post and the page says "Session watcher down" until the next one; a board with no
+watcher says nothing.
 
 A session started in the background, with nobody at its terminal, declares it with
 `CLAUDE_BOARD_CLIENT=background`: its boards post and wait as ever, and open no tab, so
