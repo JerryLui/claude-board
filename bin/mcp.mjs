@@ -34,6 +34,7 @@ import { fileURLToPath } from 'node:url';
 import { readSecret, secretPath, daemonPort, SECRET_HEADER } from '../src/secret.mjs';
 import { HANDOFF_TOKEN_RE, recoveryCommand } from '../src/handoff.mjs';
 import { MAX_DRAINED_BYTES, postTooLargeMessage } from '../src/post-limit.mjs';
+import { STATUS_TONES } from '../src/card-status.mjs';
 
 // CLAUDE_BOARD_HOME/CLAUDE_BOARD_PORT are PROTOCOL.md's; the rest are additive env
 // vars documented in PROTOCOL.md "MCP surface", never repurposing an existing name.
@@ -635,11 +636,11 @@ const ASK_TOOL = {
               description: 'A verdict chip at the card\'s right edge.',
               properties: {
                 label: { type: 'string', description: '1 to 40 characters, e.g. "Pass".' },
-                tone: { type: 'string', enum: ['good', 'warn', 'bad', 'neutral'] },
+                tone: { type: 'string', enum: [...STATUS_TONES] },
               },
               required: ['label', 'tone'],
             },
-            summary: { type: 'string', description: 'One line of markdown under the title, 1 to 600 characters.' },
+            summary: { type: 'string', description: 'A short summary under the title, markdown, 1 to 600 characters.' },
             details: { type: 'string', description: 'Markdown folded closed under the card, opened on a click.' },
             detailsLabel: { type: 'string', description: 'The details fold\'s label, 1 to 60 characters, only with details; default "Details".' },
           },

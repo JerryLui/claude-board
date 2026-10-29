@@ -904,10 +904,13 @@ function resolveStepsRejectingChrome(root, steps) {
  * resolves only onto a `<video>`, and its hint's `" at m:ss"` suffix is stripped before
  * the identity match only when it equals that second's (videoTimeSuffix). An untimed
  * anchor on a `<video>` also resolves under the video's fallback text: the name the
- * stage gave a video before videoIdentity, which comments stored then still carry. */
-export function resolveAtRoot(root, ref, hint, time) {
+ * stage gave a video before videoIdentity, which comments stored then still carry.
+ *
+ * `titled`: the anchored block carries its own `title`, which shapes the
+ * captioned-markup view (legacySectionRoot below). */
+export function resolveAtRoot(root, ref, hint, time, titled = false) {
   if (resolveAtRootAsIs(root, ref, hint, time)) return true;
-  const legacy = legacySectionRoot(root);
+  const legacy = legacySectionRoot(root, titled);
   return !!legacy && resolveAtRootAsIs(legacy, ref, hint, time);
 }
 
@@ -937,6 +940,9 @@ function resolveAtRootAsIs(root, ref, hint, time) {
 // as the captioned markup had it: the card head, summary and details out, a
 // caption back in as child 1, a lifted opening heading back at the top of the
 // markdown body, and a question's prompt back beside the caption in its head.
+// A markdown block carrying its own `title` lifted nothing (src/render.mjs's
+// titleParts): its head's heading is that title, and its body still opens as it
+// did, so nothing goes back in.
 // The caption stand-in is chrome, as the real one was, so a ref into it still
 // never resolves.
 const LEGACY_CAPTION = Object.freeze({ tag: 'div', cls: ['block-kicker'], children: [], content: [] });
@@ -950,14 +956,16 @@ const isHeadingTag = tag => /^h[1-6]$/.test(tag || '');
 // A section's legacy view is the same for every comment on it, and the batch
 // resolver (src/board.mjs's resolveComments) hands the same parsed root to each.
 const legacyViews = new WeakMap();
+const titledLegacyViews = new WeakMap();
 
 /** The captioned-markup view of a block section's parsed tree (see above), or
  * null for any root that is not a block section, an html stage's body above all.
  * Built over the same nodes, so an element found through it is the element the
- * live page shows. */
-export function legacySectionRoot(root) {
+ * live page shows. `titled`: the block carries its own `title`. */
+export function legacySectionRoot(root, titled = false) {
   if (!root || typeof root !== 'object' || root.tag !== 'section' || !hasClass(root, 'block')) return null;
-  if (legacyViews.has(root)) return legacyViews.get(root);
+  const views = titled ? titledLegacyViews : legacyViews;
+  if (views.has(root)) return views.get(root);
   const head = root.children.find(c => hasClass(c, 'card-head')) || null;
   let kids = root.children.filter(c => !titledCardOnly(c));
   let view;
@@ -972,11 +980,11 @@ export function legacySectionRoot(root) {
     });
     view = { ...root, children: kids };
   } else {
-    const lifted = hasClass(root, 'markdown-block') && head ? head.children.find(k => isHeadingTag(k.tag)) : null;
+    const lifted = !titled && hasClass(root, 'markdown-block') && head ? head.children.find(k => isHeadingTag(k.tag)) : null;
     if (lifted) kids = kids.map(c => (hasClass(c, 'md-content') ? { ...c, children: [lifted, ...c.children] } : c));
     view = { ...root, children: [LEGACY_CAPTION, ...kids] };
   }
-  legacyViews.set(root, view);
+  views.set(root, view);
   return view;
 }
 

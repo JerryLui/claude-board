@@ -108,7 +108,7 @@ function roundBody(origin) {
     blocks: [
       { kind: 'markdown', text: `${LONG}\n\n- ${LONG}\n- A short item.\n\n##### ${LONG}\n\n###### ${LONG}` },
       { kind: 'markdown', title: SHORT_TITLE, text: 'Two short lines of prose.\n\nThat is all there is.' },
-      { kind: 'markdown', title: LONG_OPEN_TITLE, text: LONG_READ },
+      { kind: 'markdown', title: LONG_OPEN_TITLE, summary: LONG, text: LONG_READ },
       { kind: 'markdown', title: LONG_FOLDED_TITLE, text: LONG_READ },
       { kind: 'html', title: 'A picture', html: mock('top') },
       { kind: 'mermaid', text: chain('Top') },
@@ -284,18 +284,29 @@ const LAYOUT_FN = `function (chOf) {
   }).map(function (p) {
     return { where: p.closest('.question-context') ? "in a question's context" : 'top level', panel: box(p), drawing: box(p.querySelector('svg')) };
   });
-  var texts = [].slice.call(document.querySelectorAll('.round-current > .markdown-block')).filter(titleOf).map(function (b) {
-    var lefts = [];
-    [].slice.call(b.querySelectorAll(':scope > .md-content > *')).forEach(function (el) {
+  // Where the lines of the elements under 'selector' start, and how many lines there are.
+  function linesUnder(b, selector) {
+    var lefts = [], lines = 0;
+    [].slice.call(b.querySelectorAll(selector)).forEach(function (el) {
+      var range = document.createRange();
+      range.selectNodeContents(el);
+      lines += new Set([].slice.call(range.getClientRects()).filter(function (r) { return r.width; })
+        .map(function (r) { return Math.round(r.left) + ',' + Math.round(r.top); })).size;
       el.getClientRects && [].slice.call(el.getClientRects()).forEach(function (r) {
         var l = Math.round(r.left);
         if (r.width && lefts.indexOf(l) === -1) lefts.push(l);
       });
     });
     lefts.sort(function (a, z) { return a - z; });
-    var body = b.querySelector(':scope > .md-content');
-    return { title: titleOf(b), folded: b.classList.contains('folded'), lefts: lefts, reading: readingOf(body),
-      gap: parseFloat(getComputedStyle(body).columnGap) || 0 };
+    return { lefts: lefts, lines: lines };
+  }
+  var texts = [].slice.call(document.querySelectorAll('.round-current > .markdown-block')).filter(titleOf).map(function (b) {
+    // The card's summary is a '.md-content' too, so the body is the other one.
+    var body = b.querySelector(':scope > .md-content:not(.card-summary)');
+    var summary = b.querySelector(':scope > .card-summary') ? linesUnder(b, ':scope > .card-summary > *') : null;
+    return { title: titleOf(b), folded: b.classList.contains('folded'),
+      lefts: linesUnder(b, ':scope > .md-content:not(.card-summary) > *').lefts, summary: summary,
+      reading: readingOf(body), gap: parseFloat(getComputedStyle(body).columnGap) || 0 };
   });
   var pullOuts = [].slice.call(document.querySelectorAll('.round-current > .html-block > .stage-wrap')).map(function (w) {
     return { wrap: box(w), control: box(w.querySelector(':scope > .pull-out')) };
@@ -635,7 +646,7 @@ async function runRows({ column, at, evidence, scrollbar, pageBoard, round }) {
       assert.deepEqual(wrong, []);
     });
 
-    await row(`at a ${width}px window, an opened long text flows into columns of reading width; a short one and a folded preview stay one column`, note => {
+    await row(`at a ${width}px window, an opened long text flows into columns of reading width; its summary, a short text and a folded preview stay one column`, note => {
       const texts = Object.fromEntries(m.layout.texts.map(t => [t.title, t]));
       const open = texts[LONG_OPEN_TITLE], folded = texts[LONG_FOLDED_TITLE], short = texts[SHORT_TITLE];
       assert.ok(open && folded && short, 'setup: the three titled texts found');
@@ -646,6 +657,9 @@ async function runRows({ column, at, evidence, scrollbar, pageBoard, round }) {
       assert.ok(near(open.lefts[1] - open.lefts[0], step, 1), `its second column starts ${open.lefts[1] - open.lefts[0]}px after the first, one reading width and a gap is ${px(step)}`);
       assert.equal(folded.lefts.length, 1, 'the folded preview stays one column');
       assert.equal(short.lefts.length, 1, 'the short text stays one column');
+      note(`"${open.title}" summary: ${open.summary && open.summary.lines} lines starting at x=${open.summary && open.summary.lefts.join(', ')}`);
+      assert.ok(open.summary && open.summary.lines >= 2, 'setup: the opened text carries a summary of several lines');
+      assert.deepEqual(open.summary.lefts, [open.lefts[0]], 'its summary stays one column, on the body\'s first');
     });
   }
 

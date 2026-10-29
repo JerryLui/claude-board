@@ -39,6 +39,7 @@
 
 import { palettes, faviconLink, markSvg } from './styles.mjs';
 import { SCRIPT_ASSET, STYLE_ASSET } from './assets.mjs';
+import { STATUS_TONES } from './card-status.mjs';
 import { themeBootScript, themeToggle } from './theme.mjs';
 import { resolveComments, stripDaemonOnly } from './board.mjs';
 import { buildSteps, stepsToPath, pathToSteps, resolveSteps, videoIdentity, videoSecond } from './anchor.mjs';
@@ -235,7 +236,7 @@ function commentButton(blockId) {
 // --- the titled card -----------------------------------------------------------
 //
 // Every block is a card in one look: a head row holding the title and, at the
-// card's own right edge, the status chip; then an optional summary line, the
+// card's own right edge, the status chip; then an optional short summary, the
 // content, and the folds. No block names its own type: the MARKDOWN, HTML STAGE,
 // COMPARE, MERMAID and question-kind captions this replaced said nothing the card
 // itself does not show.
@@ -249,14 +250,12 @@ function commentButton(blockId) {
 // a comment stored against the old captioned markup resolves through
 // src/anchor.mjs's legacy view of the section.
 
-const STATUS_TONES = new Set(['good', 'warn', 'bad', 'neutral']);
-
 /** The `status` chip, or '' when the block carries none. A tone outside the four
  * is drawn neutral rather than refused: the board stores what was validated at
  * post time, and a render never throws on a stored board. */
 function statusChip(status) {
   if (!status || typeof status.label !== 'string' || !status.label.trim()) return '';
-  const tone = STATUS_TONES.has(status.tone) ? status.tone : 'neutral';
+  const tone = STATUS_TONES.includes(status.tone) ? status.tone : 'neutral';
   return `<span class="card-status" data-tone="${tone}">${escHtml(status.label)}</span>`;
 }
 
@@ -270,6 +269,13 @@ function cardTitle(text) {
 function cardHead(titleHtml, tools = '', chip = '') {
   if (!titleHtml && !tools && !chip) return '';
   return `<div class="card-head">${titleHtml}${tools}${chip}</div>`;
+}
+
+/** The head row and summary of a block whose title is only its own `title`: every
+ * kind but markdown, which may lift its opening heading (titleParts), and a
+ * question, whose prompt is its title. */
+function blockCardHead(block, tools = '') {
+  return cardHead(cardTitle(block.title), tools, statusChip(block.status)) + cardSummary(block);
 }
 
 function cardSummary(block) {
@@ -975,8 +981,11 @@ function renderQuestionBlock(block, board, commentsByBlock, historical) {
     ? `<div class="question-explainer md-content${explainerFold.bodyClass}"${explainerFold.bodyId}>${block.explainerHtml}</div>${explainerFold.control}`
     : '';
   const picks = PICKS_LINE[block.widget] ? `<p class="question-picks">${PICKS_LINE[block.widget]}</p>` : '';
+  // From 1440px a question takes the options-and-panel columns (ADR 136) unless
+  // its options are rendered variants or its context carries a stage.
+  const split = block.widget !== 'choose-between-rendered-variants' && !proseContextHtml ? ' question-split' : '';
   return `
-<section class="block question-block" data-block-id="${escAttr(block.id)}" data-block-kind="question" data-widget="${escAttr(block.widget)}">
+<section class="block question-block${split}" data-block-id="${escAttr(block.id)}" data-block-kind="question" data-widget="${escAttr(block.widget)}">
   <div class="question-head${explainerFold.itemClass}">
     <div class="card-head"><p class="question-prompt card-title">${escHtml(block.prompt)}</p>${answerChip(status)}</div>
     ${picks}
@@ -1044,7 +1053,7 @@ function renderMermaidBlock(block, board, commentsByBlock, historical) {
   </div>`;
   return `
 <section class="block mermaid-block" data-block-id="${escAttr(block.id)}" data-block-kind="mermaid">
-  ${cardHead(cardTitle(block.title), commentButton(block.id), statusChip(block.status))}${cardSummary(block)}
+  ${blockCardHead(block, commentButton(block.id))}
   ${body}
   ${pageDomPinLayer(block.id)}
   ${cardDetails(block)}
@@ -1299,7 +1308,7 @@ function renderCodeBlock(block) {
   const body = block.error ? resolveErrorNote(block) : codeBody(block);
   return `
 <section class="block code-block" data-block-id="${escAttr(block.id)}" data-block-kind="code">
-  ${cardHead(cardTitle(block.title), '', statusChip(block.status))}${cardSummary(block)}
+  ${blockCardHead(block)}
   ${body}${source ? `<div class="context-caption">${source}</div>` : ''}
   ${cardDetails(block)}
 </section>`;
@@ -3068,7 +3077,7 @@ function renderHtmlBlock(block, board, commentsByBlock, historical, fullpage = f
   if (block.error) {
     return `
 <section class="block html-block" data-block-id="${escAttr(block.id)}" data-block-kind="html">
-  ${cardHead(cardTitle(block.title), commentButton(block.id), statusChip(block.status))}${cardSummary(block)}
+  ${blockCardHead(block, commentButton(block.id))}
   ${resolveErrorNote(block)}
   ${pageDomPinLayer(block.id)}
   ${cardDetails(block)}
@@ -3116,7 +3125,7 @@ function renderHtmlBlock(block, board, commentsByBlock, historical, fullpage = f
   const opened = stageRendersOpened(block, commentsByBlock, folds);
   return `
 <section class="block html-block${opened ? ' stage-opened' : ''}" data-block-id="${escAttr(block.id)}" data-block-kind="html">
-  ${cardHead(cardTitle(block.title), commentButton(block.id), statusChip(block.status))}${cardSummary(block)}
+  ${blockCardHead(block, commentButton(block.id))}
   <div class="stage-wrap">
     ${frame}
     <div class="pin-layer" data-block-id="${escAttr(block.id)}"></div>
@@ -3163,7 +3172,7 @@ function renderCompareSide(side, board, commentsByBlock, historical, folds = tru
 function renderCompareBlock(block, board, commentsByBlock, historical, folds = true) {
   return `
 <section class="block compare-block" data-block-id="${escAttr(block.id)}" data-block-kind="compare">
-  ${cardHead(cardTitle(block.title), '', statusChip(block.status))}${cardSummary(block)}
+  ${blockCardHead(block)}
   <div class="compare-grid">
     ${renderCompareSide(block.left, board, commentsByBlock, historical, folds)}
     ${renderCompareSide(block.right, board, commentsByBlock, historical, folds)}

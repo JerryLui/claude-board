@@ -3014,7 +3014,7 @@ check('a question block renders no comment button, no comment form, no comment a
   const markup = renderedMarkup(renderBoardPage(board));
   // Nothing else on this single-block board, so the first </section> reached is
   // this block's own closing tag (no nested context here to worry about).
-  const section = markup.slice(markup.indexOf('<section class="block question-block"'), markup.indexOf('</section>') + '</section>'.length);
+  const section = markup.slice(markup.indexOf('<section class="block question-block'), markup.indexOf('</section>') + '</section>'.length);
 
   assert.ok(!section.includes('comment-btn'), 'a question block must render no .comment-btn at all');
   assert.ok(!section.includes(`comment-form-${qId}`), 'a question block must render no comment-form for its own id');
@@ -3397,7 +3397,7 @@ check('a stage-carrying question\'s context renders no card, no border-carrying 
     }],
   });
   const markup = renderedMarkup(renderBoardPage(board));
-  const sectionStart = markup.indexOf('<section class="block question-block"');
+  const sectionStart = markup.indexOf('<section class="block question-block');
   const sectionEnd = markup.indexOf('</section>', sectionStart) + '</section>'.length;
   const section = markup.slice(sectionStart, sectionEnd);
 
@@ -3475,7 +3475,7 @@ check('a code block in a stage-carrying question\'s context renders through the 
 const idBlind = html => html.replace(/(data-block-id|data-pull-out-for|data-note-for|data-defer-for|id|for)="[^"]*"/g, '$1="X"');
 
 const questionSection = markup => {
-  const start = markup.indexOf('<section class="block question-block"');
+  const start = markup.indexOf('<section class="block question-block');
   assert.ok(start !== -1, 'setup failure: no question section in the markup');
   return markup.slice(start, markup.indexOf('</section>', start) + '</section>'.length);
 };

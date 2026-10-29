@@ -2643,10 +2643,11 @@ body.page-board .back-to-top.visible {
 .question-prompt, .card-choice, .variant-label, .opt-label, .opt-desc, .rank-list, .answer-textarea, .note-field, .resolve-error,
 body:not(.page-board) .blocks .comment-list, body:not(.page-board) .blocks .comment-form { max-width: var(--prose); }
 .card-title, .card-summary, .question-picks { max-width: var(--prose); }
-/* An option's preview image or code is rendered content, not prose, and the
-   card's measure would draw it narrower than the old column did (605px for
-   992px at 1920). A card carrying one keeps the old column's width instead;
-   its label and description still hold their own measure. */
+/* An option's preview image or code is rendered content, not prose, so a
+   choice carrying one is held to the old column's width rather than the
+   reading measure; its label and description still hold their own measure.
+   From 1440px the options column, a third of the card and never under 523px
+   (ADR 136), is narrower than that and bounds the preview first. */
 .card-choice:has(.opt-preview) { max-width: var(--column-1120); }
 @media (min-width: 1440px) {
   :root { --prose: 72ch; }
@@ -2672,13 +2673,15 @@ body:not(.page-board) .blocks .comment-list, body:not(.page-board) .blocks .comm
      question's options read at one width. A rendered-variant question, and
      one carrying a stage in its context, keeps the one full-width column
      (ADR.md entry 26) and its note at reading width: its options are the
-     rendered variants themselves. */
-  .question-block:not([data-widget="choose-between-rendered-variants"]):not(:has(> .question-main > .question-context-prose)) {
+     rendered variants themselves. src/render.mjs marks a question that takes
+     the columns '.question-split', kept beside '.question-block' so these
+     rules outrank the one-column '.question-block:not(:has(...))' above. */
+  .question-block.question-split {
     grid-template-columns: minmax(523px, 1fr) minmax(0, 2fr); grid-template-rows: auto auto 1fr auto; }
-  .question-block:not([data-widget="choose-between-rendered-variants"]):not(:has(> .question-main > .question-context-prose)) > .question-main { grid-column: 1; grid-row: 2; }
-  .question-block:not([data-widget="choose-between-rendered-variants"]):not(:has(> .question-main > .question-context-prose)) > .question-context { grid-column: 2; grid-row: 2 / 4; }
-  .question-block:not([data-widget="choose-between-rendered-variants"]):not(:has(> .question-main > .question-context-prose)) > .note-field { grid-column: 1; grid-row: 3; }
-  .question-block:not([data-widget="choose-between-rendered-variants"]):not(:has(> .question-main > .question-context-prose)) > .card-details { grid-row: 4; }
+  .question-block.question-split > .question-main { grid-column: 1; grid-row: 2; }
+  .question-block.question-split > .question-context { grid-column: 2; grid-row: 2 / 4; }
+  .question-block.question-split > .note-field { grid-column: 1; grid-row: 3; }
+  .question-block.question-split > .card-details { grid-row: 4; }
   /* The panel's tables at their natural width: stretched across two thirds of
      a 1700px card, a two-column table's cells sat far apart. */
   .question-context .md-content table { width: auto; }
@@ -2687,10 +2690,11 @@ body:not(.page-board) .blocks .comment-list, body:not(.page-board) .blocks .comm
      overflowed its clip of about ten lines (src/ui.mjs drops the fold, and its
      control, from text that fits), and it is open: a folded preview, and
      short text, stay one column. Text holding a table, code or a diagram
-     stays one column too, as each of those takes the card's width. One ':not()'
+     stays one column too, as each of those takes the card's width, and so
+     does the card's summary, a '.md-content' of its own. One ':not()'
      each, never a comma list inside one: test/check-pure.mjs's cascade resolver
      splits a selector at every comma. A heading never ends a column. */
-  .markdown-block:not(.folded):has(> .fold-toggle) > .md-content:not(:has(table)):not(:has(pre)):not(:has(.mermaid)) {
+  .markdown-block:not(.folded):has(> .fold-toggle) > .md-content:not(.card-summary):not(:has(table)):not(:has(pre)):not(:has(.mermaid)) {
     columns: 2 var(--prose); column-gap: var(--space-6); max-width: calc(2 * var(--prose) + var(--space-6)); }
   .md-content h1, .md-content h2, .md-content h3, .md-content h4, .md-content h5, .md-content h6 { break-after: avoid; }
   /* A diagram narrower than its panel sits in the panel's middle rather than

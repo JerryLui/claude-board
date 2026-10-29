@@ -30,7 +30,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { createBoard, applySubmit, buildPacket } from '../src/board.mjs';
+import { createBoard, applySubmit, buildPacket, amendRound } from '../src/board.mjs';
 import { renderBoardPage, renderBlock } from '../src/render.mjs';
 import { sectionRootFrom, legacySectionRoot, resolveSteps, pathToSteps } from '../src/anchor.mjs';
 import { StandInEvent } from './dom-stand-in.mjs';
@@ -290,6 +290,21 @@ check('a board stored before block type captions were dropped still resolves its
   assert.equal(prompt, qRoot.children[0].children[0].children[0], 'the question comment lands on today\'s prompt, the title in its card head');
   assert.ok(prompt.cls.includes('question-prompt'));
 
+});
+
+check('a markdown block stored before titled cards, amended to carry a title and a summary, still resolves its comments to the same paragraphs: its opening heading stays in the body, so the captioned view puts no heading back', () => {
+  const board = structuredClone(titledFixture);
+  const md = board.blocks[0];
+  board.comments.push({
+    n: 3, blockId: md.id, anchor: { kind: 'dom', ref: '2.3', hint: 'Riding: the parked-lines sweep.' },
+    text: 'on the second paragraph', createdAt: '2026-10-29T12:00:00.000Z', round: 1, mintBlockKind: 'markdown',
+  });
+  amendRound(board, { blocks: [{ id: md.id, kind: 'markdown', text: md.text, title: 'Grill status', summary: 'Two lines settled, one riding.' }] });
+  assert.equal(board.blocks[0].title, 'Grill status', 'setup failure: the amend did not keep the block id');
+
+  const packet = buildPacket(board, 1, 'http://127.0.0.1/b/titled');
+  const lostByN = Object.fromEntries(packet.comments.map(c => [c.n, c.lost]));
+  assert.deepEqual([lostByN[1], lostByN[3]], [undefined, undefined], 'neither paragraph comment reports lost');
 });
 
 finish('anchor-rerender');

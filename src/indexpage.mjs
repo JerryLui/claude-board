@@ -1832,6 +1832,9 @@ function missionsParts(overview, ui) {
   };
   var COLUMNS = [['needs-you', 'Needs you'], ['working', 'Working'], ['waiting', 'Waiting'], ['stalled', 'Stalled'], ['released', 'Released']];
   var ACTION_LABELS = { fire: 'Fire', merge: 'Merge' };
+  // A card's title past this many characters may be cut at its clamp, so the card
+  // carries the fold that shows it whole.
+  var FOLD_TITLE_CHARS = 30;
   var PR_MARKS = { green: '✓', merged: '✓', open: '○', draft: '○' };
   var STOP_ICON = '<svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="1.8"/><line x1="4.7" y1="4.7" x2="15.3" y2="15.3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
   var data = overview || {};
@@ -1907,6 +1910,12 @@ function missionsParts(overview, ui) {
     return out + '</article>';
   }
 
+  // The one 'Show the rest' fold a mission or tab card carries when any field of it may
+  // be cut (ADR 135), open while the card is expanded; '' when nothing can be.
+  function moreFold(key, show) {
+    return show ? '<details class="mission-more"' + (pick('expanded', key) ? ' open' : '') + '><summary>Show the rest</summary></details>' : '';
+  }
+
   function card(m) {
     var key = m.key;
     var actions = Array.isArray(m.actions) ? m.actions : [];
@@ -1927,9 +1936,7 @@ function missionsParts(overview, ui) {
     // Every card in a row is one height whatever its text: the title, summary, waiting
     // on and next each stop at a few lines, and this one fold shows them whole. It is
     // hidden again on screen while nothing is cut (missionsMarkFits).
-    if (m.summary || m.waitingOn || m.next || String(m.title || key).length > 30) {
-      out += '<details class="mission-more"' + (pick('expanded', key) ? ' open' : '') + '><summary>Show the rest</summary></details>';
-    }
+    out += moreFold(key, m.summary || m.waitingOn || m.next || String(m.title || key).length > FOLD_TITLE_CHARS);
     out += '</div>';
     var prs = Array.isArray(m.prs) ? m.prs : [];
     if (prs.length) {
@@ -1988,9 +1995,7 @@ function missionsParts(overview, ui) {
     if (where.length) out += '<div class="mission-ident"><span class="mission-key">' + where.join(', ') + '</span></div>';
     if (t.reason) out += '<p class="mission-summary tab-reason">' + esc('Blocked: ' + t.reason) + '</p>';
     // A tab card is a mission card (ADR 135): the same clamped fields and the same one fold.
-    if (t.reason || title.length > 30) {
-      out += '<details class="mission-more"' + (pick('expanded', key) ? ' open' : '') + '><summary>Show the rest</summary></details>';
-    }
+    out += moreFold(key, t.reason || title.length > FOLD_TITLE_CHARS);
     out += '</div>';
     var btns = '';
     var rounds = Array.isArray(t.rounds) ? t.rounds : [];

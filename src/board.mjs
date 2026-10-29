@@ -23,6 +23,7 @@ import { renderBlock, highlightFenceHtml } from './render.mjs';
 // roundIsAwaited's legacy fallback there too) and is re-exported below so every
 // existing `from './board.mjs'` import keeps working unchanged.
 import { isPageRound, questionBlocks } from './badge.mjs';
+import { STATUS_TONES } from './card-status.mjs';
 export { questionBlocks };
 
 // Kind letter for block id minting (`q1`, `d3`, `m2`, ...): kind letter + ordinal
@@ -643,25 +644,13 @@ function normalizeBlockContent(raw, round, counters, cwd, ids, { topLevel = true
       // draws a diagram on the page like any other -- and is parsed at the door like any
       // other (ADR.md entry 117), off this render's own fence list. It is by value only,
       // so there is no referenced file to name and no resolve error to skip.
-      const explainerRender = explainer ? mdToHtmlAndAnchors(explainer, { highlight: highlightFenceHtml }) : null;
-      if (explainerRender) {
-        const suffix = diagramPositionSuffix(position);
-        for (const fence of explainerRender.mermaidFences) {
-          recordDiagramRefusal(
-            fence.text,
-            null,
-            `mermaid fence ${fence.ordinal} in explainer of question ${id}${suffix}`,
-            true,
-            ids,
-          );
-        }
-      }
+      const explainerHtml = explainer ? cardMarkdownHtml(explainer, 'explainer', `question ${id}${diagramPositionSuffix(position)}`, ids) : '';
       return {
         ...base,
         id,
         kind: 'question',
         prompt: byValueText(raw.prompt ?? '', 'prompt'),
-        ...(explainer ? { explainer, explainerHtml: explainerRender.html } : {}),
+        ...(explainer ? { explainer, explainerHtml } : {}),
         context,
         widget,
         options,
@@ -674,9 +663,8 @@ function normalizeBlockContent(raw, round, counters, cwd, ids, { topLevel = true
 }
 
 // The card fields every block kind shares, the shared card look's optional parts:
-// a title line, a status chip at the card's right edge, a one-line summary under the
+// a title line, a status chip at the card's right edge, a short summary under the
 // title and a folded details body. Lengths are characters (code points) after trim.
-const STATUS_TONES = ['good', 'warn', 'bad', 'neutral'];
 const MAX_CARD_TITLE_CHARS = 200;
 const MAX_STATUS_LABEL_CHARS = 40;
 const MAX_CARD_SUMMARY_CHARS = 600;
@@ -1556,10 +1544,11 @@ export function resolveComment(board, comment, blockCache = new Map()) {
     // postMessage rewrite changes what root an in-stage click mints against,
     // this fallback needs to change to match, in the same direction.
     const { ref, hint, time } = comment.anchor;
+    const titled = !!block.title;
     const found = !kindDrifted && (block.kind === 'html'
       ? resolveAtRoot(stageRootForBlock(blockCache, block), ref, hint, time)
-        || resolveAtRoot(sectionRootForBlock(blockCache, block, board), ref, hint, time)
-      : resolveAtRoot(sectionRootForBlock(blockCache, block, board), ref, hint, time));
+        || resolveAtRoot(sectionRootForBlock(blockCache, block, board), ref, hint, time, titled)
+      : resolveAtRoot(sectionRootForBlock(blockCache, block, board), ref, hint, time, titled));
     if (!found) {
       out.resolved = false;
       out.lost = lostLabel(comment.anchor, '(unknown)');
