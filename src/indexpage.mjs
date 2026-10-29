@@ -265,7 +265,7 @@ const missionsScript = `
  * Stop on the card posts nothing until the daemon's missions show the first. With Comment on in the bar, a click on a card opens a note that posts a
  * comment order. Same quoting rules as the rest of this script: no backticks and no
  * dollar-brace below. */
-var missionsUi = { confirming: {}, sending: {}, errors: {}, commenting: {}, drafts: {}, stopSent: {} };
+var missionsUi = { confirming: {}, sending: {}, errors: {}, commenting: {}, drafts: {}, stopSent: {}, expanded: {} };
 var missionsData = null;
 var missionsCardHtml = {};
 var missionsInFlight = false;
@@ -356,6 +356,39 @@ function missionsSyncHeld(node, key, html) {
 }
 
 function paintMissions() {
+  paintMissionsCards();
+  missionsMarkFits();
+}
+
+// A card's fold shows only while one of its fields is cut short; a shut fold over text
+// that already fits is hidden but keeps its line, so the card keeps its height.
+function missionsMarkFits() {
+  var folds = document.querySelectorAll('details.mission-more');
+  for (var i = 0; i < folds.length; i++) {
+    var fold = folds[i];
+    var cardEl = fold.closest('article.mission-card');
+    if (fold.open || !cardEl) { fold.removeAttribute('data-fits'); continue; }
+    var fields = cardEl.querySelectorAll('.mission-title, .mission-summary, .mission-waiting, .mission-next');
+    var fits = fields.length > 0;
+    for (var j = 0; j < fields.length && fits; j++) {
+      if (!(fields[j].clientHeight > 0) || fields[j].scrollHeight > fields[j].clientHeight + 1) fits = false;
+    }
+    if (fits) fold.setAttribute('data-fits', ''); else fold.removeAttribute('data-fits');
+  }
+}
+
+// The fold is the reader's: it stays open across every repaint until shut again.
+function onMissionsToggle(ev) {
+  var t = ev.target;
+  if (!t || !t.classList || !t.classList.contains('mission-more')) return;
+  var cardEl = t.closest('article.mission-card');
+  if (!cardEl) return;
+  var key = cardEl.getAttribute('data-mission-key');
+  if (t.open) missionsUi.expanded[key] = true; else delete missionsUi.expanded[key];
+  missionsMarkFits();
+}
+
+function paintMissionsCards() {
   var mount = missionsMount();
   if (!mount || !missionsData) return;
   var parts = missionsParts(missionsData, missionsUi);
@@ -572,7 +605,7 @@ function onMissionsClick(ev) {
     return;
   }
   if (!missionsCommentModeOn() || missionsUi.commenting[key]) return;
-  if (t.closest('a') || t.closest('button') || t.closest('textarea')) return;
+  if (t.closest('a') || t.closest('button') || t.closest('textarea') || t.closest('summary')) return;
   missionsUi.commenting[key] = true;
   paintMissions();
   focusIn(key, 'textarea.mission-comment-text');
@@ -621,6 +654,15 @@ function initMissions() {
   mount.addEventListener('contextmenu', onMissionsContextmenu);
   mount.addEventListener('input', onMissionsInput);
   mount.addEventListener('keydown', onMissionsKeydown);
+  // 'toggle' does not bubble: the mount hears a fold's only on the way down.
+  mount.addEventListener('toggle', onMissionsToggle, true);
+  var refit = false;
+  window.addEventListener('resize', function () {
+    if (refit) return;
+    refit = true;
+    requestAnimationFrame(function () { refit = false; missionsMarkFits(); });
+  });
+  missionsMarkFits();
   var toggle = document.querySelector('button#comment-mode-toggle');
   if (toggle) {
     toggle.addEventListener('click', function () {
@@ -1806,17 +1848,24 @@ function missionsParts(overview, ui) {
     var orders = orderLines(m, pick('stopSent', key));
     var busy = pick('sending', key);
     var out = '<article class="mission-card" data-mission-key="' + esc(key) + '" data-view="' + esc(m.view) + '">';
-    out += '<div class="mission-card-head"><b class="mission-title">' + esc(m.title || key) + '</b>'
+    out += '<div class="mission-text"><div class="mission-card-head"><b class="mission-title">' + esc(m.title || key) + '</b>'
       + '<span class="mission-age" title="' + esc(m.updatedAt) + '">' + esc(age(m.updatedAt)) + '</span></div>';
     out += '<div class="mission-ident"><span class="mission-key">' + esc(key) + ' / ' + esc(m.phase) + '</span>'
       + (m.view === 'queued' ? '<span class="mission-tag">Queued</span>' : '') + '</div>';
     if (m.summary) out += '<p class="mission-summary">' + esc(m.summary) + '</p>';
     if (m.waitingOn || m.next) {
       out += '<dl class="mission-facts">'
-        + (m.waitingOn ? '<dt>Waiting on</dt><dd>' + esc(m.waitingOn) + '</dd>' : '')
-        + (m.next ? '<dt>Next</dt><dd>' + esc(m.next) + '</dd>' : '')
+        + (m.waitingOn ? '<dt>Waiting on</dt><dd class="mission-waiting">' + esc(m.waitingOn) + '</dd>' : '')
+        + (m.next ? '<dt>Next</dt><dd class="mission-next">' + esc(m.next) + '</dd>' : '')
         + '</dl>';
     }
+    // Every card in a row is one height whatever its text: the title, summary, waiting
+    // on and next each stop at a few lines, and this one fold shows them whole. It is
+    // hidden again on screen while nothing is cut (missionsMarkFits).
+    if (m.summary || m.waitingOn || m.next || String(m.title || key).length > 30) {
+      out += '<details class="mission-more"' + (pick('expanded', key) ? ' open' : '') + '><summary>Show the rest</summary></details>';
+    }
+    out += '</div>';
     var prs = Array.isArray(m.prs) ? m.prs : [];
     if (prs.length) {
       out += '<div class="mission-prs">';
