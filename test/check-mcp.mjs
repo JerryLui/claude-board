@@ -2361,17 +2361,46 @@ async function main() {
   // ADR.md entry 116: Codex and OpenCode export no entrypoint an MCP server can read, so
   // install.sh bakes CLAUDE_BOARD_CLIENT into their registrations and that declaration
   // is what passes the guard. HEADLESS=1 still wins over it.
+  // Waits on the ask's own reply, which a round with no question sends the moment the post
+  // lands. Watching the store instead and closing the shim once the file appeared raced the
+  // reply: the file lands before the response, and a shim closed in between never answers.
   await check('CLAUDE_BOARD_CLIENT set with no CLAUDE_CODE_ENTRYPOINT is accepted, and posts', async () => {
     const knownIds = listBoardIds(home);
     const declaredClient = spawnShim({ ...baseEnv, CLAUDE_CODE_ENTRYPOINT: undefined, CLAUDE_BOARD_CLIENT: 'codex' });
-    const pending = declaredClient.request('tools/call', {
-      name: 'ask',
-      arguments: { title: 'Declared client check', blocks: [{ kind: 'markdown', text: '# x' }] },
-    });
-    const boardId = await waitForNewBoardFile(home, knownIds);
-    assert.ok(boardId, 'a declared client must get its board posted');
-    declaredClient.close();
-    await pending.catch(() => {});
+    try {
+      const res = await declaredClient.request('tools/call', {
+        name: 'ask',
+        arguments: { title: 'Declared client check', blocks: [{ kind: 'markdown', text: '# x' }] },
+      });
+      assert.equal(res.result.isError, false, res.result.content[0].text);
+      assert.equal(res.result.status, 'posted');
+      assert.ok(!knownIds.has(res.result.board) && listBoardIds(home).has(res.result.board), `a declared client must get its board posted to the store, got ${res.result.board}`);
+    } finally {
+      declaredClient.close();
+    }
+  });
+
+  // bin/mcp.mjs exits on stdin close without answering the requests it holds, so a check
+  // awaiting one across that exit relies on test/support.mjs's McpClient to reject it, or it
+  // waits until the suite's per-check cap kills the whole file.
+  await check('a request still pending when its shim exits rejects, naming the exit, instead of waiting forever', async () => {
+    const knownIds = listBoardIds(home);
+    const client = spawnShim(baseEnv);
+    try {
+      const pending = client.request('tools/call', { name: 'ask', arguments: { title: 'Exit before answer', blocks: [QUESTION] } });
+      await waitForNewBoardFile(home, knownIds); // posted: the ask now holds its wait open, unanswered
+      client.child.stdin.end();
+      await assert.rejects(
+        withTimeout(pending, 10_000, 'timed out after 10000ms: the pending ask never settled after its shim exited'),
+        /^Error: the shim exited \(code 0, signal null\) before answering request 1 \(tools\/call\)$/,
+      );
+      await assert.rejects(
+        withTimeout(client.request('ping', {}), 1000, 'timed out after 1000ms: a request to an exited shim never settled'),
+        /^Error: the shim exited \(code 0, signal null\) before request 2 \(ping\) was sent$/,
+      );
+    } finally {
+      client.close();
+    }
   });
 
   await check('CLAUDE_BOARD_HEADLESS=1 still refuses a declared client, a background one included', async () => {

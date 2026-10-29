@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { SECRET_HEADER, SESSION_COOKIE, sessionToken } from '../src/secret.mjs';
 import { HANDOFF_TOKEN_RE, recoveryCommand, repoRoot } from '../src/handoff.mjs';
-import { startServer, activeWaitCount, buildPacketWithUndelivered, createSseHub, DEFAULT_WAIT_TIMEOUT_MS } from '../src/server.mjs';
+import { startServer, createRequestHandler, activeWaitCount, buildPacketWithUndelivered, createSseHub, DEFAULT_WAIT_TIMEOUT_MS } from '../src/server.mjs';
 import { DEFAULT_AWAIT_TIMEOUT_MS, STRANDED_BANNER, ANSWERS_DELIVERED, MAX_SUBMIT_COMMENTS, MAX_ANSWER_CHOICES, createBoard } from '../src/board.mjs';
 // The cap every by-value string on a board shares but an html stage's own markup, and
 // that stage's cap (src/resolve.mjs), read rather than restated so a check cannot pass
@@ -25,7 +25,7 @@ import { readBoard, writeBoard } from '../src/store.mjs';
 // (a nonzero cycle, a timer already mid-break) -- every ASSERTION below still goes
 // through the HTTP routes, never these directly. See the pomodoro checks near the
 // bottom of this file.
-import { readDoc as readPomodoroDoc, writeDoc as writePomodoroDoc, pomodoroDay } from '../src/pomodoro.mjs';
+import { createPomodoro, readDoc as readPomodoroDoc, writeDoc as writePomodoroDoc, pomodoroDay } from '../src/pomodoro.mjs';
 import { cueNames, NO_CUE } from '../src/cues.mjs';
 import { renderBoardPage } from '../src/render.mjs';
 import { assetsNamedBy, MERMAID_ASSET, SCRIPT_ASSET, STYLE_ASSET } from '../src/assets.mjs';
@@ -5207,41 +5207,50 @@ async function main() {
     assert.equal(body.timer.phase, 'work');
   });
 
-  await check('POMODORO: pause freezes the remaining time across a real wait, and resume continues from where it froze rather than restarting the interval', async () => {
-    // A short work interval (the validator's floor is 1 minute) so a real, meaningful
-    // slice of it can elapse inside a check that still runs in about a second: if resume
-    // wrongly minted a FRESH deadline (`now + workMin*60_000`) instead of continuing from
-    // the frozen remainder, the resulting deadline would land ~700ms later than expected
-    // -- comfortably outside the assertion's tolerance below.
-    await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(SECRET), body: JSON.stringify({ workMin: 1, enabled: true }) });
-    await fetch(`${base}/api/pomodoro/reset`, { method: 'POST', headers: writeHeaders(SECRET) });
-    const started = await (await fetch(`${base}/api/pomodoro/ensure`, { method: 'POST', headers: writeHeaders(SECRET) })).json();
-    assert.equal(started.timer.phase, 'work');
+  await check('POMODORO: pause freezes the remaining time across a wait, and resume continues from where it froze rather than restarting the interval', async () => {
+    // Its own handler and home, its pomodoro clock injected (createPomodoro's `now`), so the
+    // elapsed time is exact rather than a real sleep whose length the machine's load decides.
+    // Every route still runs through createRequestHandler, the handler startServer serves.
+    // The clock starts at the real time and then only moves when told: GET reads the store
+    // on the real clock, and a fixed date in the past would roll the pomodoro day under it.
+    const clockHome = mkdtempSync(path.join(tmpdir(), 'claude-board-http-pomodoro-clock-'));
+    let clockNow = Date.now();
+    const pomodoro = createPomodoro({ home: clockHome, now: () => clockNow });
+    const handler = createRequestHandler({ home: clockHome, secret: SECRET, pomodoro });
+    const clockServer = http.createServer(handler);
+    await new Promise(resolve => clockServer.listen(0, '127.0.0.1', resolve));
+    const clockBase = `http://127.0.0.1:${clockServer.address().port}`;
+    const post = async action => (await fetch(`${clockBase}/api/pomodoro/${action}`, { method: 'POST', headers: writeHeaders(SECRET) })).json();
+    try {
+      // The validator's floor is 1 minute. A resume that minted a FRESH deadline
+      // (`now + workMin*60_000`) instead of continuing from the frozen remainder lands
+      // exactly 700ms later than the one asserted below.
+      await fetch(`${clockBase}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(SECRET), body: JSON.stringify({ workMin: 1, enabled: true }) });
+      const started = await post('ensure');
+      assert.equal(started.timer.phase, 'work');
+      assert.equal(started.timer.deadline, clockNow + 60_000);
 
-    await sleep(700);
+      clockNow += 700;
+      const paused = await post('pause');
+      assert.equal(paused.timer.paused, true);
+      assert.equal(paused.timer.deadline, undefined, 'a paused timer carries remainingMs, not a deadline');
+      assert.equal(paused.timer.remainingMs, 59_300, 'remainingMs must be the interval less the 700ms that elapsed, not a fresh 60000ms interval');
 
-    const paused = await (await fetch(`${base}/api/pomodoro/pause`, { method: 'POST', headers: writeHeaders(SECRET) })).json();
-    assert.equal(paused.timer.paused, true);
-    assert.equal(paused.timer.deadline, undefined, 'a paused timer carries remainingMs, not a deadline');
-    const remainingAtPause = paused.timer.remainingMs;
-    assert.ok(remainingAtPause > 0 && remainingAtPause < 60_000, `remainingMs (${remainingAtPause}) must reflect real elapsed time, not a fresh 60000ms interval`);
+      clockNow += 300;
+      const stillPaused = await (await fetch(`${clockBase}/api/pomodoro`)).json();
+      assert.equal(stillPaused.timer.paused, true);
+      assert.equal(stillPaused.timer.remainingMs, 59_300, 'remaining time must not shrink while paused');
 
-    await sleep(300);
-
-    // Still paused: the remaining time must not have shrunk at all across that wait.
-    const stillPaused = await (await fetch(`${base}/api/pomodoro`)).json();
-    assert.equal(stillPaused.timer.paused, true);
-    assert.equal(stillPaused.timer.remainingMs, remainingAtPause, 'remaining time must not shrink while paused');
-
-    const resumed = await (await fetch(`${base}/api/pomodoro/resume`, { method: 'POST', headers: writeHeaders(SECRET) })).json();
-    assert.equal(resumed.timer.paused, false);
-    assert.equal(resumed.timer.remainingMs, undefined, 'a running timer carries a deadline, not remainingMs');
-    const expectedDeadline = resumed.now + remainingAtPause;
-    assert.ok(
-      Math.abs(resumed.timer.deadline - expectedDeadline) < 400,
-      `resume must continue from the frozen remainder (expected close to ${expectedDeadline}, got ${resumed.timer.deadline}) -- ` +
-      `(ablation: minting deadline = now + settings.workMin*60_000 on resume instead lands ~700ms later, well outside this tolerance)`,
-    );
+      const resumed = await post('resume');
+      assert.equal(resumed.timer.paused, false);
+      assert.equal(resumed.timer.remainingMs, undefined, 'a running timer carries a deadline, not remainingMs');
+      assert.equal(resumed.timer.deadline, clockNow + 59_300, 'resume must continue from the frozen remainder');
+    } finally {
+      clockServer.close();
+      pomodoro.close();
+      handler.close();
+      rmSync(clockHome, { recursive: true, force: true });
+    }
   });
 
   // Poll GET /api/pomodoro (never reconciled server-side -- see handlePomodoro's own
@@ -5579,7 +5588,14 @@ process.on('SIGTERM', () => {
   fs.appendFileSync(log, 'term:' + JSON.stringify(process.argv.slice(2)) + '\\n');
   process.exit(0);
 });
-setTimeout(() => process.exit(0), Number(process.env.STUB_AFPLAY_DURATION_MS || '0'));
+if (process.env.STUB_AFPLAY_DURATION_MS === 'until-killed') {
+  // Plays until a signal ends it, however long the kill takes to come; it leaves only once
+  // orphaned, when the check process that spawned it is gone.
+  const parent = process.ppid;
+  setInterval(() => { if (process.ppid !== parent) process.exit(0); }, 1000);
+} else {
+  setTimeout(() => process.exit(0), Number(process.env.STUB_AFPLAY_DURATION_MS || '0'));
+}
 `;
 
   const previewStubDir = mkdtempSync(path.join(tmpdir(), 'claude-board-preview-stub-'));
@@ -5730,11 +5746,10 @@ setTimeout(() => process.exit(0), Number(process.env.STUB_AFPLAY_DURATION_MS || 
 
   await check('PREVIEW: a rapid second preview kills the first rather than overlapping into a chorus', async () => {
     const log = freshLog(previewStubDir, 'afplay-invocations');
-    // A generous duration -- long enough that if the kill below silently stopped
-    // happening, the first stub would still be alive (and this check would catch it via
-    // the missing 'term:' line) rather than coincidentally having already exited on its
-    // own and passing for the wrong reason.
-    await withAfplayStub(log, 1500, async () => {
+    // Each stub plays until killed: if the kill below silently stopped happening, the
+    // first stub stays alive and this check fails on the missing 'term:' line; and a kill
+    // that is merely slow under load still finds the stub there to kill.
+    await withAfplayStub(log, 'until-killed', async () => {
       const first = await fetch(`${base}/api/pomodoro/preview`, {
         method: 'POST',
         headers: writeHeaders(SECRET),
@@ -5750,7 +5765,7 @@ setTimeout(() => process.exit(0), Number(process.env.STUB_AFPLAY_DURATION_MS || 
       });
       assert.equal(second.status, 200);
 
-      const lines = await waitForCount(() => readPreviewLines(log), 3, { timeoutMs: 3000 }); // start:A, term:A, start:B
+      const lines = await waitForCount(() => readPreviewLines(log), 3, { timeoutMs: 10_000 }); // start:A, term:A, start:B
       assert.ok(lines.some(l => l.startsWith('term:') && l.includes(PREVIEW_CUE_A)),
         `the FIRST preview (${PREVIEW_CUE_A}) must have been killed once the second one started -- got: ${JSON.stringify(lines)}`);
       assert.ok(lines.some(l => l.startsWith('start:') && l.includes(PREVIEW_CUE_B)),
@@ -5759,15 +5774,15 @@ setTimeout(() => process.exit(0), Number(process.env.STUB_AFPLAY_DURATION_MS || 
         'the second preview must still be the one considered "in flight" -- nothing has killed IT yet');
 
       // Cleanup: kill the still-running second stub too, via the same mechanism (any
-      // preview call kills whatever is playing first) rather than leaving a 1.5s stub
-      // process outliving this check and delaying the suite's own exit.
+      // preview call kills whatever is playing first) rather than leaving it playing past
+      // this check.
       const cleanup = await fetch(`${base}/api/pomodoro/preview`, {
         method: 'POST',
         headers: writeHeaders(SECRET),
         body: JSON.stringify({ cue: NO_CUE }),
       });
       assert.equal(cleanup.status, 200);
-      const finalLines = await waitForCount(() => readPreviewLines(log), 4, { timeoutMs: 2000 }); // + term:B
+      const finalLines = await waitForCount(() => readPreviewLines(log), 4, { timeoutMs: 10_000 }); // + term:B
       assert.ok(finalLines.some(l => l.startsWith('term:') && l.includes(PREVIEW_CUE_B)), 'cleanup must have killed the second stub in turn');
     });
   });
