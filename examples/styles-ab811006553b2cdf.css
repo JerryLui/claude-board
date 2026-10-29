@@ -67,7 +67,6 @@
   --warning-soft: rgba(229, 176, 77, 0.12);
   --warning-ink: #f0cd8c;
   --warning-border: rgba(229, 176, 77, 0.35);
-  --warning-line: rgba(229, 176, 77, 0.4);
   --warning-border-strong: rgba(229, 176, 77, 0.45);
   --warning-ring: rgba(229, 176, 77, 0.5);
   --warning-fade: rgba(229, 176, 77, 0);
@@ -120,7 +119,6 @@
   --warning-soft: rgba(128, 83, 0, 0.12);
   --warning-ink: #7a4a00;
   --warning-border: rgba(128, 83, 0, 0.35);
-  --warning-line: rgba(128, 83, 0, 0.4);
   --warning-border-strong: rgba(128, 83, 0, 0.45);
   --warning-ring: rgba(128, 83, 0, 0.5);
   --warning-fade: rgba(128, 83, 0, 0);
@@ -173,7 +171,6 @@
   --warning-soft: rgba(128, 83, 0, 0.12);
   --warning-ink: #7a4a00;
   --warning-border: rgba(128, 83, 0, 0.35);
-  --warning-line: rgba(128, 83, 0, 0.4);
   --warning-border-strong: rgba(128, 83, 0, 0.45);
   --warning-ring: rgba(128, 83, 0, 0.5);
   --warning-fade: rgba(128, 83, 0, 0);
@@ -1735,12 +1732,12 @@ body.home-page .mode-toggle:disabled { opacity: 0.5; cursor: default; }
    it is empty until something has happened. */
 .pomodoro-settings-status { font-size: 11px; color: var(--muted); align-self: center; }
 
-.search-form { display: flex; gap: var(--space-2); margin: 0 0 var(--space-5); }
-.search-input { flex: 1; min-width: 0; background: var(--panel-2); border: 1px solid var(--hairline); color: var(--ink);
-  border-radius: var(--r-md); padding: 10px 14px; font: inherit;
+.search-form { display: flex; gap: var(--space-2); margin: 0 0 var(--space-3); }
+.search-input { flex: 1; min-width: 0; height: 32px; background: var(--panel-2); border: 1px solid var(--hairline); color: var(--ink);
+  border-radius: var(--r-sm); padding: 0 10px; font: inherit; font-size: 13px;
   transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease); }
-.search-btn { background: var(--accent); color: var(--accent-ink); border: none; border-radius: var(--r-md);
-  padding: 10px 20px; font: inherit; font-weight: 650; transition: filter var(--dur) var(--ease); }
+.search-btn { height: 32px; background: var(--accent); color: var(--accent-ink); border: none; border-radius: var(--r-sm);
+  padding: 0 14px; font: inherit; font-size: 13px; font-weight: 600; transition: filter var(--dur) var(--ease); }
 .search-btn:hover { filter: brightness(1.08); }
 
 /* No '.search-results' / '.result-*' rules any more: the box filters the thread
@@ -1751,24 +1748,35 @@ body.home-page .mode-toggle:disabled { opacity: 0.5; cursor: default; }
 .empty-state { color: var(--muted); font-size: 13px; background: var(--panel); border: 1px dashed var(--hairline);
   border-radius: var(--r-md); padding: var(--space-5); text-align: center; }
 
-.thread-list { display: flex; flex-direction: column; gap: var(--space-3); }
-.thread-item { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4);
-  background: var(--panel); border: 1px solid var(--hairline); border-radius: var(--r-lg);
-  padding: var(--space-4) var(--space-5); text-decoration: none; color: var(--ink); box-shadow: var(--shadow-1);
-  transition: border-color var(--dur) var(--ease), transform var(--dur) var(--ease), box-shadow var(--dur) var(--ease); }
-.thread-item:hover { border-color: var(--hairline-2); transform: translateY(-1px); box-shadow: var(--shadow-2); }
-/* a thread with an open round is the one thing on this page asking for something */
-.thread-item.live { border-color: var(--warning-line); background:
-  linear-gradient(to right, var(--warning-soft), transparent 45%), var(--panel); }
-.thread-item.live:hover { border-color: var(--warning); }
-.thread-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-/* headline: the board title (or, title-less, the project folder name) — was .thread-cwd,
-   which held the full path as the bold headline; the path is now demoted to .thread-path */
-.thread-title { display: flex; align-items: center; gap: var(--space-2); font-size: 14.5px; font-weight: 600; letter-spacing: -0.01em; }
-.thread-path { color: var(--muted); font-size: 12.5px; }
-.thread-meta { color: var(--muted); font-size: 12px; }
-.thread-status { display: flex; align-items: center; gap: var(--space-3); flex: none; }
-.live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warning); display: inline-block;
+/* The Boards view at every width: one panel, a group header and then one 38px line per
+   board (src/indexpage.mjs renderThreadRows), boards with a round waiting on the reader
+   under "Waiting on you" first, the rest under "Earlier". A line is its dot, the
+   headline cut to one line, the rounds-left chip where any, then fixed columns for the
+   folder, round count, last update and thread id; the whole line is the link. */
+.thread-list { background: var(--panel); border: 1px solid var(--hairline); border-radius: var(--r-md);
+  overflow: hidden; box-shadow: var(--shadow-1); }
+.thread-list > .empty-state { border: 0; border-radius: 0; background: none; }
+.thread-group-head { display: flex; align-items: center; gap: var(--space-2); height: 32px; margin: 0; padding: 0 14px;
+  background: var(--panel-2); border-bottom: 1px solid var(--hairline); font-size: 13px; font-weight: 600; color: var(--ink); }
+.thread-group-count { color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
+.thread-group-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--warning); }
+.thread-group[data-group="earlier"] .thread-group-dot { background: none; border: 1.5px solid var(--muted); opacity: 0.6; }
+.thread-item { display: flex; align-items: center; gap: var(--space-3); height: 38px; padding: 0 14px;
+  border-bottom: 1px solid var(--hairline); font-size: 13px; text-decoration: none; color: var(--ink);
+  transition: background-color var(--dur) var(--ease); }
+.thread-group:last-child .thread-item:last-child { border-bottom: 0; }
+.thread-item:hover { background: color-mix(in srgb, var(--panel-2), var(--panel-3)); }
+.thread-item:focus-visible { outline: none; box-shadow: inset var(--ring); }
+/* headline: the board title (or, title-less, the project folder name), cut to one line */
+.thread-title { flex: 1; min-width: 0; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.thread-path { flex: none; width: 110px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.thread-rounds { flex: none; width: 70px; text-align: right; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.thread-updated { flex: none; width: 104px; text-align: right; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.thread-id { flex: none; width: 96px; color: var(--muted); font-size: 12px; white-space: nowrap;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+.thread-status { display: flex; align-items: center; flex: none; }
+.settled-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; border: 1.5px solid var(--muted); opacity: 0.6; }
+.live-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--warning); display: inline-block;
   box-shadow: 0 0 0 0 var(--warning-ring); animation: cb-pulse 2.4s var(--ease) infinite; }
 @keyframes cb-pulse {
   70% { box-shadow: 0 0 0 7px var(--warning-fade); }
@@ -1776,18 +1784,13 @@ body.home-page .mode-toggle:disabled { opacity: 0.5; cursor: default; }
 }
 /* Only ever rendered when count > 0 -- there is no zero state
    to style, so the amber "waiting on you" treatment is the whole rule. */
-.rounds-left-badge { font-size: 11.5px; font-weight: 600; font-variant-numeric: tabular-nums;
+.rounds-left-badge { display: inline-flex; align-items: center; height: 20px; font-size: 11.5px; font-weight: 600;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
   color: var(--warning); background: var(--warning-soft); border: 1px solid var(--warning-border-strong);
-  border-radius: var(--r-pill); padding: 4px 12px; }
-
-/* The Boards view on a wide window: boards as a grid of cards filling the bar's
-   content width, at least 400px each (three across at 1440, six at 2560), each card
-   its row's height with its rounds-left chip at the top right. Under 1440 the list
-   stays one card a line. */
-@media (min-width: 1440px) {
-  .thread-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(400px, 1fr)); }
-  .thread-list > .empty-state { grid-column: 1 / -1; }
-  .thread-item { align-items: flex-start; }
+  border-radius: var(--r-pill); padding: 0 8px; }
+/* a window too narrow for every column keeps the headline and drops the folder and id */
+@media (max-width: 760px) {
+  .thread-path, .thread-id { display: none; }
 }
 
 /* the Missions view (src/indexpage.mjs missionsParts): five columns by derived state,
