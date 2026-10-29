@@ -3124,8 +3124,8 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
       }
 
       // The missions ledger (src/missions.mjs). The list is a plain read, so a browser
-      // holding the cookie reads it through gate 4 above. `build` is the home page's this
-      // daemon serves: a Missions tab served by another reloads.
+      // holding the cookie reads it through gate 4 above. `build` names the home page this
+      // daemon serves, so a Missions tab served by another build reloads.
       if (req.method === 'GET' && url.pathname === '/api/missions') {
         try {
           const overview = overviewFor(req, missionsCache.overview({ all: url.searchParams.get('all') === '1' }), sessions);

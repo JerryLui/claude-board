@@ -167,8 +167,9 @@ export function listMissions(home = boardHome()) {
 /** Rewrites every mission record from before ADR 130 as `releasedRecord` reads it, once the
  * daemon holds its port, so a start that cannot bind leaves the store as an older daemon
  * still serving it reads it. A record already migrated is left untouched, so a second start
- * rewrites nothing. A write the store refuses leaves that record for the next start, warned
- * under its key, apart from a file that cannot be read. Answers the keys rewritten. */
+ * rewrites nothing. A write the store refuses leaves the record for the next start, with a
+ * warning that names its key rather than calling the file unreadable. Answers the keys
+ * rewritten. */
 export function migrateMissions(home = boardHome()) {
   const migrated = [];
   eachMissionKey(home, key => {
