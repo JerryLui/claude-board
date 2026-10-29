@@ -267,19 +267,22 @@ the board. Unlike an Unattended session, which must not post at all. _Avoid_: he
 the refusal), detached, bot.
 
 **Missions view**: the board's home page (`/`), every Mission in the column of its Mission state,
-each a card with its summary, PRs, board link and buttons. _Avoid_: dashboard, overview, index
+each a card with its summary, PRs and buttons that opens its board. _Avoid_: dashboard, overview, index
 (the old name of the page now at `/boards`).
 
 **Boards view**: the list of Threads with its filter, at `/boards`; the home page until the
-Missions view took `/`. _Avoid_: index, index page.
+Missions view took `/`. One line per board, grouped "Waiting on you" (its Waiting boards) over
+"Earlier" (every other), each group with its count and left out while empty; the whole line opens
+the board. _Avoid_: index, index page.
 
 **Top bar**: the board page's own header, shared by the Missions and Boards views with one tab
 for each; switching tabs moves nothing in it. _Avoid_: nav bar, header (unqualified: a board
 page has its own).
 
-**Mission card**: a Mission on the Missions view, one height with the others in its row whatever
-its text: its long fields clamp to a line or two, whole behind one Show the rest fold. _Avoid_:
-tile, row.
+**Mission card**: a Mission on the Missions view, as tall as its text: its long fields clamp to a
+line or two, whole behind one Show the rest fold. The whole card is the link to its board, the
+round waiting on the person or else the latest; its Stop shows on hover, keyboard focus or while
+its question is open, while a Fire or Merge it offers stays shown. _Avoid_: tile, row.
 
 **Mission state**: the column a Mission shows in, derived on every read: needs you, working,
 waiting, stalled or released. Between merge and Released a Mission is working, or needs you
@@ -320,8 +323,8 @@ with the answer, rather than by a Send on the page. _Avoid_: forwarded, proxied,
 person started by hand or a background job, reported by the Session watcher and held only in the
 daemon's memory: its name shows while it runs and is never stored. In Needs you while a round it
 posted waits on the person or it is blocked, else Working while busy, else Waiting with "your
-turn". It is a Mission card in shape, one height with the rest and its long fields cut short
-under the same fold. It takes Orders like a Mission's card and counts toward no launch cap. A session a Mission
+turn". It is a Mission card in shape, as tall as its text and its long fields cut short
+under the same fold; while rounds it posted wait on the person, the whole card opens the first. It takes Orders like a Mission's card and counts toward no launch cap. A session a Mission
 holds is that Mission's card, never a Tab card. _Avoid_: session card, tab (unqualified: a
 browser tab), orphan, hand mission.
 

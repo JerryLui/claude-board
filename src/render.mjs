@@ -981,7 +981,7 @@ function renderQuestionBlock(block, board, commentsByBlock, historical) {
     ? `<div class="question-explainer md-content${explainerFold.bodyClass}"${explainerFold.bodyId}>${block.explainerHtml}</div>${explainerFold.control}`
     : '';
   const picks = PICKS_LINE[block.widget] ? `<p class="question-picks">${PICKS_LINE[block.widget]}</p>` : '';
-  // From 1440px a question takes the options-and-panel columns (ADR 136) unless
+  // From 1440px a question takes the options-and-context halves (ADR 138) unless
   // its options are rendered variants or its context carries a stage.
   const split = block.widget !== 'choose-between-rendered-variants' && !proseContextHtml ? ' question-split' : '';
   return `

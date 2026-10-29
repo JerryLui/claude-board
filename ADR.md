@@ -107,10 +107,10 @@ link where it is worth reading.
 | 118 | [Remote review rides an SSH tunnel; the daemon stays loopback-only](.agents/adr/0118-remote-review-rides-an-ssh-tunnel.md) | 2026-09-28 | relates to 116 |
 | 119 | [A stage fits its content and folds past 600px](.agents/adr/0119-a-stage-fits-its-content-and-folds-past-600px.md) | 2026-10-12 | widens 110 |
 | 120 | [One Pull-out in the corner of every rendered block](.agents/adr/0120-one-pull-out-in-the-corner-of-every-rendered-block.md) | 2026-10-12 | relates to 22, 110 |
-| 121 | [An html stage may carry the post limit](.agents/adr/0121-an-html-stage-may-carry-the-post-limit.md) | 2026-10-19 | amends 7; relates to 112, 117; amended by 122; narrowed by 136 |
-| 122 | [A page carries each stage once](.agents/adr/0122-a-page-carries-each-stage-once.md) | 2026-10-19 | amends 121; relates to 32, 42; narrowed by 136 |
+| 121 | [An html stage may carry the post limit](.agents/adr/0121-an-html-stage-may-carry-the-post-limit.md) | 2026-10-19 | amends 7; relates to 112, 117; amended by 122; narrowed by 138 |
+| 122 | [A page carries each stage once](.agents/adr/0122-a-page-carries-each-stage-once.md) | 2026-10-19 | amends 121; relates to 32, 42; narrowed by 138 |
 | 123 | [The board keeps missions beside its rounds](.agents/adr/0123-the-board-keeps-missions-beside-its-rounds.md) | 2026-10-28 | relates to 5, 71, 115; amended by 130; narrowed by 134 |
-| 124 | [The home page is Missions, in columns by state, under one top bar](.agents/adr/0124-the-home-page-is-missions-under-one-top-bar.md) | 2026-10-28 | relates to 30, 46, 87, 98, 123; amended by 135 |
+| 124 | [The home page is Missions, in columns by state, under one top bar](.agents/adr/0124-the-home-page-is-missions-under-one-top-bar.md) | 2026-10-28 | relates to 30, 46, 87, 98, 123; amended by 137 |
 | 125 | [A card's Fire and Merge answer a live round; Stop is an order](.agents/adr/0125-a-cards-fire-and-merge-answer-a-live-round.md) | 2026-10-28 | relates to 46, 114, 123, 126; narrowed by 134 |
 | 126 | [A relay answers a round on the person's words, marked relayed](.agents/adr/0126-a-relay-answers-a-round-on-the-persons-words.md) | 2026-10-28 | relates to 114, 115, 125 |
 | 127 | [A background session passes the guard and opens no tab](.agents/adr/0127-a-background-session-passes-the-guard-and-opens-no-tab.md) | 2026-10-28 | widens 116 |
@@ -121,5 +121,6 @@ link where it is worth reading.
 | 132 | [Any block may carry card fields](.agents/adr/0132-any-block-may-carry-card-fields.md) | 2026-10-29 | relates to 133 |
 | 133 | [Every block is a titled card, with no type caption](.agents/adr/0133-every-block-is-a-titled-card-with-no-type-caption.md) | 2026-10-29 | amends 110; relates to 28, 132 |
 | 134 | [Send covers the page on screen, and needs you reads a board's newest asking round](.agents/adr/0134-send-covers-the-page-on-screen.md) | 2026-10-29 | narrows 123, 125; relates to 42, 114 |
-| 135 | [Mission cards share one height, and Boards is a card grid from 1440px](.agents/adr/0135-mission-cards-share-one-height.md) | 2026-10-29 | amends 124; relates to 123, 133 |
-| 136 | [From 1440px every card on a board page is one width, up to 1700px](.agents/adr/0136-from-1440px-every-card-is-one-width.md) | 2026-10-29 | narrows 121, 122; relates to 26, 110, 120 |
+| 137 | [Mission cards are as tall as their text, and Boards is one grouped list](.agents/adr/0137-mission-cards-as-tall-as-their-text-and-boards-one-grouped-list.md) | 2026-10-29 | replaces 135; amends 124; relates to 123, 125, 133 |
+| 138 | [Round pages are one centred 1100px column, in Linear's card density](.agents/adr/0138-round-pages-one-centred-1100px-column-in-linear-card-density.md) | 2026-10-29 | replaces 136; narrows 121, 122; relates to 26, 110, 120, 133, 137 |
+| 139 | [Inter is bundled, and "no web fonts and no external assets" narrows to "no external assets"](.agents/adr/0139-inter-is-bundled-no-external-assets-only.md) | 2026-10-29 | relates to 62, 70, 95, 137, 138 |

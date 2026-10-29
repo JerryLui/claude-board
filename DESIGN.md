@@ -445,29 +445,48 @@ smaller scale. The look is the evidence card's, made the board's own so an evide
 from ordinary blocks and the two cannot drift (ADR 132 gives every block the fields). Rejected:
 flat sections, text set on the page with no card, which leaves two kinds of block.
 
-**From a 1440px window every card is one width, up to 1700px** (ADR 136). The shell, and the
-header with its wash, run as wide as the window up to 2560px; the cards under the header are the
-column's width up to 1700px, on the header's left edge, pictures included, and the window beyond
-them is plain page. The send bar keeps the same right edge. Inside a card the content spreads to
-fill it rather than the card shrinking to its content:
+**Cards in Linear's density, at every width** (ADR 138). A round page's cards share the home
+page's density: 13px card text, 14 by 16 padding, 8px corners (`--r-card`) and 8px between cards;
+a card's title 13px semibold and a nested title 12.5px; the board's title 20px semibold; an
+option 13px with its description 12px; markdown headings 16, 14.5 and 13px.
 
-- Long open text (past its fold and opened) flows into up to two columns of reading width, 72ch
-  each; short text, a folded preview, and text holding a table, code or a diagram stay one column.
-- A question's options take a third of the card, never under 523px (the options column the old
-  1120px column gave a question beside a panel), its note and the Defer row on the note's label
-  sit under them at exactly that width, and its context panel takes the other two thirds, tables
-  at their natural width. A question with no panel keeps the same columns, the second empty, so
-  every question's options read at one width. A rendered-variant question, or one with a stage
-  in its context, keeps one full-width column (ADR 26) and its note at reading width.
-- A compare side takes half; a diagram narrower than its panel sits in its middle; a picture opens
-  full size from its corner Pull-out (ADR 120).
-- A long title stays at reading width; its chip stays at the card's right edge.
+**From a 1440px window, one centred 1100px column** (ADR 138). Every card on a board page, the
+board's title and its meta line sit in one 1100px column (`--round-column`), centred on the window
+with `margin-inline: auto`, and the window either side is plain page; the send bar keeps the same
+edges. The header keeps the shell's width, up to 2560px, so its mark, buttons, wash and condensed
+pill stay where they were; only its title block moves onto the column, by a margin that rides the
+condense down to nothing. At 1440px the header's buttons narrow the title box to about 1011px, its
+left edge still on the column. Inside a card:
 
-Under 1440px the column is narrower than the cap and nothing changes. A page board is one
-artifact filling the window and keeps no column. Rejected: cards that fit their content (the
-first pick; on its mock the widths differed widely), every card the window's full width (short
-text and narrow tables left cards half empty, the original complaint), and one centred column
-(text no longer lines up with the title).
+- Prose carries no line-length cap: a line of text runs the card's width, about 130 characters at
+  13px. Long open text (past its fold of about ten lines, and opened) flows into two columns, each
+  half the card, which keeps most prose near 65 characters a line; short text, a folded preview,
+  the card's summary, and text holding a table, code or a diagram stay one column.
+- A question's options take the card's left half, never under 523px, with a 20px gap; its note and
+  the Defer row sit under them at that width, and its context panel takes the right half, tables at
+  their natural width. A question with no panel keeps the same columns, the second empty, so every
+  question's options read at one width. A question whose options or context hold a stage keeps one
+  full-width column, its context over its options (ADR 26).
+- A diagram narrower than its panel sits in its middle; a picture opens full size from its corner
+  Pull-out (ADR 120).
+
+Under 1440px the layout is as before: the cards take the shell's width and prose keeps the old
+1120px column's measure. A page board is one artifact filling the window and keeps no column.
+Recommended was a 760px text column with tables, pictures and compares widening to 1360px on the
+same centre, for lines of about 85 characters and bigger mocks; the person chose one width for every
+card, accepting the longer lines and smaller mocks. This replaces the earlier choice of one wide
+column on the header's left edge, which left a wide window's page against its left side, and with
+it that choice's rejection of a centred column. Still rejected: cards that fit their content
+(widths varied widely), and every card the window's full width (short text and narrow tables left
+cards half empty).
+
+**Inter, inlined** (ADR 139). The page sets Inter, its Latin faces at 400, 500, 600 and 700 inlined
+in the stylesheet as `data:` URLs, with the system stack after it, so a face that fails to load
+reads as the page did before. The rule it bends was "no web fonts and no external assets"; it is
+now "no external assets": the font rides in the stylesheet's own bytes, so a saved copy still opens
+with the network off. The cost is about 97 KB raw on the shared stylesheet, and on every home page
+load, since the home page inlines it; `test/check-pure.mjs` caps it at 120 KB. Recommended had been
+no font.
 
 ### Theme decisions
 
@@ -782,23 +801,32 @@ views: the mark at 30px linking home, the 20px title, the Missions and Boards ta
 on the right the timer, Comment and theme controls. The Boards tab carries the daemon's one waiting
 total, the same number on either view at the same moment. Under it, Missions draws a row of counts
 and then five columns, Needs you, Working, Waiting, Stalled and Released, as a grid of columns at
-least 250px wide that wraps on a narrow window. A card is the work's title and age, its key and
-phase (with a Queued tag under Waiting), the summary, what it waits on and what comes next, its
-PRs with a mark for their state, any pending order, and a row of buttons: the latest board or the
-round asking, Fire or Merge while asked, and the Stop icon at the right while a session is live,
-asking once before it sends, or sending at once on a Cmd-click.
+least 250px wide that wraps on a narrow window. A card is a grey line with its key and phase and
+its age at the right, the title, the summary, what it waits on and what comes next, and a foot of
+small chips (Queued under Waiting, a tab card's tags, its PRs with a mark for their state) with
+Fire or Merge while asked. The whole card opens its board, the round asking or else the latest.
+Stop sits over the age while a session is live, shown on the card's hover or keyboard focus or
+while its question is open, asking once before it sends, or sending at once on a Cmd-click.
 Boards is the list of Threads with its filter, the home page before Missions took `/`, now at the
-bar's full width; from a 1440px window it is a grid of cards at least 400px wide, three across at
-1440px and six at 2560px (ADR 135).
+bar's full width (ADR 137): one panel at every width, a 38px line per board (its dot, the title
+cut with an ellipsis, the rounds-left chip, then folder, round count, last update and thread id as
+fixed columns, the folder and thread id hidden under 760px), the whole line the link. The lines
+are grouped "Waiting on you", the boards with a round waiting on the person (the dot's own fact),
+over "Earlier", each headed by its count and left out while empty, and a board moves group on the
+next repaint. Rejected: one ungrouped dense list by time, the card-per-line list from before
+Missions, and a grid of cards from 1440px.
 
-**Every mission card is one height** (ADR 135). A card wears the board's titled-card look and
-clamps its long fields: the title and the summary to 2 lines, waiting on to 2, next to 1, each
-ending in an ellipsis. Its least height is that whole stack at full length plus one line of PRs
-and one of buttons, so a card with less text stands as tall as one with more, the spare height
-going to the text and the PRs and buttons held to the card's foot, and the cards in a row line
-up. One Show the rest fold per card shows every field whole; it is hidden while nothing is cut,
-stays open across repaints, and may grow its card past the row. Rejected: relying on the agents
-that write a mission to keep `waitingOn` and `next` short, which no card can enforce.
+**A mission card is as tall as its text, in Linear's density** (ADR 137). A card is padded 10 by
+12 with 8px corners and no shadow, its title 13px medium, its grey key line 12px, showing the phase
+alone when the title is the key. It clamps its long fields: the title and the summary to 2 lines,
+waiting on to 2, next to 1, each ending in an ellipsis. One Show the rest fold per card shows every
+field whole; it takes no room while nothing is cut, and stays open across repaints. The whole card
+is the link, by click or Enter (`role="link"`), so it carries no Open board button; Fire and Merge
+stay shown, since they are calls rather than navigation, and Stop waits for hover or focus. A tab
+card with several rounds waiting opens the first, the rest reached through Boards. Rejected:
+the earlier card with only its forced height dropped (it kept the roomy type and padding the
+person called out), Open board and Stop always shown on every card, and relying on the agents that
+write a mission to keep `waitingOn` and `next` short, which no card can enforce.
 
 **Why columns.** Three layouts were mocked. A needs-you-first list puts the one urgent thing on
 top and buries the rest in one undifferentiated scroll, so "what is working" has no place to be
