@@ -2287,6 +2287,12 @@ chrome band; if that ever surfaces, the fix is this same resend, not a broadcast
 
 Traps that have bitten once. A second bite moves the entry up into the section it belongs to.
 
+- **Chrome's media emulation ignores a 'hover' feature.** Chrome 154 headless:
+  `Emulation.setEmulatedMedia` with `{ name: 'hover', value: 'none' }` returns no error and
+  `matchMedia('(hover: none)')` stays false. `Emulation.setTouchEmulationEnabled` with
+  `maxTouchPoints: 1` turns it true (`test/browser-check-missions.mjs`'s no-hover Stop row).
+  Assert the `matchMedia` answer as setup before believing a no-hover row.
+
 - **Deleting the last rule that reads a palette token fails the contrast suite, not the pure one.**
   `test/check-contrast.mjs` ("every palette token is referenced somewhere in the stylesheet, or
   by another token") fails on a token left in `DARK`/`LIGHT` with no reader; the Boards grid's
