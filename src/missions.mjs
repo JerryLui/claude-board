@@ -374,9 +374,10 @@ function releasedLongAgo(m, now) {
 
 /** `GET /api/missions`: the views, newest change first, with per-column counts over the
  * missions listed and `live` counts over every mission. A released mission is listed until
- * `RELEASED_VISIBLE_MS` after it was released, or always with `all`. */
-export function missionsOverview({ home = boardHome(), now = Date.now(), all = false, isAlive = pidAlive } = {}) {
-  const views = listMissions(home).map(m => missionView(m, { home, now, isAlive }));
+ * `RELEASED_VISIBLE_MS` after it was released, or always with `all`. `records` are the
+ * stored records when the caller has read them already (src/missions-cache.mjs). */
+export function missionsOverview({ home = boardHome(), now = Date.now(), all = false, isAlive = pidAlive, records = null } = {}) {
+  const views = (records ?? listMissions(home)).map(m => missionView(m, { home, now, isAlive }));
   const missions = (all ? views : views.filter(v => !releasedLongAgo(v, now)))
     .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
   const counts = { needsYou: 0, working: 0, waiting: 0, stalled: 0, released: 0, queued: 0 };

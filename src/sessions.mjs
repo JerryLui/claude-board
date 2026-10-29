@@ -79,9 +79,11 @@ function validProcStart(value) {
   return typeof value === 'string' && UTC_ISO.test(value) && Number.isFinite(Date.parse(value));
 }
 
-/** Two process starts name one instant (`...:15Z` and `...:15.000Z` alike). */
+/** Two process starts name one second (`...:15Z`, `...:15.000Z` and `...:15.400Z` alike):
+ * the contract allows milliseconds, and the board tool's post sends whole seconds. */
 function sameStart(a, b) {
-  return typeof a === 'string' && typeof b === 'string' && Date.parse(a) === Date.parse(b);
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  return Math.floor(Date.parse(a) / 1000) === Math.floor(Date.parse(b) / 1000);
 }
 
 // --- validation -----------------------------------------------------------------------
@@ -173,7 +175,8 @@ export function validateSessionRef(value) {
  *  - a board whose session has no id yet takes one from a later post by the same process
  *    (same pid and start), once the watcher lists it;
  *  - a board whose session has an id takes a new pid and start from a post resolved to that
- *    same id (the session resumed in a new process);
+ *    same id (the session resumed in a new process), and a new id from a post by the same
+ *    process (the session resumed in place, `/resume` inside one process);
  *  - any other post leaves it as it was. The post itself still lands: which session a board
  *    belongs to is the card's business, never a reason to refuse a round. */
 export function bindBoardSession(board, ref, id) {
@@ -186,9 +189,12 @@ export function bindBoardSession(board, ref, id) {
     if (id && held.pid === ref.pid && sameStart(held.procStart, ref.procStart)) held.id = id;
     return;
   }
-  if (id && id === held.id) {
+  if (!id) return;
+  if (id === held.id) {
     held.pid = ref.pid;
     held.procStart = ref.procStart;
+  } else if (held.pid === ref.pid && sameStart(held.procStart, ref.procStart)) {
+    held.id = id;
   }
 }
 
@@ -337,19 +343,45 @@ export function createSessionList({ now = Date.now, onChange = () => {} } = {}) 
 
 // --- the view -------------------------------------------------------------------------
 
-/** The ids a mission holds or held: its bound session's and the one its last launch
- * ended. A session a mission launched is that mission's card, never a tab, even once the
- * mission has moved on while its process lingers. */
-function missionSessionIds(missions) {
+/** The sessions a mission holds or held, by id and by pid: its bound session's and the one
+ * its last launch ended. A session a mission launched is that mission's card, never a tab,
+ * even once the mission has moved on while its process lingers; the pid covers it under a
+ * new id before its next beat binds that (a `/clear`). */
+function missionSessions(missions) {
   const ids = new Set();
+  const pids = new Set();
+  const add = s => {
+    if (typeof s.id === 'string' && s.id) ids.add(s.id);
+    if (validPid(s.pid)) pids.add(s.pid);
+  };
   for (const m of missions) {
     const s = m && m.session;
     if (!isObject(s)) continue;
-    if (typeof s.id === 'string' && s.id) ids.add(s.id);
-    if (isObject(s.ended) && typeof s.ended.id === 'string' && s.ended.id) ids.add(s.ended.id);
+    add(s);
+    if (isObject(s.ended)) add(s.ended);
   }
-  return ids;
+  return { ids, pids };
 }
+
+/** What a tab card needs of one board, or null for a board no session posted: its id, the
+ * session it holds (`bindBoardSession`), the mission it belongs to, and the rounds still
+ * waiting on the PM (src/missions.mjs `roundWantsAnswer`, the rule a mission's own
+ * needs-you reads). It reads nothing off the clock, so it holds for as long as the board's
+ * file does: src/missions-cache.mjs keeps one per file and re-reads only a file that
+ * moved. */
+export function boardLink(board) {
+  const bs = board && board.session;
+  if (!isObject(bs)) return null;
+  const questions = questionBlocks(board);
+  return {
+    id: board.id,
+    session: { pid: bs.pid ?? null, procStart: bs.procStart ?? null, id: bs.id ?? null },
+    mission: board.mission ?? null,
+    open: (board.rounds || []).filter(r => roundWantsAnswer(r, questions)).map(r => r.n),
+  };
+}
+
+const sameProcess = (s, ref) => s.pid != null && s.pid === ref.pid && sameStart(s.procStart, ref.procStart);
 
 /** `/word` at the head of a session's name (its first prompt), else null: the slash
  * command a tab runs, the one part of its name a reader can tell tabs apart by at a
@@ -360,37 +392,42 @@ export function commandOf(name) {
   return m ? m[1] : null;
 }
 
-/** The tab cards for `sessions` (the list's `entries()`): every listed session but those a
- * mission holds, matched by its session id or by its job id being that id's first 8
- * characters (a background job's id is its session's short form). `missions` are the
- * stored records, every one, retired or not; `boards` every board in the store. A card
- * reads:
+/** The tab cards for `sessions` (the list's `entries()`): every listed session but a
+ * mission's. A session is a mission's when a mission record holds or held it, by its id,
+ * its pid, or its job id being a held id's first 8 characters (a background job's id is
+ * its session's short form); or when it posted a board that belongs to a mission (a
+ * launch reserves a session before it knows its pid or id). `missions` are the stored
+ * records, every one, retired or not; `boards` are `boardLink`s of every board in the
+ * store. A card reads:
  *
- *  - needs-you: a round still waiting on the PM (src/missions.mjs `roundWantsAnswer`, the
- *    rule a mission's own needs-you reads) sits on a board this session posted, or the
- *    session is a blocked job;
+ *  - needs-you: a round still waiting on the PM sits on a board this session posted that
+ *    belongs to no mission (a mission's round is its own card's), or the session is a
+ *    blocked job;
  *  - working: busy;
  *  - waiting: idle, with `yourTurn`.
  *
- * A board links to a session by the id it recorded, or, with none recorded, by its pid and
+ * A board links to the listed session with the id it recorded; with no id recorded, or an
+ * id no listed session has (resumed in place under a new one), to the one with its pid and
  * process start together. `rounds` are `{ board, round }`; the caller adds each one's
  * `url`, which takes the request's host. */
 export function deriveTabs({ sessions, missions = [], boards = [] }) {
-  const held = missionSessionIds(missions);
-  const heldJobs = new Set([...held].map(id => id.slice(0, 8)));
-  const tabs = sessions.filter(s => !held.has(s.id) && !(s.jobId && heldJobs.has(s.jobId)));
+  const links = boards.filter(Boolean);
+  const ownerOf = bs => (bs.id != null && sessions.find(s => s.id === bs.id)) || sessions.find(s => sameProcess(s, bs)) || null;
+  const held = missionSessions(missions);
+  for (const link of links) {
+    if (link.mission == null) continue;
+    const owner = ownerOf(link.session);
+    if (owner) held.ids.add(owner.id);
+  }
+  const heldJobs = new Set([...held.ids].map(id => id.slice(0, 8)));
+  const isMissions = s => held.ids.has(s.id) || (s.pid != null && held.pids.has(s.pid)) || (s.jobId && heldJobs.has(s.jobId));
+  const tabs = sessions.filter(s => !isMissions(s));
   const rounds = new Map(tabs.map(t => [t.id, []]));
-  for (const board of boards) {
-    const bs = board && board.session;
-    if (!isObject(bs)) continue;
-    const owner = bs.id != null
-      ? tabs.find(t => t.id === bs.id)
-      : tabs.find(t => t.pid != null && t.pid === bs.pid && sameStart(t.procStart, bs.procStart));
-    if (!owner) continue;
-    const questions = questionBlocks(board);
-    for (const round of board.rounds || []) {
-      if (roundWantsAnswer(round, questions)) rounds.get(owner.id).push({ board: board.id, round: round.n });
-    }
+  for (const link of links) {
+    if (link.mission != null) continue;
+    const owner = ownerOf(link.session);
+    if (!owner || !rounds.has(owner.id)) continue;
+    for (const n of link.open) rounds.get(owner.id).push({ board: link.id, round: n });
   }
   return tabs.map(t => {
     const linked = rounds.get(t.id);

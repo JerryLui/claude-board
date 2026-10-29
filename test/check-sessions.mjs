@@ -6,7 +6,7 @@
 
 import assert from 'node:assert/strict';
 import { createBoard } from '../src/board.mjs';
-import { createSessionList, deriveTabs, DEFAULT_INTERVAL_MS, MAX_SESSIONS, MAX_NAME_CHARS } from '../src/sessions.mjs';
+import { boardLink, createSessionList, deriveTabs, DEFAULT_INTERVAL_MS, MAX_SESSIONS, MAX_NAME_CHARS } from '../src/sessions.mjs';
 import { check, runMain } from './support.mjs';
 
 const T0 = Date.parse('2026-10-29T12:00:00.000Z');
@@ -28,9 +28,10 @@ function rig() {
 }
 
 /** A board with one round asking a question, recorded as posted by `owner`. */
-function questionBoard(owner, { sent = false } = {}) {
+function questionBoard(owner, { sent = false, mission = null } = {}) {
   const board = createBoard({ title: 'a round', blocks: [{ kind: 'question', prompt: 'Go?', widget: 'single', options: [{ label: 'Yes' }] }] });
   board.session = owner;
+  if (mission) board.mission = mission;
   if (sent) board.rounds[0].status = 'sent';
   return board;
 }
@@ -131,6 +132,7 @@ async function main() {
         sessions: [session(), session({ id: 'other', pid: 5151, procStart: '2026-10-29T09:00:00Z' })],
       });
       assert.equal(list.matchId(4242, '2026-10-29T11:10:15.000Z'), session().id, 'the same instant, written with milliseconds');
+      assert.equal(list.matchId(4242, '2026-10-29T11:10:15.400Z'), session().id, 'a start read to the millisecond matches one sent in whole seconds');
       assert.equal(list.matchId(4242, '2026-10-29T11:10:16Z'), null, 'a reused pid starts at another time');
       assert.equal(list.matchId(5151, '2026-10-29T11:10:15Z'), null);
     } finally {
@@ -155,49 +157,65 @@ async function main() {
     ]);
   });
 
-  await check('an open round on a board a tab posted puts it in needs-you, linked by its id, or by pid and process start when the board recorded no id', () => {
+  await check('an open round on a board a tab posted puts it in needs-you, linked by its id, or by pid and process start when the board recorded no id or an id no listed session has', () => {
     const byId = session({ id: 'by-id', pid: 1001, procStart: '2026-10-29T10:00:00Z' });
     const byPid = session({ id: 'by-pid', pid: 1002, procStart: '2026-10-29T10:00:00Z' });
     const reused = session({ id: 'reused', pid: 1003, procStart: '2026-10-29T11:30:00Z' });
     const answered = session({ id: 'answered', pid: 1004, procStart: '2026-10-29T10:00:00Z' });
+    const resumed = session({ id: 'resumed-new', pid: 1005, procStart: '2026-10-29T10:00:00Z' });
     const idBoard = questionBoard({ pid: 9999, procStart: '2026-10-29T08:00:00Z', id: 'by-id' });
     const pidBoard = questionBoard({ pid: 1002, procStart: '2026-10-29T10:00:00.000Z', id: null });
+    const byIdToo = questionBoard({ pid: 1004, procStart: '2026-10-29T10:00:00Z', id: 'by-id' });
+    // Resumed in place: the same process now lists under a new id.
+    const resumedBoard = questionBoard({ pid: 1005, procStart: '2026-10-29T10:00:00Z', id: 'resumed-old' });
     const tabs = deriveTabs({
-      sessions: [byId, byPid, reused, answered],
+      sessions: [byId, byPid, reused, answered, resumed],
       boards: [
         idBoard,
         pidBoard,
+        resumedBoard,
         // pid 1003 under its earlier process: the reused pid inherits nothing.
         questionBoard({ pid: 1003, procStart: '2026-10-29T07:00:00Z', id: null }),
-        // pid 1004's own board, but recorded under another session's id.
-        questionBoard({ pid: 1004, procStart: '2026-10-29T10:00:00Z', id: 'someone-else' }),
+        // pid 1004's process, but recorded under another listed session's id: that session's.
+        byIdToo,
         questionBoard({ pid: 1004, procStart: '2026-10-29T10:00:00Z', id: 'answered' }, { sent: true }),
-      ],
+      ].map(boardLink),
     });
     assert.deepEqual(tabs.map(t => [t.id, t.state, t.rounds]), [
-      ['by-id', 'needs-you', [{ board: idBoard.id, round: 1 }]],
+      ['by-id', 'needs-you', [{ board: idBoard.id, round: 1 }, { board: byIdToo.id, round: 1 }]],
       ['by-pid', 'needs-you', [{ board: pidBoard.id, round: 1 }]],
       ['reused', 'waiting', []],
       ['answered', 'waiting', []],
+      ['resumed-new', 'needs-you', [{ board: resumedBoard.id, round: 1 }]],
     ]);
   });
 
-  await check('a session a mission holds or held is no tab: its bound id, the id its last launch ended, or a job id that is the bound id\'s first 8 characters', () => {
+  await check('a session a mission holds or held is no tab: its bound id or pid, the id or pid its last launch ended, a job id that is the bound id\'s first 8 characters, or a poster of a mission\'s board', () => {
     const bound = 'bc01dc2a-1111-4000-8000-000000000000';
+    const reservedStart = '2026-10-29T10:30:00Z';
+    // A launch reserves a session with no pid or id; until its first beat binds them, the
+    // board it posts names its mission and its process.
+    const reservedBoard = questionBoard({ pid: 3003, procStart: reservedStart, id: null }, { mission: 'D' });
+    const handBoard = questionBoard({ pid: 4004, procStart: '2026-10-29T09:00:00Z', id: 'hand-tab' });
     const tabs = deriveTabs({
       sessions: [
-        session({ id: bound }),
-        session({ id: 'job-of-bound', kind: 'bg', jobId: 'bc01dc2a' }),
-        session({ id: 'ended-one' }),
-        session({ id: 'hand-tab', jobId: 'ffff0000' }),
+        session({ id: bound, pid: 1 }),
+        session({ id: 'job-of-bound', pid: 7, kind: 'bg', jobId: 'bc01dc2a' }),
+        session({ id: 'ended-one', pid: 8 }),
+        session({ id: 'cleared-anew', pid: 1 }),
+        session({ id: 'ended-pid-anew', pid: 2 }),
+        session({ id: 'reserved-one', pid: 3003, procStart: reservedStart }),
+        session({ id: 'hand-tab', pid: 4004, procStart: '2026-10-29T09:00:00Z', jobId: 'ffff0000' }),
       ],
       missions: [
         { key: 'A', session: { pid: 1, id: bound } },
         { key: 'B', session: { startedAt: '2026-10-29T10:00:00Z', ended: { pid: 2, id: 'ended-one' } } },
         { key: 'C', session: null },
+        { key: 'D', session: { startedAt: reservedStart, seenAt: reservedStart } },
       ],
+      boards: [reservedBoard, handBoard].map(boardLink),
     });
-    assert.deepEqual(tabs.map(t => t.id), ['hand-tab']);
+    assert.deepEqual(tabs.map(t => [t.id, t.rounds]), [['hand-tab', [{ board: handBoard.id, round: 1 }]]]);
   });
 }
 

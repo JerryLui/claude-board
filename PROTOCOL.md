@@ -950,8 +950,9 @@ positive integer, a start with an offset or no zone, another field) is a **400**
 written. The daemon keeps `session: { pid, procStart, id }` on the board, `id` the session id of
 the one listed session ("The session routes") with that pid and start, else `null`; the post never
 names an id itself. The first post to name a session decides the board's: a later post from the
-same pid and start fills an `id` still `null`, a post resolved to the same `id` from a new process
-takes its pid and start, and any other post moves nothing (and still lands). An open round on the
+same pid and start fills an `id` still `null` or takes its new one (the session resumed in its own
+process), a post resolved to the same `id` from a new process takes its pid and start, and any other
+post moves nothing (and still lands). Starts match to the second. An open round on the
 board then puts that session's tab card in Needs you. The shim sends its parent process (the
 `claude` process that spawned it) and that process's start as `TZ=UTC ps -o lstart=` prints it,
 read once at startup; a start it cannot read sends no `session`, never a failed post.
@@ -1450,7 +1451,7 @@ GET  /api/missions[?all=1]
 
 Newest change first. A released mission is listed until 24 hours after `releasedAt`, or always with
 `all=1`. `tabs` and `watcher` are "The session routes"' below. `counts` are per `view` over the
-missions listed, `needsYou` adding the tabs needing the PM; `live` counts every mission holding a
+missions listed, each tab added to its `state`'s count as the Missions view counts its cards; `live` counts every mission holding a
 live session, `working` including one that reads stalled. Secret or cookie.
 
 ```
@@ -1550,14 +1551,17 @@ tabs: [ { id, kind, jobId, cwd, folder, login, name, command,
 watcher: { up, lastAt }  // lastAt: the last snapshot's time, or null since the daemon started
 ```
 
-A session a mission holds or held is never a tab: its `id` is a mission's `session.id` or
-`session.ended.id`, or its `jobId` is the first 8 characters of one. `folder` is the cwd's last
-segment; `command` the name's leading `/word`, else null. `state` is `needs-you` while a round
-that wants its answer (as a mission's needs-you reads it) sits on a board whose `session.id` is
-the tab's, or whose `session.id` is null with the tab's pid and process start, or while the
-session is `blocked`; else `working` while busy, else `waiting`. `rounds` are those rounds, `url`
-built off the request's host. `counts.needsYou` adds the needs-you tabs; a working or waiting tab
-counts nowhere, the launch caps' `live` included.
+A session a mission holds or held is never a tab: its `id` or `pid` is a mission's `session`'s or
+`session.ended`'s, its `jobId` is the first 8 characters of such an id, or it posted a board that
+belongs to a mission (a launch reserves a session before it knows its pid or id). `folder` is the
+cwd's last segment; `command` the name's leading `/word`, else null. `state` is `needs-you` while a
+round that wants its answer (as a mission's needs-you reads it) sits on a board of no mission whose
+`session.id` is the tab's, or whose `session.id` is null or names no listed session, with the tab's
+pid and process start (a session resumed in its own process lists under a new id), or while the
+session is `blocked`; else `working` while busy, else `waiting`. A process start matches to the
+second. `rounds` are those rounds, `url` built off the request's host. Each tab adds one to its
+`state`'s entry in `counts` (`needsYou`, `working`, `waiting`), so `/api/waiting`'s `missions`
+counts match the Missions view; the launch caps' `live` counts no tab.
 
 ```
 POST /api/session/:id/order          { kind: 'stop' | 'comment', text? } -> { order }
