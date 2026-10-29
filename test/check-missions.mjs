@@ -871,14 +871,16 @@ async function main() {
     assert.equal((await rawRequest(port, 'POST', '/api/mission/COOKIE/order', { headers: { 'content-type': 'application/json' }, body: '{"kind":"stop"}' })).status, 401);
   });
 
-  await check('GET /api/missions answers missions, counts, live and now', async () => {
+  await check('GET /api/missions answers missions, tab cards, counts, live, now and the session watcher', async () => {
     const r = await getJson('/api/missions');
     assert.equal(r.status, 200);
-    assert.deepEqual(Object.keys(r.body).sort(), ['counts', 'live', 'missions', 'now']);
+    assert.deepEqual(Object.keys(r.body).sort(), ['counts', 'live', 'missions', 'now', 'tabs', 'watcher']);
+    assert.deepEqual(Object.keys(r.body.watcher).sort(), ['lastAt', 'up']);
     assert.deepEqual(Object.keys(r.body.counts).sort(), ['needsYou', 'queued', 'released', 'stalled', 'waiting', 'working']);
     assert.deepEqual(Object.keys(r.body.live).sort(), ['alive', 'working']);
     const total = Object.values(r.body.counts).reduce((a, b) => a + b, 0);
-    assert.equal(total, r.body.missions.length, 'every listed mission is counted in one column');
+    const tabsNeedingYou = r.body.tabs.filter(t => t.state === 'needs-you').length;
+    assert.equal(total, r.body.missions.length + tabsNeedingYou, 'every listed mission is counted in one column, and a tab only in Needs you');
   });
 }
 

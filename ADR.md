@@ -117,3 +117,4 @@ link where it is worth reading.
 | 128 | [Mission changes speak once a minute, from a read-only watch](.agents/adr/0128-mission-changes-speak-once-a-minute-from-a-read-only-watch.md) | 2026-10-28 | widens 56; relates to 71, 72, 94, 106; amended by 130 |
 | 129 | [A mission's session is live while bound and not gone](.agents/adr/0129-a-missions-session-is-live-while-bound-and-not-gone.md) | 2026-10-28 | relates to 123, 125 |
 | 130 | [A mission's last state is released, and landed records migrate](.agents/adr/0130-a-missions-last-state-is-released.md) | 2026-10-28 | amends 123, 128; relates to 124, 129 |
+| 131 | [Sessions reach the board over a route, held in memory](.agents/adr/0131-sessions-reach-the-board-over-a-route-held-in-memory.md) | 2026-10-29 | relates to 5, 123, 125, 128, 129 |
