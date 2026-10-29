@@ -7529,11 +7529,8 @@ function visibleText(item) {
   return item.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-// Tolerates the leading live-dot span every fresh board carries (round 1 is always
-// `status: 'open'`), so a check that only cares about the headline text is not
-// coupled to liveness, which none of these checks are about.
 function headlineRe(text) {
-  return new RegExp(`<div class="thread-title"[^>]*>(?:<span class="live-dot"[^>]*></span> )?${text}</div>`);
+  return new RegExp(`<div class="thread-title"[^>]*>${text}</div>`);
 }
 
 check('folderName: the last path segment only, and null for no cwd', () => {
@@ -7774,7 +7771,7 @@ check('three threads sharing one cwd render as three visibly distinct rows -- ti
   boards.forEach((b, i) => assert.ok(texts[i].includes(b.thread), `row ${i}'s VISIBLE text must identify its own thread even when headline and path do not`));
 });
 
-check('.thread-meta carries the thread id unconditionally, not just when a collision makes it necessary', () => {
+check('every row shows its thread id, unconditionally, not just when a collision makes it necessary', () => {
   const board = createBoard({ title: 'Has a title, has a cwd', cwd: fixturesDir });
   const threads = buildThreadIndex([board]);
   const html = renderIndexPage({ threads });
@@ -7832,6 +7829,33 @@ check('the round segment reads as a count, not an ordinal, is pluralized correct
   assert.match(twoItem, /\b2 rounds\b/, 'plural for more than one');
   assert.doesNotMatch(html, /\bround \d/i, 'never worded as an ordinal ("round N") anywhere on the page');
   assert.doesNotMatch(zeroItem, /\b0 rounds?\b/, 'the segment is suppressed, not shown as "0 rounds", for a board with no rounds at all');
+});
+
+check('the Boards list groups its rows: Waiting on you first, then Earlier, each header with its count, an empty group left out, the filter applied inside both', () => {
+  const dir = path.join(fixturesDir, 'indexpage-fixtures', 'groups');
+  mkdirSync(dir, { recursive: true });
+  const asking = ['Pick a vendor', 'Pick a region'].map(title => createBoard({ title, cwd: dir, blocks: [{ kind: 'question', prompt: 'which?', widget: 'text' }] }));
+  const settled = ['Vendor notes', 'Release notes', 'Region notes'].map(title => createBoard({ title, cwd: dir, blocks: [{ kind: 'markdown', text: 'fyi' }] }));
+  const threads = buildThreadIndex([...settled, ...asking]);
+  const groups = html => parseHTML(html).querySelectorAll('div.thread-group').map(g => {
+    const head = g.querySelector('h2.thread-group-head');
+    const count = head.querySelector('.thread-group-count').textContent;
+    return {
+      head: head.textContent.slice(0, -count.length).trim() + ' ' + count,
+      rows: g.querySelectorAll('div.thread-title').map(t => t.textContent),
+    };
+  });
+  const sorted = list => [...list].sort();
+
+  const all = groups(renderIndexPage({ threads }));
+  assert.deepEqual(all.map(g => g.head), ['Waiting on you 2', 'Earlier 3']);
+  assert.deepEqual(sorted(all[0].rows), ['Pick a region', 'Pick a vendor']);
+  assert.deepEqual(sorted(all[1].rows), ['Region notes', 'Release notes', 'Vendor notes']);
+
+  const both = groups(renderIndexPage({ threads, query: 'vendor' }));
+  assert.deepEqual(both, [{ head: 'Waiting on you 1', rows: ['Pick a vendor'] }, { head: 'Earlier 1', rows: ['Vendor notes'] }]);
+  assert.deepEqual(groups(renderIndexPage({ threads, query: 'notes' })).map(g => g.head), ['Earlier 3'], 'nothing waiting: no Waiting on you header');
+  assert.deepEqual(groups(renderIndexPage({ threads, query: 'pick' })).map(g => g.head), ['Waiting on you 2'], 'nothing earlier: no Earlier header');
 });
 
 check('the row\'s time element carries both a machine-readable datetime and the exact formatted value for hover', () => {

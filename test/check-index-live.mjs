@@ -181,6 +181,19 @@ function openWireStream(port) {
 const rows = doc => doc.querySelectorAll('a.thread-item');
 const rowFor = (doc, threadId) => rows(doc).find(r => r.getAttribute('data-thread-id') === threadId) || null;
 
+/** The group a row sits in, as a reader sees it: the header's label and count, and how
+ * many board lines the group holds. */
+function groupOf(row) {
+  const group = row.parentElement;
+  assert.equal(group.getAttribute('class'), 'thread-group', 'a board line sits inside a group');
+  const head = group.querySelector('h2.thread-group-head');
+  return {
+    label: head.textContent.replace(head.querySelector('.thread-group-count').textContent, '').trim(),
+    count: Number(head.querySelector('.thread-group-count').textContent),
+    lines: group.querySelectorAll('a.thread-item').length,
+  };
+}
+
 async function main() {
   // `let`, not `const`: one check below genuinely restarts this daemon -- same home,
   // same port, and a brand-new stream hub that has never heard of the page still
@@ -370,16 +383,19 @@ async function main() {
         assert.ok(before, 'setup failure: no row for the session under test');
         assert.equal(before.getAttribute('data-live'), 'true', 'a board with an awaited round is live');
         assert.equal(before.getAttribute('data-rounds-left'), '1');
-        const beforeMeta = before.querySelector('.thread-meta').textContent;
         const beforeStamp = before.querySelector('time.rel-time').getAttribute('datetime');
-        assert.match(beforeMeta, /1 round ·/, 'one round so far');
+        assert.equal(before.querySelector('.thread-rounds').textContent, '1 round', 'one round so far');
+        const waiting = groupOf(before);
+        assert.equal(waiting.label, 'Waiting on you', 'a board with a round waiting sits under Waiting on you');
+        assert.equal(waiting.count, waiting.lines, 'and the header counts the boards under it');
+        assert.equal(rows(tab.document)[0].parentElement, before.parentElement, 'the Waiting on you group comes first');
 
         // A second round on the same board: the count moves, the activity stamp moves.
         await sleep(1100); // updatedAt has second resolution
         await postBoard(port, SECRET, { boardId: posted.boardId, blocks: [QUESTION('And now?')] });
         await tab.tick();
         const moved = rowFor(tab.document, posted.thread);
-        assert.match(moved.querySelector('.thread-meta').textContent, /2 rounds ·/, 'the round count moved');
+        assert.equal(moved.querySelector('.thread-rounds').textContent, '2 rounds', 'the round count moved');
         assert.equal(moved.getAttribute('data-rounds-left'), '2', 'and so did the trips the reviewer owes');
         assert.notEqual(moved.querySelector('time.rel-time').getAttribute('datetime'), beforeStamp,
           'and the last-activity stamp moved with it');
@@ -397,6 +413,9 @@ async function main() {
         assert.equal(settled.getAttribute('data-live'), 'false', 'the status changed without a reload');
         assert.equal(settled.getAttribute('data-rounds-left'), '0');
         assert.equal(settled.querySelector('.rounds-left-badge'), null, 'and the badge is gone, not reading zero');
+        const earlier = groupOf(settled);
+        assert.equal(earlier.label, 'Earlier', 'the answered board moved under Earlier on the repaint');
+        assert.equal(earlier.count, earlier.lines, 'and that header counts the boards under it');
       } finally {
         tab.restoreFetch();
       }
