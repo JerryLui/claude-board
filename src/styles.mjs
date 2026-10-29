@@ -408,12 +408,13 @@ svg { flex: none; }
    padding grows a bottom value here and if the reservation there ever stops
    matching the expression the Tray clears the dock with.
 
-   The column is as wide as the window, up to 2560px, the widest common display
-   in CSS px: a round's mocks, diagrams and before-and-after pairs stand for
-   whole screens and render at the width they get. It used to stop at 1120px,
-   which drew a wide screen's mocks smaller than the screens they stood for.
-   Prose does not follow it out: '--prose' (the width section near the end of
-   this file) holds every line of it to a reading measure. */
+   The shell is as wide as the window, up to 2560px, the widest common display
+   in CSS px; its header runs that wide. The cards under it stop at 1700px on
+   the title's left edge (the width section near the end of this file), wide
+   enough for a mock to read at a laptop screen's size: the shell used to stop
+   at 1120px, which drew a wide screen's mocks smaller than the screens they
+   stood for. Prose does not follow the cards out: '--prose' (the same
+   section) holds every line of it to a reading measure. */
 .board-shell { position: relative; z-index: 1; max-width: 2560px; margin: 0 auto; padding: 0 var(--space-5); }
 
 /* the board's identity stays on screen: a long board scrolls for a while, and
@@ -2598,10 +2599,11 @@ body.page-board .back-to-top.visible {
   transform: translateY(calc((1 - var(--stage-p)) * var(--space-2))); }
 .back-to-top:hover:not(:disabled) { border-color: var(--hairline-2); color: var(--ink); }
 
-/* --- width: a round's rendered blocks take the window, its prose keeps a measure ---
-   '.board-shell' runs as wide as the window (up to 2560px), and every block
-   with it: a stage, a diagram, a compare, a rendered-variant card, at top level
-   and in a question's context. Prose does not: each element a reader reads as
+/* --- width: a round's rendered blocks take the column, its prose keeps a measure ---
+   '.board-shell' runs as wide as the window (up to 2560px), and the cards in
+   it as wide as the column up to 1700px (the 1440px block below), every
+   rendered block with them: a stage, a diagram, a compare, a rendered-variant
+   card, at top level and in a question's context. Prose does not: each element a reader reads as
    lines carries 'max-width: var(--prose)', resolved in its OWN font, so a 16px
    prompt and a 14px paragraph each hold their own measure. That is why an
    option's label and description carry it themselves rather than inheriting
@@ -2641,13 +2643,51 @@ body:not(.page-board) .blocks .comment-list, body:not(.page-board) .blocks .comm
 .card-choice:has(.opt-preview) { max-width: var(--column-1120); }
 @media (min-width: 1440px) {
   :root { --prose: 72ch; }
-  /* A question with a context panel: the options keep exactly the width the
-     old column gave them (its 1.1fr share of '--column-1120' less the gap,
-     523px), so neither an option nor its preview draws narrower than it did,
-     and the panel beside them, where the diagrams and compares sit, takes
-     everything the window adds. The one-column rule for a question with no
-     panel outranks this (':not(:has())' carries a class). */
-  .question-block { grid-template-columns: minmax(0, calc((var(--column-1120) - var(--space-5)) * 1.1 / 2.1)) minmax(0, 1fr); }
+  /* One card width. From 1440px every card on a board page, a picture's
+     included, is the column's width up to 1700px, on the title's left edge;
+     the window beyond it, up to the shell's 2560px, is plain page. Widths
+     that varied card by card read as a ragged page, and a card the window's
+     full width left short text and narrow tables half empty. '.blocks' is the
+     column every top-level card stretches across, and the send bar under it
+     keeps the same right edge. The header stays the shell's width: its wash
+     and its condensed pill centre on the window (see '.board-head::after'). A
+     page board is one artifact filling the window and keeps no column. Below
+     1440px the column is narrower than the cap, so nothing changes there. */
+  body:not(.page-board) .blocks, body:not(.page-board) .send-bar { max-width: 1700px; }
+  /* A question's options take a third of the card, never under 523px (the
+     options column the old 1120px column gave a question beside a panel),
+     its note and the Defer row on the note's label sit under them at exactly
+     their width, and its context panel takes the other two thirds beside both.
+     The note row is the flexible one: a context panel taller than options and
+     note together grows that row, and the note, aligned to its top, stays
+     right under the options instead of drifting down the card. A question
+     with no panel takes the same columns with the second left empty, so every
+     question's options read at one width. A rendered-variant question, and
+     one carrying a stage in its context, keeps the one full-width column
+     (ADR.md entry 26) and its note at reading width: its options are the
+     rendered variants themselves. */
+  .question-block:not([data-widget="choose-between-rendered-variants"]):not(:has(> .question-main > .question-context-prose)) {
+    grid-template-columns: minmax(523px, 1fr) minmax(0, 2fr); grid-template-rows: auto auto 1fr auto; }
+  .question-block:not([data-widget="choose-between-rendered-variants"]):not(:has(> .question-main > .question-context-prose)) > .question-main { grid-column: 1; grid-row: 2; }
+  .question-block:not([data-widget="choose-between-rendered-variants"]):not(:has(> .question-main > .question-context-prose)) > .question-context { grid-column: 2; grid-row: 2 / 4; }
+  .question-block:not([data-widget="choose-between-rendered-variants"]):not(:has(> .question-main > .question-context-prose)) > .note-field { grid-column: 1; grid-row: 3; }
+  .question-block:not([data-widget="choose-between-rendered-variants"]):not(:has(> .question-main > .question-context-prose)) > .card-details { grid-row: 4; }
+  /* The panel's tables at their natural width: stretched across two thirds of
+     a 1700px card, a two-column table's cells sat far apart. */
+  .question-context .md-content table { width: auto; }
+  /* Long text flows into columns of reading width, two at most (three need
+     more than the 1700px card holds). Long means the fold marked it and it
+     overflowed its clip of about ten lines (src/ui.mjs drops the fold, and its
+     control, from text that fits), and it is open: a folded preview, and
+     short text, stay one column. Text holding a table, code or a diagram
+     stays one column too, as each of those takes the card's width. */
+  .markdown-block:not(.folded):has(> .fold-toggle) > .md-content:not(:has(table, pre, .mermaid)) {
+    columns: 2 var(--prose); column-gap: var(--space-6); max-width: calc(2 * var(--prose) + var(--space-6)); }
+  .markdown-block:not(.folded):has(> .fold-toggle) > .md-content > :is(h1, h2, h3, h4, h5, h6) { break-after: avoid; }
+  .markdown-block:not(.folded):has(> .fold-toggle) > .md-content > :is(li, ul, ol, blockquote) { break-inside: avoid; }
+  /* A diagram narrower than its panel sits in the panel's middle rather than
+     against its left edge. */
+  pre.mermaid > svg { display: block; margin-inline: auto; }
 }
 
 /* --- responsive: the board is a laptop surface first, but it has to survive a
