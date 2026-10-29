@@ -12,15 +12,15 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createMissionWatch } from '../src/mission-watch.mjs';
-import { upsertMission, launchMission, STALL_SILENCE_MS } from '../src/missions.mjs';
+import { upsertMission, launchMission, bindSession, STALL_SILENCE_MS } from '../src/missions.mjs';
 import { notifyMissions } from '../src/notify.mjs';
 import { writeDoc, defaultDoc } from '../src/pomodoro.mjs';
 import { readMission } from '../src/store.mjs';
 import { startServer } from '../src/server.mjs';
 import { SECRET_HEADER } from '../src/secret.mjs';
 import {
-  buildLauncher, check, freshLog, haveCc, rawRequest, readJsonLines, runMain, secretHome, waitFor, waitForCount,
-  withEnv, withStubOnPath, writeHeaders, writeStub, STUB_OSASCRIPT,
+  buildLauncher, check, freshLog, haveCc, readJsonLines, runMain, secretHome, waitFor, waitForCount,
+  withEnv, withStubOnPath, writeStub, STUB_OSASCRIPT,
 } from './support.mjs';
 
 process.env.CLAUDE_BOARD_STRANDED_GRACE_MS ??= String(24 * 60 * 60 * 1000);
@@ -140,12 +140,14 @@ async function main() {
     for (const readFails of [false, true]) {
       const clock = { t: T0 };
       const posted = [];
+      let spoke;
+      const spoken = new Promise(resolve => { spoke = resolve; });
       let views = [{ key: 'GOLF', view: 'working', updatedAt: 'u1' }];
       let failing = false;
       const watch = createMissionWatch({
         now: () => clock.t,
         read: () => { if (failing) throw new Error('missions unreadable'); return views; },
-        notify: line => posted.push(line),
+        notify: line => { posted.push(line); spoke(); },
         level: () => 'always',
         intervalMs: 24 * 60 * 60 * 1000,
         windowMs: 40,
@@ -156,7 +158,11 @@ async function main() {
       // The timer's own read: the clock still 1 ms short of the window's end.
       clock.t = T0 + 39;
       failing = readFails;
-      await waitFor(() => posted.length > 0, { timeoutMs: 1000 });
+      // A held timer, not withTimeout's unref'd one: the window timer is unref'd too, and
+      // with nothing holding the loop the process would exit before it fires.
+      let bound;
+      await Promise.race([spoken, new Promise((_, reject) => { bound = setTimeout(() => reject(new Error('the window timer never spoke the batch')), 30_000); })]);
+      clearTimeout(bound);
       watch.close();
       assert.deepEqual(posted, ['GOLF needs you'], readFails ? 'a failed read' : 'an early clock');
     }
@@ -261,15 +267,16 @@ int cb_menubar_probe(void) { return 0; }
     await withEnv({ CLAUDE_BOARD_MISSION_WATCH_MS: '100' }, async () => {
       const { home, secret } = secretHome('claude-board-mission-watch-daemon-', { setHome: false });
       writeDoc({ ...defaultDoc(), settings: { ...defaultDoc().settings, bannerLevel: 'off' } }, home);
-      const { server, port } = await startServer({ home, port: 0, secret });
       const session = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+      // On disk with its session alive before the daemon starts, so the watch's baseline
+      // read, which startServer makes before it answers, has read KILO as working.
+      launchMission('KILO', { phase: 'direct' }, { home });
+      bindSession('KILO', { pid: session.pid }, { home });
+      const written = readMission('KILO', home).updatedAt;
+      const { server, port } = await startServer({ home, port: 0, secret });
       const events = [];
       let req;
       try {
-        const post = (route, body) => rawRequest(port, 'POST', route, { headers: writeHeaders(secret), body: JSON.stringify(body) });
-        assert.equal((await post('/api/mission/KILO/launch', { phase: 'direct' })).status, 200);
-        assert.equal((await post('/api/mission/KILO/session', { pid: session.pid })).status, 200);
-        const written = readMission('KILO', home).updatedAt;
         let raw = '';
         let pending = '';
         req = http.request({ host: '127.0.0.1', port, path: '/api/events', headers: { host: `127.0.0.1:${port}`, [SECRET_HEADER]: secret } }, res => {
@@ -289,12 +296,11 @@ int cb_menubar_probe(void) { return 0; }
         req.on('error', () => {});
         req.end();
         await waitFor(() => raw.includes(': connected'), { what: 'the stream opened' });
-        // Two watch intervals with the session alive: the watch has read KILO as working.
-        await new Promise(resolve => setTimeout(resolve, 300));
-        assert.deepEqual(events.filter(e => e.name === 'missions'), []);
         await new Promise(resolve => { session.once('exit', resolve); session.kill('SIGKILL'); });
         await waitFor(() => events.some(e => e.name === 'missions' && e.data.key === 'KILO'),
           { what: 'a missions event for the stalled session' });
+        // The stream delivers in order, so a publish while the session lived would sit ahead of it.
+        assert.deepEqual(events.filter(e => e.name === 'missions').map(e => e.data.key), ['KILO'], 'nothing was published while the session lived');
         assert.equal(readMission('KILO', home).updatedAt, written, 'nothing wrote the mission');
       } finally {
         req?.destroy();

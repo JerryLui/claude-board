@@ -2421,23 +2421,29 @@ async function main() {
   // A session the Master Chief starts in the background declares itself with
   // CLAUDE_BOARD_CLIENT=background: it posts, and opens no tab. The declared codex client
   // beside it, on the same daemon and the same recorded opener, opens one, so the empty log
-  // is the background flag's doing and not a Suppressed open (ADR 91).
+  // is the background flag's doing and not a Suppressed open (ADR 91). A tab is opened
+  // through a handoff the shim mints from the daemon, awaited before its ask answers, so
+  // the daemon's count of handoff requests says, at each answer, whether a tab was opened.
   await check('CLAUDE_BOARD_CLIENT=background posts a board and opens no tab, where a declared codex client opens one', async () => {
     const dir = tempHome('background');
     const recorder = makeOpenRecorder(dir);
     const openerEnv = { ...baseEnv, CLAUDE_CODE_ENTRYPOINT: undefined, CLAUDE_BOARD_NO_OPEN: undefined, CLAUDE_BOARD_OPEN_CMD: recorder.script, CLAUDE_BOARD_OPEN_LOG: recorder.log };
     const background = spawnShim({ ...openerEnv, CLAUDE_BOARD_CLIENT: 'background' });
     const codex = spawnShim({ ...openerEnv, CLAUDE_BOARD_CLIENT: 'codex' });
+    let handoffs = 0;
+    const countHandoffs = req => { if (req.method === 'POST' && req.url === '/api/handoff') handoffs += 1; };
+    server.on('request', countHandoffs);
     try {
       const posted = await background.request('tools/call', { name: 'ask', arguments: { title: 'Background board', blocks: [NOTE] } });
       assert.equal(posted.result.isError, false, posted.result.content[0].text);
       assert.equal(posted.result.status, 'posted');
+      assert.equal(handoffs, 0, 'the background session opened no tab');
       const control = await codex.request('tools/call', { name: 'ask', arguments: { title: 'Codex board', blocks: [NOTE] } });
       assert.equal(control.result.isError, false, control.result.content[0].text);
-      assert.equal((await recorder.waitForOpens(1, 10_000)).length, 1, 'the codex client opens its tab');
-      await sleep(300);
-      assert.equal(recorder.opened().length, 1, 'the background session opened none');
+      assert.equal(handoffs, 1, 'the codex client opens its tab');
+      assert.equal((await recorder.waitForOpens(1, 10_000)).length, 1, 'the codex client\'s tab reaches the opener');
     } finally {
+      server.off('request', countHandoffs);
       background.close();
       codex.close();
     }
@@ -2531,8 +2537,8 @@ async function main() {
       knownIds = listBoardIds(home);
       const plain = (await invalid.request('tools/call', { name: 'ask', arguments: { title: 'Unlinked board', blocks: [NOTE] } })).result;
       assert.equal(plain.isError, false, plain.content[0].text);
-      const boardId = await waitForNewBoardFile(home, knownIds);
-      assert.equal(JSON.parse(readFileSync(path.join(home, 'boards', `${boardId}.json`), 'utf8')).mission ?? null, null);
+      assert.ok(!knownIds.has(plain.board), 'the unlinked ask posted a board of its own');
+      assert.equal(JSON.parse(readFileSync(path.join(home, 'boards', `${plain.board}.json`), 'utf8')).mission ?? null, null);
     } finally {
       linked.close();
       invalid.close();
