@@ -137,6 +137,9 @@ board = {
   blocks: [ Block ],                // every block of every round, in display order
   answers: { [questionBlockId]: Answer },
   comments: [ Comment ],
+  mission?,                         // the mission key a post named (ADR 123)
+  session?: { pid, procStart, id }, // the agent session that first posted (ADR 131); id null
+                                     // until the session watcher lists that process
 }
 ```
 
@@ -759,7 +762,8 @@ GET  /api/waiting                   every round in the store with an OPEN WAIT (
                                       total, now, missions?: { needsYou, working } };
                                     newest board first, uncapped -- a client showing only
                                     its first few owns that cap. `missions` counts the
-                                    missions needing the PM and those working, for the
+                                    missions and tab cards needing the PM (ADR 131) and
+                                    the missions working, for the
                                     Status item's missions row; absent when the missions
                                     read fails, never failing the list
 GET  /api/events                    SSE: the daemon-wide stream -- timer, settings,
@@ -813,6 +817,13 @@ POST /api/mission/:key/order        { kind: 'stop'|'comment', text? }: a card's 
                                     cookie may post it
 POST /api/mission/:key/order/:id/ack
                                     {}: the order was relayed
+POST /api/sessions                  { intervalMs, sessions }: the session watcher's full
+                                    snapshot, held in memory -> see "The session routes".
+                                    Secret only
+POST /api/session/:id/order         { kind: 'stop'|'comment', text? }: a tab card's order;
+                                    the cookie may post it
+POST /api/session/:id/order/:oid/ack
+                                    {}: the order was relayed. Secret only
 ```
 
 Posting and waiting are separate routes on purpose, so splitting `ask` into post + collect stays
@@ -848,8 +859,8 @@ x-claude-board-secret: <secret>    request header; the file is re-read per gated
 ```
 
 **Every non-GET request** must carry it — except `POST /api/board/:id/submit`,
-`POST /api/board/:id/attended`, `POST /api/store/prune` and `POST /api/mission/:key/order`, which
-also take the session cookie below. `POST /api/board/:id/abandon` is deliberately **not** among them: only the
+`POST /api/board/:id/attended`, `POST /api/store/prune`, `POST /api/mission/:key/order` and
+`POST /api/session/:id/order`, which also take the session cookie below. `POST /api/board/:id/abandon` is deliberately **not** among them: only the
 shim that owns a board may close its rounds, never a browser looking at it. A missing or wrong
 credential is **401 with no body**: nothing about
 what is behind it, not even whether the board exists. A daemon that finds no secret file says so
@@ -957,6 +968,20 @@ making a stub mission (titled by its key, phase `grill`, state `waiting`) when t
 stores `mission` on the board. A later round naming a mission links a board that had none; a
 board never moves from one mission to another, so naming a second is a **400**, and so is a key
 off the pattern, both before anything is written. The shim sends it from `CLAUDE_MISSION`.
+
+**`session: { pid, procStart }` (either form) names the agent session posting** (ADR 131): the
+process id of the agent session the shim runs under, and that process's start, UTC ISO-8601 to the
+second (`2026-10-29T12:10:15Z`, milliseconds allowed). Any other shape (a pid that is not a
+positive integer, a start with an offset or no zone, another field) is a **400** before anything is
+written. The daemon keeps `session: { pid, procStart, id }` on the board, `id` the session id of
+the one listed session ("The session routes") with that pid and start, else `null`; the post never
+names an id itself. The first post to name a session decides the board's: a later post from the
+same pid and start fills an `id` still `null` or takes its new one (the session resumed in its own
+process), a post resolved to the same `id` from a new process takes its pid and start, and any other
+post moves nothing (and still lands). Starts match to the second. An open round on the
+board then puts that session's tab card in Needs you. The shim sends its parent process (the
+`claude` process that spawned it) and that process's start as `TZ=UTC ps -o lstart=` prints it,
+read once at startup; a start it cannot read sends no `session`, never a failed post.
 
 **`noWait` (boolean) is the caller stating it will not open `/wait` on this post**, which is what
 makes the response the thread's next packet. On it the daemon drains into that response whatever
@@ -1450,12 +1475,13 @@ question block's id, and `choice` option 0's label, the one a click submits thro
 
 ```
 GET  /api/missions[?all=1]
-       -> { missions: [View], counts: { needsYou, working, waiting, stalled, released, queued },
-            live: { working, alive }, now }
+       -> { missions: [View], tabs: [Tab], counts: { needsYou, working, waiting, stalled, released, queued },
+            live: { working, alive }, now, watcher: { up, lastAt } }
 ```
 
 Newest change first. A released mission is listed until 24 hours after `releasedAt`, or always with
-`all=1`. `counts` are per `view` over the missions listed; `live` counts every mission holding a
+`all=1`. `tabs` and `watcher` are "The session routes"' below. `counts` are per `view` over the
+missions listed, each tab added to its `state`'s count as the Missions view counts its cards; `live` counts every mission holding a
 live session, `working` including one that reads stalled. Secret or cookie.
 
 ```
@@ -1511,6 +1537,76 @@ order is a 404.
 
 Every write publishes `missions` on the daemon-wide stream ("SSE events"). A refusal is
 `{ error }` with its status.
+
+## The session routes
+
+The agent sessions running on the machine that no mission launched, reported by a session watcher
+outside the daemon and shown on the Missions view as tab cards (ADR 131). The daemon finds no
+session itself and reads no agent's folder: a watcher posts what it found. The list is held in
+memory only. A session's `name` (its first prompt) and a blocked job's `reason` never reach the
+store, a board or mission record, a log line or a notification, and leave with the session or a
+daemon restart.
+
+```
+POST /api/sessions   { intervalMs, sessions: [Session] } -> { sessions: <count>, watcher }
+Session = {
+  id,                 // the agent's session id, ^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$
+  pid, procStart,     // its process and that process's start (UTC ISO-8601), or both null
+                      // for a blocked bg job with no live process
+  kind,               // 'interactive' | 'bg'
+  jobId,              // a bg job's id, or null
+  cwd,                // absolute path
+  login,              // the agent login it runs under, or null
+  name,               // its live name, or null; cut to 200 characters
+  status,             // 'busy' | 'idle' | 'blocked'
+  reason,             // a blocked job's reason, or null; cut to 300 characters
+}
+```
+
+A full snapshot, replacing the list whole; secret only, never the cookie. `intervalMs` (1000 to
+600000) is how often the watcher posts. At most 100 sessions, ids unique. A malformed snapshot is
+a **400** naming the field and the entry's index, never a value, and leaves the list as it was. No
+snapshot for two intervals (counted from the last, or from the daemon's start, assuming 30 s, when
+none came) reads the watcher down and drops the list.
+
+`GET /api/missions` (above) carries the list as `tabs`, and the watcher as `watcher`:
+
+```js
+tabs: [ { id, kind, jobId, cwd, folder, login, name, command,
+          state,       // 'needs-you' | 'working' | 'waiting'
+          yourTurn,    // true while waiting
+          reason,      // a blocked job's, else null
+          rounds: [ { board, round, url } ],
+          orders: [ { id, kind, text?, at, relayedAt? } ] } ]
+watcher: { up, lastAt }  // lastAt: the last snapshot's time, or null since the daemon started
+```
+
+A session a mission holds or held is never a tab: its `id` or `pid` is a mission's `session`'s or
+`session.ended`'s, its `jobId` is the first 8 characters of such an id, or it posted a board that
+belongs to a mission (a launch reserves a session before it knows its pid or id). `folder` is the
+cwd's last segment; `command` the name's leading `/word`, else null. `state` is `needs-you` while a
+round that wants its answer (open and asking, as a mission's needs-you reads a round, but any
+round of the board, not only its newest) sits on a board of no mission whose
+`session.id` is the tab's, or whose `session.id` is null or names no listed session, with the tab's
+pid and process start (a session resumed in its own process lists under a new id), or while the
+session is `blocked`; else `working` while busy, else `waiting`. A process start matches to the
+second. `rounds` are those rounds, `url` built off the request's host. Each tab adds one to its
+`state`'s entry in `counts` (`needsYou`, `working`, `waiting`), so `/api/waiting`'s `missions`
+counts match the Missions view; the launch caps' `live` counts no tab.
+
+```
+POST /api/session/:id/order          { kind: 'stop' | 'comment', text? } -> { order }
+POST /api/session/:id/order/:oid/ack {} -> { order }
+```
+
+A tab card's Stop or comment for the Master Chief to carry to the session, as a mission card's
+(ADR 125): the cookie may post it, a comment needs non-empty `text` at most 4 KB, and the ack,
+secret only, sets `relayedAt` once. Orders are held with the session and leave with it. A session
+not listed, or an order not held, is a 404.
+
+A change to what `GET /api/missions` shows of the list (a snapshot that differs from the last, the
+watcher coming up or going down, an order or its ack) publishes `missions` with `key: null` on the
+daemon-wide stream; a snapshot repeating the last publishes nothing.
 
 ## Marking an already-open tab
 
@@ -1623,7 +1719,7 @@ nothing published here is per-connection.
 ```js
 event: pomodoro   data: { settings, cycle, cycleDate, timer, now }   // same shape as GET /api/pomodoro
 event: waiting    data: { total, now }                               // same total as GET /api/waiting
-event: missions   data: { key, now }                                 // which mission changed
+event: missions   data: { key, now }                                 // which mission changed; key null: the tabs
 ```
 
 `pomodoro` fires after every write under `/api/pomodoro/*` (ensure, pause, resume, reset, forward,
@@ -1638,7 +1734,9 @@ only the count, not the rows — a client that wants the rows still asks `GET /a
 caused by a board linked to a mission (its newest round decides whether it reads needs-you), and from the
 daemon's missions watch (ADR 128), which reads every mission each 30 seconds and publishes a
 derived change no write made: a session whose process died, or one gone silent past 15 minutes.
-A read between the watch's ticks can therefore see a stall before the event says so.
+A read between the watch's ticks can therefore see a stall before the event says so. With `key:
+null` it names the tab cards instead ("The session routes"): a changed snapshot, the watcher up or
+down, a tab's order, or a round on a board a session posted.
 
 ## Stage postMessage channel
 

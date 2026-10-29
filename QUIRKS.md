@@ -2434,7 +2434,8 @@ Traps that have bitten once. A second bite moves the entry up into the section i
   `EPOCHREALTIME` and no `BASH_XTRACEFD`: run it under `bash -x` from a node wrapper that splits
   the trace lines (a marked `PS4`) off stderr and stamps each as it arrives.
   Crept back (2026-10-28): 163s alone, green, and past 180s under `npm run check`'s 4-wide pool
-  on a loaded jerry-m6, with `install.sh` and the check unchanged.
+  on a loaded jerry-m6, with `install.sh` and the check unchanged. Again 2026-10-29: killed at
+  180s in the pool on a merge tip that touched neither, 104 rows green run alone.
 - **A stage frame that leaves the document loads again, and a Send's push used to take every
   frame out** (2026-10-19). Chrome 155: `applySubmittedPush` swapped the whole round section, so a
   video paused at 1.4s came back at 0 after a Send, and `el.replaceWith(el)` is no safe no-op

@@ -1,9 +1,9 @@
 // Real-browser check for the Missions view with cards on it: the top bar lands on the same
 // pixels on `/` (cards in every column, Comment on offer) as on `/boards`; the five columns
 // lay out in one row across the bar's whole content width, at 1440 and 2560 wide, light
-// and dark, with nothing scrolling sideways; every mission card at rest is one height
-// whatever its text, its long fields cut short with an ellipsis under one fold that shows
-// them whole; the Boards view is a card grid filling the width from 1440 up and today's
+// and dark, with nothing scrolling sideways; every mission card at rest, a tab card's too,
+// is one height whatever its text, its long fields cut short with an ellipsis under one
+// fold that shows them whole; the Boards view is a card grid filling the width from 1440 up and today's
 // list at 1280; and Stop, pressed with a real mouse, plain or
 // with Ctrl, Shift or Alt held, asks once and then sends its order, its Stop and Keep on
 // one line, while a Cmd double-press sends one order with no question. Layout and a real press, which the DOM stand-in has none of (QUIRKS.md "The DOM
@@ -36,6 +36,7 @@ const BOARDS = 14; // enough rows that the boards list scrolls at HEIGHT
 const COLUMNS = ['needs-you', 'working', 'waiting', 'stalled', 'released'];
 const NARROW = 1280; // under the wide layout: the Boards view stays a list
 const LONG = 'LONG_CARD'; // every field at the store's longest
+const LONG_TAB = 'tab:tab-long'; // a tab card with its name and blocked reason at their longest (ADR 131)
 // The lines each long field stops at, and the class that draws it.
 const CUTS = { title: ['b.mission-title', 2], summary: ['p.mission-summary', 2], 'waiting on': ['dd.mission-waiting', 2], next: ['dd.mission-next', 1] };
 const words = (n, seed) => Array.from({ length: n }, (_, i) => `${seed}${i}`).join(' ');
@@ -77,6 +78,14 @@ const MEASURE_EXPR = `(function () {
       fold: fold ? getComputedStyle(fold).visibility : null });
   });
   var long = document.querySelector('article.mission-card[data-mission-key=${JSON.stringify(LONG)}]');
+  var longTab = document.querySelector('article.mission-card[data-mission-key=${JSON.stringify(LONG_TAB)}]');
+  var tabCuts = {};
+  [['title', 'b.mission-title'], ['reason', 'p.mission-summary']].forEach(function (e) {
+    var el = longTab && longTab.querySelector(e[1]);
+    if (!el) return;
+    var s = getComputedStyle(el);
+    tabCuts[e[0]] = { clamp: s.webkitLineClamp, lineHeight: parseFloat(s.lineHeight), client: el.clientHeight, scroll: el.scrollHeight };
+  });
   var cuts = {};
   ${JSON.stringify(Object.entries(CUTS))}.forEach(function (e) {
     var el = long && long.querySelector(e[1][0]);
@@ -91,6 +100,8 @@ const MEASURE_EXPR = `(function () {
     cards: cards,
     cuts: cuts,
     longFolds: long ? long.querySelectorAll('details.mission-more').length : 0,
+    tabCuts: tabCuts,
+    longTabFolds: longTab ? longTab.querySelectorAll('details.mission-more').length : 0,
     threads: [].slice.call(document.querySelectorAll('a.thread-item')).map(rect),
     commentOn: !!document.querySelector('button#comment-mode-toggle:not([disabled])'),
     background: getComputedStyle(document.body).backgroundColor,
@@ -166,8 +177,18 @@ async function main() {
     await post('/api/mission/ESTATE_GOLDENS', { title: 'Estate case goldens', phase: 'landing', state: 'released', summary: 'Released, nothing left',
       prs: [{ repo: 'service', number: 1862, url: 'https://github.com/o/service/pull/1862', state: 'merged' }] });
 
+    const tabSession = (id, fields) => ({ id, pid: null, procStart: null, kind: 'interactive', jobId: null, cwd: '/Users/pm/work/tab-repo',
+      login: '/Users/pm/.claude-a', name: null, status: 'busy', reason: null, ...fields });
+    await post('/api/sessions', { intervalMs: 600000, sessions: [
+      tabSession('tab-long', { kind: 'bg', jobId: 'job-long', name: longText(200, 'tabname'), status: 'blocked', reason: longText(300, 'reason') }),
+      tabSession('tab-short', { pid: 61002, procStart: '2026-10-29T11:10:15Z', name: '/grill' }),
+    ] });
+
     const counts = Object.fromEntries(COLUMNS.map(c => [c, 0]));
-    for (const m of (await getJson(`${origin}/api/missions`, daemon.secret)).missions) counts[m.view === 'queued' ? 'waiting' : m.view] += 1;
+    const overview = await getJson(`${origin}/api/missions`, daemon.secret);
+    for (const m of overview.missions) counts[m.view === 'queued' ? 'waiting' : m.view] += 1;
+    for (const t of overview.tabs) counts[t.state] += 1;
+    assert.deepEqual(overview.tabs.map(t => `${t.id} ${t.state}`).sort(), ['tab-long needs-you', 'tab-short working'], 'setup: both tabs listed');
 
     for (const [mode, classicScrollbars] of [['classic scrollbars', true], ['default scrollbars', false]]) {
       await withChrome({ tag: 'cb-missions', classicScrollbars }, async ({ send, onEvent }) => {
@@ -231,7 +252,7 @@ async function main() {
         }
 
         for (const [key, m] of Object.entries(at)) {
-          await row(`${mode}, at ${key}: every mission card at rest is one height whatever its text, so the columns' cards line up row by row`, note => {
+          await row(`${mode}, at ${key}: every mission card and tab card at rest is one height whatever its text, so the columns' cards line up row by row`, note => {
             const { cards } = m.missions;
             const long = cards.find(c => c.key === LONG);
             assert.ok(long, 'setup: the long card is on the page');
@@ -258,6 +279,21 @@ async function main() {
             assert.equal(cards.find(c => c.key === LONG).fold, 'visible', 'the fold shows while text is cut');
             const short = cards.find(c => c.key === 'BANK_EXPORT');
             assert.equal(short.fold, 'hidden', 'a card whose text all fits shows no fold');
+          });
+
+          await row(`${mode}, at ${key}: the long tab card cuts its name and blocked reason at two lines, with an ellipsis, under one fold`, note => {
+            const { tabCuts, longTabFolds, cards } = m.missions;
+            for (const field of ['title', 'reason']) {
+              const c = tabCuts[field];
+              assert.ok(c, `setup: the long tab card shows its ${field}`);
+              note(`${field}: ${px(c.client)} shown of ${px(c.scroll)}, line-clamp ${c.clamp}`);
+              assert.equal(String(c.clamp), '2', `${field} is clamped, which draws the ellipsis`);
+              assert.ok(Math.abs(c.client - 2 * c.lineHeight) <= 1, `${field} shows 2 lines`);
+              assert.ok(c.scroll > c.client + 1, `${field} has more than it shows`);
+            }
+            assert.equal(longTabFolds, 1, 'one fold on the tab card');
+            assert.equal(cards.find(c => c.key === LONG_TAB).fold, 'visible', 'the fold shows while text is cut');
+            assert.equal(cards.find(c => c.key === 'tab:tab-short').fold, null, 'a short tab card has no fold');
           });
 
           await row(`${mode}, at ${key}: the Boards view lays its boards in a grid of at least three columns across the bar's content width`, note => {

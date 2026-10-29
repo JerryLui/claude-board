@@ -2544,6 +2544,50 @@ async function main() {
       invalid.close();
     }
   });
+
+  // ADR 131: the shim names the session it runs under, its parent process, so the board's
+  // open round reaches that session's tab card. This check process is the shim's parent, and
+  // every shim above shares it, so the round is read on a daemon of its own: a tab lists
+  // every open round its pid posted. A Swedish locale makes `ps` print `tors 29 okt.`, so
+  // the shim reads its parent's start in the C locale.
+  for (const [locale, localeEnv] of [
+    ['the inherited locale', {}],
+    ['a Swedish locale', { LC_ALL: 'sv_SE.UTF-8', LC_TIME: 'sv_SE.UTF-8' }],
+  ]) await check(`under ${locale}, a board the shim posts names its parent process and that process's UTC start, and a listed session with that pid and start shows the round in Needs you`, async () => {
+    const tabHome = tempHome('session');
+    const { server: tabServer, port: tabPort } = await startServer({ home: tabHome, port: 0 });
+    const tabBase = `http://127.0.0.1:${tabPort}`;
+    const asker = spawnShim({ ...baseEnv, ...localeEnv, CLAUDE_BOARD_HOME: tabHome, CLAUDE_BOARD_PORT: String(tabPort) });
+    try {
+      const asked = asker.request('tools/call', { name: 'ask', arguments: { title: 'A hand tab asks', blocks: [QUESTION] } });
+      const boardId = await waitForNewBoardFile(tabHome, new Set());
+      const stored = JSON.parse(readFileSync(path.join(tabHome, 'boards', `${boardId}.json`), 'utf8'));
+      const { pid, procStart, id } = stored.session ?? {};
+      assert.equal(pid, process.pid, 'the post names the shim\'s parent pid');
+      assert.match(procStart, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/);
+      const startedAt = Date.now() - process.uptime() * 1000;
+      assert.ok(Math.abs(Date.parse(procStart) - startedAt) < 2_000, `procStart ${procStart} is this process's start in UTC, ${new Date(startedAt).toISOString()}`);
+      assert.equal(id, null, 'no session listed yet');
+
+      const listed = await fetch(`${tabBase}/api/sessions`, {
+        method: 'POST', headers: writeHeaders(SECRET),
+        body: JSON.stringify({ intervalMs: 30_000, sessions: [{
+          id: 'mcp-hand-tab', pid: process.pid, procStart, kind: 'interactive', jobId: null, cwd: process.cwd(),
+          login: null, name: null, status: 'idle', reason: null,
+        }] }),
+      });
+      assert.equal(listed.status, 200, await listed.text());
+      const tab = (await (await fetch(`${tabBase}/api/missions`, { headers: missionHeaders })).json()).tabs.find(t => t.id === 'mcp-hand-tab');
+      assert.equal(tab.state, 'needs-you');
+      assert.deepEqual(tab.rounds, [{ board: boardId, round: 1, url: `${tabBase}/b/${boardId}` }]);
+
+      await submitBoard(tabBase, boardId, { answers: [{ id: stored.blocks[0].id, status: 'answered', choice: 'Yes', note: '' }] }, tabHome);
+      assert.equal((await asked).result.isError, false);
+    } finally {
+      asker.close();
+      tabServer.close();
+    }
+  });
 }
 
 runMain('mcp', main, {
