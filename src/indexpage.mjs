@@ -351,11 +351,11 @@ function missionsSyncHeld(node, key, html) {
   if (was && now) { was.replaceWith(now); return; }
   if (was) { was.replaceWith(); return; }
   if (!now) return;
-  // In the fresh markup the error sits just above the card's first row of controls.
+  // In the fresh markup the error sits just above the card's foot and controls.
   var before = null;
   for (var j = 0; j < node.children.length && !before; j++) {
     var cl = node.children[j].classList;
-    if (cl.contains('mission-btns') || cl.contains('mission-confirm') || cl.contains('mission-comment')) before = node.children[j];
+    if (cl.contains('mission-foot') || cl.contains('mission-confirm') || cl.contains('mission-comment')) before = node.children[j];
   }
   node.insertBefore(now, before);
 }
@@ -374,7 +374,7 @@ function paintMissions() {
 }
 
 // A card's fold shows only while one of its fields is cut short; a shut fold over text
-// that already fits is hidden but keeps its line, so the card keeps its height.
+// that already fits takes no room, so the card is as tall as its text.
 function missionsMarkFits() {
   var folds = document.querySelectorAll('details.mission-more');
   for (var i = 0; i < folds.length; i++) {
@@ -629,11 +629,30 @@ function onMissionsClick(ev) {
     });
     return;
   }
-  if (!missionsCommentModeOn() || missionsUi.commenting[key]) return;
-  if (t.closest('a') || t.closest('button') || t.closest('textarea') || t.closest('summary')) return;
-  missionsUi.commenting[key] = true;
-  paintMissions();
-  focusIn(key, 'textarea.mission-comment-text');
+  if (missionsCommentModeOn()) {
+    if (missionsUi.commenting[key]) return;
+    if (t.closest('a') || t.closest('button') || t.closest('textarea') || t.closest('summary')) return;
+    missionsUi.commenting[key] = true;
+    paintMissions();
+    focusIn(key, 'textarea.mission-comment-text');
+    return;
+  }
+  // The card itself opens its board; its chips, controls, fold and forms keep their own
+  // clicks, and a drag that selected text is not a click on the card. Neither is a
+  // double-press's second click: on Stop, the first one took Stop off the card.
+  if (ev.detail > 1) return;
+  if (t.closest('a, button, textarea, details, span.mission-tag, div.mission-confirm, div.mission-comment')) return;
+  var sel = window.getSelection ? window.getSelection() : null;
+  if (sel && !sel.isCollapsed && cardEl.contains(sel.anchorNode)) return;
+  missionsOpenBoard(cardEl, ev.metaKey || ev.ctrlKey);
+}
+
+// A card's board, as its link: Cmd (or Ctrl) opens it in a new tab.
+function missionsOpenBoard(cardEl, newTab) {
+  var href = cardEl.getAttribute('data-href');
+  if (!href) return;
+  if (newTab) window.open(href, '_blank', 'noopener');
+  else window.location.assign(href);
 }
 
 // On a Mac, Ctrl with the primary button is the secondary click: the browser fires
@@ -656,6 +675,11 @@ function onMissionsInput(ev) {
 
 function onMissionsKeydown(ev) {
   var t = ev.target;
+  if (ev && ev.key === 'Enter' && t && t.classList && t.classList.contains('mission-card')) {
+    ev.preventDefault();
+    missionsOpenBoard(t, ev.metaKey || ev.ctrlKey);
+    return;
+  }
   if (!ev || ev.key !== 'Escape' || !t || !t.closest) return;
   var cardEl = t.closest('article.mission-card');
   if (!cardEl) return;
@@ -1812,11 +1836,12 @@ export function filterThreads(threads, query) {
  * Five columns by derived state (`view`), queued shown under waiting. A card's Fire or
  * Merge button exists only while `actions` holds that kind, which the daemon fills only
  * from a round still waiting on the PM; the button carries what a click submits. Stop
- * shows while a session is live and no stop is already on its way.
+ * is offered while a session is live and no stop is already on its way. The whole card
+ * opens its board, the round waiting on the PM where there is one.
  *
  * A tab (`tabs`, a session the watcher reports that no mission launched; ADR 131) is a
  * card of its own in its state's column, after the missions: tagged "tab", its login and
- * folder, "your turn" while it waits, an Open round link per round it has waiting, a
+ * folder, "your turn" while it waits, a click opening the first round it has waiting, a
  * blocked job's reason, and the mission card's Stop and comment. Its key is TAB_KEY_PREFIX
  * and its session id, which no mission key can be. A watcher that posted in this daemon's life
  * and then went quiet (`watcher.up` false, `lastAt` set) puts a notice over the columns;
@@ -1877,23 +1902,30 @@ function missionsParts(overview, ui) {
     return { lines: lines, stopPending: !!(stop && live) };
   }
 
-  // The frame a mission's card and a tab's share: the article, `inner` (what sits between
-  // it and the orders), the order lines, the error, the button row with Stop last while
-  // the session is live and no stop is on its way, and the Stop question and comment note.
+  // The frame a mission's card and a tab's share: the article, Stop in its top-right
+  // corner while the session is live and no stop is on its way (shown on the card's hover
+  // or focus, styles.mjs), `inner` (the text), the order lines, the error, the foot of
+  // chips and buttons, and the Stop question and comment note. The whole card opens
+  // `o.href`, its board: a link for the pointer and the keyboard both (onMissionsClick,
+  // onMissionsKeydown). A card with Stop and no board still takes the focus, so Stop is
+  // reachable by Tab.
   function cardShell(o) {
     var key = o.key;
     var busy = pick('sending', key);
     var orders = orderLines(o.orders, o.live, pick('stopSent', key));
     var stoppable = o.live && !orders.stopPending;
-    var out = '<article class="' + o.className + '" data-mission-key="' + esc(key) + '" data-view="' + esc(o.view) + '">' + o.inner;
-    for (var l = 0; l < orders.lines.length; l++) out += '<p class="mission-order" role="status">' + esc(orders.lines[l]) + '</p>';
-    if (state.errors && state.errors[key]) out += '<p class="mission-error" role="alert">' + esc(state.errors[key]) + '</p>';
-    var btns = o.btns;
+    var reach = o.href
+      ? ' role="link" tabindex="0" data-href="' + esc(o.href) + '" aria-label="' + esc(o.label) + '"'
+      : (stoppable ? ' role="group" tabindex="0" aria-label="' + esc(o.label) + '"' : '');
+    var out = '<article class="' + o.className + '" data-mission-key="' + esc(key) + '" data-view="' + esc(o.view) + '"' + reach + '>';
     if (stoppable) {
-      btns += '<button type="button" class="mission-stop" aria-label="Stop session" title="Stop: finish the step, hand off, end. Cmd-click stops at once" aria-expanded="'
+      out += '<button type="button" class="mission-stop" aria-label="Stop session" title="Stop: finish the step, hand off, end. Cmd-click stops at once" aria-expanded="'
         + (pick('confirming', key) ? 'true' : 'false') + '"' + (busy ? ' disabled' : '') + '>' + STOP_ICON + '</button>';
     }
-    if (btns) out += '<div class="mission-btns">' + btns + '</div>';
+    out += o.inner;
+    for (var l = 0; l < orders.lines.length; l++) out += '<p class="mission-order" role="status">' + esc(orders.lines[l]) + '</p>';
+    if (state.errors && state.errors[key]) out += '<p class="mission-error" role="alert">' + esc(state.errors[key]) + '</p>';
+    if (o.foot) out += '<div class="mission-foot">' + o.foot + '</div>';
     if (stoppable && pick('confirming', key)) {
       out += '<div class="mission-confirm" role="group" aria-label="Stop this session">'
         + '<p class="mission-confirm-text">Stop this session? It finishes its step, writes its Handoff and ends.</p>'
@@ -1911,7 +1943,7 @@ function missionsParts(overview, ui) {
   }
 
   // The one 'Show the rest' fold a mission or tab card carries when any field of it may
-  // be cut (ADR 135), open while the card is expanded; '' when nothing can be.
+  // be cut, open while the card is expanded; '' when nothing can be.
   function moreFold(key, show) {
     return show ? '<details class="mission-more"' + (pick('expanded', key) ? ' open' : '') + '><summary>Show the rest</summary></details>' : '';
   }
@@ -1922,55 +1954,45 @@ function missionsParts(overview, ui) {
     var boards = Array.isArray(m.boards) ? m.boards : [];
     var latest = boards.length ? boards[boards.length - 1] : null;
     var busy = pick('sending', key);
-    var out = '<div class="mission-text"><div class="mission-card-head"><b class="mission-title">' + esc(m.title || key) + '</b>'
-      + '<span class="mission-age" title="' + esc(m.updatedAt) + '">' + esc(age(m.updatedAt)) + '</span></div>';
-    out += '<div class="mission-ident"><span class="mission-key">' + esc(key) + ' / ' + esc(m.phase) + '</span>'
-      + (m.view === 'queued' ? '<span class="mission-tag">Queued</span>' : '') + '</div>';
+    var title = m.title || key;
+    // A card whose title is its key names it once, in the title.
+    var ident = title === key ? m.phase : key + ' / ' + m.phase;
+    var out = '<div class="mission-text"><div class="mission-ident"><span class="mission-key">' + esc(ident) + '</span>'
+      + '<span class="mission-age" title="' + esc(m.updatedAt) + '">' + esc(age(m.updatedAt)) + '</span></div>'
+      + '<b class="mission-title">' + esc(title) + '</b>';
     if (m.summary) out += '<p class="mission-summary">' + esc(m.summary) + '</p>';
-    if (m.waitingOn || m.next) {
-      out += '<dl class="mission-facts">'
-        + (m.waitingOn ? '<dt>Waiting on</dt><dd class="mission-waiting">' + esc(m.waitingOn) + '</dd>' : '')
-        + (m.next ? '<dt>Next</dt><dd class="mission-next">' + esc(m.next) + '</dd>' : '')
-        + '</dl>';
-    }
-    // Every card in a row is one height whatever its text: the title, summary, waiting
-    // on and next each stop at a few lines, and this one fold shows them whole. It is
-    // hidden again on screen while nothing is cut (missionsMarkFits).
-    out += moreFold(key, m.summary || m.waitingOn || m.next || String(m.title || key).length > FOLD_TITLE_CHARS);
+    if (m.waitingOn) out += '<p class="mission-fact mission-waiting"><span class="mission-label">Waiting on</span>' + esc(m.waitingOn) + '</p>';
+    if (m.next) out += '<p class="mission-fact mission-next"><span class="mission-label">Next</span>' + esc(m.next) + '</p>';
+    // The title, summary, waiting on and next each stop at a few lines, and this one fold
+    // shows them whole. It is hidden on screen while nothing is cut (missionsMarkFits).
+    out += moreFold(key, m.summary || m.waitingOn || m.next || String(title).length > FOLD_TITLE_CHARS);
     out += '</div>';
-    var prs = Array.isArray(m.prs) ? m.prs : [];
-    if (prs.length) {
-      out += '<div class="mission-prs">';
-      for (var p = 0; p < prs.length; p++) {
-        var pr = prs[p];
-        var name = pr.repo + ' #' + pr.number;
-        // Only a web address becomes a link: the url is whatever the writing agent sent.
-        var tag = /^https?:\/\//i.test(String(pr.url)) ? 'a' : 'span';
-        out += '<' + tag + ' class="mission-pr" data-state="' + esc(pr.state) + '"' + (tag === 'a' ? ' href="' + esc(pr.url) + '"' : '')
-          + ' title="' + esc(name + ': ' + pr.state) + '">'
-          + '<i aria-hidden="true">' + (PR_MARKS[pr.state] || '○') + '</i>' + esc(name) + '</' + tag + '>';
-      }
-      out += '</div>';
-    }
 
-    var btns = '';
-    if (actions.length) {
-      btns += '<a class="mission-btn primary" href="/b/' + esc(actions[0].board) + '">Open round ' + esc(actions[0].round) + '</a>';
-    } else if (latest) {
-      btns += '<a class="mission-btn' + (m.view === 'needs-you' ? ' primary' : '') + '" href="/b/' + esc(latest.id) + '">Open board</a>';
+    var foot = m.view === 'queued' ? '<span class="mission-tag">Queued</span>' : '';
+    var prs = Array.isArray(m.prs) ? m.prs : [];
+    for (var p = 0; p < prs.length; p++) {
+      var pr = prs[p];
+      var name = pr.repo + ' #' + pr.number;
+      // Only a web address becomes a link: the url is whatever the writing agent sent.
+      var tag = /^https?:\/\//i.test(String(pr.url)) ? 'a' : 'span';
+      foot += '<' + tag + ' class="mission-pr" data-state="' + esc(pr.state) + '"' + (tag === 'a' ? ' href="' + esc(pr.url) + '"' : '')
+        + ' title="' + esc(name + ': ' + pr.state) + '">'
+        + '<i aria-hidden="true">' + (PR_MARKS[pr.state] || '○') + '</i>' + esc(name) + '</' + tag + '>';
     }
     var shown = {};
     for (var a = 0; a < actions.length; a++) {
       var act = actions[a];
       if (!ACTION_LABELS[act.kind] || shown[act.kind]) continue;
       shown[act.kind] = true;
-      btns += '<button type="button" class="mission-btn mission-act" data-action="' + esc(act.kind) + '" data-board="' + esc(act.board)
+      foot += '<button type="button" class="mission-btn mission-act" data-action="' + esc(act.kind) + '" data-board="' + esc(act.board)
         + '" data-round="' + esc(act.round) + '" data-question="' + esc(act.question) + '" data-choice="' + esc(act.choice) + '"'
         + (busy ? ' disabled' : '') + '>' + ACTION_LABELS[act.kind] + '</button>';
     }
+    // The card opens the round waiting on the PM where there is one, else its latest board.
+    var href = actions.length ? '/b/' + actions[0].board : latest ? '/b/' + latest.id : '';
     return cardShell({
-      key: key, view: m.view, className: 'mission-card', inner: out, orders: m.orders, live: m.live, btns: btns,
-      label: m.title || key, placeholder: 'A note for this mission’s session',
+      key: key, view: m.view, className: 'mission-card', inner: out, orders: m.orders, live: m.live, foot: foot, href: href,
+      label: title, placeholder: 'A note for this mission’s session',
     });
   }
 
@@ -1983,28 +2005,26 @@ function missionsParts(overview, ui) {
 
   // A session the watcher reports that no mission launched (src/sessions.mjs deriveTabs):
   // its own card, keyed apart from every mission key by the colon no mission key can hold.
+  // A tab card is a mission card: the same clamped fields, the same one fold, and a click
+  // opens its first waiting round.
   function tabCard(t) {
     var title = t.name || t.command || (t.kind === 'bg' && t.jobId ? 'Background job ' + t.jobId : 'Session ' + String(t.id).slice(0, 8));
     var key = TAB_KEY_PREFIX + t.id;
-    var out = '<div class="mission-text"><div class="mission-card-head"><b class="mission-title" title="' + esc(title) + '">' + esc(title) + '</b>'
-      + '<span class="tab-tags"><span class="mission-tag tab-tag">tab</span>'
-      + (t.yourTurn ? '<span class="mission-tag tab-turn">your turn</span>' : '') + '</span></div>';
     var where = [];
     if (t.login) where.push('<span class="tab-login" title="' + esc(t.login) + '">' + esc(loginLabel(t.login)) + '</span>');
     if (t.folder) where.push('<span class="tab-folder" title="' + esc(t.cwd) + '">' + esc(t.folder) + '</span>');
+    var out = '<div class="mission-text">';
     if (where.length) out += '<div class="mission-ident"><span class="mission-key">' + where.join(', ') + '</span></div>';
+    out += '<b class="mission-title" title="' + esc(title) + '">' + esc(title) + '</b>';
     if (t.reason) out += '<p class="mission-summary tab-reason">' + esc('Blocked: ' + t.reason) + '</p>';
-    // A tab card is a mission card (ADR 135): the same clamped fields and the same one fold.
     out += moreFold(key, t.reason || title.length > FOLD_TITLE_CHARS);
     out += '</div>';
-    var btns = '';
+    var foot = '<span class="mission-tag tab-tag">tab</span>' + (t.yourTurn ? '<span class="mission-tag tab-turn">your turn</span>' : '');
     var rounds = Array.isArray(t.rounds) ? t.rounds : [];
-    for (var r = 0; r < rounds.length; r++) {
-      var href = /^https?:\/\//i.test(String(rounds[r].url)) ? rounds[r].url : '/b/' + encodeURIComponent(rounds[r].board);
-      btns += '<a class="mission-btn' + (r === 0 ? ' primary' : '') + '" href="' + esc(href) + '">Open round ' + esc(rounds[r].round) + '</a>';
-    }
+    var href = '';
+    if (rounds.length) href = /^https?:\/\//i.test(String(rounds[0].url)) ? rounds[0].url : '/b/' + encodeURIComponent(rounds[0].board);
     return cardShell({
-      key: key, view: t.state, className: 'mission-card tab-card', inner: out, orders: t.orders, live: true, btns: btns,
+      key: key, view: t.state, className: 'mission-card tab-card', inner: out, orders: t.orders, live: true, foot: foot, href: href,
       label: title, placeholder: 'A note for this tab’s session',
     });
   }

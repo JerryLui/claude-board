@@ -223,19 +223,21 @@ async function main() {
         assert.deepEqual(columns(tab.document), expected);
         const card = cardFor(tab.document, 'WORKING_TWO');
         assert.equal(card.querySelector('b.mission-title').textContent, 'WORKING_TWO');
-        assert.equal(card.querySelector('span.mission-key').textContent, 'WORKING_TWO / direct');
+        assert.equal(card.querySelector('span.mission-key').textContent, 'direct', 'a title that is the key is not said twice');
+        assert.equal(cardFor(tab.document, 'WAITING_ONE').querySelector('span.mission-key').textContent, 'WAITING_ONE / landing');
         assert.equal(card.querySelector('p.mission-summary').textContent, 'Wave 2 of 3');
-        assert.deepEqual(card.querySelectorAll('.mission-facts dt, .mission-facts dd').map(n => n.textContent),
-          ['Waiting on', 'checks on #12', 'Next', 'merge']);
+        assert.deepEqual(card.querySelectorAll('p.mission-fact').map(n => [n.querySelector('span.mission-label').textContent, n.textContent]),
+          [['Waiting on', 'Waiting onchecks on #12'], ['Next', 'Nextmerge']]);
         const pr = card.querySelector('a.mission-pr');
         assert.equal(pr.getAttribute('href'), 'https://github.com/o/service/pull/12');
         assert.equal(pr.textContent, '✓service #12');
         const odd = cardFor(tab.document, 'WAITING_ONE').querySelector('.mission-pr');
         assert.deepEqual([odd.tagName, odd.getAttribute('href'), odd.textContent], ['SPAN', null, '○admin #7'],
           'a url that is not a web address is shown, never linked');
-        const needs = cardFor(tab.document, 'NEEDS_ONE').querySelector('a.mission-btn');
-        assert.equal(needs.textContent, 'Open board');
-        assert.equal(needs.getAttribute('href'), `/b/${needsBoard.boardId}`, 'the latest board the mission posted');
+        const needs = cardFor(tab.document, 'NEEDS_ONE');
+        assert.deepEqual([needs.getAttribute('role'), needs.getAttribute('tabindex'), needs.getAttribute('data-href')],
+          ['link', '0', `/b/${needsBoard.boardId}`], 'the card is the link to the latest board the mission posted');
+        assert.equal(needs.querySelector('a.mission-btn'), null, 'no Open board button');
         assert.ok(cardFor(tab.document, 'WORKING_ONE').querySelector('button.mission-stop'), 'a live session offers Stop');
         assert.equal(cardFor(tab.document, 'STALLED_ONE').querySelector('button.mission-stop'), null, 'a stalled one does not');
         assert.equal(cardFor(tab.document, 'RELEASED_ONE').querySelector('button.mission-stop'), null);
@@ -253,7 +255,8 @@ async function main() {
         try {
           const card = cardFor(tab.document, key);
           assert.deepEqual(actionButtons(card), [{ kind, label }]);
-          assert.equal(card.querySelector('a.mission-btn').textContent, `Open round ${round}`);
+          assert.equal(card.getAttribute('data-href'), `/b/${boardId}`, 'the card opens the round waiting on the PM');
+          assert.equal(card.querySelector('a.mission-btn'), null, 'no Open round button');
           await tab.click(card.querySelector('button.mission-act'));
 
           const board = readBoard(boardId, home);

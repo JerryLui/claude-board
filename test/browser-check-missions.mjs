@@ -2,8 +2,9 @@
 // pixels on `/` (cards in every column, Comment on offer) as on `/boards`; the five columns
 // lay out in one row across the bar's whole content width, at 1440 and 2560 wide, light
 // and dark, with nothing scrolling sideways; every mission card at rest, a tab card's too,
-// is one height whatever its text, its long fields cut short with an ellipsis under one
-// fold that shows them whole; the Boards view is a card grid filling the width from 1440 up and today's
+// is as tall as its own text, in a list's density, its long fields cut short with an
+// ellipsis under one fold that shows them whole; a click on a card or Enter on it opens
+// its board, and its Stop shows only on its hover or focus; the Boards view is a card grid filling the width from 1440 up and today's
 // list at 1280; and Stop, pressed with a real mouse, plain or
 // with Ctrl, Shift or Alt held, asks once and then sends its order, its Stop and Keep on
 // one line, while a Cmd double-press sends one order with no question. Layout and a real press, which the DOM stand-in has none of (QUIRKS.md "The DOM
@@ -38,7 +39,8 @@ const NARROW = 1280; // under the wide layout: the Boards view stays a list
 const LONG = 'LONG_CARD'; // every field at the store's longest
 const LONG_TAB = 'tab:tab-long'; // a tab card with its name and blocked reason at their longest (ADR 131)
 // The lines each long field stops at, and the class that draws it.
-const CUTS = { title: ['b.mission-title', 2], summary: ['p.mission-summary', 2], 'waiting on': ['dd.mission-waiting', 2], next: ['dd.mission-next', 1] };
+const CUTS = { title: ['b.mission-title', 2], summary: ['p.mission-summary', 2], 'waiting on': ['p.mission-waiting', 2], next: ['p.mission-next', 1] };
+const TITLE_ONLY = 'TITLE_ONLY'; // a title and its key line, nothing else
 const words = (n, seed) => Array.from({ length: n }, (_, i) => `${seed}${i}`).join(' ');
 const longText = (max, seed) => words(200, seed).slice(0, max);
 
@@ -74,8 +76,27 @@ const MEASURE_EXPR = `(function () {
   var cards = [].slice.call(document.querySelectorAll('article.mission-card')).map(function (c) {
     var list = [].slice.call(c.parentNode.children);
     var fold = c.querySelector('details.mission-more');
+    var s = getComputedStyle(c);
+    var r = c.getBoundingClientRect();
+    // The last child the card lays out, and how far its bottom sits above the card's padding edge.
+    var flow = [].slice.call(c.children).filter(function (k) {
+      var ks = getComputedStyle(k);
+      return ks.position !== 'absolute' && ks.display !== 'none';
+    });
+    var last = flow[flow.length - 1];
+    var title = c.querySelector('b.mission-title');
+    var ident = c.querySelector('span.mission-key');
+    var stop = c.querySelector('button.mission-stop');
     return Object.assign(rect(c), { key: c.getAttribute('data-mission-key'), index: list.indexOf(c),
-      fold: fold ? getComputedStyle(fold).visibility : null });
+      col: c.closest('section.mission-col').getAttribute('data-col'),
+      fold: fold ? getComputedStyle(fold).display : null,
+      footGap: r.bottom - parseFloat(s.borderBottomWidth) - parseFloat(s.paddingBottom) - last.getBoundingClientRect().bottom,
+      pad: s.paddingTop + ' ' + s.paddingRight + ' ' + s.paddingBottom + ' ' + s.paddingLeft,
+      radius: s.borderRadius, shadow: s.boxShadow,
+      title: title ? getComputedStyle(title).fontSize + ' ' + getComputedStyle(title).fontWeight : null,
+      ident: ident ? getComputedStyle(ident).fontSize : null,
+      stop: stop ? getComputedStyle(stop).visibility : null,
+      openButtons: [].slice.call(c.querySelectorAll('a, button')).filter(function (b) { return /Open (board|round)/.test(b.textContent); }).length });
   });
   var long = document.querySelector('article.mission-card[data-mission-key=${JSON.stringify(LONG)}]');
   var longTab = document.querySelector('article.mission-card[data-mission-key=${JSON.stringify(LONG_TAB)}]');
@@ -133,6 +154,28 @@ async function press(tab, selector, modifiers = 0, times = 1) {
   }
 }
 
+/** The path the tab's top frame has gone to once it leaves the Missions page (`/`), or
+ * '/' when it has not left within five seconds. */
+async function landedAt(tab) {
+  let path = '/';
+  for (let i = 0; i < 100 && path === '/'; i++) {
+    const { currentIndex, entries } = await tab.sp('Page.getNavigationHistory');
+    path = new URL(entries[currentIndex].url).pathname;
+    if (path === '/') await new Promise(r => setTimeout(r, 50));
+  }
+  return path;
+}
+
+/** Presses `key` ('Enter' or 'Tab') on whatever has the tab's focus, as a keyboard does.
+ * Enter is its key-down alone: the page may already be navigating away by its key-up. */
+async function pressKey(tab, key) {
+  const code = { Enter: 13, Tab: 9 }[key];
+  const down = { key, code: key, windowsVirtualKeyCode: code, nativeVirtualKeyCode: code };
+  if (key === 'Enter') { await tab.sp('Input.dispatchKeyEvent', { type: 'keyDown', text: '\r', ...down }); return; }
+  await tab.sp('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...down });
+  await tab.sp('Input.dispatchKeyEvent', { type: 'keyUp', ...down });
+}
+
 /** The stop orders `key`'s card has sent from this tab, once every request the press
  * started, and the repaint after it, has landed (openTab's `quiet`). */
 async function ordersSent(tab, key) {
@@ -164,10 +207,15 @@ async function main() {
     await post('/api/board', { title: 'Model vendors: merge', mission: 'MODEL_MAP', blocks: [
       { kind: 'question', prompt: 'Merge both PRs?', widget: 'single', action: 'merge', options: [{ label: 'Merge' }, { label: 'Hold' }] },
     ] });
+    // A board after the merge round: the card still opens the round waiting on the PM.
+    await post('/api/board', { title: 'Model vendors: notes', mission: 'MODEL_MAP', blocks: [{ kind: 'markdown', text: 'Notes' }] });
     await live('FILETYPE_FOLLOWUP', { title: 'File types, part 2', summary: 'Wave 2 of 3, 4 owners', next: 'wave 3',
       prs: [{ repo: 'service', number: 1866, url: 'https://github.com/o/service/pull/1866', state: 'draft' }] });
+    await post('/api/board', { title: 'File types: wave 2', mission: 'FILETYPE_FOLLOWUP', blocks: [{ kind: 'markdown', text: 'Wave 2' }] });
+    await live(TITLE_ONLY, { title: 'Release notes' });
     await live('ANNOUNCEMENTS', { title: 'In-app announcements', summary: 'Wave 1 of 2, 3 owners' });
     await live('BANK_EXPORT', { title: 'Bank export', summary: 'Wave 1 of 1, 1 owner' });
+    await post('/api/board', { title: 'Bank export: plan', mission: 'BANK_EXPORT', blocks: [{ kind: 'markdown', text: 'Plan' }] });
     await post('/api/mission/SCHEDULED', { title: 'Scheduled steps', phase: 'landing', state: 'waiting', waitingOn: 'checks on service #1880' });
     await post('/api/mission/PAGE_READ_ROLLOUT', { title: 'Page reading rollout', phase: 'direct', state: 'queued', next: 'starts when a slot frees' });
     await post('/api/mission/SMALL_FIXES', { title: 'Security small fixes', phase: 'direct', state: 'working', summary: 'Silent since its last step' });
@@ -189,6 +237,15 @@ async function main() {
     for (const m of overview.missions) counts[m.view === 'queued' ? 'waiting' : m.view] += 1;
     for (const t of overview.tabs) counts[t.state] += 1;
     assert.deepEqual(overview.tabs.map(t => `${t.id} ${t.state}`).sort(), ['tab-long needs-you', 'tab-short working'], 'setup: both tabs listed');
+    const byKey = Object.fromEntries(overview.missions.map(m => [m.key, m]));
+    // Where a click on a card lands: the round waiting on the PM, else the latest board.
+    const target = {
+      MODEL_MAP: `/b/${byKey.MODEL_MAP.actions[0].board}`,
+      FILETYPE_FOLLOWUP: `/b/${byKey.FILETYPE_FOLLOWUP.boards.at(-1).id}`,
+    };
+    assert.notEqual(target.MODEL_MAP, `/b/${byKey.MODEL_MAP.boards.at(-1).id}`, 'setup: MODEL_MAP posted a board after its merge round');
+    // The cards Stop is offered on: a live session with no stop on its way, and every tab.
+    const stoppable = [...overview.missions.filter(m => m.live).map(m => m.key), ...overview.tabs.map(t => `tab:${t.id}`)].sort();
 
     for (const [mode, classicScrollbars] of [['classic scrollbars', true], ['default scrollbars', false]]) {
       await withChrome({ tag: 'cb-missions', classicScrollbars }, async ({ send, onEvent }) => {
@@ -252,17 +309,39 @@ async function main() {
         }
 
         for (const [key, m] of Object.entries(at)) {
-          await row(`${mode}, at ${key}: every mission card and tab card at rest is one height whatever its text, so the columns' cards line up row by row`, note => {
+          await row(`${mode}, at ${key}: every mission card and tab card is as tall as its own text, 6px apart in its column`, note => {
             const { cards } = m.missions;
             const long = cards.find(c => c.key === LONG);
-            assert.ok(long, 'setup: the long card is on the page');
-            note(`card heights ${[...new Set(cards.map(c => px(c.height)))].join(', ')} over ${cards.length} cards`);
-            assert.deepEqual(cards.filter(c => Math.abs(c.height - long.height) > 0.5).map(c => `${c.key} ${px(c.height)}`), [],
-              `every card is the long card's ${px(long.height)}`);
-            const byIndex = {};
-            for (const c of cards) (byIndex[c.index] ||= []).push(c);
-            const askew = Object.values(byIndex).filter(row => row.some(c => Math.abs(c.top - row[0].top) > 0.5));
-            assert.deepEqual(askew.map(row => row.map(c => `${c.key} ${px(c.top)}`).join(', ')), [], 'the cards at one place in their columns share a top');
+            const short = cards.find(c => c.key === TITLE_ONLY);
+            assert.ok(long && short, 'setup: the long and the title-only cards are on the page');
+            note(`title-only ${px(short.height)}, long ${px(long.height)}; foot gaps ${[...new Set(cards.map(c => px(c.footGap)))].join(', ')}`);
+            assert.ok(short.height < long.height, 'a title-only card is shorter than one with every field');
+            assert.deepEqual(cards.filter(c => Math.abs(c.footGap) > 1).map(c => `${c.key} ${px(c.footGap)}`), [],
+              'no card has room between its last line and its foot');
+            const apart = [];
+            for (const col of COLUMNS) {
+              const list = cards.filter(c => c.col === col).sort((a, b) => a.index - b.index);
+              for (let i = 1; i < list.length; i++) apart.push(`${list[i].key} ${px(list[i].top - list[i - 1].top - list[i - 1].height)}`);
+            }
+            note(`apart: ${apart.join(', ')}`);
+            assert.ok(apart.length > 0, 'setup: a column holds two cards');
+            assert.deepEqual(apart.filter(a => a.split(' ')[1] !== '6px'), []);
+          });
+
+          await row(`${mode}, at ${key}: every card is padded 10 by 12 with 8px corners and no shadow, its title 13px medium, its key line 12px, no Open board button`, note => {
+            const { cards } = m.missions;
+            note(`${cards[0].pad}, ${cards[0].radius}, ${cards[0].shadow}, title ${cards[0].title}, key line ${cards[0].ident}`);
+            const wrong = cards.filter(c => c.pad !== '10px 12px 10px 12px' || c.radius !== '8px' || c.shadow !== 'none'
+              || c.title !== '13px 500' || (c.ident !== null && c.ident !== '12px') || c.openButtons !== 0);
+            assert.deepEqual(wrong.map(c => `${c.key}: ${c.pad}, ${c.radius}, ${c.shadow}, ${c.title}, ${c.ident}, ${c.openButtons} open buttons`), []);
+          });
+
+          await row(`${mode}, at ${key}: Stop is offered only where a session can be stopped, and hidden at rest`, note => {
+            const { cards } = m.missions;
+            const offered = cards.filter(c => c.stop !== null);
+            note(`Stop on ${offered.length} of ${cards.length} cards: ${[...new Set(offered.map(c => c.stop))].join(', ')}`);
+            assert.deepEqual(offered.map(c => c.key).sort(), stoppable);
+            assert.deepEqual(offered.filter(c => c.stop !== 'hidden').map(c => c.key), []);
           });
 
           await row(`${mode}, at ${key}: the long card cuts its title, summary and waiting on at two lines and next at one, with an ellipsis, under one fold`, note => {
@@ -276,9 +355,9 @@ async function main() {
               assert.ok(c.scroll > c.client + 1, `${field} has more than it shows`);
             }
             assert.equal(longFolds, 1, 'one fold on the card');
-            assert.equal(cards.find(c => c.key === LONG).fold, 'visible', 'the fold shows while text is cut');
+            assert.equal(cards.find(c => c.key === LONG).fold, 'block', 'the fold shows while text is cut');
             const short = cards.find(c => c.key === 'BANK_EXPORT');
-            assert.equal(short.fold, 'hidden', 'a card whose text all fits shows no fold');
+            assert.equal(short.fold, 'none', 'a card whose text all fits shows no fold, and keeps no room for it');
           });
 
           await row(`${mode}, at ${key}: the long tab card cuts its name and blocked reason at two lines, with an ellipsis, under one fold`, note => {
@@ -292,7 +371,7 @@ async function main() {
               assert.ok(c.scroll > c.client + 1, `${field} has more than it shows`);
             }
             assert.equal(longTabFolds, 1, 'one fold on the tab card');
-            assert.equal(cards.find(c => c.key === LONG_TAB).fold, 'visible', 'the fold shows while text is cut');
+            assert.equal(cards.find(c => c.key === LONG_TAB).fold, 'block', 'the fold shows while text is cut');
             assert.equal(cards.find(c => c.key === 'tab:tab-short').fold, null, 'a short tab card has no fold');
           });
 
@@ -337,16 +416,19 @@ async function main() {
 
     await withChrome({ tag: 'cb-missions-stop' }, async ({ send, onEvent }) => {
       const cookie = sessionToken(daemon.secret);
-      await row('Stop, double-pressed with Cmd held, sends one stop order with no question and says so on the card', async note => {
+      await row('Stop, double-pressed with Cmd held, sends one stop order with no question, says so on the card, and opens no board', async note => {
         const tab = await openTab(send, onEvent, `${origin}/`, cookie, tabAt(1440, 'light'));
         try {
           const card = 'article.mission-card[data-mission-key="BANK_EXPORT"]';
+          assert.ok(await tab.evalPage(`document.querySelector('${card}').getAttribute('data-href')`), 'setup: the card opens a board');
+          await tab.evalPage(`window.__opened = []; window.open = function (u) { window.__opened.push(u); return null; }`);
           await press(tab, `${card} button.mission-stop`, 4, 2);
           const said = await tab.until(`(document.querySelector('${card} p.mission-order') || {}).textContent`, 'the order line');
           note(said);
           assert.equal(said, 'Stop asked: waiting for the Master Chief to relay it');
           assert.equal(await ordersSent(tab, 'BANK_EXPORT'), 1, 'one order left the tab for the two presses');
           assert.equal(await tab.evalPage(`!!document.querySelector('${card} div.mission-confirm')`), false, 'no question');
+          assert.deepEqual(await tab.evalPage('window.__opened'), [], 'the second press opens no board');
           const orders = (await getJson(`${origin}/api/mission/BANK_EXPORT`, daemon.secret)).orders;
           note(`orders: ${orders.map(o => o.kind).join(', ')}`);
           assert.deepEqual(orders.map(o => o.kind), ['stop']);
@@ -422,6 +504,66 @@ async function main() {
         }
       });
 
+      for (const width of WIDTHS) {
+        for (const theme of THEMES) {
+          await row(`a click on a card's body opens its latest board, at ${width}px ${theme}`, async note => {
+            const tab = await openTab(send, onEvent, `${origin}/`, cookie, tabAt(width, theme));
+            try {
+              await press(tab, 'article.mission-card[data-mission-key="FILETYPE_FOLLOWUP"] b.mission-title');
+              const landed = await landedAt(tab);
+              note(`landed on ${landed}`);
+              assert.equal(landed, target.FILETYPE_FOLLOWUP);
+            } finally {
+              await tab.close();
+            }
+          });
+
+          await row(`Enter on a focused card opens the round waiting on the PM, not its later board, at ${width}px ${theme}`, async note => {
+            const tab = await openTab(send, onEvent, `${origin}/`, cookie, tabAt(width, theme));
+            try {
+              await tab.evalPage(`document.querySelector('article.mission-card[data-mission-key="MODEL_MAP"]').focus()`);
+              await pressKey(tab, 'Enter');
+              const landed = await landedAt(tab);
+              note(`landed on ${landed}`);
+              assert.equal(landed, target.MODEL_MAP);
+            } finally {
+              await tab.close();
+            }
+          });
+
+          await row(`Stop shows on a card's keyboard focus, takes the next Tab, and shows on its hover, at ${width}px ${theme}`, async note => {
+            const tab = await openTab(send, onEvent, `${origin}/`, cookie, tabAt(width, theme));
+            const seen = sel => tab.evalPage(`getComputedStyle(document.querySelector('${sel} button.mission-stop')).visibility`);
+            try {
+              const focused = 'article.mission-card[data-mission-key="tab:tab-short"]';
+              const hovered = `article.mission-card[data-mission-key="${TITLE_ONLY}"]`;
+              assert.deepEqual([await seen(focused), await seen(hovered)], ['hidden', 'hidden'], 'setup: both at rest');
+              await tab.evalPage(`document.querySelector('${focused}').focus()`);
+              const onFocus = await seen(focused);
+              await pressKey(tab, 'Tab');
+              const next = await tab.evalPage(`document.activeElement === document.querySelector('${focused} button.mission-stop')`);
+              note(`focus: ${onFocus}, the next Tab on Stop: ${next}`);
+              assert.equal(onFocus, 'visible');
+              assert.equal(next, true);
+              await tab.evalPage('document.activeElement.blur()');
+              const at = await tab.evalPage(`(function () {
+                var el = document.querySelector('${hovered} b.mission-title');
+                el.scrollIntoView({ block: 'center' });
+                var r = el.getBoundingClientRect();
+                return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+              })()`);
+              assert.equal(await seen(hovered), 'hidden', 'setup: the mouse is not on it yet');
+              await tab.sp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: at.x, y: at.y, button: 'none', modifiers: 0, clickCount: 0 });
+              const onHover = await seen(hovered);
+              note(`hover: ${onHover}`);
+              assert.equal(onHover, 'visible');
+            } finally {
+              await tab.close();
+            }
+          });
+        }
+      }
+
       await row('Show the rest opens the long card\'s every field whole, grows only that card, and stays open across a repaint', async note => {
         const tab = await openTab(send, onEvent, `${origin}/`, cookie, tabAt(1440, 'light'));
         try {
@@ -456,7 +598,7 @@ async function main() {
 
           const next = longText(280, 'later');
           await post(`/api/mission/${LONG}`, { phase: 'direct', state: 'waiting', next });
-          await tab.until(`(document.querySelector('${card} dd.mission-next') || {}).textContent === ${JSON.stringify(next)}`, 'the repaint');
+          await tab.until(`(document.querySelector('${card} p.mission-next') || {}).textContent === ${JSON.stringify('Next' + next)}`, 'the repaint');
           assert.equal(await tab.evalPage(`!!document.querySelector('${card} details.mission-more[open]')`), true, 'still open after the repaint');
         } finally {
           await tab.close();
