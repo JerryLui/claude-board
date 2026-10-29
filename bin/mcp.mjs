@@ -100,19 +100,24 @@ const MISSION_FIELD = MISSION ? { mission: MISSION } : {};
 // The agent session this shim runs under, carried on every board post so the daemon links
 // the board's open round to that session's tab card (ADR 131). Claude Code spawns the shim
 // directly, so the parent process is the `claude` process itself. Its start is read once,
-// as `TZ=UTC ps -o lstart=` prints it, the reading the session watcher matches on. A start
-// that cannot be read sends no `session` at all, never a failed post.
-const SESSION_FIELD = (() => {
-  const procStart = parentStartUtc(process.ppid);
-  return procStart ? { session: { pid: process.ppid, procStart } } : {};
-})();
+// on the first post, as `TZ=UTC ps -o lstart=` prints it in the C locale, the reading the
+// session watcher matches on. A start that cannot be read sends no `session` at all, never
+// a failed post.
+let sessionFieldCache = null;
+function sessionField() {
+  if (!sessionFieldCache) {
+    const procStart = parentStartUtc(process.ppid);
+    sessionFieldCache = procStart ? { session: { pid: process.ppid, procStart } } : {};
+  }
+  return sessionFieldCache;
+}
 
 function parentStartUtc(pid) {
   if (!Number.isInteger(pid) || pid <= 1) return null;
   let lstart;
   try {
     lstart = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
-      env: { ...process.env, TZ: 'UTC' }, encoding: 'utf8', timeout: 2_000, stdio: ['ignore', 'pipe', 'ignore'],
+      env: { ...process.env, TZ: 'UTC', LC_ALL: 'C' }, encoding: 'utf8', timeout: 2_000, stdio: ['ignore', 'pipe', 'ignore'],
     });
   } catch {
     return null;
@@ -1069,7 +1074,7 @@ async function postThisRound(session, title, blocks, wait, fresh) {
     const creating = (async () => {
       const posted = await httpJson(
         'POST', `${BASE_URL}/api/board`,
-        { title, blocks, wait: Boolean(wait), noWait, cwd: process.cwd(), thread: session.thread ?? null, requestId: createRequestId, ...MISSION_FIELD, ...SESSION_FIELD },
+        { title, blocks, wait: Boolean(wait), noWait, cwd: process.cwd(), thread: session.thread ?? null, requestId: createRequestId, ...MISSION_FIELD, ...sessionField() },
         { timeoutMs: CREATE_TIMEOUT_MS }
       );
       session.boardId = posted.boardId;
@@ -1129,7 +1134,7 @@ async function postThisRound(session, title, blocks, wait, fresh) {
   try {
     posted = await httpJson(
       'POST', `${BASE_URL}/api/board`,
-      { boardId: session.boardId, blocks, title, wait: Boolean(wait), noWait, requestId, ...MISSION_FIELD, ...SESSION_FIELD },
+      { boardId: session.boardId, blocks, title, wait: Boolean(wait), noWait, requestId, ...MISSION_FIELD, ...sessionField() },
       { timeoutMs: POST_TIMEOUT_MS }
     );
   } catch (err) {
