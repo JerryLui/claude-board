@@ -365,8 +365,8 @@ function missionSessions(missions) {
 
 /** What a tab card needs of one board, or null for a board no session posted: its id, the
  * session it holds (`bindBoardSession`), the mission it belongs to, and the rounds still
- * waiting on the PM (src/missions.mjs `roundWantsAnswer`, the rule a mission's own
- * needs-you reads). It reads nothing off the clock, so it holds for as long as the board's
+ * waiting on the PM (src/missions.mjs `roundWantsAnswer`), every one of them: a mission's
+ * own needs-you reads that rule on each board's newest round only (ADR 134). It reads nothing off the clock, so it holds for as long as the board's
  * file does: src/missions-cache.mjs keeps one per file and re-reads only a file that
  * moved. */
 export function boardLink(board) {

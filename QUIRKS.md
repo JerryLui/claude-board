@@ -2434,7 +2434,8 @@ Traps that have bitten once. A second bite moves the entry up into the section i
   `EPOCHREALTIME` and no `BASH_XTRACEFD`: run it under `bash -x` from a node wrapper that splits
   the trace lines (a marked `PS4`) off stderr and stamps each as it arrives.
   Crept back (2026-10-28): 163s alone, green, and past 180s under `npm run check`'s 4-wide pool
-  on a loaded jerry-m6, with `install.sh` and the check unchanged.
+  on a loaded jerry-m6, with `install.sh` and the check unchanged. Again 2026-10-29: killed at
+  180s in the pool on a merge tip that touched neither, 104 rows green run alone.
 - **A stage frame that leaves the document loads again, and a Send's push used to take every
   frame out** (2026-10-19). Chrome 155: `applySubmittedPush` swapped the whole round section, so a
   video paused at 1.4s came back at 0 after a Send, and `el.replaceWith(el)` is no safe no-op
@@ -2461,3 +2462,14 @@ Traps that have bitten once. A second bite moves the entry up into the section i
   `overflow-y: scroll` (true width 1429), so the centred `--doc-w` wash overflowed by half the
   difference and the page scrolled sideways 6px. Re-measure on the root's `ResizeObserver` and on
   `load`, not only on `resize`.
+- **`test/check-mcp.mjs` fails 7 tab-opening checks when run inside an agent session.** The
+  session's environment carries `CLAUDE_BOARD_OPEN_CMD`, `CLAUDE_MISSION`, `CLAUDE_BOARD_CLIENT`
+  and `CLAUDE_CODE_ENTRYPOINT`, which the shim reads, so a check expecting a tab to open, or the
+  guard to refuse, sees the session's answer instead (2026-10-29). Run it as
+  `env -u CLAUDE_BOARD_OPEN_CMD -u CLAUDE_MISSION -u CLAUDE_BOARD_CLIENT -u CLAUDE_CODE_ENTRYPOINT node test/check-mcp.mjs`.
+  `test/check-boundary.mjs` fails 6 rows the same way, on `main` too.
+- **Headless Chromium does not paint a sandboxed stage frame wholly below the first screen in a
+  full-page screenshot.** The frame is captured blank, so a before/after compare low on a long
+  board looked empty although it rendered once scrolled into view (2026-10-29). Before a
+  full-page shot, raise the viewport to the page's full height, or scroll each stage into view
+  first.

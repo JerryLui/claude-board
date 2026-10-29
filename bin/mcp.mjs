@@ -34,6 +34,7 @@ import { fileURLToPath } from 'node:url';
 import { readSecret, secretPath, daemonPort, SECRET_HEADER } from '../src/secret.mjs';
 import { HANDOFF_TOKEN_RE, recoveryCommand } from '../src/handoff.mjs';
 import { MAX_DRAINED_BYTES, postTooLargeMessage } from '../src/post-limit.mjs';
+import { STATUS_TONES } from '../src/card-status.mjs';
 
 // CLAUDE_BOARD_HOME/CLAUDE_BOARD_PORT are PROTOCOL.md's; the rest are additive env
 // vars documented in PROTOCOL.md "MCP surface", never repurposing an existing name.
@@ -623,8 +624,27 @@ const ASK_TOOL = {
         type: 'array',
         description:
           'Content and question blocks in display order. Questions carry their prompt by ' +
-          'value; content blocks carry a source ref (or raw text/html for the html/mermaid kinds).',
-        items: { type: 'object' },
+          'value; content blocks carry a source ref (or raw text/html for the html/mermaid kinds). ' +
+          'Any block may also carry the card fields below, each left out when unused; a question ' +
+          'takes only details and detailsLabel of them.',
+        items: {
+          type: 'object',
+          properties: {
+            title: { type: 'string', description: 'The card\'s title line, plain text, 1 to 200 characters.' },
+            status: {
+              type: 'object',
+              description: 'A verdict chip at the card\'s right edge.',
+              properties: {
+                label: { type: 'string', description: '1 to 40 characters, e.g. "Pass".' },
+                tone: { type: 'string', enum: [...STATUS_TONES] },
+              },
+              required: ['label', 'tone'],
+            },
+            summary: { type: 'string', description: 'A short summary under the title, markdown, 1 to 600 characters.' },
+            details: { type: 'string', description: 'Markdown folded closed under the card, opened on a click.' },
+            detailsLabel: { type: 'string', description: 'The details fold\'s label, 1 to 60 characters, only with details; default "Details".' },
+          },
+        },
       },
       wait: {
         type: 'boolean',

@@ -112,6 +112,10 @@ const DARK = {
   // resolveSurface's default alpha-surface treatment does -- dark --code-ink on this
   // fill 8.92:1, on --diff-del-fill 9.61:1.
   '--diff-add-fill': 'rgba(86, 214, 138, 0.12)',
+  // A status chip's good fill (a card's good status, a question's Answered), its
+  // text --good. Its own token beside --diff-add-fill, so the two can move apart:
+  // light needs a paler fill than a diff row for --good text to clear 4.5:1.
+  '--good-soft': 'rgba(86, 214, 138, 0.12)',
   '--warning': '#e5b04d',
   // The owed-round dot's hue, theme-dependent where every other "waiting on you"
   // surface is not (ADR.md entry 66). Dark takes the accent: amber sits too close
@@ -219,6 +223,7 @@ const LIGHT = {
   // full account. light --code-ink on this fill (composited over --panel-2)
   // 6.59:1, on --diff-del-fill 6.40:1.
   '--diff-add-fill': 'rgba(0, 117, 48, 0.12)',
+  '--good-soft': 'rgba(0, 117, 48, 0.08)',
   '--warning': '#805300',
   // Amber, taken from DARK rather than from this palette's own --warning (ADR.md
   // entry 66): #805300 is the brown entry 30 already rules out for the tab mark,
@@ -403,12 +408,13 @@ svg { flex: none; }
    padding grows a bottom value here and if the reservation there ever stops
    matching the expression the Tray clears the dock with.
 
-   The column is as wide as the window, up to 2560px, the widest common display
-   in CSS px: a round's mocks, diagrams and before-and-after pairs stand for
-   whole screens and render at the width they get. It used to stop at 1120px,
-   which drew a wide screen's mocks smaller than the screens they stood for.
-   Prose does not follow it out: '--prose' (the width section near the end of
-   this file) holds every line of it to a reading measure. */
+   The shell is as wide as the window, up to 2560px, the widest common display
+   in CSS px; its header runs that wide. The cards under it stop at 1700px on
+   the title's left edge (the width section near the end of this file), wide
+   enough for a mock to read at a laptop screen's size: the shell used to stop
+   at 1120px, which drew a wide screen's mocks smaller than the screens they
+   stood for. Prose does not follow the cards out: '--prose' (the same
+   section) holds every line of it to a reading measure. */
 .board-shell { position: relative; z-index: 1; max-width: 2560px; margin: 0 auto; padding: 0 var(--space-5); }
 
 /* the board's identity stays on screen: a long board scrolls for a while, and
@@ -614,11 +620,38 @@ body.sent-page .comment-btn { display: none; }
   transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
 }
 .round-open .block:hover { border-color: var(--hairline-2); box-shadow: var(--shadow-2); }
-.block .block-kicker {
-  display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2);
-  font-size: 10.5px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase;
-  color: var(--muted); margin-bottom: var(--space-3);
-}
+/* The titled card: every block opens with this head row -- its title, then a
+   stage's or a diagram's comment button, then the status chip, always last, so
+   it sits at the card's own right edge. No block names its own type. A block
+   nested in a compare side, a question's context or a variant option takes the
+   same head on a smaller scale (below). */
+.card-head { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-3); min-width: 0; }
+.card-head > .card-title { flex: 1 1 auto; min-width: 0; margin: 0; color: var(--ink);
+  font-size: 16px; font-weight: 650; line-height: 1.4; letter-spacing: -0.01em; }
+.card-head > :first-child:not(.card-title), .card-head > .card-title + * { margin-left: auto; }
+.card-status { flex: none; align-self: flex-start; display: inline-flex; align-items: center;
+  font-size: 11.5px; font-weight: 600; line-height: 1.3; white-space: nowrap;
+  border-radius: var(--r-pill); padding: 3px 10px; background: var(--panel-3); color: var(--ink-2); }
+.card-status[data-tone="good"], .answer-status[data-status="answered"] { background: var(--good-soft); color: var(--good); }
+.card-status[data-tone="warn"], .answer-status[data-status="deferred"] { background: var(--warning-soft); color: var(--warning-ink); }
+.card-status[data-tone="bad"] { background: var(--critical-soft); color: var(--critical); }
+.answer-status[data-status="unanswered"] { display: none; }
+.card-summary { margin: calc(-1 * var(--space-2)) 0 var(--space-3); color: var(--ink-2); }
+.card-summary > :first-child { margin-top: 0; }
+.card-summary > :last-child { margin-bottom: 0; }
+/* The two folds read alike: "Show the rest" under long text (.fold-toggle) and
+   a card's own Details (.card-details), a small disclosure line, not a button. */
+.card-details { margin-top: var(--space-3); }
+.card-details > summary { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; list-style: none;
+  font-size: 12px; font-weight: 600; color: var(--ink-2); }
+.card-details > summary::-webkit-details-marker { display: none; }
+.card-details > summary::before { content: "\\25B8"; color: var(--muted); }
+.card-details[open] > summary::before { content: "\\25BE"; }
+.card-details > summary:hover { color: var(--accent); }
+.card-details > .md-content { margin-top: var(--space-2); }
+.card-details > .md-content > :first-child { margin-top: 0; }
+.compare-side .card-head, .context-item .card-head, .variant-card .card-head { margin-bottom: var(--space-2); }
+.compare-side .card-title, .context-item .card-title, .variant-card .card-title { font-size: 13.5px; font-weight: 600; }
 
 .md-content h1, .md-content h2, .md-content h3, .md-content h4 { font-weight: 650; line-height: 1.3; letter-spacing: -0.01em; margin: 1.1em 0 0.5em; }
 .md-content > :first-child { margin-top: 0; }
@@ -692,7 +725,7 @@ body.sent-page .comment-btn { display: none; }
    put the two columns UNDER them rather than beside the prompt, so a reviewer
    reads what the question is before either column starts. A question with no
    explainer gets the same row with the prompt alone on it. */
-.question-block > .question-head, .question-block > .note-field, .question-block > .question-footer { grid-column: 1 / -1; }
+.question-block > .question-head, .question-block > .note-field, .question-block > .card-details { grid-column: 1 / -1; }
 .question-head > :last-child { margin-bottom: 0; }
 .question-explainer { margin: 0 0 var(--space-3); color: var(--ink-2); }
 .question-explainer > :first-child { margin-top: 0; }
@@ -787,6 +820,8 @@ body.sent-page .comment-btn { display: none; }
    there. */
 .fold-toggle { margin-top: 6px; }
 .question-prompt { font-size: 16px; font-weight: 600; line-height: 1.4; letter-spacing: -0.01em; margin: 0 0 var(--space-3); }
+/* A widget that takes several picks says so, in plain words, under the prompt. */
+.question-picks { margin: calc(-1 * var(--space-2)) 0 var(--space-3); font-size: 12.5px; color: var(--muted); }
 
 .options { display: flex; flex-direction: column; gap: var(--space-2); margin-bottom: var(--space-3); }
 .card-choice {
@@ -920,42 +955,36 @@ body.sent-page .comment-btn { display: none; }
 .rank-list .rank-grip { color: var(--muted); display: inline-flex; }
 
 .note-field { width: 100%; }
+/* the note's label row carries Defer at its right end */
+.note-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); margin-bottom: var(--space-1); }
 .note-field label { display: block; font-size: 10.5px; font-weight: 600; text-transform: uppercase;
-  letter-spacing: 0.1em; color: var(--muted); margin-bottom: var(--space-1); }
+  letter-spacing: 0.1em; color: var(--muted); }
 .note-field textarea { width: 100%; min-height: 56px; resize: vertical; background: var(--panel-2);
   border: 1px solid var(--hairline); color: var(--ink); border-radius: var(--r-md); padding: 9px 12px; font: inherit;
   transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease); }
 
-.question-footer { display: flex; align-items: center; gap: var(--space-3); }
-.btn-defer { background: var(--panel-2); border: 1px solid var(--hairline); color: var(--ink-2);
-  font-size: 11.5px; font-weight: 550; border-radius: var(--r-pill); padding: 6px 14px;
+.btn-defer { background: transparent; border: 1px solid transparent; color: var(--ink-2);
+  font-size: 11.5px; font-weight: 600; border-radius: var(--r-pill); padding: 3px 10px;
   transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease), background var(--dur) var(--ease); }
 .btn-defer:hover:not(:disabled) { border-color: var(--warning); color: var(--ink); }
 .btn-defer.active { background: var(--warning-soft); border-color: var(--warning-ring); color: var(--warning); }
 
-/* the status line reads at a glance instead of being scanned as text: the dot is
-   coloured from data-status, which src/render.mjs emits alongside the same word */
-.answer-status { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted); }
-.answer-status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-.answer-status[data-status="answered"] { color: var(--good); }
-.answer-status[data-status="deferred"] { color: var(--warning); }
 
 .comment-btn { display: inline-flex; align-items: center; gap: 5px; background: transparent;
   border: 1px solid var(--hairline); color: var(--muted); font-size: 10.5px; font-weight: 600;
   letter-spacing: 0.06em; text-transform: uppercase; border-radius: var(--r-pill); padding: 4px 10px;
   transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease), background var(--dur) var(--ease); }
 .comment-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
-/* the fold's Show more control. Same
-   pill chrome as the comment button, written out rather
-   than folded into the selector above so neither rule's exact text moves (several
-   rules in this file are asserted by their text -- QUIRKS.md). It deliberately
-   does NOT also carry .comment-btn: that class is what wireRoot binds the
-   "open a block-level comment form" click handler to. */
-.fold-toggle { display: inline-flex; align-items: center; gap: 5px; background: transparent;
-  border: 1px solid var(--hairline); color: var(--muted); font-size: 10.5px; font-weight: 600;
-  letter-spacing: 0.06em; text-transform: uppercase; border-radius: var(--r-pill); padding: 4px 10px;
-  transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease), background var(--dur) var(--ease); }
-.fold-toggle:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+/* the fold's Show the rest control, drawn as the same disclosure line as a
+   card's Details fold (.card-details above). It deliberately does NOT carry
+   .comment-btn: that class is what wireRoot binds the "open a block-level
+   comment form" click handler to. */
+.fold-toggle { display: inline-flex; align-items: center; gap: 6px; background: transparent;
+  border: none; padding: 0; color: var(--ink-2); font-size: 12px; font-weight: 600; cursor: pointer;
+  transition: color var(--dur) var(--ease); }
+.fold-toggle::before { content: "\\25B8"; color: var(--muted); }
+.fold-toggle[aria-expanded="true"]::before { content: "\\25BE"; }
+.fold-toggle:hover:not(:disabled) { color: var(--accent); }
 
 .comment-list { margin-top: var(--space-3); display: flex; flex-direction: column; gap: var(--space-2); }
 .comment-item { position: relative; font-size: 12.5px; color: var(--ink-2); background: var(--panel-2);
@@ -1885,6 +1914,16 @@ body.home-page .mode-toggle:disabled { opacity: 0.5; cursor: default; }
   color: var(--warning); background: var(--warning-soft); border: 1px solid var(--warning-border-strong);
   border-radius: var(--r-pill); padding: 4px 12px; }
 
+/* The Boards view on a wide window: boards as a grid of cards filling the bar's
+   content width, at least 400px each (three across at 1440, six at 2560), each card
+   its row's height with its rounds-left chip at the top right. Under 1440 the list
+   stays one card a line. */
+@media (min-width: 1440px) {
+  .thread-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(400px, 1fr)); }
+  .thread-list > .empty-state { grid-column: 1 / -1; }
+  .thread-item { align-items: flex-start; }
+}
+
 /* the Missions view (src/indexpage.mjs missionsParts): five columns by derived state,
    a card per mission. Columns share the width the bar's content has, at least 250px
    each, so they wrap only on a narrow window. */
@@ -1906,20 +1945,49 @@ body.home-page .mode-toggle:disabled { opacity: 0.5; cursor: default; }
 .mission-badge[data-col="working"] { color: var(--accent); background: var(--accent-soft); border-color: transparent; }
 .mission-badge[data-col="stalled"] { color: var(--critical); background: var(--critical-soft); border-color: var(--critical-border); }
 .mission-badge[data-col="released"] { color: var(--good); background: var(--panel); }
-.mission-card { background: var(--panel); border: 1px solid var(--hairline); border-radius: var(--r-sm); padding: 10px 12px;
-  box-shadow: var(--shadow-1); min-width: 0; overflow-wrap: anywhere; }
-.mission-card-head { display: flex; justify-content: space-between; gap: 8px; }
-.mission-title { font-weight: 600; }
-.mission-age, .mission-key { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; color: var(--muted); white-space: nowrap; }
-.mission-ident { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 2px; }
+/* A mission card has the board's titled-card look ('.block': panel, hairline, 14px
+   corners, a bold title, its age at the right edge), and every card is one height
+   whatever its text. The title and summary stop at two lines, waiting on at two, next
+   at one, each ending in an ellipsis, and the card's least height is that whole stack
+   at full length plus one line of PRs and one of buttons, so a card with less text
+   is as tall as one with more and the columns' cards line up row by row. The text
+   takes the spare height, holding the PRs and buttons to the card's foot. One fold
+   per card ('.mission-more') shows every field whole; opening it may grow that card. */
+.mission-card { --mc-pad: 14px; --mc-title-lh: 20px; --mc-mono-lh: 18px; --mc-text-lh: 19px; --mc-label-lh: 17px;
+  --mc-fact-lh: 18px; --mc-chip: 22px; --mc-btn: 32px;
+  display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--hairline); border-radius: var(--r-lg);
+  padding: var(--mc-pad) 16px; box-shadow: var(--shadow-1); min-width: 0; overflow-wrap: anywhere;
+  min-height: calc(2 * var(--mc-pad) + 2px + 2 * var(--mc-title-lh) + 2px + var(--mc-mono-lh) + 8px + 2 * var(--mc-text-lh)
+    + 8px + var(--mc-label-lh) + 2 * var(--mc-fact-lh) + 6px + var(--mc-label-lh) + var(--mc-fact-lh)
+    + 8px + var(--mc-mono-lh) + 8px + var(--mc-chip) + 10px + var(--mc-btn)); }
+.mission-text { flex: 1 0 auto; min-width: 0; }
+.mission-card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+.mission-title { flex: 1 1 auto; min-width: 0; font-size: 14px; line-height: var(--mc-title-lh); font-weight: 650; letter-spacing: -0.01em; color: var(--ink); }
+.mission-age, .mission-key { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; line-height: var(--mc-mono-lh); color: var(--muted); white-space: nowrap; }
+.mission-age { line-height: var(--mc-title-lh); }
+.mission-ident { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 2px; line-height: var(--mc-mono-lh); }
 .mission-key { white-space: normal; }
-.mission-tag { flex: none; white-space: nowrap; font-size: 11px; padding: 0 7px; border-radius: var(--r-pill); color: var(--muted); border: 1px solid var(--hairline-2); }
-.mission-summary { margin: 6px 0 0; color: var(--ink-2); font-size: 13px; }
-.mission-facts { font-size: 12.5px; color: var(--ink-2); margin: 6px 0 0; display: grid; grid-template-columns: auto 1fr; gap: 1px 10px; }
-.mission-facts dt { color: var(--muted); font-weight: 600; }
-.mission-facts dd { margin: 0; }
+.mission-tag { flex: none; white-space: nowrap; font-size: 11px; line-height: 16px; padding: 0 7px; border-radius: var(--r-pill); color: var(--muted); border: 1px solid var(--hairline-2); }
+.mission-summary { margin: 8px 0 0; color: var(--ink-2); font-size: 13px; line-height: var(--mc-text-lh); }
+.mission-facts { font-size: 12.5px; color: var(--ink-2); margin: 8px 0 0; }
+.mission-facts dt { color: var(--muted); font-size: 12px; line-height: var(--mc-label-lh); font-weight: 600; }
+.mission-facts dd { margin: 0; line-height: var(--mc-fact-lh); }
+.mission-facts dd + dt { margin-top: 6px; }
+.mission-title, .mission-summary, .mission-waiting, .mission-next { display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; }
+.mission-title, .mission-summary, .mission-waiting { -webkit-line-clamp: 2; }
+.mission-next { -webkit-line-clamp: 1; }
+.mission-text:has(> .mission-more[open]) :is(.mission-title, .mission-summary, .mission-waiting, .mission-next) { display: block; -webkit-line-clamp: none; overflow: visible; }
+.mission-more { margin-top: 8px; font-size: 12px; line-height: var(--mc-mono-lh); }
+.mission-more > summary { display: inline-block; cursor: pointer; color: var(--muted); font-weight: 600; list-style: none; border-radius: var(--r-sm); }
+.mission-more > summary::-webkit-details-marker { display: none; }
+.mission-more > summary::before { content: "\\25B8"; display: inline-block; margin-right: 5px; transition: transform var(--dur) var(--ease); }
+.mission-more[open] > summary::before { transform: rotate(90deg); }
+.mission-more > summary:hover { color: var(--ink); }
+.mission-more > summary:focus-visible { outline: none; box-shadow: var(--ring); }
+.mission-more[data-fits] { visibility: hidden; }
 .mission-prs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.mission-pr { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; padding: 1px 8px; border-radius: var(--r-sm);
+.mission-card > .mission-btns { margin-top: 10px; }
+.mission-pr { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; line-height: 18px; padding: 1px 8px; border-radius: var(--r-sm);
   border: 1px solid var(--hairline-2); color: var(--ink-2); background: var(--panel-2); white-space: nowrap; text-decoration: none; }
 .mission-pr:hover { border-color: var(--accent); color: var(--ink); }
 .mission-pr i { font-style: normal; font-weight: 700; color: var(--muted); }
@@ -1959,7 +2027,6 @@ body.home-page .mode-toggle:disabled { opacity: 0.5; cursor: default; }
 .tab-tags { display: inline-flex; flex: none; align-items: center; gap: 4px; }
 .tab-tag { color: var(--accent); background: var(--accent-soft); border-color: transparent; }
 .tab-turn { color: var(--warning); background: var(--warning-soft); border-color: var(--warning-border); }
-.tab-card .mission-title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
 .missions-notice { margin: 0 0 var(--space-4); padding: 8px 12px; font-size: 13px; color: var(--ink-2);
   background: var(--warning-soft); border: 1px solid var(--warning-border); border-radius: var(--r-sm); }
 .missions-notice b { color: var(--warning); }
@@ -2539,10 +2606,11 @@ body.page-board .back-to-top.visible {
   transform: translateY(calc((1 - var(--stage-p)) * var(--space-2))); }
 .back-to-top:hover:not(:disabled) { border-color: var(--hairline-2); color: var(--ink); }
 
-/* --- width: a round's rendered blocks take the window, its prose keeps a measure ---
-   '.board-shell' runs as wide as the window (up to 2560px), and every block
-   with it: a stage, a diagram, a compare, a rendered-variant card, at top level
-   and in a question's context. Prose does not: each element a reader reads as
+/* --- width: a round's rendered blocks take the column, its prose keeps a measure ---
+   '.board-shell' runs as wide as the window (up to 2560px), and the cards in
+   it as wide as the column up to 1700px (the 1440px block below), every
+   rendered block with them: a stage, a diagram, a compare, a rendered-variant
+   card, at top level and in a question's context. Prose does not: each element a reader reads as
    lines carries 'max-width: var(--prose)', resolved in its OWN font, so a 16px
    prompt and a 14px paragraph each hold their own measure. That is why an
    option's label and description carry it themselves rather than inheriting
@@ -2574,20 +2642,64 @@ body.page-board .back-to-top.visible {
 .md-content h1, .md-content h2, .md-content h3, .md-content h4, .md-content h5, .md-content h6,
 .question-prompt, .card-choice, .variant-label, .opt-label, .opt-desc, .rank-list, .answer-textarea, .note-field, .resolve-error,
 body:not(.page-board) .blocks .comment-list, body:not(.page-board) .blocks .comment-form { max-width: var(--prose); }
-/* An option's preview image or code is rendered content, not prose, and the
-   card's measure would draw it narrower than the old column did (605px for
-   992px at 1920). A card carrying one keeps the old column's width instead;
-   its label and description still hold their own measure. */
+.card-title, .card-summary, .question-picks { max-width: var(--prose); }
+/* An option's preview image or code is rendered content, not prose, so a
+   choice carrying one is held to the old column's width rather than the
+   reading measure; its label and description still hold their own measure.
+   From 1440px the options column, a third of the card and never under 523px
+   (ADR 136), is narrower than that and bounds the preview first. */
 .card-choice:has(.opt-preview) { max-width: var(--column-1120); }
 @media (min-width: 1440px) {
   :root { --prose: 72ch; }
-  /* A question with a context panel: the options keep exactly the width the
-     old column gave them (its 1.1fr share of '--column-1120' less the gap,
-     523px), so neither an option nor its preview draws narrower than it did,
-     and the panel beside them, where the diagrams and compares sit, takes
-     everything the window adds. The one-column rule for a question with no
-     panel outranks this (':not(:has())' carries a class). */
-  .question-block { grid-template-columns: minmax(0, calc((var(--column-1120) - var(--space-5)) * 1.1 / 2.1)) minmax(0, 1fr); }
+  /* One card width. From 1440px every card on a board page, a picture's
+     included, is the column's width up to 1700px, on the title's left edge;
+     the window beyond it, up to the shell's 2560px, is plain page. Widths
+     that varied card by card read as a ragged page, and a card the window's
+     full width left short text and narrow tables half empty. '.blocks' is the
+     column every top-level card stretches across, and the send bar under it
+     keeps the same right edge. The header stays the shell's width: its wash
+     and its condensed pill centre on the window (see '.board-head::after'). A
+     page board is one artifact filling the window and keeps no column. Below
+     1440px the column is narrower than the cap, so nothing changes there. */
+  body:not(.page-board) .blocks, body:not(.page-board) .send-bar { max-width: 1700px; }
+  /* A question's options take a third of the card, never under 523px (the
+     options column the old 1120px column gave a question beside a panel),
+     its note and the Defer row on the note's label sit under them at exactly
+     their width, and its context panel takes the other two thirds beside both.
+     The note row is the flexible one: a context panel taller than options and
+     note together grows that row, and the note, aligned to its top, stays
+     right under the options instead of drifting down the card. A question
+     with no panel takes the same columns with the second left empty, so every
+     question's options read at one width. A rendered-variant question, and
+     one carrying a stage in its context, keeps the one full-width column
+     (ADR.md entry 26) and its note at reading width: its options are the
+     rendered variants themselves. src/render.mjs marks a question that takes
+     the columns '.question-split', kept beside '.question-block' so these
+     rules outrank the one-column '.question-block:not(:has(...))' above. */
+  .question-block.question-split {
+    grid-template-columns: minmax(523px, 1fr) minmax(0, 2fr); grid-template-rows: auto auto 1fr auto; }
+  .question-block.question-split > .question-main { grid-column: 1; grid-row: 2; }
+  .question-block.question-split > .question-context { grid-column: 2; grid-row: 2 / 4; }
+  .question-block.question-split > .note-field { grid-column: 1; grid-row: 3; }
+  .question-block.question-split > .card-details { grid-row: 4; }
+  /* The panel's tables at their natural width: stretched across two thirds of
+     a 1700px card, a two-column table's cells sat far apart. */
+  .question-context .md-content table { width: auto; }
+  /* Long text flows into columns of reading width, two at most (three need
+     more than the 1700px card holds). Long means the fold marked it and it
+     overflowed its clip of about ten lines (src/ui.mjs drops the fold, and its
+     control, from text that fits), and it is open: a folded preview, and
+     short text, stay one column. Text holding a table, code or a diagram
+     stays one column too, as each of those takes the card's width, and so
+     does the card's summary, a '.md-content' of its own. One ':not()'
+     each, never a comma list inside one: test/check-pure.mjs's cascade resolver
+     splits a selector at every comma. A heading never ends a column. */
+  .markdown-block:not(.folded):has(> .fold-toggle) > .md-content:not(.card-summary):not(:has(table)):not(:has(pre)):not(:has(.mermaid)) {
+    columns: 2 var(--prose); column-gap: var(--space-6); max-width: calc(2 * var(--prose) + var(--space-6)); }
+  .md-content h1, .md-content h2, .md-content h3, .md-content h4, .md-content h5, .md-content h6 { break-after: avoid; }
+  /* A diagram narrower than its panel sits in the panel's middle rather than
+     against its left edge. */
+  pre.mermaid > svg { display: block; margin-inline: auto; }
 }
 
 /* --- responsive: the board is a laptop surface first, but it has to survive a

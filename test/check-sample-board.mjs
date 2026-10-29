@@ -151,7 +151,7 @@ check("the multi question carries a None option, rendered as one of its choices"
     'the rendered choices do not match the multi question\'s options, in order');
 });
 
-check("a question's context renders as one panel of plain items -- no per-item card, no kind label", () => {
+check("a question's context renders as one panel of its items, in posted order", () => {
   const withContext = questionBlocks(committedBoard).filter(b => Array.isArray(b.context) && b.context.length > 0);
   assert.ok(withContext.length > 0, 'no question block on the committed board carries a context block');
   for (const q of withContext) {
@@ -164,8 +164,6 @@ check("a question's context renders as one panel of plain items -- no per-item c
     for (const [i, item] of items.entries()) {
       assert.equal(item.getAttribute('data-block-kind'), q.context[i].kind,
         `context item ${i} of question ${q.id} renders out of posted order`);
-      assert.equal(item.querySelector('.block-kicker'), null,
-        `context item ${i} of question ${q.id} still renders a kind label`);
     }
   }
 });

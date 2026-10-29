@@ -990,7 +990,7 @@ check('archive: the fold arrives folded in the page\'s own bytes, and its contro
   } finally { restore(); }
 });
 
-check('archive: Show more opens the fold in place and becomes Show less, with aria-expanded following, and closes again', () => {
+check('archive: Show the rest opens the fold in place and becomes Show less, with aria-expanded following, and closes again', () => {
   const { document, restore } = loadFoldArchive();
   try {
     const item = foldItem(document);
@@ -1006,7 +1006,7 @@ check('archive: Show more opens the fold in place and becomes Show less, with ar
 
     control.dispatchEvent(new StandInEvent('click'));
     assert.equal(item.classList.contains('folded'), true, 'Show less closes it again');
-    assert.equal(control.textContent, 'Show more');
+    assert.equal(control.textContent, 'Show the rest');
     assert.equal(control.getAttribute('aria-expanded'), 'false');
   } finally { restore(); }
 });

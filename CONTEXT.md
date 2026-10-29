@@ -19,6 +19,10 @@ see a Conversation end. _Avoid_: new, first, reset.
 **Round**: one post into a board, the unit a packet reports on, and the board's unit of layout.
 Round 6 does not redeliver rounds 1-5. _Avoid_: turn, batch, post.
 
+**Page**: a Round as the board shows it, one at a time, flipped with the pager. Send covers the
+page on screen alone, its check, its count of questions left and the answers it posts; another
+unsent page keeps what was typed on it and sends from its own page. _Avoid_: tab, screen, step.
+
 **Awaited**: of a round, that the `ask` call which posted it is still blocked on it, so a submit
 reaches a listening agent. The property behind three surfaces — the sendable badge, the Banner,
 and the Boards view's per-Thread count of rounds still open — until the round is sent, Abandoned, or its
@@ -99,7 +103,16 @@ hint (names the per-option text this product deleted), cue (ADR 20 spends it on 
 naming).
 
 **Block**: the atomic piece of a board — markdown, code, mermaid, html, compare, or question.
-Everything a board shows is one. _Avoid_: card, section, element.
+Everything a board shows is one, drawn as a titled card. _Avoid_: section, element, card (the
+look, not the thing).
+
+**Card fields**: the optional title, status chip, one-line summary and folded details any Block
+may carry, a question only the details; absent when not sent, so a stored board is unchanged.
+_Avoid_: metadata, header fields.
+
+**Card head**: the row every Block's card opens with, its title (the Card fields' title, a
+question's prompt, or a markdown block's opening heading) and its status chip at the right edge.
+Chrome, never a comment target, and never a type caption. _Avoid_: caption, kicker, label.
 
 **Content block**: a block that renders material of its own — `markdown`, `code`, `mermaid`,
 `html`. Everything a reviewer reads sits in one. _Avoid_: artifact block, context block
@@ -116,11 +129,12 @@ context (what the reviewer looks up), note (the reviewer's).
 
 **Context**: what a question carries beside its options for the reviewer to look up — the
 section under discussion, the code it constrains, a diagram — rendered as one panel of plain
-prose, items in posted order, no card and no kind label per item. _Avoid_: context block (see
+prose, items in posted order, no kind label per item, and a Card head only on an item with a
+title or a chip. _Avoid_: context block (see
 Content block), attachment, sidebar.
 
 **Fold**: a prose item clipped at about a dozen lines under a fade, opened in place by Show
-more — per item, wherever the item sits, decided by a count of its source. A Stage outside a
+the rest — per item, wherever the item sits, decided by a count of its source. A Stage outside a
 page board or a variant option folds too, past 600px: it scrolls inside at that height, and
 Show full height under the frame opens it in place. A code
 excerpt keeps its own scroll box, and a diagram does not fold. _Avoid_: collapse, truncate, clamp.
@@ -263,10 +277,14 @@ Missions view took `/`. _Avoid_: index, index page.
 for each; switching tabs moves nothing in it. _Avoid_: nav bar, header (unqualified: a board
 page has its own).
 
+**Mission card**: a Mission on the Missions view, one height with the others in its row whatever
+its text: its long fields clamp to a line or two, whole behind one Show the rest fold. _Avoid_:
+tile, row.
+
 **Mission state**: the column a Mission shows in, derived on every read: needs you, working,
 waiting, stalled or released. Between merge and Released a Mission is working, or needs you
-while a release step waits on the person. Needs you is any linked board with a round still open that asks the
-person a question or was posted Awaited, a Lapsed one included; waiting is the Mission waiting on
+while a release step waits on the person. Needs you is any linked board whose newest round is
+still open and asks the person a question or was posted Awaited, a Lapsed one included; waiting is the Mission waiting on
 something else (a check, another PR, a Queued launch). _Avoid_: status (collides with the
 Packet's), phase (grill, direct or landing), column, landed (the name before Released).
 
@@ -288,8 +306,8 @@ alive; shown under waiting with its tag, launched by the Master Chief when one f
 pending, backlog, deferred.
 
 **Action**: the answer a `single` question names in its `action` field, `fire` or `merge`, its
-yes being option 0. While its round waits on an answer, the Mission's card offers that yes as a
-button, and a click is that round's Send. _Avoid_: shortcut, quick answer, command.
+yes being option 0. While its round is its board's newest and waits on an answer, the Mission's
+card offers that yes as a button, and a click is that round's Send. _Avoid_: shortcut, quick answer, command.
 
 **Order**: a Stop or a comment sent from a Mission's card, for the Master Chief to carry to the
 Live session and mark relayed. A request, never a signal: the board ends no process. _Avoid_:
@@ -302,7 +320,8 @@ with the answer, rather than by a Send on the page. _Avoid_: forwarded, proxied,
 person started by hand or a background job, reported by the Session watcher and held only in the
 daemon's memory: its name shows while it runs and is never stored. In Needs you while a round it
 posted waits on the person or it is blocked, else Working while busy, else Waiting with "your
-turn". It takes Orders like a Mission's card and counts toward no launch cap. A session a Mission
+turn". It is a Mission card in shape, one height with the rest and its long fields cut short
+under the same fold. It takes Orders like a Mission's card and counts toward no launch cap. A session a Mission
 holds is that Mission's card, never a Tab card. _Avoid_: session card, tab (unqualified: a
 browser tab), orphan, hand mission.
 

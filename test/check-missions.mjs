@@ -407,6 +407,31 @@ async function main() {
       'five working and two waiting on the PM leave a working slot');
   });
 
+  await check('needs you and the card\'s Fire come only from a board\'s newest round: an older page left asking holds neither', () => {
+    const dir = scratchHome('newest-page');
+    const now = Date.now();
+    const fireQ = (id, round) => ({ id, kind: 'question', round, prompt: 'Fire?', widget: 'single', action: 'fire', options: [{ label: 'Fire /direct' }, { label: 'Not yet' }] });
+    const roundOf = (n, status) => ({ n, postedAt: iso(now), status, sentAt: status === 'sent' ? iso(now) : null, title: `p${n}` });
+    for (const [key, statuses, view, actionRounds] of [
+      ['OLDER_ASKS', ['open', 'sent'], 'working', []],
+      ['NEWEST_ASKS', ['sent', 'open'], 'needs-you', [2]],
+      ['BOTH_ASK', ['open', 'open'], 'needs-you', [2]],
+    ]) {
+      const boardId = `b_${key.toLowerCase()}`;
+      mkdirSync(path.join(dir, 'boards'), { recursive: true });
+      writeFileSync(path.join(dir, 'boards', `${boardId}.json`), JSON.stringify({
+        id: boardId, thread: 't', title: 'q', cwd: null, createdAt: iso(now), updatedAt: iso(now), state: 'open',
+        rounds: statuses.map((status, i) => roundOf(i + 1, status)),
+        blocks: statuses.map((_, i) => fireQ(`q${i + 1}`, i + 1)),
+        answers: {}, comments: [],
+      }));
+      seed(dir, key, { boards: [{ id: boardId, url: 'http://x/b/' + boardId, at: iso(now) }] });
+      const v = missionsOverview({ home: dir, now }).missions.find(m => m.key === key);
+      assert.equal(v.view, view, `${key}: rounds ${statuses.join(', ')}`);
+      assert.deepEqual(v.actions.map(a => [a.round, a.question]), actionRounds.map(n => [n, `q${n}`]), `${key}: the card's buttons`);
+    }
+  });
+
   // --- the view -------------------------------------------------------------------
 
   await check(`the overview cache answers from one read for ${MISSIONS_CACHE_MS / 1000} s, and a write to the missions store is read at once`, () => {

@@ -319,7 +319,7 @@ The de-affordance rides comment mode's existing hover reinterpretation rather th
 element permanently, so the reading view stays unmarked.
 
 **Only code blocks get a scroll cap; long prose folds.** Code keeps the scroll box below. Markdown
-past about a dozen lines folds under a fade with a Show more that opens it in place (ADR 110),
+past about a dozen lines folds under a fade with a Show the rest control that opens it in place (ADR 110),
 decided by a count of its source rather than measured pixels, so the check suite can assert it;
 this reversed the earlier "markdown is never capped" rule once a question's context started
 carrying whole spec sections beside a short explainer. Rejected there: scroll-in-place for prose (a
@@ -428,6 +428,46 @@ path but breaks live-first sorting, since a live thread in the third group would
 threads in the first). A row also states its round count and its time relatively, since triage only
 ever asks "which of these is fresh"; rejected there was a shortened absolute, which needs no script
 and never goes stale but still answers the wrong question.
+
+### Card decisions
+
+**Every block is a titled card** (ADR 133). A card opens with a head row: its title on the left
+(the block's `title`, a question's prompt, or a markdown block's opening heading lifted out of its
+body), a stage's or a diagram's comment button after it, and the status chip last, at the card's
+own right edge, its tone one of good, warn, bad or neutral (a question's chip is its answer state,
+Answered or Deferred, live). Under the head sit the optional one-line summary, the content, and a
+closed Details fold (`detailsLabel` names it). Long text folds behind Show the rest. No block names
+its own type: the Markdown, HTML stage, Compare, Mermaid and Question captions are gone, and a
+question that takes several picks says so in a line under its prompt. A block with no title and
+no chip has no head, so an untitled markdown card starts with its text, and an untitled item in
+a question's context stays bare prose in the panel; a titled one there wears the head at a
+smaller scale. The look is the evidence card's, made the board's own so an evidence page is built
+from ordinary blocks and the two cannot drift (ADR 132 gives every block the fields). Rejected:
+flat sections, text set on the page with no card, which leaves two kinds of block.
+
+**From a 1440px window every card is one width, up to 1700px** (ADR 136). The shell, and the
+header with its wash, run as wide as the window up to 2560px; the cards under the header are the
+column's width up to 1700px, on the header's left edge, pictures included, and the window beyond
+them is plain page. The send bar keeps the same right edge. Inside a card the content spreads to
+fill it rather than the card shrinking to its content:
+
+- Long open text (past its fold and opened) flows into up to two columns of reading width, 72ch
+  each; short text, a folded preview, and text holding a table, code or a diagram stay one column.
+- A question's options take a third of the card, never under 523px (the options column the old
+  1120px column gave a question beside a panel), its note and the Defer row on the note's label
+  sit under them at exactly that width, and its context panel takes the other two thirds, tables
+  at their natural width. A question with no panel keeps the same columns, the second empty, so
+  every question's options read at one width. A rendered-variant question, or one with a stage
+  in its context, keeps one full-width column (ADR 26) and its note at reading width.
+- A compare side takes half; a diagram narrower than its panel sits in its middle; a picture opens
+  full size from its corner Pull-out (ADR 120).
+- A long title stays at reading width; its chip stays at the card's right edge.
+
+Under 1440px the column is narrower than the cap and nothing changes. A page board is one
+artifact filling the window and keeps no column. Rejected: cards that fit their content (the
+first pick; on its mock the widths differed widely), every card the window's full width (short
+text and narrow tables left cards half empty, the original complaint), and one centred column
+(text no longer lines up with the title).
 
 ### Theme decisions
 
@@ -748,7 +788,17 @@ PRs with a mark for their state, any pending order, and a row of buttons: the la
 round asking, Fire or Merge while asked, and the Stop icon at the right while a session is live,
 asking once before it sends, or sending at once on a Cmd-click.
 Boards is the list of Threads with its filter, the home page before Missions took `/`, now at the
-bar's full width.
+bar's full width; from a 1440px window it is a grid of cards at least 400px wide, three across at
+1440px and six at 2560px (ADR 135).
+
+**Every mission card is one height** (ADR 135). A card wears the board's titled-card look and
+clamps its long fields: the title and the summary to 2 lines, waiting on to 2, next to 1, each
+ending in an ellipsis. Its least height is that whole stack at full length plus one line of PRs
+and one of buttons, so a card with less text stands as tall as one with more, the spare height
+going to the text and the PRs and buttons held to the card's foot, and the cards in a row line
+up. One Show the rest fold per card shows every field whole; it is hidden while nothing is cut,
+stays open across repaints, and may grow its card past the row. Rejected: relying on the agents
+that write a mission to keep `waitingOn` and `next` short, which no card can enforce.
 
 **Why columns.** Three layouts were mocked. A needs-you-first list puts the one urgent thing on
 top and buries the rest in one undifferentiated scroll, so "what is working" has no place to be

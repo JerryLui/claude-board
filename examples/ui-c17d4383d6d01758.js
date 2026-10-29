@@ -3706,10 +3706,13 @@
   // their own delegated listener below, which carries no comment-mode guard: with
   // the Tray unlisted, one press in comment mode both submitted the round AND
   // opened a compose form over the artifact.
-  // .context-tools is the kicker's replacement on a context item (ADR.md entry
-  // 110) and is listed for the reason .block-kicker is: it is a control group
-  // this page drew, so a click beside its button must mint nothing, exactly as
-  // a click beside the kicker's comment button does.
+  // .card-head is a card's title row: its title, a stage's or a diagram's
+  // comment button and the status chip, all drawn by this page around the
+  // content, so a click on or beside any of them mints nothing. .card-summary
+  // and .card-details are the card's own line and fold, about the card rather
+  // than part of the stage or diagram a comment anchors to.
+  // .context-tools is the comment button's group on a context item (ADR.md
+  // entry 110), listed for the same reason as .card-head.
   // .fold-toggle is the Show more control under a folded prose item (ADR.md
   // entry 110), listed for the same reason: it is a control this page drew, not
   // authored content, and it sits directly in the item rather than inside a
@@ -3722,7 +3725,7 @@
   // the whole bar, not just its button, so a click beside the pill mints
   // nothing either. It sits in an html block, whose 'dom' anchors resolve
   // through the iframe's document, where nothing of the bar exists.
-  var ANCHOR_CHROME_SELECTOR = '.block-kicker, .context-tools, .fold-toggle, .pull-out, .comment-btn, .comment-form, .comment-target, '
+  var ANCHOR_CHROME_SELECTOR = '.card-head, .card-summary, .card-details, .context-tools, .fold-toggle, .pull-out, .comment-btn, .comment-form, .comment-target, '
     + '.comment-list, .page-comments, .pin-layer, .anchor-pin, .mode-toggle, .compare-label, .variant-label, .round-label, '
     + 'pre.mermaid, .html-stage, .stage-wrap, .diagram-lens'
     + ', .stage-fold';
@@ -3960,7 +3963,7 @@
     var btn = item.querySelector('.fold-toggle');
     if (!btn) return;
     btn.setAttribute('aria-expanded', folded ? 'false' : 'true');
-    btn.textContent = folded ? 'Show more' : 'Show less';
+    btn.textContent = folded ? 'Show the rest' : 'Show less';
   }
 
   /** Drop the fold on an item that does not actually overflow its clip, so a
@@ -4069,7 +4072,7 @@
       // keeps its own meaning -- selecting the variant is this card's own
       // affordance, not a replacement for the content's.
       if (ev.target !== card && ev.target.closest
-        && ev.target.closest('button, textarea, input, a, .comment-form, .comment-item')) return;
+        && ev.target.closest('button, textarea, input, a, summary, .comment-form, .comment-item')) return;
       selectVariant(card);
     });
     card.addEventListener('keydown', function (ev) {
@@ -4322,7 +4325,7 @@
   // the clip hides before they can comment on it -- which is why '.fold-toggle'
   // is listed in ANCHOR_CHROME_SELECTOR above: the control is chrome this page
   // drew, so the generic click-to-anchor gesture must mint nothing on it, the
-  // same carve-out '.block-kicker' and '.context-tools' get.
+  // same carve-out '.card-head' and '.context-tools' get.
   document.addEventListener('click', function (ev) {
     var btn = ev.target && ev.target.closest && ev.target.closest('.fold-toggle');
     if (!btn) return;
@@ -4930,10 +4933,13 @@
   // never silently dropped), and defer overrides whatever status the widget
   // itself would imply. The one exception is rank, which has no blank state to
   // leave -- see its own branch below.
-  // Only the currently OPEN round's questions are collected —
+  // Only the page on screen is collected, and only while its round is unsent:
   // a sent round's blocks are already recorded and their controls are disabled
   // server-side (see src/render.mjs renderRoundSection), so Send can never
-  // silently rewrite an answer that already went out.
+  // silently rewrite an answer that already went out. Another open page keeps
+  // what was typed on it, and its pager dot, and sends from its own page: the
+  // daemon stores only the answers of the round a submit names (applySubmit,
+  // src/board.mjs), so collecting it here would post answers that are dropped.
 
   function currentAnswer(qid, widget) {
     var raw = selections[qid];
@@ -4971,19 +4977,33 @@
   var sendBar = document.querySelector('div.send-bar');
   var questionsLeftPill = document.querySelector('button#questions-left-pill');
 
-  /** Collect the open round's answers exactly as they stand right now. Shared
+  /** The question-blocks Send covers, in round order: the page on screen's,
+   * while its round is unsent ('.round-open', which an abandoned round carries
+   * too, ADR 114); none on a sent page. The one set collectAnswers, the send
+   * guard, the pill and the Cmd+Enter traversal all walk. */
+  function pageQuestionBlocks() {
+    var section = roundSectionEl(currentRound);
+    if (!section || !section.classList.contains('round-open')) return [];
+    return qsa('.question-block', section);
+  }
+
+  /** Where one question's answer stands: 'deferred', 'answered' or 'unanswered'.
+   * The one rule the posted answers and the chips both read. */
+  function answerStatus(qid, result) {
+    return deferred[qid] ? 'deferred' : (result.answered ? 'answered' : 'unanswered');
+  }
+
+  /** Collect the page on screen's answers exactly as they stand right now. Shared
    * verbatim by both actions -- Discuss reads the identical surface Send does, so
    * "whatever is filled in" means the same thing either way. */
   function collectAnswers() {
     var answers = [];
-    qsa('.round-open .question-block').forEach(function (qb) {
+    pageQuestionBlocks().forEach(function (qb) {
       var qid = qb.getAttribute('data-block-id');
-      var widget = qb.getAttribute('data-widget');
-      var result = currentAnswer(qid, widget);
-      var status = deferred[qid] ? 'deferred' : (result.answered ? 'answered' : 'unanswered');
+      var result = currentAnswer(qid, qb.getAttribute('data-widget'));
       answers.push({
         id: qid,
-        status: status,
+        status: answerStatus(qid, result),
         choice: result.choice,
         note: notes[qid] || '',
       });
@@ -4991,14 +5011,14 @@
     return answers;
   }
 
-  /** The open round's question-blocks that still carry no status, in round
+  /** The page on screen's question-blocks that still carry no status, in round
    * order -- the completeness rule (a 'deferred' question is
    * complete; only 'unanswered' is outstanding), read straight off
    * collectAnswers rather than re-derived, so the send guard below can never
    * disagree with what a submit itself would post. Empty once every question
    * has been answered or deferred. */
   function outstandingBlocks() {
-    var blocks = qsa('.round-open .question-block');
+    var blocks = pageQuestionBlocks();
     var answers = collectAnswers();
     var outstanding = [];
     answers.forEach(function (a, i) {
@@ -5029,15 +5049,32 @@
    * the moment the rail is on screen); text is the button's own accessible name,
    * so no separate aria-label is needed. */
   function updateQuestionsLeftPill() {
+    refreshAnswerChips();
     if (!questionsLeftPill) return;
     var count = outstandingBlocks().length;
     questionsLeftPill.textContent = count + (count === 1 ? ' question left' : ' questions left');
     questionsLeftPill.classList.toggle('visible', count > 0 && !railIntersecting);
   }
 
-  /** The round this page can still submit: the latest round nobody has sent.
-   * Posted with the body so the server can refuse a submit aimed at a round that
-   * already went out (409) instead of silently rewriting it.
+  /** Each open question's chip, in its card head, says where the answer stands
+   * as the reviewer answers: Answered, Deferred, or nothing yet. The same status
+   * collectAnswers would post, read the same way. A question's own chip is the
+   * first in its section, ahead of any question nested in its context. */
+  var ANSWER_CHIP_LABEL = {"answered":"Answered","deferred":"Deferred","unanswered":""};
+  function refreshAnswerChips() {
+    qsa('.round-open .question-block').forEach(function (qb) {
+      var chip = qsa('.answer-status', qb)[0];
+      if (!chip) return;
+      var qid = qb.getAttribute('data-block-id');
+      var status = answerStatus(qid, currentAnswer(qid, qb.getAttribute('data-widget')));
+      chip.setAttribute('data-status', status);
+      chip.textContent = ANSWER_CHIP_LABEL[status];
+    });
+  }
+
+  /** The latest round nobody has sent: where arrival from the index lands and
+   * whose countdown the send bar shows. Send itself names the page on screen
+   * (currentPageSendable, below).
    *
    * Asked as status !== 'sent', which is the identical question the server's own
    * unsentRounds filter asks (handleSubmit, src/server.mjs) -- the two must agree or
@@ -5094,6 +5131,18 @@
    * Send button back (setSendBarEnabled is otherwise driven purely by which page
    * you are on). submitBoard owns both edges of this. */
   var submitInFlight = false;
+
+  /** Can Send answer the page on screen? The newest unsent page always (whatever
+   * it asks), and an older unsent page only while it asks something: an agent
+   * waits on the newest round alone (waitForRound, src/server.mjs), so a Send or
+   * a Discuss closing an older page that asks nothing reaches nobody. Unsent is
+   * the question the daemon's own submit guard asks of the round a submit names
+   * (handleSubmit, src/server.mjs, ADR 45). */
+  function currentPageSendable() {
+    var entry = roundEntry(currentRound);
+    if (!entry || entry.status === 'sent') return false;
+    return currentRound === openRoundNumber() || roundOwesAnswer(entry);
+  }
 
   function roundSectionEl(n) {
     return document.querySelector('.round[data-round="' + n + '"]');
@@ -5173,7 +5222,9 @@
     }
     var cd = document.querySelector('span#round-countdown');
     if (cd) {
-      var text = roundCountdownText(roundEntry(openRoundNumber()), now);
+      // The newest unsent page's wait, shown only on that page: Send answers the
+      // page on screen, and an older page's wait is never the one an agent holds.
+      var text = currentRound === openRoundNumber() ? roundCountdownText(roundEntry(currentRound), now) : null;
       cd.textContent = text || '';
       cd.title = text ? ROUND_COUNTDOWN_TITLE : '';
       cd.classList.toggle('visible', !!text);
@@ -5329,8 +5380,7 @@
     // a crosshair over an exchange that has already gone, and no visible
     // toggle to turn it back off. Turning the STATE off is the JS half.
     if (sentPage && commentMode) setCommentMode(false);
-    var open = openRoundNumber();
-    if (!submitInFlight) setSendBarEnabled(open !== null && currentRound === open);
+    if (!submitInFlight) setSendBarEnabled(currentPageSendable());
 
     refreshAwaitDisplay();
   }
@@ -5355,6 +5405,10 @@
   function goToRound(n, scroll) {
     var section = roundSectionEl(n);
     if (!section) return;
+    // An armed Send rang a question on the page being left; armed on the
+    // arriving page it would send that page with no check at all.
+    var flipped = n !== currentRound;
+    if (flipped && sendArmed) disarmSend();
     currentRound = n;
     qsa('.round').forEach(function (s) { s.classList.toggle('round-current', s === section); });
     // The arriving page's diagrams are drawn now, not at load: a diagram drawn
@@ -5396,6 +5450,8 @@
     // stage topped up, and a round that isn't one is simply ignored by
     // reportStageBand's own page-board gate.
     reportStageBand();
+    // The arriving page's end is watched from here, unseen until it reports.
+    if (flipped) { railIntersecting = false; setupSendBarDock(); }
     updateQuestionsLeftPill();
     refreshPins(document);
     if (scroll !== false && section.scrollIntoView) section.scrollIntoView({ block: 'start' });
@@ -5413,9 +5469,10 @@
   }
 
   /** The send bar drops its blur scrim and docks flush
-   * the instant the round's own end (.round-end -- at most one on the page, see
-   * renderRoundSection's own comment) scrolls into view, and floats over content
-   * the rest of the time. An IntersectionObserver on the rail itself, and now
+   * the instant the page on screen's own end scrolls into view (.round-end --
+   * every unsent question page carries one, see renderRoundSection's own
+   * comment, so the current page's is observed, re-chosen on every flip), and
+   * floats over content the rest of the time. An IntersectionObserver on the rail itself, and now
    * the only one on the page: the round badge's own band observer went with the
    * layout it measured (see "rounds are the board's pages" above). This one is
    * untouched by that, because it asks about the round you are ON, which is
@@ -5447,7 +5504,8 @@
     if (!sendBar) return;
     if (typeof IntersectionObserver !== 'function') return;
     if (sendBarDockObserver) sendBarDockObserver.disconnect();
-    var rail = document.querySelector('.round-end');
+    var page = roundSectionEl(currentRound);
+    var rail = page ? page.querySelector('.round-end') : null;
     if (!rail) { sendBar.classList.remove('docked'); railIntersecting = false; updateQuestionsLeftPill(); return; }
     // The viewport's bottom strip is not free space: '.send-bar' is sticky at
     // 'bottom: 0' and drawn over it, so a default-margin observer flips
@@ -5776,6 +5834,29 @@
     if (discussBtn) discussBtn.disabled = !on;
   }
 
+  /** The queued comments a Send from page 'n' posts. The daemon files every comment
+   * a submit carries under the round it names, and an agent hears only that round's
+   * (buildPacket, src/board.mjs), so a comment goes out with its own page's Send.
+   * A page that asks nothing has no Send of its own, so its comments ride the newest
+   * unsent page's. Every other comment stays queued for its own page. */
+  function commentsSentFrom(n) {
+    var newest = n === openRoundNumber();
+    return pendingComments.filter(function (c) {
+      var round = roundOfBlockEl(c.blockId);
+      return round === n || (newest && !roundOwesAnswer(roundEntry(round)));
+    });
+  }
+
+  /** The round a block sits in, read off the page section holding it, so a block
+   * nested in a question's option or a comparison side answers too; null when no
+   * section on the page holds it. */
+  function roundOfBlockEl(id) {
+    var el = findBlockEl(document, id);
+    var section = el && el.closest('.round');
+    var n = section ? parseInt(section.getAttribute('data-round'), 10) : NaN;
+    return isFinite(n) ? n : null;
+  }
+
   /** One submit path, one fetch, parameterised by action ('send' | 'discuss') --
    * never two divergent copies of the body-building code. Both buttons go
    * disabled for the duration and STAY disabled once the round has gone out; only
@@ -5793,6 +5874,7 @@
     if (readonly) return;
     if (isPageRound(blocksOfRound(currentRound))) return;
     var answers = collectAnswers();
+    var comments = commentsSentFrom(currentRound);
     setSendBarEnabled(false);
     // Held until the response lands, so that flipping to another page and back
     // mid-flight cannot hand the button back (refreshPager enables the bar
@@ -5803,7 +5885,7 @@
     fetch('/api/board/' + boardId + '/submit', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ action: action, round: openRoundNumber(), answers: answers, comments: pendingComments }),
+      body: JSON.stringify({ action: action, round: currentRound, answers: answers, comments: comments }),
     }).then(function (r) {
       // 409 is not an error: it means this round was already sent (a second tab,
       // or a double click that beat the disable). The right response is the same
@@ -5838,10 +5920,11 @@
         }
         return;
       }
-      // Queue emptied first, then the pin layers re-rendered: from here the pins
-      // come from board.comments alone, so the provisional ones are replaced
+      // What went out leaves the queue first, then the pin layers re-render: those
+      // pins now come from board.comments, so the provisional ones are replaced
       // rather than joined by the server-numbered copies of the same comments.
-      pendingComments = [];
+      // A comment that stayed behind keeps its provisional pin.
+      pendingComments = pendingComments.filter(function (c) { return comments.indexOf(c) === -1; });
       refreshPins(document);
       clearPendingMark();
       if (sendStatus) {
@@ -5851,7 +5934,9 @@
     }).catch(function (err) {
       submitInFlight = false;
       if (sendStatus) sendStatus.textContent = 'Error: ' + err.message;
-      setSendBarEnabled(true);   // nothing went out -- the reviewer must be able to retry
+      // Nothing went out, so the page on screen gets its Send back for a retry --
+      // unless a flip mid-flight left a page Send cannot answer on screen.
+      setSendBarEnabled(currentPageSendable());
     });
   }
 
@@ -5915,22 +6000,17 @@
    * submitBoard's analogue for a page round, deliberately never sharing that
    * function's path. submitBoard refuses outright on a page round (ADR.md
    * entry 35: "a page board is not sendable" through the ordinary send bar)
-   * and always names openRoundNumber(), the LATEST unsent round -- wrong for
-   * an awaited page round that is not the latest, exactly the gap ticket 01
-   * left for this one: "the browser's own Send control ... still assumes a
-   * single submittable round ... 03 is free to give an awaited page round's
-   * Send control its own correct round number rather than whatever the
-   * single latest-open number is". 'roundN' is read off the button's own
-   * 'data-round' (baked in at render time by renderPageCommentPanel,
+   * and names the page on screen -- wrong for the expiry flush above, which
+   * fires for a round whatever page is showing. 'roundN' is read off the
+   * button's own 'data-round' (baked in at render time by renderPageCommentPanel,
    * src/render.mjs), never derived from which page happens to be current.
    *
    * Comments are filtered to THIS round's own block before posting:
    * 'pendingComments' is one flat, board-wide queue, and bundling every
-   * pending comment into every submit -- what submitBoard itself still does,
-   * unchanged and out of this ticket's scope -- would misfile a comment left
-   * on a DIFFERENT open round under this one's number the moment two rounds
-   * are genuinely open at once (ticket 01's "a board can hold two open rounds
-   * at once"). A page round carries exactly one block, so "this round's own
+   * pending comment into every submit would misfile a comment left on a
+   * DIFFERENT open round under this one's number the moment two rounds are
+   * genuinely open at once (submitBoard filters the same way, through
+   * commentsSentFrom). A page round carries exactly one block, so "this round's own
    * comments" and "this block's own comments" are the same set -- whatever is
    * left over stays queued, exactly the AC 12 promise ("comments already left
    * stay on screen and ride the thread's next packet") for a comment on some
@@ -6198,7 +6278,7 @@
     }
 
     ev.preventDefault(); // every branch below either arrives at Send or moves focus -- never leave the chord to the textarea
-    var blocks = qsa('.round-open .question-block'); // the exact set, exact order, collectAnswers itself walks
+    var blocks = pageQuestionBlocks(); // the exact set, exact order, collectAnswers itself walks
     var arrived = (target && target.closest && target.closest('button#send-btn')) || blocks.length === 0;
     if (!arrived) {
       var current = target && target.closest ? target.closest('.question-block') : null;
@@ -7113,10 +7193,10 @@
     // Sent means sent: the send bar stays disabled until a new round arrives, so
     // a second click (or a second tab) can never re-submit a round that went
     // out. goToRound above has already said exactly this (the bar is live only
-    // on the open round's own page); this is the same call kept explicit,
+    // on an unsent round's own page); this is the same call kept explicit,
     // because "a sent round is never submittable twice" is not a fact that
     // should depend on the pager's internals.
-    setSendBarEnabled(openRoundNumber() !== null && currentRound === openRoundNumber());
+    setSendBarEnabled(currentPageSendable());
     fillHeldStages();
   }
 

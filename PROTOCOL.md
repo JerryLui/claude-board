@@ -224,8 +224,9 @@ unawaited.
 
 ### Blocks
 
-Every block has `{ id, round, kind }`. Content blocks additionally carry the resolved snapshot —
-`text` (`html`, for an `html` block) and `sha` — written once at post time and never re-read.
+Every block has `{ id, round, kind }` and may carry the card fields (`Card` below). Content blocks
+additionally carry the resolved snapshot — `text` (`html`, for an `html` block) and `sha` —
+written once at post time and never re-read.
 
 ```js
 { kind: 'markdown', source: Ref|null, text, sha, html, anchors, error? }
@@ -239,6 +240,8 @@ Ref    = { path, section?, lines? }               // lines is [from, to], 1-base
 Option = { label, description?, preview? }                  // every widget except the one below
        | { label, description?, block: ContentBlock|null }  // widget 'choose-between-rendered-variants' only
 widget = 'single' | 'multi' | 'text' | 'rank' | 'choose-between-rendered-variants'
+Card   = { title?, status?: { label, tone }, summary?, summaryHtml?, details?, detailsHtml?, detailsLabel? }
+tone   = 'good' | 'warn' | 'bad' | 'neutral'   // Card on any block, anywhere; a question refuses title, status and summary
 ```
 
 A markdown block's `anchors` is markdown's own slug index for headings and top-level list items
@@ -290,9 +293,32 @@ that question renders with the prompt alone on its head row. It is a separate fi
 because the two sit in different places: the explainer takes the card's full row with the prompt,
 while `context` is what the reviewer looks up, laid out beside the options.
 
+**Card fields** give any block the shared card look: a title line, a status chip at the card's
+right edge, one line of summary under the title and a details body folded closed. Each is
+optional, on every block kind wherever it sits (top level, a compare side, a question's `context`,
+a rendered-variant option's `block`), and absent, never empty, when not sent; a `null` counts as
+not sent, and a board stored before these fields existed renders with them absent.
+
+- `title`: plain text, 1 to 200 characters after trim, stored trimmed.
+- `status`: `{ label, tone }`, the label plain text of 1 to 40 characters after trim, the tone one
+  of `'good'`, `'warn'`, `'bad'` or `'neutral'`. A verdict goes here.
+- `summary`: markdown by value, 1 to 600 characters after trim, stored trimmed beside its rendered
+  `summaryHtml`.
+- `details`: markdown by value under the same by-value cap as `prompt`, stored as sent beside its
+  rendered `detailsHtml`, the same source/markup pair `explainer` keeps. The page folds it closed.
+- `detailsLabel`: the fold's label, plain text of 1 to 60 characters after trim, only beside
+  `details`; the page says "Details" without it.
+
+A `question` refuses `title`, `status` and `summary`: its prompt is its title, its answer state
+(Answered, Deferred) its chip and its `explainer` its summary. It may carry `details` and
+`detailsLabel`. A field of the wrong type, empty or past its cap, a `detailsLabel` without
+`details`, or a refused field on a question is a 400 naming the field, and the post stores nothing.
+A ```` ```mermaid ```` fence in `summary` or `details` is diagram input like any other (ADR 117).
+An amend into the open round stores them the same way.
+
 **`action`** is `'fire'` or `'merge'`, on a `single` question only, and absent on one that carries
-none: the question's yes is option 0, and while its round waits on an answer, the card of the
-mission whose board it is offers that yes as a Fire or Merge button. A click answers the round
+none: the question's yes is option 0, and while its round, its board's newest, waits on an
+answer, the card of the mission whose board it is offers that yes as a Fire or Merge button. A click answers the round
 through `POST /api/board/:id/submit`, that question set to option 0's label and the body marked
 `via: 'card'`, exactly as a Send with that pick would. A `fire` question answered yes, from the
 card, the page or a relay, records `fire` on the mission (the submit route below). Any other
@@ -1051,14 +1077,16 @@ later post is a new round beside it, not an edit of it. That is what makes "post
 then ask about it" two rounds, and therefore two pages one flip apart.
 
 A board can consequently hold **two open rounds at once**: an artifact round nobody will ever send,
-and the question round after it. Wherever this protocol says *the open round* — the round a submit
-must name, the round an amend lands on — it means the **latest** open one.
+and the question round after it. Wherever this protocol says *the open round*, the round an amend
+lands on, it means the **latest** open one. A submit is not bound to it: it names the round of the
+page the reviewer sent from, which may be any unsent round (ADR 134).
 
 ## `POST /api/board/:id/submit`
 
 ```js
 {
-  round: 1,                                       // required; must be the open round
+  round: 1,                                       // required; the round of the page the
+                                                  // reviewer sent from; any unsent round
   action: 'send' | 'discuss',
   answers:  [ { id, status?, choice, note? } ],   // status defaults to 'answered' when
                                                   // choice is present, 'unanswered' otherwise;
@@ -1070,7 +1098,9 @@ must name, the round an amend lands on — it means the **latest** open one.
 }
 ```
 
-`round` names the round the page believed it was answering when the reviewer pressed the button.
+`round` names the round the page believed it was answering when the reviewer pressed the button:
+the page on screen. Send's check, its count of questions left and the answers it posts cover that
+page alone; another unsent page keeps what was typed on it and sends from its own page.
 Omitting it is a **400**; naming a round that has already been **sent** is a **409** whose body
 carries `{ error, board, round }`, `round` naming the latest round still unsent (`null` when every
 round has gone out, which is also what a submit naming no round at all is answered with). Without
@@ -1428,8 +1458,8 @@ Mission = {
 and never stored. `view` is the column the mission shows in: `released` while stored released;
 else `stalled` when its session is gone (a bound `pid` that no longer exists, or a reservation no
 `pid` or `id` bound within 5 minutes) or it is stored `working` and `session.seenAt` is over 15
-minutes old; else `needs-you` when a linked board holds an open round that asks a question or was
-minted awaited (a lapsed wait still counts); else the stored `state`. `live` is whether a session
+minutes old; else `needs-you` when a linked board's newest round is open and asks a question or was
+minted awaited (a lapsed wait still counts; an older round left open does not, ADR 134); else the stored `state`. `live` is whether a session
 holds the mission (ADR 129): bound or reserved, not gone, and the mission has not recorded its end
 (stored `released`, or phase `grill` with `fire` set); silence frees only a session with no `pid`.
 `actions` lists the card's buttons (ADR 125):
@@ -1438,8 +1468,8 @@ holds the mission (ADR 129): bound or reserved, not gone, and the mission has no
 actions: [ { kind, board, round, question, choice } ]   // kind: 'fire' | 'merge'
 ```
 
-one per `single` question carrying an `action`, in a round of a linked board that still wants its
-answer as `needs-you` reads it: `board` the board id, `round` the round's number, `question` the
+one per `single` question carrying an `action`, in a linked board's newest round while it still
+wants its answer as `needs-you` reads it: `board` the board id, `round` the round's number, `question` the
 question block's id, and `choice` option 0's label, the one a click submits through
 `POST /api/board/:id/submit` with `action: 'send'` and `via: 'card'`.
 
@@ -1555,7 +1585,8 @@ A session a mission holds or held is never a tab: its `id` or `pid` is a mission
 `session.ended`'s, its `jobId` is the first 8 characters of such an id, or it posted a board that
 belongs to a mission (a launch reserves a session before it knows its pid or id). `folder` is the
 cwd's last segment; `command` the name's leading `/word`, else null. `state` is `needs-you` while a
-round that wants its answer (as a mission's needs-you reads it) sits on a board of no mission whose
+round that wants its answer (open and asking, as a mission's needs-you reads a round, but any
+round of the board, not only its newest) sits on a board of no mission whose
 `session.id` is the tab's, or whose `session.id` is null or names no listed session, with the tab's
 pid and process start (a session resumed in its own process lists under a new id), or while the
 session is `blocked`; else `working` while busy, else `waiting`. A process start matches to the
@@ -1700,7 +1731,7 @@ only the count, not the rows — a client that wants the rows still asks `GET /a
 
 `missions` names one mission whose view may have moved, and nothing else: a subscriber re-reads
 `GET /api/missions` for it. It fires on every write under `/api/mission/:key`, on every `waiting`
-caused by a board linked to a mission (its rounds decide whether it reads needs-you), and from the
+caused by a board linked to a mission (its newest round decides whether it reads needs-you), and from the
 daemon's missions watch (ADR 128), which reads every mission each 30 seconds and publishes a
 derived change no write made: a session whose process died, or one gone silent past 15 minutes.
 A read between the watch's ticks can therefore see a stall before the event says so. With `key:
@@ -1794,18 +1825,21 @@ What the cap hides on a variant option is not lost: the same reported height is 
 parent the stage has somewhere to scroll, which is what `scrollBy` below forwards a wheel notch
 for.
 
-No stage reports a width: a frame is as wide as the box it sits in, and the board's column runs
-as wide as the window, up to 2560px (`.board-shell`, `src/styles.mjs`). A top-level stage,
-diagram or compare spans the window less about 100px of gutter, card padding and scrollbar
-(1811px in a 1920px window), and so does a stage in a question's context, since a question
-carrying one lays out in one column (ADR 26). A diagram or compare in the context panel beside a
-question's options gets what the options leave, which from a 1440px window is all of it past
-the 523px the old 1120px column gave them. A compare side gets half; an `html` variant option
-takes a whole row, other variant kinds share one. Prose does not widen with the column: below a
-1440px window a line set straight in a block keeps the 1022px the old column gave it (a line in
-the options, the context panel or a compare side still widens with its box), and from 1440px
-every line holds 72ch of its own font (`--prose`). An option's `preview` image or code is not
-prose: its card keeps the old column's width, so a preview is never drawn narrower than it was.
+No stage reports a width: a frame is as wide as the box it sits in. The board's shell runs as
+wide as the window, up to 2560px (`.board-shell`, `src/styles.mjs`), and from a 1440px window
+every card under its header is one width, the column's up to 1700px on the header's left edge,
+the window beyond it plain page (ADR 136); below 1440px the column is narrower than that cap and
+every card takes it. A top-level stage, diagram or compare spans its card less the card's padding,
+and so does a stage in a question's context, since a question carrying one lays out in one column
+(ADR 26). From 1440px a question's options take a third of the card, never under 523px, with its
+note and Defer row under them at that width, and a diagram or compare in its context panel gets
+the other two thirds. A compare side gets half; an `html` variant option takes a whole row, other
+variant kinds share one. Prose does not widen with the card: below a 1440px window a line set
+straight in a block keeps the 1022px the old 1120px column gave it (a line in the options, the
+context panel or a compare side still widens with its box), and from 1440px every line holds 72ch
+of its own font (`--prose`), long open text flowing into up to two such columns. An option's
+`preview` image or code is not prose: its card keeps the old column's width, so a preview is never
+drawn narrower than it was.
 A page board's stage fills the window, as before (ADR 33).
 
 `scroll` exists because ADR 40's page-board header condenses on the reader's scroll, but on a page

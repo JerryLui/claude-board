@@ -36,8 +36,8 @@ are the same review once it was sent. **See it rendered, no clone required:**
 [jerrylui.github.io/claude-board/sample-board.html](https://jerrylui.github.io/claude-board/sample-board.html).
 
 A board grows in **rounds**: each post lands as a new page in the same tab, and the
-pager at the bottom flips between them. Earlier rounds stay readable and stop being
-editable the moment the next one lands.
+pager at the bottom flips between them. Earlier rounds stay readable; one already sent
+is read-only, and one still unsent keeps what you typed and sends from its own page.
 
 After installing, `npm run demo` posts that same sample board to your own daemon and
 opens it. One command proves the daemon, the MCP registration and the browser hop all
@@ -218,7 +218,8 @@ it. [PROTOCOL.md](PROTOCOL.md) is the wire format underneath.
 A tab opens on the first call. Answer what you want; unanswered comes back explicitly
 marked, never defaulted. Add a note beside any answer, or click **comment mode** and
 click any element of a rendered diagram or artifact to attach a comment to it, then
-**Send**. Follow-up rounds push into the same tab as new pages.
+**Send**, which sends the page on screen. Follow-up rounds push into the same tab as new
+pages.
 
 Two other ways out: **Discuss in chat** returns immediately with whatever is filled in,
 and a wall-clock cap (default 40 minutes) returns an explicit no-response. Closing the
@@ -252,12 +253,12 @@ process is gone, or it has been working and silent for fifteen minutes. Missions
 Boards share one top bar, the board page's own header, with a tab each; the Boards tab
 counts the rounds waiting.
 
-A card's **Fire** and **Merge** buttons show only while a round on that mission's own
-board asks for that answer, and a click is that round's answer, exactly a Send. Stop
-(the circle-slash icon) and a comment on a card are orders for an agent fronting the
-sessions to carry to the mission's session; the board itself stops nothing. That agent
-can also answer a round on your typed words, and the round then says it was relayed
-and quotes them.
+A card's **Fire** and **Merge** buttons show only while the newest round on that
+mission's own board asks for that answer, and a click is that round's answer, exactly a
+Send. Stop (the circle-slash icon) and a comment on a card are orders for an agent
+fronting the sessions to carry to the mission's session; the board itself stops
+nothing. That agent can also answer a round on your typed words, and the round then
+says it was relayed and quotes them.
 
 A session no mission launched, a tab you started by hand or a background job, shows as a
 **tab card** in the same columns once a session watcher reports it: tagged "tab", with its

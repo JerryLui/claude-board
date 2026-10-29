@@ -1,16 +1,21 @@
-// Real-browser check for how wide a question round lays out. On a window wider
-// than the 1120px column the board used to cap at, a round's rendered blocks (an
-// html stage, a mermaid diagram, a compare, a rendered-variant card, at top level
-// and inside a question's context) take the extra width, while its prose (a
+// Real-browser check for how wide a board page lays out. From a 1440px window
+// every card on the page (text, question, compare, stage, diagram, an
+// evidence-shaped compare) is one width, the column's up to 1700px, on the
+// header's left edge, and at 2560px the window right of it is plain page. Inside
+// a card the content spreads to fill it: long open text in columns of reading
+// width (short text and a folded preview in one), a question's options a third of
+// the card and never under 523px with its note and Defer row exactly as wide
+// under them and its context panel the rest, that panel's tables at their natural
+// width, a compare's two sides each half, a diagram centred in its panel, and a
+// picture carrying a corner control that opens it full size. Its prose (a
 // markdown paragraph, heading or list item, a question prompt, an option label or
 // description, a note or answer field, a rank item, a comment list) holds a
-// reading measure of at most 80ch of its own font. An option's preview image or
-// code sits in a card whose words hold that measure, and is never narrower than
-// the old column drew it. A page board, one html block
-// and nothing else, still fills the window. All of that is layout, and the DOM
-// stand-in the suite runs on has none (QUIRKS.md "The DOM stand-in's ceilings"):
-// test/check-pure.mjs holds the rules on declared values and this file looks at
-// real ones.
+// reading measure of at most 80ch of its own font. Under 1440px the cap and the
+// thirds do not apply: the 1280px rows hold the board to the layout it had. A page
+// board, one html block and nothing else, still fills the window. All of that is
+// layout, and the DOM stand-in the suite runs on has none (QUIRKS.md "The DOM
+// stand-in's ceilings"): test/check-pure.mjs holds the rules on declared values
+// and this file looks at real ones.
 //
 // NOT wired into test/run.mjs's `checks` array, on purpose: that suite has to pass
 // on a machine with no Chrome installed. Run this one by hand:
@@ -27,11 +32,12 @@
 // One ordinary board carries every kind of block once at top level and once in a
 // question's context, and each width opens it in a fresh tab whose viewport is
 // fixed before the page loads. "Today's 1120px column" is the same board in a
-// window whose document is exactly 1120px wide: the column capped there, so every
-// wider window laid the board out the same way, and the 1280px rows compare
-// against it as well. What is measured, never assumed: each element's
-// getBoundingClientRect, and each prose element's `ch` read off a 100-zero probe
-// set in that element's own computed font.
+// window whose document is exactly 1120px wide: the column capped there once, and
+// the rows that ask whether a block gained width compare against it. A second,
+// evidence-shaped board (a header, a criterion's before-and-after compare, a Not
+// shown card) is measured beside it. What is measured, never assumed: each
+// element's getBoundingClientRect, and each prose element's `ch` read off a
+// 100-zero probe set in that element's own computed font.
 
 import assert from 'node:assert/strict';
 import { sessionToken } from '../src/secret.mjs';
@@ -45,6 +51,9 @@ import {
 // expectation with it.
 const OLD_COLUMN = 1120; // the column a round was capped at before it widened
 const MEASURE_CH = 80; // the longest prose line, in `ch` of the element's own font
+const READING_CH = 72; // the reading measure a long text's columns and a variant question's note keep
+const CARD_CAP = 1700; // the widest a card gets, from a 1440px window up
+const OPTIONS_MIN = 523; // the narrowest a question's options column gets, from 1440px up
 const WIDE = [1920, 2560];
 const NARROW = 1280;
 const HEIGHT = 1200;
@@ -81,16 +90,31 @@ const chain = prefix => ['flowchart LR',
   ...Array.from({ length: 16 }, (_, i) => `  ${prefix}${i}["${prefix} step ${i + 1}"]`),
   ...Array.from({ length: 15 }, (_, i) => `  ${prefix}${i} --> ${prefix}${i + 1}`)].join('\n');
 
+/** Long enough to overflow the fold's clip of about ten lines at the reading
+ * measure several times over, so it folds, and once opened it is long text. */
+const LONG_READ = Array.from({ length: 5 }, () => LONG).join('\n\n');
+const SHORT_TITLE = 'A short note';
+const LONG_OPEN_TITLE = 'A long read, opened';
+const LONG_FOLDED_TITLE = 'A long read, left folded';
+/** Two nodes: far narrower than any panel here, so where it sits in its panel shows. */
+const SMALL_DIAGRAM = 'flowchart TD\n  s1["small one"] --> s2["small two"]';
+/** Short cells, so the table's natural width is far under its panel's. */
+const TABLE_MD = '| Step | Undone by |\n| --- | --- |\n| app deploy | a redeploy |\n| secret | a new version |';
+
 function roundBody(origin) {
   const previewImage = `${origin}${PREVIEW_IMAGE_PATH}`;
   return {
     title: 'round width browser check',
     blocks: [
       { kind: 'markdown', text: `${LONG}\n\n- ${LONG}\n- A short item.\n\n##### ${LONG}\n\n###### ${LONG}` },
-      { kind: 'html', html: mock('top') },
+      { kind: 'markdown', title: SHORT_TITLE, text: 'Two short lines of prose.\n\nThat is all there is.' },
+      { kind: 'markdown', title: LONG_OPEN_TITLE, summary: LONG, text: LONG_READ },
+      { kind: 'markdown', title: LONG_FOLDED_TITLE, text: LONG_READ },
+      { kind: 'html', title: 'A picture', html: mock('top') },
       { kind: 'mermaid', text: chain('Top') },
+      { kind: 'mermaid', title: 'A small diagram', text: SMALL_DIAGRAM },
       {
-        kind: 'compare',
+        kind: 'compare', title: 'A compare', status: { tone: 'good', label: 'Met' },
         left: { label: 'Before, top level', block: { kind: 'html', html: mock('before') } },
         right: { label: 'After, top level', block: { kind: 'html', html: mock('after') } },
       },
@@ -100,7 +124,9 @@ function roundBody(origin) {
         options: [{ label: `Option one: ${LONG}`, description: LONG }, { label: 'Option two', preview: PREVIEW_CODE }],
         context: [
           { kind: 'markdown', text: LONG },
+          { kind: 'markdown', text: TABLE_MD },
           { kind: 'mermaid', text: chain('Ctx') },
+          { kind: 'mermaid', text: SMALL_DIAGRAM },
           {
             kind: 'compare',
             left: { label: 'Before, in context', block: { kind: 'markdown', text: LONG } },
@@ -144,6 +170,151 @@ function roundBody(origin) {
 }
 
 const pageBody = () => ({ title: 'page board width', blocks: [{ kind: 'html', html: mock('page') }] });
+
+/** The evidence page's shape: a header card, one criterion as a titled compare
+ * of two screenshots with its verdict chip, summary and folded details, and the
+ * Not shown card. */
+const evidenceBody = () => ({
+  title: 'evidence width',
+  blocks: [
+    { kind: 'markdown', title: 'Cited rows tint and scroll into view', text: 'client #2151, service #2691: 1 met, 3 not shown.' },
+    {
+      kind: 'compare', title: 'A cited spreadsheet row is tinted', status: { tone: 'good', label: 'Met' },
+      summary: 'The cited cell is tinted green and already in view after the fix.',
+      left: { label: 'Before', block: { kind: 'html', html: mock('ev-before') } },
+      right: { label: 'After', block: { kind: 'html', html: mock('ev-after') } },
+      details: 'Shot at 1440px from the branch.',
+    },
+    {
+      kind: 'markdown', title: 'Not shown', status: { tone: 'neutral', label: '3 items' },
+      text: '**AC 4, CSV row:** no reachable CSV file.\n\n**AC 7, upload copy:** no file drop.', details: 'Where the shots came from.',
+    },
+  ],
+});
+
+/** How a question lays out from 1440px, by its prompt's opening words: options a
+ * third of the card with the note under them, or (a rendered-variant question,
+ * and one carrying a stage in its context, ADR.md entry 26) the full-width column
+ * with its note at reading width. */
+const THIRD_QUESTIONS = ['Beside a panel', 'Pick by its preview', 'In your words', 'In order'];
+const READING_NOTE_QUESTIONS = ['Over a stage', 'Between mocks', 'Between drawings'];
+
+// Read in any board page: where each top-level card sits against the column and
+// the header, what lies right of the cards, and inside them the questions' columns,
+// the compares' sides, the diagrams' placement, the context tables' widths and how
+// many columns each titled text runs in. Shared by both boards, so it asks only for
+// what it finds.
+const LAYOUT_FN = `function (chOf) {
+  function box(el) {
+    if (!el) return null;
+    var r = el.getBoundingClientRect();
+    return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, w: r.width };
+  }
+  function inner(el) {
+    var cs = getComputedStyle(el);
+    return el.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+  }
+  // The reading measure in el's own font, as CSS lays it out: a box 'width: 72ch'.
+  function readingOf(el) {
+    var cs = getComputedStyle(el), d = document.createElement('div');
+    d.style.cssText = 'position:absolute;left:0;top:0;visibility:hidden;width:${READING_CH}ch';
+    d.style.fontFamily = cs.fontFamily; d.style.fontSize = cs.fontSize; d.style.fontWeight = cs.fontWeight;
+    d.style.fontStyle = cs.fontStyle; d.style.fontStretch = cs.fontStretch;
+    document.body.appendChild(d);
+    var w = d.getBoundingClientRect().width;
+    d.remove();
+    return w;
+  }
+  function titleOf(el) {
+    var t = el.querySelector(':scope > .card-head > .card-title');
+    return t ? t.textContent.trim() : null;
+  }
+  var shell = document.querySelector('.board-shell'), shellCs = getComputedStyle(shell);
+  var shellBox = shell.getBoundingClientRect();
+  var column = { left: shellBox.left + parseFloat(shellCs.paddingLeft), w: inner(shell) };
+  var cards = [].slice.call(document.querySelectorAll('.round-current > .block')).map(function (b, i) {
+    var name = b.getAttribute('data-block-kind') + ' #' + (i + 1) + (titleOf(b) ? ' "' + titleOf(b).slice(0, 30) + '"' : '');
+    return { name: name, box: box(b) };
+  });
+  // Every box in the cards' column, the send bar included, to find the rightmost.
+  var reach = 0;
+  [].slice.call(document.querySelectorAll('.blocks, .blocks *, .send-bar, .send-bar *')).forEach(function (el) {
+    var r = el.getBoundingClientRect();
+    if (r.width && r.height && r.right > reach) reach = r.right;
+  });
+  // What a reader would hit right of the cards, at each card's middle on screen.
+  var beyond = [];
+  var cardsRight = cards.reduce(function (a, c) { return Math.max(a, c.box.right); }, 0);
+  cards.forEach(function (c) {
+    var y = (Math.max(c.box.top, 0) + Math.min(c.box.bottom, innerHeight)) / 2;
+    if (y <= 0 || y >= innerHeight || c.box.bottom <= 0 || c.box.top >= innerHeight) return;
+    [cardsRight + 40, innerWidth - 40].forEach(function (x) {
+      if (x <= cardsRight) return;
+      var hit = document.elementFromPoint(x, y);
+      beyond.push({ at: Math.round(x) + ',' + Math.round(y), hit: hit ? (hit.tagName.toLowerCase() + (hit.className && typeof hit.className === 'string' ? '.' + hit.className.split(' ').join('.') : '')) : 'nothing' });
+    });
+  });
+  var questions = [].slice.call(document.querySelectorAll('.round-current > .question-block')).map(function (q) {
+    var main = q.querySelector(':scope > .question-main');
+    var note = q.querySelector(':scope > .note-field');
+    var table = q.querySelector(':scope > .question-context .md-content table');
+    var natural = null;
+    if (table) {
+      var was = table.style.width;
+      table.style.width = 'max-content';
+      natural = table.getBoundingClientRect().width;
+      table.style.width = was;
+    }
+    return {
+      prompt: q.querySelector('.question-prompt').textContent,
+      inner: inner(q), gap: parseFloat(getComputedStyle(q).columnGap),
+      options: box(main.lastElementChild), context: box(q.querySelector(':scope > .question-context')),
+      note: box(note), noteReading: readingOf(note), defer: box(note.querySelector('.note-head')),
+      textarea: box(note.querySelector('textarea')),
+      table: table ? { w: table.getBoundingClientRect().width, natural: natural } : null,
+    };
+  });
+  var compares = [].slice.call(document.querySelectorAll('.round-current .compare-grid')).map(function (g) {
+    var sides = [].slice.call(g.children);
+    return { label: g.querySelector('.compare-label').textContent, w: g.getBoundingClientRect().width,
+      gap: parseFloat(getComputedStyle(g).columnGap), sides: sides.map(function (s) { return s.getBoundingClientRect().width; }) };
+  });
+  var diagrams = [].slice.call(document.querySelectorAll('.round-current pre.mermaid')).filter(function (p) {
+    return p.textContent.indexOf('small one') !== -1;
+  }).map(function (p) {
+    return { where: p.closest('.question-context') ? "in a question's context" : 'top level', panel: box(p), drawing: box(p.querySelector('svg')) };
+  });
+  // Where the lines of the elements under 'selector' start, and how many lines there are.
+  function linesUnder(b, selector) {
+    var lefts = [], lines = 0;
+    [].slice.call(b.querySelectorAll(selector)).forEach(function (el) {
+      var range = document.createRange();
+      range.selectNodeContents(el);
+      lines += new Set([].slice.call(range.getClientRects()).filter(function (r) { return r.width; })
+        .map(function (r) { return Math.round(r.left) + ',' + Math.round(r.top); })).size;
+      el.getClientRects && [].slice.call(el.getClientRects()).forEach(function (r) {
+        var l = Math.round(r.left);
+        if (r.width && lefts.indexOf(l) === -1) lefts.push(l);
+      });
+    });
+    lefts.sort(function (a, z) { return a - z; });
+    return { lefts: lefts, lines: lines };
+  }
+  var texts = [].slice.call(document.querySelectorAll('.round-current > .markdown-block')).filter(titleOf).map(function (b) {
+    // The card's summary is a '.md-content' too, so the body is the other one.
+    var body = b.querySelector(':scope > .md-content:not(.card-summary)');
+    var summary = b.querySelector(':scope > .card-summary') ? linesUnder(b, ':scope > .card-summary > *') : null;
+    return { title: titleOf(b), folded: b.classList.contains('folded'),
+      lefts: linesUnder(b, ':scope > .md-content:not(.card-summary) > *').lefts, summary: summary,
+      reading: readingOf(body), gap: parseFloat(getComputedStyle(body).columnGap) || 0 };
+  });
+  var pullOuts = [].slice.call(document.querySelectorAll('.round-current > .html-block > .stage-wrap')).map(function (w) {
+    return { wrap: box(w), control: box(w.querySelector(':scope > .pull-out')) };
+  });
+  return { column: column, head: box(document.querySelector('.board-head')),
+    label: box(document.querySelector('.round-current > .round-label')), cards: cards, reach: reach, beyond: beyond,
+    questions: questions, compares: compares, diagrams: diagrams, texts: texts, pullOuts: pullOuts };
+}`;
 
 // Every kind of prose element the board carries, by what a reader sees.
 const PROSE = [
@@ -215,21 +386,25 @@ const MEASURE_EXPR = `(function () {
   var prose = {};
   PROSE.forEach(function (kind) {
     [].slice.call(document.querySelectorAll('.round-current ' + kind[1])).forEach(function (el, i) {
-      var r = el.getBoundingClientRect();
-      if (!r.width) return; // hidden: a closed form, a collapsed card
-      prose[kind[0] + ' #' + (i + 1)] = { w: r.width, ch: chOf(el) };
+      // Its widest box: a paragraph running on into a text's second column is
+      // two boxes, each one column wide, and its bounding box spans both.
+      var w = [].slice.call(el.getClientRects()).reduce(function (a, r) { return Math.max(a, r.width); }, 0);
+      if (!w) return; // hidden: a closed form, a collapsed card
+      prose[kind[0] + ' #' + (i + 1)] = { w: w, ch: chOf(el) };
     });
   });
   var previews = {};
   [].slice.call(document.querySelectorAll('.round-current .opt-preview')).forEach(function (p) {
     var option = p.closest('.card-choice').getAttribute('data-choice').split(':')[0];
     var image = p.tagName === 'IMG';
+    var card = p.closest('.card-choice'), cardCs = getComputedStyle(card);
     previews[(image ? 'preview image' : 'preview code') + ' of option "' + option + '"'] =
-      { w: w(p), loaded: !image || (p.complete && p.naturalWidth > 0) };
+      { w: w(p), loaded: !image || (p.complete && p.naturalWidth > 0),
+        room: card.clientWidth - parseFloat(cardCs.paddingLeft) - parseFloat(cardCs.paddingRight) };
   });
   var root = document.documentElement;
   return { blocks: blocks, shared: shared, prose: prose, previews: previews, docW: root.clientWidth,
-    scrollW: root.scrollWidth, innerW: window.innerWidth };
+    scrollW: root.scrollWidth, innerW: window.innerWidth, layout: (${LAYOUT_FN})(chOf) };
 })()`;
 
 // ---------------------------------------------------------------------------
@@ -267,6 +442,12 @@ async function openAt(send, onEvent, url, cookie, { width, height }) {
   await withTimeout(loadFired, 20000, `page never fired load: ${url}`);
 
   const deadline = Date.now() + 20000;
+  // Open the one long text the rows read as opened; every other fold stays shut.
+  await evalPage(`[].slice.call(document.querySelectorAll('.round-current > .markdown-block.folded')).forEach(function (b) {
+    var t = b.querySelector(':scope > .card-head > .card-title');
+    var btn = b.querySelector(':scope > .fold-toggle');
+    if (t && btn && t.textContent.trim() === ${JSON.stringify(LONG_OPEN_TITLE)}) btn.click();
+  })`);
   for (;;) {
     const drawn = await evalPage(`[].slice.call(document.querySelectorAll('.round-current pre.mermaid'))
       .every(function (p) { return !!p.querySelector('svg'); })`);
@@ -305,6 +486,7 @@ async function main() {
     };
     const roundUrl = await boardUrl(roundBody(`http://127.0.0.1:${daemonPort}`));
     const pageUrl = await boardUrl(pageBody());
+    const evidenceUrl = await boardUrl(evidenceBody());
 
     await withChrome({ tag: 'cb-round-width' }, async ({ send, onEvent }) => {
       const cookie = sessionToken(daemon.secret);
@@ -317,7 +499,15 @@ async function main() {
       const column = await measureAt(openRound, { width: OLD_COLUMN + scrollbar, height: HEIGHT });
       const at = { [NARROW]: probe };
       for (const width of WIDE) at[width] = await measureAt(openRound, { width, height: HEIGHT });
-      await runRows({ column, at, scrollbar, pageBoard: () => openAt(send, onEvent, pageUrl, cookie, PAGE_BOARD_VIEWPORT) });
+      const evidence = {};
+      for (const width of [NARROW, ...WIDE]) {
+        evidence[width] = await measureAt(viewport => openAt(send, onEvent, evidenceUrl, cookie, viewport), { width, height: HEIGHT });
+      }
+      await runRows({
+        column, at, evidence, scrollbar,
+        pageBoard: () => openAt(send, onEvent, pageUrl, cookie, PAGE_BOARD_VIEWPORT),
+        round: viewport => openRound(viewport),
+      });
     });
   } finally {
     await daemon.stop();
@@ -348,10 +538,166 @@ function setupPreviews(m) {
   }
 }
 
-async function runRows({ column, at, scrollbar, pageBoard }) {
+const near = (a, b, tol = 0.5) => Math.abs(a - b) <= tol;
+const isCapped = width => width >= 1440;
+
+async function runRows({ column, at, evidence, scrollbar, pageBoard, round }) {
+  // --- one card width -------------------------------------------------------
+  for (const [board, byWidth] of [['the round board', at], ['the evidence board', evidence]]) {
+    for (const width of [NARROW, ...WIDE]) {
+      const want = isCapped(width) ? `the column's up to ${CARD_CAP}px` : "the column's, uncapped";
+      await row(`at a ${width}px window, every card on ${board} is one width, ${want}, its left edge on the header's`, note => {
+        const l = byWidth[width].layout;
+        assert.ok(l.cards.length >= 3 && l.head && l.label, `setup: the header, the round label and the cards found on ${board}`);
+        const expect = isCapped(width) ? Math.min(l.column.w, CARD_CAP) : l.column.w;
+        note(`column ${px(l.column.w)} from x=${l.column.left}; header from x=${l.head.left}; round label from x=${l.label.left}; ${l.cards.length} cards, ${px(expect)} each expected`);
+        const wrong = [];
+        if (!near(l.head.left, l.column.left)) wrong.push(`header from x=${l.head.left}`);
+        if (!near(l.label.left, l.column.left)) wrong.push(`round label from x=${l.label.left}`);
+        for (const c of l.cards) {
+          if (!near(c.box.w, expect) || !near(c.box.left, l.column.left)) wrong.push(`${c.name}: ${px(c.box.w)} from x=${c.box.left}`);
+        }
+        assert.deepEqual(wrong, []);
+      });
+    }
+  }
+
+  await row(`at a ${WIDE[1]}px window, the window right of the cards is plain page, on both boards`, note => {
+    const wrong = [];
+    for (const [board, m] of [['round board', at[WIDE[1]]], ['evidence board', evidence[WIDE[1]]]]) {
+      const l = m.layout;
+      const right = Math.max(...l.cards.map(c => c.box.right));
+      assert.ok(right < m.docW - 200 && l.beyond.length > 0, `setup: the ${board}'s cards stop short of the window, and a point right of them was probed`);
+      note(`${board}: cards end at x=${right}, nothing in the column or the send bar reaches past x=${l.reach}; ${l.beyond.length} points probed right of them`);
+      if (l.reach > right + 0.5) wrong.push(`${board}: something reaches x=${l.reach}`);
+      for (const b of l.beyond) if (!/^(html|body|div\.board-shell)$/.test(b.hit)) wrong.push(`${board}: ${b.hit} at ${b.at}`);
+    }
+    assert.deepEqual(wrong, []);
+  });
+
+  // --- inside a card --------------------------------------------------------
+  const question = (m, name) => {
+    const q = m.layout.questions.find(x => x.prompt.startsWith(name));
+    assert.ok(q && q.options && q.note && q.defer, `setup: question "${name}" with its options, note and Defer row found at a ${m.innerW}px window`);
+    return q;
+  };
   for (const width of WIDE) {
     const m = at[width];
-    await row(`at a ${width}px window, every rendered block in the round is wider than in the ${OLD_COLUMN}px column and wider than ${OLD_COLUMN}px`, note => {
+    await row(`at a ${width}px window, a question's options take a third of the card and never under ${OPTIONS_MIN}px, its note field and Defer row exactly as wide right under them, its context the rest`, note => {
+      const wrong = [];
+      for (const name of THIRD_QUESTIONS) {
+        const q = question(m, name);
+        const third = Math.max(OPTIONS_MIN, (q.inner - q.gap) / 3);
+        note(`${name}: ${px(q.inner)} inside the card; options ${px(q.options.w)} (a third: ${px(third)}); note ${px(q.note.w)}, Defer row ${px(q.defer.w)}, box ${px(q.textarea.w)}; context ${q.context ? px(q.context.w) : 'none'}`);
+        if (q.options.w < OPTIONS_MIN - 0.5 || !near(q.options.w, third, 1)) wrong.push(`${name}: options ${px(q.options.w)}, a third is ${px(third)}`);
+        for (const [part, b] of [['note field', q.note], ['Defer row', q.defer], ['note box', q.textarea]]) {
+          if (!near(b.w, q.options.w) || !near(b.left, q.options.left)) wrong.push(`${name}: ${part} ${px(b.w)} from x=${b.left}, options ${px(q.options.w)} from x=${q.options.left}`);
+        }
+        const under = q.note.top - q.options.bottom;
+        if (under < 0 || under > 40) wrong.push(`${name}: the note starts ${Math.round(under)}px under its options`);
+        if (q.context && (!near(q.context.w, q.inner - q.gap - q.options.w, 1) || !near(q.context.left, q.options.right + q.gap, 1))) {
+          wrong.push(`${name}: context ${px(q.context.w)} from x=${q.context.left}, the rest is ${px(q.inner - q.gap - q.options.w)} from x=${q.options.right + q.gap}`);
+        }
+      }
+      assert.ok(question(m, THIRD_QUESTIONS[0]).context, `setup: "${THIRD_QUESTIONS[0]}" has its context panel`);
+      assert.deepEqual(wrong, []);
+    });
+
+    await row(`at a ${width}px window, a question whose options are rendered variants, or whose context holds a stage, keeps its note at reading width`, note => {
+      const wrong = [];
+      for (const name of READING_NOTE_QUESTIONS) {
+        const q = question(m, name);
+        const reading = q.noteReading;
+        note(`${name}: note ${px(q.note.w)}, ${READING_CH}ch of its font ${px(reading)}, in a card ${px(q.inner)} inside`);
+        if (!near(q.note.w, reading, 1)) wrong.push(`${name}: note ${px(q.note.w)}, reading width ${px(reading)}`);
+      }
+      assert.deepEqual(wrong, []);
+    });
+
+    await row(`at a ${width}px window, a table in a question's context panel is at its natural width`, note => {
+      const q = question(m, THIRD_QUESTIONS[0]);
+      assert.ok(q.table && q.context && q.table.natural < q.context.w - 200, 'setup: a context table whose natural width is well under its panel');
+      note(`table ${px(q.table.w)}, natural ${px(q.table.natural)}, panel ${px(q.context.w)}`);
+      assert.ok(near(q.table.w, q.table.natural, 1), `table ${px(q.table.w)} against its natural ${px(q.table.natural)}`);
+    });
+
+    await row(`at a ${width}px window, a compare's or an evidence card's before and after are each half the card`, note => {
+      const wrong = [];
+      const all = [...m.layout.compares, ...evidence[width].layout.compares];
+      assert.ok(all.length >= 3, 'setup: the compares found');
+      for (const c of all) {
+        const half = (c.w - c.gap) / 2;
+        note(`"${c.label}": ${c.sides.map(px).join(' and ')} in ${px(c.w)}`);
+        if (c.sides.length !== 2 || c.sides.some(w => !near(w, half))) wrong.push(`"${c.label}": ${c.sides.map(px).join(', ')}, half is ${px(half)}`);
+      }
+      assert.deepEqual(wrong, []);
+    });
+
+    await row(`at a ${width}px window, a diagram narrower than its panel is centred in it`, note => {
+      const wrong = [];
+      const ds = m.layout.diagrams;
+      assert.deepEqual(ds.map(d => d.where).sort(), ["in a question's context", 'top level'], 'setup: the small diagram found at top level and in a context');
+      for (const d of ds) {
+        assert.ok(d.drawing && d.drawing.w < d.panel.w - 200, `setup: the ${d.where} drawing is well under its panel`);
+        const off = (d.drawing.left + d.drawing.right) / 2 - (d.panel.left + d.panel.right) / 2;
+        note(`${d.where}: drawing ${px(d.drawing.w)} in ${px(d.panel.w)}, centre off by ${off.toFixed(1)}px`);
+        if (Math.abs(off) > 1) wrong.push(`${d.where}: centre off by ${off.toFixed(1)}px`);
+      }
+      assert.deepEqual(wrong, []);
+    });
+
+    await row(`at a ${width}px window, an opened long text flows into columns of reading width; its summary, a short text and a folded preview stay one column`, note => {
+      const texts = Object.fromEntries(m.layout.texts.map(t => [t.title, t]));
+      const open = texts[LONG_OPEN_TITLE], folded = texts[LONG_FOLDED_TITLE], short = texts[SHORT_TITLE];
+      assert.ok(open && folded && short, 'setup: the three titled texts found');
+      assert.ok(!open.folded && folded.folded, 'setup: the long read is opened, its twin still folded');
+      for (const t of [open, folded, short]) note(`"${t.title}": lines start at x=${t.lefts.join(', ')}`);
+      const step = open.reading + open.gap;
+      assert.equal(open.lefts.length, 2, 'the opened long text runs in two columns');
+      assert.ok(near(open.lefts[1] - open.lefts[0], step, 1), `its second column starts ${open.lefts[1] - open.lefts[0]}px after the first, one reading width and a gap is ${px(step)}`);
+      assert.equal(folded.lefts.length, 1, 'the folded preview stays one column');
+      assert.equal(short.lefts.length, 1, 'the short text stays one column');
+      note(`"${open.title}" summary: ${open.summary && open.summary.lines} lines starting at x=${open.summary && open.summary.lefts.join(', ')}`);
+      assert.ok(open.summary && open.summary.lines >= 2, 'setup: the opened text carries a summary of several lines');
+      assert.deepEqual(open.summary.lefts, [open.lefts[0]], 'its summary stays one column, on the body\'s first');
+    });
+  }
+
+  await row(`at a ${WIDE[1]}px window, a picture carries a control in its corner that opens it full size`, async note => {
+    const l = at[WIDE[1]].layout;
+    assert.ok(l.pullOuts.length >= 1, 'setup: a top-level picture found');
+    const wrong = [];
+    for (const { wrap, control } of l.pullOuts) {
+      if (!control) { wrong.push('a picture has no corner control'); continue; }
+      const fromRight = wrap.right - control.right, fromTop = control.top - wrap.top;
+      note(`control ${Math.round(fromRight)}px from the picture's right edge, ${Math.round(fromTop)}px from its top`);
+      if (fromRight < 0 || fromRight > 24 || fromTop < 0 || fromTop > 24) wrong.push(`control ${Math.round(fromRight)}px from the right, ${Math.round(fromTop)}px from the top`);
+    }
+    const page = await round({ width: WIDE[1], height: HEIGHT });
+    try {
+      await page.evalPage(`document.querySelector('.round-current > .html-block > .stage-wrap > .pull-out').click()`);
+      let lens = null;
+      const deadline = Date.now() + 5000;
+      while (!lens && Date.now() < deadline) {
+        lens = await page.evalPage(`(function () {
+          var f = document.querySelector('.stage-lens[open] .stage-lens-frame');
+          if (!f) return null;
+          var r = f.getBoundingClientRect(), s = document.querySelector('.round-current > .html-block .html-stage').getBoundingClientRect();
+          return { w: r.width, h: r.height, stageW: s.width, innerW: innerWidth, innerH: innerHeight };
+        })()`);
+        if (!lens) await sleep(100);
+      }
+      assert.ok(lens, 'pressing the control opens the lens');
+      note(`lens frame ${px(lens.w)} x ${px(lens.h)} in a ${lens.innerW} x ${lens.innerH} window; the picture on the card ${px(lens.stageW)}`);
+      if (!(lens.w > lens.stageW && lens.w >= lens.innerW - 64 && lens.h >= lens.innerH - 160)) wrong.push(`lens frame ${px(lens.w)} x ${px(lens.h)}`);
+    } finally { await page.close(); }
+    assert.deepEqual(wrong, []);
+  });
+
+  // --- the rendered blocks and the prose --------------------------------------
+  for (const width of WIDE) {
+    const m = at[width];
+    await row(`at a ${width}px window, every rendered block in the round is wider than in the ${OLD_COLUMN}px column, and one outside a context panel wider than ${OLD_COLUMN}px`, note => {
       setupColumn(column, scrollbar, note);
       setupBlocks(column);
       setupBlocks(m);
@@ -360,7 +706,8 @@ async function runRows({ column, at, scrollbar, pageBoard }) {
         const was = column.blocks[name];
         const line = `${name}: ${px(w)} (${px(was)} in the column)`;
         note(line);
-        if (!(w > was + 1 && w > OLD_COLUMN)) wrong.push(line);
+        const inPanel = /^(compare|mermaid).*in a question's context/.test(name);
+        if (!(w > was + 1 && (inPanel || w > OLD_COLUMN))) wrong.push(line);
       }
       for (const [name, w] of Object.entries(m.shared)) {
         const was = column.shared[name];
@@ -386,15 +733,17 @@ async function runRows({ column, at, scrollbar, pageBoard }) {
     });
   }
 
-  await row(`at a ${WIDE[1]}px window every rendered block is at least as wide as at ${WIDE[0]}px: the extra width is used, not capped`, note => {
+  await row(`every rendered block is as wide at a ${WIDE[1]}px window as at ${WIDE[0]}px: both are past the ${CARD_CAP}px cap`, note => {
     setupBlocks(at[WIDE[0]]);
     setupBlocks(at[WIDE[1]]);
     const wrong = [];
-    for (const [name, w] of Object.entries(at[WIDE[1]].blocks)) {
-      const was = at[WIDE[0]].blocks[name];
-      if (w < was - 0.5) wrong.push(`${name}: ${px(w)} against ${px(was)}`);
+    for (const group of ['blocks', 'shared']) {
+      for (const [name, w] of Object.entries(at[WIDE[1]][group])) {
+        const was = at[WIDE[0]][group][name];
+        if (!near(w, was)) wrong.push(`${name}: ${px(w)} against ${px(was)}`);
+      }
     }
-    note(`${Object.keys(at[WIDE[1]].blocks).length} blocks compared`);
+    note(`${Object.keys(at[WIDE[1]].blocks).length + Object.keys(at[WIDE[1]].shared).length} blocks compared`);
     assert.deepEqual(wrong, []);
   });
 
@@ -420,11 +769,22 @@ async function runRows({ column, at, scrollbar, pageBoard }) {
     assert.deepEqual(wrong, []);
   });
 
+  await row(`at a ${NARROW}px window the wide layout is not in force: a question's note spans its row past its options, and an opened long text stays one column`, note => {
+    const q = question(at[NARROW], THIRD_QUESTIONS[0]);
+    const open = at[NARROW].layout.texts.find(t => t.title === LONG_OPEN_TITLE);
+    assert.ok(open && !open.folded, 'setup: the long read is opened');
+    note(`${THIRD_QUESTIONS[0]}: options ${px(q.options.w)}, note ${px(q.note.w)}; the opened long text's lines start at x=${open.lefts.join(', ')}`);
+    assert.ok(q.note.w > q.options.w + 100, `the note ${px(q.note.w)} runs past its options' ${px(q.options.w)}`);
+    assert.equal(open.lefts.length, 1);
+  });
+
   // An option's preview is rendered content in a card whose words hold the
-  // measure: the card's cap must not take the preview narrower than the old
-  // column drew it.
+  // measure. Below 1440px the card's cap must not take the preview narrower
+  // than the old column drew it; from 1440px an option is a third of its card,
+  // and its preview fills it where that is narrower than the column drew it.
   for (const width of [NARROW, ...WIDE]) {
-    await row(`at a ${width}px window, every option's preview image and code are at least as wide as in the ${OLD_COLUMN}px column`, note => {
+    const rule = isCapped(width) ? `as wide as the ${OLD_COLUMN}px column drew them, or the whole of their option` : `at least as wide as in the ${OLD_COLUMN}px column`;
+    await row(`at a ${width}px window, every option's preview image and code are ${rule}`, note => {
       const m = at[width];
       setupColumn(column, scrollbar, note);
       setupPreviews(column);
@@ -432,17 +792,18 @@ async function runRows({ column, at, scrollbar, pageBoard }) {
       const wrong = [];
       for (const [name, { w: was }] of Object.entries(column.previews)) {
         const now = m.previews[name];
-        const line = `${name}: ${now ? px(now.w) : 'missing'} (${px(was)} in the column)`;
+        const floor = now && isCapped(width) ? Math.min(was, now.room) : was;
+        const line = `${name}: ${now ? px(now.w) : 'missing'} (${px(was)} in the column${now && isCapped(width) ? `, ${px(now.room)} inside its option` : ''})`;
         note(line);
-        if (!now || now.w < was - 0.5) wrong.push(line);
+        if (!now || now.w < floor - 0.5) wrong.push(line);
       }
       assert.deepEqual(wrong, []);
     });
   }
 
-  await row('no window scrolls the board sideways', note => {
+  await row('no window scrolls a board sideways', note => {
     const wrong = [];
-    for (const m of [column, ...Object.values(at)]) {
+    for (const m of [column, ...Object.values(at), ...Object.values(evidence)]) {
       note(`${m.innerW}px window: document ${m.docW}px, content ${m.scrollW}px`);
       if (m.scrollW > m.docW) wrong.push(`${m.innerW}px window: ${m.scrollW}px of content in a ${m.docW}px document`);
     }

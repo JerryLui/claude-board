@@ -1623,38 +1623,38 @@ check('resolveComment resolves a mermaid anchor whose node id is still in the di
 
 // --- the block's own chrome must never be inside the resolution surface --
 
-check('resolveDomAnchorInSection: a ref addressing a markdown block\'s own kicker chrome does not resolve, even with a matching hint', () => {
+check('resolveDomAnchorInSection: a ref addressing a markdown card\'s own head row (its lifted title) does not resolve, even with a matching hint', () => {
   const board = createBoard({ title: 'V3', blocks: [{ kind: 'markdown', text: '# Notes\n\nSome text.' }] });
   const sectionHtml = renderBlock(board.blocks[0], board, new Map(), false);
   const sectionRoot = parseHtmlTree(sectionHtml).children[0];
-  const kicker = resolveSteps(sectionRoot, pathToSteps('1'));
-  assert.ok(kicker && (kicker.cls || []).includes('block-kicker'), 'setup failure: "1" must address the block-kicker chrome');
-  const kickerHint = extractHint(elementText(kicker));
-  // Sanity: the chrome element's own identity really is what a forged ref would
-  // need to claim to pass domIdentityHintMatches on its own terms.
-  assert.ok(kickerHint, 'setup failure: the kicker must carry some text to construct a plausible forged hint from');
-  assert.equal(resolveDomAnchorInSection(sectionHtml, '1', kickerHint), false,
-    'a ref into the block-kicker must never resolve, no matter how well the hint matches its text');
+  const head = resolveSteps(sectionRoot, pathToSteps('1'));
+  assert.ok(head && (head.cls || []).includes('card-head'), 'setup failure: "1" must address the card head');
+  const headHint = extractHint(elementText(head));
+  assert.equal(headHint, 'Notes', 'setup failure: the head must carry the lifted heading as its title');
+  for (const ref of ['1', '1.1']) {
+    assert.equal(resolveDomAnchorInSection(sectionHtml, ref, headHint), false,
+      `a ref into the card head (${ref}) must never resolve, no matter how well the hint matches its text`);
+  }
 });
 
-check('resolveComment: a forged dom anchor on a markdown block\'s own kicker reports lost, even with the kicker\'s own text as its hint', () => {
+check('resolveComment: a forged dom anchor on a markdown card\'s own head reports lost, even with the head\'s own text as its hint', () => {
   const board = createBoard({ title: 'V3 end to end', blocks: [{ kind: 'markdown', text: '# Notes\n\nSome text.' }] });
   const blockId = board.blocks[0].id;
-  // The forged hint is the kicker's own text, read off the rendered section, so the
-  // chrome exclusion is the only thing that can refuse it. A hint the kicker's text is
+  // The forged hint is the head's own text, read off the rendered section, so the
+  // chrome exclusion is the only thing that can refuse it. A hint the head's text is
   // merely a prefix of fails the starts-with rule instead, and stays lost with the
   // exclusion deleted.
-  const kicker = resolveSteps(parseHtmlTree(renderBlock(board.blocks[0], board, new Map(), false)).children[0], pathToSteps('1'));
-  assert.ok(kicker && (kicker.cls || []).includes('block-kicker'), 'setup failure: "1" must address the block-kicker chrome');
-  const hint = extractHint(elementText(kicker));
-  assert.ok(hint, 'setup failure: the kicker must carry text to forge a hint from');
+  const head = resolveSteps(parseHtmlTree(renderBlock(board.blocks[0], board, new Map(), false)).children[0], pathToSteps('1'));
+  assert.ok(head && (head.cls || []).includes('card-head'), 'setup failure: "1" must address the card head');
+  const hint = extractHint(elementText(head));
+  assert.ok(hint, 'setup failure: the head must carry text to forge a hint from');
   applySubmit(board, {
     action: 'send', answers: [],
     comments: [{ blockId, anchor: { kind: 'dom', ref: '1', hint }, text: 'forged' }],
   }, 1);
   assert.deepEqual(board.comments[0].anchor, { kind: 'dom', ref: '1', hint }, 'setup failure: the forged anchor must be stored as sent');
   assert.equal(resolveComment(board, board.comments[0]).resolved, false,
-    'a dom anchor into a markdown block\'s own kicker must not resolve, even when its hint is exactly the kicker\'s text');
+    'a dom anchor into a markdown card\'s own head must not resolve, even when its hint is exactly the head\'s text');
 });
 
 check('resolveMermaidAnchor: a forged domRef into the block\'s own chrome (domRef "1", a node id the source never declared) never carries the anchor', () => {
@@ -1662,12 +1662,12 @@ check('resolveMermaidAnchor: a forged domRef into the block\'s own chrome (domRe
   const block = board.blocks[0];
   const sectionHtml = renderBlock(block, board, new Map(), false);
   const sectionRoot = parseHtmlTree(sectionHtml).children[0];
-  const kicker = resolveSteps(sectionRoot, pathToSteps('1'));
-  assert.ok(kicker && (kicker.cls || []).includes('block-kicker'), 'setup failure: "1" must address the block-kicker chrome');
-  const kickerHint = extractHint(elementText(kicker));
-  const anchor = { kind: 'mermaid', ref: 'NODE_THAT_NEVER_EXISTED', domRef: '1', hint: kickerHint };
+  const head = resolveSteps(sectionRoot, pathToSteps('1'));
+  assert.ok(head && (head.cls || []).includes('card-head'), 'setup failure: "1" must address the card head');
+  const headHint = extractHint(elementText(head));
+  const anchor = { kind: 'mermaid', ref: 'NODE_THAT_NEVER_EXISTED', domRef: '1', hint: headHint };
   assert.equal(resolveDomAnchorInSection(sectionHtml, anchor.domRef, anchor.hint), false,
-    'domRef "1" addresses the block-kicker, which is chrome -- must not resolve even with a matching hint');
+    'domRef "1" addresses the card head, which is chrome -- must not resolve even with a matching hint');
   assert.equal(resolveMermaidAnchor(sectionHtml, block.text, anchor), false,
     'with domRef excluded and the node id never declared in source, the anchor must be lost, not silently resolved via the generic half');
 });
@@ -1821,7 +1821,7 @@ check('resolveComment: a dom anchor rooted at an html block\'s own SECTION (a cl
 // using the same scenario (options "Ship it" / "Ship it later" / "Drop
 // it", where "Ship it" is a literal prefix of "Ship it later").
 
-check('a comment anchored on a question\'s status line is reported lost by the same Send that answers the question', () => {
+check('a comment anchored on a question\'s answer state is reported lost, before and after the Send that answers it: the chip sits in the card head, which is chrome', () => {
   const board = createBoard({
     title: 'U1',
     blocks: [{ kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] }],
@@ -1829,34 +1829,24 @@ check('a comment anchored on a question\'s status line is reported lost by the s
   const qid = board.blocks[0].id;
   const sectionHtml = renderBlock(board.blocks[0], board, new Map(), false);
   const sectionRoot = parseHtmlTree(sectionHtml).children[0];
-  // question-footer(4) > answer-status span(2) -- fixed sibling positions for a
-  // question with no context panel: question-head, question-main, note-field and
-  // footer are the section's four children, and the head, the note and the
-  // footer are the section's own (full-width rows over and under both columns),
-  // not question-main's.
-  const statusNode = resolveSteps(sectionRoot, pathToSteps('4.2'));
-  assert.ok(statusNode && (statusNode.cls || []).includes('answer-status'), 'setup failure: "4.2" must address the status span');
-  const hint = extractHint(elementText(statusNode));
-  assert.equal(hint, 'status: unanswered');
-  assert.equal(resolveDomAnchorInSection(sectionHtml, '4.2', hint), true, 'setup failure: must resolve while genuinely unanswered');
+  // question-head(1) > card-head(1) > the chip(2), after the prompt.
+  const chip = resolveSteps(sectionRoot, pathToSteps('1.1.2'));
+  assert.ok(chip && (chip.cls || []).includes('answer-status'), 'setup failure: "1.1.2" must address the answer chip');
+  assert.equal(elementText(chip), '', 'an unanswered question\'s chip reads nothing');
+  // The footer status line the captioned card carried ("4.2", "status: unanswered").
+  for (const ref of ['1.1.2', '4.2']) {
+    assert.equal(resolveDomAnchorInSection(sectionHtml, ref, ref === '4.2' ? 'status: unanswered' : 'span'), false, `${ref} must not resolve`);
+  }
 
-  // The reviewer's ONE Send carries both the comment minted against the
-  // still-unanswered status line AND the answer itself -- an answer can only
-  // ever be merged into the SAME round its question was posted in
-  // (applySubmit's own `answerable` set), so "anchor while unanswered, answer
-  // it, Send" is necessarily one request, not two.
   applySubmit(board, {
     action: 'send',
     answers: [{ id: qid, choice: 'Yes' }],
-    comments: [{ blockId: qid, anchor: { kind: 'dom', ref: '4.2', hint }, text: 'still says unanswered?' }],
+    comments: [{ blockId: qid, anchor: { kind: 'dom', ref: '4.2', hint: 'status: unanswered' }, text: 'still says unanswered?' }],
   }, 1);
-
+  const answered = parseHtmlTree(renderBlock(board.blocks[0], board, new Map(), false)).children[0];
+  assert.equal(elementText(resolveSteps(answered, pathToSteps('1.1.2'))), 'Answered', 'the sent answer shows on the chip');
   const resolved = resolveComment(board, board.comments[0]);
-  // Judgement call (not a bug -- see this block's own header comment): the
-  // status text this anchor names genuinely changed as a direct result of the
-  // reviewer's own answer, in the same request. Reported lost, honestly, per
-  // that decision's second half.
-  assert.equal(resolved.resolved, false, 'answering the question changes the status line this anchor named -- must report lost, not silently keep resolving against now-false text');
+  assert.equal(resolved.resolved, false, 'an anchor on the answer state names text that changes with the answer, so it reports lost');
   assert.equal(resolved.lost, 'status: unanswered');
 });
 
@@ -2266,7 +2256,7 @@ check('a page board renders the stage edge to edge -- no card, no kicker, no col
   assertNoCard(section);
 
   // no kicker, and nothing else printed over the artifact
-  assert.equal(document.querySelectorAll('.block-kicker').length, 0, 'a page board renders no kicker at all');
+  assert.equal(document.querySelectorAll('.card-head').length, 0, 'a page board renders no card head at all');
   assert.equal(document.querySelectorAll('.round-label').length, 0, 'nor the "Round 1" chip over a full-viewport artifact');
   assert.equal(document.querySelectorAll('.round-end').length, 0, 'nor the closing rail');
 
@@ -2308,7 +2298,7 @@ check('a page board neither strips nor rewrites the artifact -- same srcdoc byte
     'the artifact\'s own scripts run inside it -- and never with allow-same-origin');
 });
 
-check('a post carrying a question, or any second block, renders exactly as a board does today -- column, card, kicker, lens control and send bar', () => {
+check('a post carrying a question, or any second block, renders exactly as a board does today -- column, card, card head, lens control and send bar', () => {
   const withQuestion = createBoard({
     title: 'artifact + question',
     blocks: [{ kind: 'html', html: PAGE_ARTIFACT }, { kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }] }],
@@ -2319,7 +2309,7 @@ check('a post carrying a question, or any second block, renders exactly as a boa
   assert.equal(resolveComputedProperty(styles, head, true, 'position'), 'sticky');
   assert.equal(resolveComputedProperty(styles, frame, true, 'height'), '320px', 'and the stage is back at its ordinary placeholder, to fit its content from its first report (ADR.md entry 119)');
   assert.equal(resolveComputedProperty(styles, frame, true, 'min-height'), '', 'with no floor that would stop it fitting a short mock');
-  assert.ok(document.querySelector('.html-block .block-kicker'), 'the kicker is back');
+  assert.ok(document.querySelector('.html-block .card-head .comment-btn'), 'the card head and its comment button are back');
   assert.ok(document.querySelector('.html-block .pull-out'), 'and its lens is one click away');
   assert.ok(document.querySelector('.round-label'), 'and the round renders as an ordinary round');
   assert.notEqual(resolveComputedProperty(styles, sendBar, true, 'display'), 'none', 'and the send bar is live, since there is now something to answer');
@@ -2329,7 +2319,7 @@ check('a post carrying a question, or any second block, renders exactly as a boa
   const secondBlock = createBoard({ title: 'artifact + note', blocks: [{ kind: 'html', html: PAGE_ARTIFACT }, { kind: 'markdown', text: 'a stats line' }] });
   const ordinary = renderBoardPage(secondBlock);
   assert.ok(ordinary.includes('<body>'), 'a two-block board opens <body> with no class at all');
-  assert.ok(ordinary.includes('<div class="block-kicker">HTML stage '), 'and renders the stage in its usual card');
+  assert.ok(ordinary.includes('<div class="card-head"><button type="button" class="comment-btn"'), 'and renders the stage in its usual card');
 });
 
 // The stylesheet a window `width` CSS px wide applies, for the stand-in's cascade
@@ -2375,7 +2365,7 @@ function resolvedAtWindow(sheet, el, prop) {
 // no Chrome can still hold is what the cascade gives each element: at a wide
 // window every prose element on a round holds a measure of its own of at most
 // 80ch, and no rendered block, whose width is the whole point, holds any.
-check("on a wide window a round's prose holds a measure of at most 80ch and none of its rendered blocks holds one -- a page board's Tray keeps its own width", () => {
+check("on a wide window a round's prose holds a measure of at most 80ch and none of its rendered blocks holds one but the column's 1700px cap -- a page board's Tray keeps its own width", () => {
   const board = createBoard({
     title: 'measure',
     blocks: [
@@ -2420,11 +2410,14 @@ check("on a wide window a round's prose holds a measure of at most 80ch and none
     .map(([name, el]) => `${name} (${maxWidth(el) || 'unset'})`);
   assert.deepEqual(unheld, [], 'every prose element holds a measure of at most 80ch, resolved in its own font');
 
+  // From 1440px the column itself stops at 1700px (one card width); what is
+  // inside it takes its width.
   const rendered = ['.html-stage', '.stage-wrap', 'pre.mermaid', '.compare-grid', '.compare-side', '.options-variants', '.variant-card',
-    '.question-context', '.table-scroll', '.md-content table', '.md-content pre', '.block', '.round', '.blocks'];
-  for (const [label, sheet] of [['wide', wide], ['1280px', stylesAtWindow(styles, 1280)]]) {
+    '.question-context', '.table-scroll', '.md-content table', '.md-content pre', '.block', '.round'];
+  for (const [label, sheet, column] of [['wide', wide, '1700px'], ['1280px', stylesAtWindow(styles, 1280), '']]) {
     const held = rendered.flatMap(sel => each(sel).filter(el => !['', 'none'].includes(maxWidth(el, sheet))).map(el => `${sel} (${maxWidth(el, sheet)})`));
     assert.deepEqual(held, [], `at a ${label} window no rendered block, and nothing around one, is capped: it takes the column`);
+    assert.equal(maxWidth(document.querySelector('.blocks'), sheet), column, `at a ${label} window the column is capped at ${column || 'nothing'}`);
   }
 
   const tray = renderedPage(pageBoard()).document.querySelector('.page-comments .comment-list');
@@ -2981,7 +2974,7 @@ check('all five context kinds render into the page: markdown, code, mermaid, htm
     + '<span class="tok-keyword">const</span> x = <span class="tok-number">1</span>;</span></code></pre>',
   ));
   assert.ok(!markup.includes('code-line'), 'a code block must emit no OLD-style per-line anchor spans (ADR.md entry 28)');
-  assert.ok(markup.includes('Code · javascript'));
+  assert.ok(markup.includes('<div class="context-caption">javascript</div>'), 'a code block names its language in a caption under the excerpt, never as a type caption');
 
   assert.ok(markup.includes('class="block mermaid-block"'));
   assert.ok(markup.includes('<pre class="mermaid">flowchart LR'));
@@ -3021,7 +3014,7 @@ check('a question block renders no comment button, no comment form, no comment a
   const markup = renderedMarkup(renderBoardPage(board));
   // Nothing else on this single-block board, so the first </section> reached is
   // this block's own closing tag (no nested context here to worry about).
-  const section = markup.slice(markup.indexOf('<section class="block question-block"'), markup.indexOf('</section>') + '</section>'.length);
+  const section = markup.slice(markup.indexOf('<section class="block question-block'), markup.indexOf('</section>') + '</section>'.length);
 
   assert.ok(!section.includes('comment-btn'), 'a question block must render no .comment-btn at all');
   assert.ok(!section.includes(`comment-form-${qId}`), 'a question block must render no comment-form for its own id');
@@ -3045,18 +3038,17 @@ check('a compare block renders no comment button, no comment form, no comment ar
   });
   const compareId = board.blocks[0].id;
   const markup = renderedMarkup(renderBoardPage(board));
-  const outerKicker = /<section class="block compare-block"[^>]*>\s*<div class="block-kicker">([\s\S]*?)<\/div>/.exec(markup)[1];
-
-  assert.equal(outerKicker.trim(), 'Compare', 'the compare wrapper\'s own kicker must carry no comment button, just its label');
+  const wrapperOpen = /<section class="block compare-block"[^>]*>\s*<div class="compare-grid">/.exec(markup);
+  assert.ok(wrapperOpen, 'an untitled compare wrapper opens straight onto its grid: no head, so no comment button');
   assert.ok(!markup.includes(`comment-form-${compareId}`), 'a compare block must render no comment-form for its own id');
   assert.ok(!markup.includes(`comment-target-${compareId}`), 'a compare block must render no comment-target for its own id');
   assert.ok(!markup.includes(`comment-list-${compareId}`), 'a compare block must render no comment-list for its own id');
-  // No direct-child pin-layer between the wrapper's own kicker and its grid --
+  // No direct-child pin-layer between the wrapper's own opening and its grid --
   // the only place a page-scoped pin-layer belonging to the OUTER section
   // (rather than one of the two nested sides) could ever sit.
   const wrapperStart = markup.indexOf(`data-block-id="${compareId}" data-block-kind="compare"`);
   const gridStart = markup.indexOf('class="compare-grid"', wrapperStart);
-  assert.ok(!markup.slice(wrapperStart, gridStart).includes('class="pin-layer"'), 'no pin-layer between the compare wrapper\'s kicker and its grid');
+  assert.ok(!markup.slice(wrapperStart, gridStart).includes('class="pin-layer"'), 'no pin-layer between the compare wrapper\'s opening and its grid');
 });
 
 check('ADR.md entry 28: mermaid and html keep their comment button, form and pin-layer; markdown and code carry none of it', () => {
@@ -3171,7 +3163,7 @@ check('a rendered kind nested inside a question\'s context or a compare side kee
 // toggle was already made visible chrome to say. Nothing replaces it -- the toggle
 // carries discoverability alone now, on both stage kinds and in both page states.
 
-check('neither stage kind renders a hint in its kicker, and the stylesheet defines no .stage-hint rule at all', () => {
+check('neither stage kind renders a hint in its card head, and the stylesheet defines no .stage-hint rule at all', () => {
   const board = createBoard({
     title: 'Stage affordances',
     blocks: [
@@ -3182,11 +3174,11 @@ check('neither stage kind renders a hint in its kicker, and the stylesheet defin
   const page = renderBoardPage(board);
   const markup = renderedMarkup(page);
 
-  // Each kicker carries no hint -- inverted from "the kicker carries the hint".
-  const htmlKicker = /<div class="block-kicker">HTML stage.*?<\/div>/s.exec(markup);
-  const mermaidKicker = /<div class="block-kicker">Mermaid.*?<\/div>/s.exec(markup);
-  assert.ok(htmlKicker && !htmlKicker[0].includes('stage-hint'), 'the html-stage kicker must carry no hint');
-  assert.ok(mermaidKicker && !mermaidKicker[0].includes('stage-hint'), 'the mermaid kicker must carry no hint');
+  // Each head carries no hint -- inverted from "the kicker carries the hint".
+  for (const kind of ['html', 'mermaid']) {
+    const head = new RegExp(`<section class="block ${kind}-block"[^>]*>\\s*<div class="card-head">([\\s\\S]*?)</div>`).exec(markup);
+    assert.ok(head && !head[1].includes('stage-hint'), `the ${kind} card head must carry no hint`);
+  }
 
   // Not merely hidden in a read-only archive any more -- the rule itself is gone,
   // so there is nothing left for `body.readonly` to override.
@@ -3405,7 +3397,7 @@ check('a stage-carrying question\'s context renders no card, no border-carrying 
     }],
   });
   const markup = renderedMarkup(renderBoardPage(board));
-  const sectionStart = markup.indexOf('<section class="block question-block"');
+  const sectionStart = markup.indexOf('<section class="block question-block');
   const sectionEnd = markup.indexOf('</section>', sectionStart) + '</section>'.length;
   const section = markup.slice(sectionStart, sectionEnd);
 
@@ -3421,7 +3413,6 @@ check('a stage-carrying question\'s context renders no card, no border-carrying 
   // No card, no border-carrying wrapper, no kicker label anywhere in the context
   // prose -- the markdown context's own "Markdown" kicker text (which the
   // pre-existing renderBlock path would have emitted) must be entirely absent.
-  assert.ok(!contextRegion.includes('block-kicker'), 'no .block-kicker inside the context prose');
   assert.ok(!contextRegion.includes('>Markdown<'), 'no "Markdown" kicker label for the context markdown item');
   assert.ok(!contextRegion.includes('class="block '), 'no .block card wrapper on a context item');
 
@@ -3484,7 +3475,7 @@ check('a code block in a stage-carrying question\'s context renders through the 
 const idBlind = html => html.replace(/(data-block-id|data-pull-out-for|data-note-for|data-defer-for|id|for)="[^"]*"/g, '$1="X"');
 
 const questionSection = markup => {
-  const start = markup.indexOf('<section class="block question-block"');
+  const start = markup.indexOf('<section class="block question-block');
   assert.ok(start !== -1, 'setup failure: no question section in the markup');
   return markup.slice(start, markup.indexOf('</section>', start) + '</section>'.length);
 };
@@ -3511,7 +3502,6 @@ check('several markdown context items render as ONE panel -- no per-item card, n
   const panel = panels[0];
   assert.equal(panel.querySelectorAll('.context-item').length, 3, 'all three items live in that one panel');
   assert.equal(panel.querySelector('.block'), null, 'no .block card wrapper on any item');
-  assert.equal(panel.querySelector('.block-kicker'), null, 'and no kind label on any item');
 
   const ids = panel.querySelectorAll('.context-item').map(el => el.getAttribute('data-block-id'));
   assert.deepEqual(ids, board.blocks[0].context.map(c => c.id), 'posted order, not sorted or grouped by kind');
@@ -3538,7 +3528,6 @@ check('AC 2: markdown and a mermaid diagram render in that same one panel, and t
   const panel = document.querySelector('.question-context');
   assert.ok(panel, 'setup failure: this fixture must take the panel path');
   assert.equal(panel.querySelectorAll('.context-item').length, 2, 'both kinds in the one panel');
-  assert.equal(panel.querySelector('.block-kicker'), null, 'neither carries a kind label');
 
   const diagram = document.querySelector('.context-item.mermaid-block');
   assert.ok(diagram, 'the diagram item wears .mermaid-block, which is what src/ui.mjs walks up to');
@@ -3694,7 +3683,6 @@ check('a code context item keeps its source label as a CAPTION under the excerpt
     const caption = codeItem.querySelector('.context-caption');
     assert.ok(caption, 'the source label survives as a caption');
     assert.equal(caption.textContent, 'app.js:2-3', 'naming the path and the line range');
-    assert.equal(codeItem.querySelector('.block-kicker'), null, 'and never as a card kicker');
     const itemHtml = renderedMarkup(renderBoardPage(board));
     assert.ok(itemHtml.indexOf('context-caption') > itemHtml.indexOf('class="code-row"'), 'the caption sits UNDER the excerpt, not over it');
 
@@ -3783,7 +3771,7 @@ check('a prose item longer than the cap is marked folded in a question\'s contex
   assert.ok(controls, 'aria-controls names something');
   assert.equal(controls, longMarks.body.getAttribute('id'), 'and what it names is the folded body');
   assert.equal(document.getElementById(controls), longMarks.body, 'an id that actually resolves in the page');
-  assert.equal(longMarks.control.textContent.trim(), 'Show more');
+  assert.equal(longMarks.control.textContent.trim(), 'Show the rest');
 });
 
 check('the fold\'s trigger is a SOURCE count, and both halves fire on their own -- many short lines, or one long paragraph', () => {
@@ -6394,6 +6382,25 @@ check('choose-between-rendered-variants: a click on the option\'s own comment bu
   assert.equal(card.classList.contains('selected'), false, 'clicking the nested block\'s own comment button must not select the variant');
   const form = document.getElementById('comment-form-' + nestedBlockId);
   assert.equal(form.classList.contains('open'), true, 'the comment button\'s own gesture must still work, undisturbed by the card wrapping it');
+});
+
+check('choose-between-rendered-variants: a click on an option\'s Details fold selects nothing', () => {
+  const board = createBoard({
+    title: 'variants',
+    blocks: [{
+      kind: 'question', prompt: 'Which?', widget: 'choose-between-rendered-variants',
+      options: [
+        { label: 'A', block: { kind: 'markdown', text: 'copy A' } },
+        { label: 'B', block: { kind: 'markdown', text: 'copy B', details: 'what B costs' } },
+      ],
+    }],
+  });
+  const document = loadVariantBoard(board);
+  const summary = document.querySelector('.choice-variant .card-details summary');
+  assert.ok(summary, 'setup failure: option B must render its Details fold');
+  summary.dispatchEvent(new StandInEvent('click'));
+  assert.deepEqual([...document.querySelectorAll('.choice-variant')].map(c => c.classList.contains('selected')), [false, false],
+    'opening an option\'s Details to read it must not pick that option');
 });
 
 check('choose-between-rendered-variants: a historical (sent) round\'s card is served selected with its own content, stays selected, and ignores a click', () => {
@@ -10690,6 +10697,174 @@ check('ADR.md entry 117: diagram and reference failures are returned together', 
     ]);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+// --- the titled card: one look for every block --------------------------------
+//
+// Every block is a card: a head row with its title and, last, its status chip;
+// no block names its own type. Stored boards carry the look's optional fields
+// (title, status, summaryHtml, detailsHtml, detailsLabel) as written at post
+// time, so these fixtures splice them onto stored blocks the way a board on
+// disk holds them.
+
+/** A board holding one block of every kind a post can carry, each in a second,
+ * nested position too (a compare side, a question's context), so a rule holds
+ * wherever a block sits. */
+function everyKindBoard() {
+  const board = createBoard({
+    title: 'every kind',
+    blocks: [
+      { kind: 'markdown', text: '## Where the grill stands\n\nSettled: release steps run at merge.' },
+      { kind: 'code', text: 'const x = 1;', lang: 'javascript' },
+      { kind: 'mermaid', text: 'flowchart LR\n  A --> B' },
+      { kind: 'html', html: '<div class="mock"><button>Send</button></div>' },
+      { kind: 'compare', left: { label: 'Before', block: { kind: 'markdown', text: 'old' } }, right: { label: 'After', block: { kind: 'mermaid', text: 'flowchart LR\n  C --> D' } } },
+      ...['single', 'multi', 'rank', 'text'].map(widget => ({
+        kind: 'question', prompt: `A ${widget} question?`, widget,
+        ...(widget === 'text' ? {} : { options: [{ label: 'One' }, { label: 'Two' }] }),
+        context: [{ kind: 'markdown', text: '### Kinds of release step\n\nA table.' }],
+      })),
+    ],
+  });
+  return board;
+}
+
+check('no block of any kind, top level or nested, renders a type caption: no kicker element and no Markdown, Code, Mermaid, HTML stage, Compare or question-kind label', () => {
+  const { document } = renderedPage(everyKindBoard());
+  assert.equal(document.querySelectorAll('.block-kicker').length, 0, 'no kicker element anywhere');
+  const caption = /^(markdown|code|mermaid|html stage|compare|question)\b/i;
+  const heads = document.querySelectorAll('.card-head');
+  assert.ok(heads.length >= 10, `setup failure: expected a head on most cards, got ${heads.length}`);
+  for (const head of heads) {
+    assert.doesNotMatch(head.textContent.trim(), caption, `a card head reads as a type caption: "${head.textContent.trim()}"`);
+  }
+  for (const widget of ['single', 'multi', 'rank', 'text']) {
+    assert.equal(document.body.textContent.includes(`Question · ${widget}`), false, `no "Question · ${widget}" label`);
+  }
+});
+
+check('a block with a title and a status renders both in its head row, the chip last, for every kind and nested in a compare side and a question\'s context; the status tone rides on the chip', () => {
+  const board = everyKindBoard();
+  const tones = ['good', 'warn', 'bad', 'neutral', 'good'];
+  const titled = board.blocks.filter(b => b.kind !== 'question');
+  titled.forEach((b, i) => Object.assign(b, { title: `Card ${i}`, status: { label: `State ${i}`, tone: tones[i] } }));
+  const sideBlock = board.blocks.find(b => b.kind === 'compare').right.block;
+  Object.assign(sideBlock, { title: 'Side title', status: { label: 'Side state', tone: 'warn' } });
+  const ctx = board.blocks.find(b => b.kind === 'question').context[0];
+  Object.assign(ctx, { title: 'Context title', status: { label: 'Context state', tone: 'bad' } });
+  const { document } = renderedPage(board);
+  const headOf = id => {
+    const el = document.querySelector(`[data-block-id="${id}"]`);
+    const head = el && el.children.find(c => c.classList.contains('card-head'));
+    assert.ok(head, `block ${id} has a head row of its own`);
+    return head;
+  };
+  const expect = [
+    ...titled.map((b, i) => [b.id, `Card ${i}`, `State ${i}`, tones[i]]),
+    [sideBlock.id, 'Side title', 'Side state', 'warn'],
+    [ctx.id, 'Context title', 'Context state', 'bad'],
+  ];
+  for (const [id, title, label, tone] of expect) {
+    const head = headOf(id);
+    assert.equal(head.querySelector('.card-title').textContent, title, `${id}'s title`);
+    const chip = head.children[head.children.length - 1];
+    assert.ok(chip.classList.contains('card-status'), `${id}'s chip is the head's last child`);
+    assert.equal(chip.textContent, label);
+    assert.equal(chip.getAttribute('data-tone'), tone);
+  }
+  // A stage's and a diagram's comment button sits in the head, before the chip.
+  for (const kind of ['html', 'mermaid']) {
+    const head = headOf(titled.find(b => b.kind === kind).id);
+    assert.deepEqual(head.children.map(c => c.className.split(' ')[0]), ['card-title', 'comment-btn', 'card-status'], `${kind}'s head row`);
+  }
+});
+
+check('a card\'s title is its own title, else a markdown block\'s opening heading lifted out of the body (said once), else none; an untitled card opens with its content', () => {
+  const board = createBoard({
+    title: 'titles',
+    blocks: [
+      { kind: 'markdown', text: '## Where the grill stands\n\nSettled.' },
+      { kind: 'markdown', text: 'No heading here.\n\n## A later heading' },
+      { kind: 'markdown', text: '## Its own heading\n\nBody.' },
+    ],
+  });
+  board.blocks[2].title = 'The block title';
+  const { document } = renderedPage(board);
+  const [lifted, plain, both] = board.blocks.map(b => document.querySelector(`[data-block-id="${b.id}"]`));
+  const liftedTitle = lifted.querySelector('.card-head .card-title');
+  assert.equal(liftedTitle.tagName.toLowerCase(), 'h2', 'the opening heading itself becomes the title');
+  assert.equal(liftedTitle.textContent, 'Where the grill stands');
+  assert.equal(liftedTitle.getAttribute('id'), 'where-the-grill-stands', 'keeping its id, so a link to it still lands');
+  assert.equal(lifted.querySelector('.md-content').textContent.includes('Where the grill stands'), false, 'and is not repeated in the body');
+  assert.equal(plain.querySelector('.card-head'), null, 'a body that does not open with a heading gives no title');
+  assert.equal(plain.children[0].classList.contains('md-content'), true, 'so the card opens with its text');
+  assert.equal(both.querySelector('.card-title').textContent, 'The block title', 'a block title wins');
+  assert.equal(both.querySelector('.md-content h2').textContent, 'Its own heading', 'and the heading stays in the body');
+});
+
+check('a question that takes several picks says so in plain words under its prompt; a single pick and free text do not', () => {
+  const { document } = renderedPage(everyKindBoard());
+  const picks = widget => {
+    const q = document.querySelector(`.question-block[data-widget="${widget}"]`);
+    const line = q.querySelector('.question-head .question-picks');
+    return line ? line.textContent : null;
+  };
+  assert.equal(picks('multi'), 'Pick as many as apply.');
+  assert.equal(picks('rank'), 'Drag them into order, most important first.');
+  assert.equal(picks('single'), null);
+  assert.equal(picks('text'), null);
+});
+
+check('a question\'s chip is its answer state at the head\'s right edge: Answered, Deferred, and nothing while unanswered', () => {
+  const board = everyKindBoard();
+  const [single, multi, rank] = board.blocks.filter(b => b.kind === 'question');
+  applySubmit(board, { action: 'send', answers: [{ id: single.id, choice: 'One' }, { id: multi.id, status: 'deferred' }], comments: [] }, 1);
+  const { document } = renderedPage(board);
+  const chip = q => {
+    const head = document.querySelector(`[data-block-id="${q.id}"] .question-head .card-head`);
+    const last = head.children[head.children.length - 1];
+    assert.ok(last.classList.contains('answer-status'), 'the chip is the head\'s last child');
+    return [last.getAttribute('data-status'), last.textContent];
+  };
+  assert.deepEqual(chip(single), ['answered', 'Answered']);
+  assert.deepEqual(chip(multi), ['deferred', 'Deferred']);
+  assert.deepEqual(chip(rank), ['unanswered', '']);
+  assert.equal(resolveComputedProperty(styles, document.querySelector(`[data-block-id="${rank.id}"] .answer-status`), true, 'display'), 'none', 'an unanswered chip is not drawn');
+});
+
+check('details renders as a closed fold labelled detailsLabel, else "Details", under the content; summary renders under the title; a long markdown body folds behind "Show the rest"', () => {
+  const board = everyKindBoard();
+  const [md, code, , html] = board.blocks;
+  const q = board.blocks.find(b => b.kind === 'question');
+  Object.assign(md, { summaryHtml: '<p>One line.</p>', detailsHtml: '<p>Links and commit ids.</p>', detailsLabel: 'Where the shots came from' });
+  Object.assign(code, { detailsHtml: '<p>More.</p>' });
+  Object.assign(html, { detailsHtml: '<p>More.</p>' });
+  Object.assign(q, { detailsHtml: '<p>More.</p>' });
+  const long = createBoard({ title: 'long', blocks: [{ kind: 'markdown', text: Array.from({ length: 20 }, (_, i) => `Line ${i}.`).join('\n\n') }] });
+  const { document } = renderedPage(board);
+  const fold = b => {
+    const el = document.querySelector(`[data-block-id="${b.id}"]`).children.find(c => c.classList.contains('card-details'));
+    assert.ok(el, `${b.kind} carries its details fold`);
+    assert.equal(el.tagName.toLowerCase(), 'details');
+    assert.equal(el.hasAttribute('open'), false, `${b.kind}'s details start closed`);
+    return el.querySelector('summary').textContent;
+  };
+  assert.equal(fold(md), 'Where the shots came from');
+  for (const b of [code, html, q]) assert.equal(fold(b), 'Details');
+  const mdSection = document.querySelector(`[data-block-id="${md.id}"]`);
+  assert.equal(mdSection.children[1].classList.contains('card-summary'), true, 'the summary sits right under the head');
+  assert.equal(mdSection.children[1].textContent, 'One line.');
+  const longDoc = renderedPage(long).document;
+  assert.equal(longDoc.querySelector('.markdown-block .fold-toggle').textContent, 'Show the rest');
+});
+
+check('a forged ref into a card\'s head, summary or details never resolves, even with the element\'s own text as its hint: all three are chrome', () => {
+  const board = createBoard({ title: 'chrome', blocks: [{ kind: 'mermaid', text: 'flowchart LR\n  A --> B' }, { kind: 'markdown', text: 'x' }] });
+  Object.assign(board.blocks[0], { title: 'Diagram', summaryHtml: '<p>Sum.</p>', detailsHtml: '<p>Det.</p>' });
+  const sectionHtml = renderBlock(board.blocks[0], board, new Map(), false);
+  for (const [ref, hint] of [['1.1', 'Diagram'], ['2.1', 'Sum.'], ['5.2.1', 'Det.']]) {
+    assert.equal(resolveDomAnchorInSection(sectionHtml, ref, hint), false, `${ref} (${hint}) must not resolve`);
   }
 });
 

@@ -270,7 +270,7 @@ const missionsScript = `
  * Stop on the card posts nothing until the daemon's missions show the first. With Comment on in the bar, a click on a card opens a note that posts a
  * comment order. Same quoting rules as the rest of this script: no backticks and no
  * dollar-brace below. */
-var missionsUi = { confirming: {}, sending: {}, errors: {}, commenting: {}, drafts: {}, stopSent: {} };
+var missionsUi = { confirming: {}, sending: {}, errors: {}, commenting: {}, drafts: {}, stopSent: {}, expanded: {} };
 var missionsData = null;
 var missionsCardHtml = {};
 var missionsInFlight = false;
@@ -369,6 +369,39 @@ function missionsSyncNotice(mount, html) {
 }
 
 function paintMissions() {
+  paintMissionsCards();
+  missionsMarkFits();
+}
+
+// A card's fold shows only while one of its fields is cut short; a shut fold over text
+// that already fits is hidden but keeps its line, so the card keeps its height.
+function missionsMarkFits() {
+  var folds = document.querySelectorAll('details.mission-more');
+  for (var i = 0; i < folds.length; i++) {
+    var fold = folds[i];
+    var cardEl = fold.closest('article.mission-card');
+    if (fold.open || !cardEl) { fold.removeAttribute('data-fits'); continue; }
+    var fields = cardEl.querySelectorAll('.mission-title, .mission-summary, .mission-waiting, .mission-next');
+    var fits = fields.length > 0;
+    for (var j = 0; j < fields.length && fits; j++) {
+      if (!(fields[j].clientHeight > 0) || fields[j].scrollHeight > fields[j].clientHeight + 1) fits = false;
+    }
+    if (fits) fold.setAttribute('data-fits', ''); else fold.removeAttribute('data-fits');
+  }
+}
+
+// The fold is the reader's: it stays open across every repaint until shut again.
+function onMissionsToggle(ev) {
+  var t = ev.target;
+  if (!t || !t.classList || !t.classList.contains('mission-more')) return;
+  var cardEl = t.closest('article.mission-card');
+  if (!cardEl) return;
+  var key = cardEl.getAttribute('data-mission-key');
+  if (t.open) missionsUi.expanded[key] = true; else delete missionsUi.expanded[key];
+  missionsMarkFits();
+}
+
+function paintMissionsCards() {
   var mount = missionsMount();
   if (!mount || !missionsData) return;
   var parts = missionsParts(missionsData, missionsUi);
@@ -597,7 +630,7 @@ function onMissionsClick(ev) {
     return;
   }
   if (!missionsCommentModeOn() || missionsUi.commenting[key]) return;
-  if (t.closest('a') || t.closest('button') || t.closest('textarea')) return;
+  if (t.closest('a') || t.closest('button') || t.closest('textarea') || t.closest('summary')) return;
   missionsUi.commenting[key] = true;
   paintMissions();
   focusIn(key, 'textarea.mission-comment-text');
@@ -646,6 +679,15 @@ function initMissions() {
   mount.addEventListener('contextmenu', onMissionsContextmenu);
   mount.addEventListener('input', onMissionsInput);
   mount.addEventListener('keydown', onMissionsKeydown);
+  // 'toggle' does not bubble: the mount hears a fold's only on the way down.
+  mount.addEventListener('toggle', onMissionsToggle, true);
+  var refit = false;
+  window.addEventListener('resize', function () {
+    if (refit) return;
+    refit = true;
+    requestAnimationFrame(function () { refit = false; missionsMarkFits(); });
+  });
+  missionsMarkFits();
   var toggle = document.querySelector('button#comment-mode-toggle');
   if (toggle) {
     toggle.addEventListener('click', function () {
@@ -1790,6 +1832,9 @@ function missionsParts(overview, ui) {
   };
   var COLUMNS = [['needs-you', 'Needs you'], ['working', 'Working'], ['waiting', 'Waiting'], ['stalled', 'Stalled'], ['released', 'Released']];
   var ACTION_LABELS = { fire: 'Fire', merge: 'Merge' };
+  // A card's title past this many characters may be cut at its clamp, so the card
+  // carries the fold that shows it whole.
+  var FOLD_TITLE_CHARS = 30;
   var PR_MARKS = { green: '✓', merged: '✓', open: '○', draft: '○' };
   var STOP_ICON = '<svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="1.8"/><line x1="4.7" y1="4.7" x2="15.3" y2="15.3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
   var data = overview || {};
@@ -1865,23 +1910,34 @@ function missionsParts(overview, ui) {
     return out + '</article>';
   }
 
+  // The one 'Show the rest' fold a mission or tab card carries when any field of it may
+  // be cut (ADR 135), open while the card is expanded; '' when nothing can be.
+  function moreFold(key, show) {
+    return show ? '<details class="mission-more"' + (pick('expanded', key) ? ' open' : '') + '><summary>Show the rest</summary></details>' : '';
+  }
+
   function card(m) {
     var key = m.key;
     var actions = Array.isArray(m.actions) ? m.actions : [];
     var boards = Array.isArray(m.boards) ? m.boards : [];
     var latest = boards.length ? boards[boards.length - 1] : null;
     var busy = pick('sending', key);
-    var out = '<div class="mission-card-head"><b class="mission-title">' + esc(m.title || key) + '</b>'
+    var out = '<div class="mission-text"><div class="mission-card-head"><b class="mission-title">' + esc(m.title || key) + '</b>'
       + '<span class="mission-age" title="' + esc(m.updatedAt) + '">' + esc(age(m.updatedAt)) + '</span></div>';
     out += '<div class="mission-ident"><span class="mission-key">' + esc(key) + ' / ' + esc(m.phase) + '</span>'
       + (m.view === 'queued' ? '<span class="mission-tag">Queued</span>' : '') + '</div>';
     if (m.summary) out += '<p class="mission-summary">' + esc(m.summary) + '</p>';
     if (m.waitingOn || m.next) {
       out += '<dl class="mission-facts">'
-        + (m.waitingOn ? '<dt>Waiting on</dt><dd>' + esc(m.waitingOn) + '</dd>' : '')
-        + (m.next ? '<dt>Next</dt><dd>' + esc(m.next) + '</dd>' : '')
+        + (m.waitingOn ? '<dt>Waiting on</dt><dd class="mission-waiting">' + esc(m.waitingOn) + '</dd>' : '')
+        + (m.next ? '<dt>Next</dt><dd class="mission-next">' + esc(m.next) + '</dd>' : '')
         + '</dl>';
     }
+    // Every card in a row is one height whatever its text: the title, summary, waiting
+    // on and next each stop at a few lines, and this one fold shows them whole. It is
+    // hidden again on screen while nothing is cut (missionsMarkFits).
+    out += moreFold(key, m.summary || m.waitingOn || m.next || String(m.title || key).length > FOLD_TITLE_CHARS);
+    out += '</div>';
     var prs = Array.isArray(m.prs) ? m.prs : [];
     if (prs.length) {
       out += '<div class="mission-prs">';
@@ -1929,7 +1985,8 @@ function missionsParts(overview, ui) {
   // its own card, keyed apart from every mission key by the colon no mission key can hold.
   function tabCard(t) {
     var title = t.name || t.command || (t.kind === 'bg' && t.jobId ? 'Background job ' + t.jobId : 'Session ' + String(t.id).slice(0, 8));
-    var out = '<div class="mission-card-head"><b class="mission-title" title=""' + esc(title) + '">' + esc(title) + '</b>'
+    var key = TAB_KEY_PREFIX + t.id;
+    var out = '<div class="mission-text"><div class="mission-card-head"><b class="mission-title" title="' + esc(title) + '">' + esc(title) + '</b>'
       + '<span class="tab-tags"><span class="mission-tag tab-tag">tab</span>'
       + (t.yourTurn ? '<span class="mission-tag tab-turn">your turn</span>' : '') + '</span></div>';
     var where = [];
@@ -1937,6 +1994,9 @@ function missionsParts(overview, ui) {
     if (t.folder) where.push('<span class="tab-folder" title="' + esc(t.cwd) + '">' + esc(t.folder) + '</span>');
     if (where.length) out += '<div class="mission-ident"><span class="mission-key">' + where.join(', ') + '</span></div>';
     if (t.reason) out += '<p class="mission-summary tab-reason">' + esc('Blocked: ' + t.reason) + '</p>';
+    // A tab card is a mission card (ADR 135): the same clamped fields and the same one fold.
+    out += moreFold(key, t.reason || title.length > FOLD_TITLE_CHARS);
+    out += '</div>';
     var btns = '';
     var rounds = Array.isArray(t.rounds) ? t.rounds : [];
     for (var r = 0; r < rounds.length; r++) {
@@ -1944,7 +2004,7 @@ function missionsParts(overview, ui) {
       btns += '<a class="mission-btn' + (r === 0 ? ' primary' : '') + '" href="' + esc(href) + '">Open round ' + esc(rounds[r].round) + '</a>';
     }
     return cardShell({
-      key: TAB_KEY_PREFIX + t.id, view: t.state, className: 'mission-card tab-card', inner: out, orders: t.orders, live: true, btns: btns,
+      key: key, view: t.state, className: 'mission-card tab-card', inner: out, orders: t.orders, live: true, btns: btns,
       label: title, placeholder: 'A note for this tab’s session',
     });
   }
