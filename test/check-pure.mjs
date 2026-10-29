@@ -6384,6 +6384,25 @@ check('choose-between-rendered-variants: a click on the option\'s own comment bu
   assert.equal(form.classList.contains('open'), true, 'the comment button\'s own gesture must still work, undisturbed by the card wrapping it');
 });
 
+check('choose-between-rendered-variants: a click on an option\'s Details fold selects nothing', () => {
+  const board = createBoard({
+    title: 'variants',
+    blocks: [{
+      kind: 'question', prompt: 'Which?', widget: 'choose-between-rendered-variants',
+      options: [
+        { label: 'A', block: { kind: 'markdown', text: 'copy A' } },
+        { label: 'B', block: { kind: 'markdown', text: 'copy B', details: 'what B costs' } },
+      ],
+    }],
+  });
+  const document = loadVariantBoard(board);
+  const summary = document.querySelector('.choice-variant .card-details summary');
+  assert.ok(summary, 'setup failure: option B must render its Details fold');
+  summary.dispatchEvent(new StandInEvent('click'));
+  assert.deepEqual([...document.querySelectorAll('.choice-variant')].map(c => c.classList.contains('selected')), [false, false],
+    'opening an option\'s Details to read it must not pick that option');
+});
+
 check('choose-between-rendered-variants: a historical (sent) round\'s card is served selected with its own content, stays selected, and ignores a click', () => {
   const board = createBoard({
     title: 'variants',
