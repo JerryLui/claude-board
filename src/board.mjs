@@ -418,7 +418,14 @@ function spendHtmlAllowance(html, id, ids) {
  * grew out of because a nesting site that drops it should lose a label and nothing more
  * -- whether diagrams are parsed at all is the ledger's `diagrams` budget to say, which
  * every recursion site already threads because ids depend on it. */
-export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLedger(), { topLevel = true, position = null } = {}) {
+export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLedger(), placement = {}) {
+  const block = normalizeBlockContent(raw, round, counters, cwd, ids, placement);
+  return { ...block, ...normalizeCardFields(raw, block.id, placement.position ?? null, ids) };
+}
+
+/** The kind's own fields of one block, everything `normalizeBlock` stores but the card
+ * fields every kind shares (`normalizeCardFields`). */
+function normalizeBlockContent(raw, round, counters, cwd, ids, { topLevel = true, position = null } = {}) {
   if (!raw || typeof raw !== 'object' || !raw.kind) {
     throw new Error('block requires a kind');
   }
@@ -664,6 +671,90 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
     default:
       throw new Error(`unknown block kind: ${raw.kind}`);
   }
+}
+
+// The card fields every block kind shares, the shared card look's optional parts:
+// a title line, a status chip at the card's right edge, a one-line summary under the
+// title and a folded details body. Lengths are characters (code points) after trim.
+const STATUS_TONES = ['good', 'warn', 'bad', 'neutral'];
+const MAX_CARD_TITLE_CHARS = 200;
+const MAX_STATUS_LABEL_CHARS = 40;
+const MAX_CARD_SUMMARY_CHARS = 600;
+const MAX_DETAILS_LABEL_CHARS = 60;
+// A question's prompt is its title line, its answer state its chip and its explainer the
+// prose under the prompt, so those three fields would give one card two of each.
+const QUESTION_REFUSED_CARD_FIELDS = ['title', 'status', 'summary'];
+
+/** Validate and store the card fields one raw block carries, or throw the 400 naming the
+ * field. Returns only the fields the caller sent: each is absent, never empty, when not
+ * sent (a null counts as not sent), so a board posted without them stores exactly what it
+ * stored before they existed. `summary` and `details` are markdown by value, kept as sent
+ * beside their rendered `summaryHtml`/`detailsHtml`, the same source/markup pair a
+ * question's `explainer` keeps, and a ```mermaid fence in either is judged at the door like
+ * any other. */
+function normalizeCardFields(raw, id, position, ids) {
+  const where = `${raw.kind} block ${id}${diagramPositionSuffix(position)}`;
+  const sent = name => raw[name] !== undefined && raw[name] !== null;
+  if (raw.kind === 'question') {
+    const refused = QUESTION_REFUSED_CARD_FIELDS.filter(sent);
+    if (refused.length) {
+      throw new Error(`${where}: a question takes no ${refused.map(f => `\`${f}\``).join(', ')}; its prompt is its title, its answer state its chip and its explainer its summary`);
+    }
+  }
+  const fields = {};
+  if (sent('title')) fields.title = cardPlainText(raw.title, 'title', MAX_CARD_TITLE_CHARS, where);
+  if (sent('status')) fields.status = cardStatus(raw.status, where);
+  if (sent('summary')) {
+    const summary = cardPlainText(raw.summary, 'summary', MAX_CARD_SUMMARY_CHARS, where);
+    fields.summary = summary;
+    fields.summaryHtml = cardMarkdownHtml(summary, 'summary', where, ids);
+  }
+  if (sent('details')) {
+    if (typeof raw.details !== 'string') throw new Error(`${where}: \`details\` must be a string of markdown, not ${typeName(raw.details)}`);
+    const details = byValueText(raw.details, 'details');
+    if (!details.trim()) throw new Error(`${where}: \`details\` is empty; leave it out instead`);
+    fields.details = details;
+    fields.detailsHtml = cardMarkdownHtml(details, 'details', where, ids);
+  }
+  if (sent('detailsLabel')) {
+    if (!fields.details) throw new Error(`${where}: \`detailsLabel\` names the details fold, so it needs \`details\` beside it`);
+    fields.detailsLabel = cardPlainText(raw.detailsLabel, 'detailsLabel', MAX_DETAILS_LABEL_CHARS, where);
+  }
+  return fields;
+}
+
+function typeName(value) {
+  return Array.isArray(value) ? 'an array' : value === null ? 'null' : `a ${typeof value}`;
+}
+
+/** One card string, trimmed and bounded: a 400 naming `field` for a non-string, an empty
+ * one or one past `max` characters. */
+function cardPlainText(value, field, max, where) {
+  if (typeof value !== 'string') throw new Error(`${where}: \`${field}\` must be a string, not ${typeName(value)}`);
+  const text = value.trim();
+  const chars = [...text].length;
+  if (chars === 0) throw new Error(`${where}: \`${field}\` is empty; leave it out instead`);
+  if (chars > max) throw new Error(`${where}: \`${field}\` is ${chars} characters, over its ${max}-character cap`);
+  return text;
+}
+
+function cardStatus(value, where) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`${where}: \`status\` must be an object { label, tone }, not ${typeName(value)}`);
+  }
+  const label = cardPlainText(value.label, 'status.label', MAX_STATUS_LABEL_CHARS, where);
+  if (!STATUS_TONES.includes(value.tone)) {
+    throw new Error(`${where}: \`status.tone\` must be one of ${STATUS_TONES.map(t => `'${t}'`).join(', ')}, not ${JSON.stringify(value.tone) ?? 'undefined'}`);
+  }
+  return { label, tone: value.tone };
+}
+
+function cardMarkdownHtml(text, field, where, ids) {
+  const { html, mermaidFences } = mdToHtmlAndAnchors(text, { highlight: highlightFenceHtml });
+  for (const fence of mermaidFences) {
+    recordDiagramRefusal(fence.text, null, `mermaid fence ${fence.ordinal} in ${field} of ${where}`, true, ids);
+  }
+  return html;
 }
 
 function normalizeCompareSide(side, round, counters, cwd, ids, position) {

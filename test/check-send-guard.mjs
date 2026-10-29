@@ -559,6 +559,80 @@ await checkAsync('Send names the open round in its body, and a 409 for a round a
   assert.equal(document.getElementById('send-btn').disabled, true, 'and Send stays disabled, as on a Send that landed');
 });
 
+// === Send covers the page on screen ==============================================
+// The daemon stores only the answers of the round a submit names, so the check,
+// the count, the ask and the posted answers are the page on screen's alone: an
+// earlier page still open keeps what was typed on it and its pager dot, and
+// sends from its own page.
+
+await checkAsync('Send on the newest page covers that page alone: an earlier open page\'s blank neither counts nor asks, keeps its typed note and its dot, and asks about its blank from its own page', async () => {
+  const q = prompt => ({ kind: 'question', prompt, widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] });
+  const board = createBoard({ title: 'Two open pages', blocks: [q('P1: ship it?'), q('P1: rename it?')] });
+  const round2 = addRound(board, { title: 'Second page', blocks: [q('P2: merge it?'), q('P2: tag it?'), q('P2: announce it?')] });
+  const [p1a, p1b, p2a, p2b, p2c] = board.blocks.map(b => b.id);
+  const { document, es: captured } = loadBoardWithEventSource(renderBoardPage(board));
+  const block = id => document.querySelector(`.question-block[data-block-id="${id}"]`);
+  const page = n => document.querySelector(`.round-page[data-round="${n}"]`);
+  const sendBtn = document.getElementById('send-btn');
+  const pill = document.getElementById('questions-left-pill');
+  const press = () => withFetchCapture(() => sendBtn.dispatchEvent(new StandInEvent('click')));
+
+  assert.equal(pill.textContent, '3 questions left', 'the pill counts the page on screen, not the earlier page\'s two');
+  page(1).dispatchEvent(new StandInEvent('click'));
+  assert.equal(pill.textContent, '2 questions left', 'flipped to page 1, the pill counts page 1');
+  answerSingle(block(p1a), 'Yes');
+  const note = block(p1a).querySelector('textarea[data-note-for]');
+  note.value = 'keep this note';
+  note.dispatchEvent(new StandInEvent('input'));
+  assert.equal(pill.textContent, '1 question left');
+
+  page(round2).dispatchEvent(new StandInEvent('click'));
+  answerSingle(block(p2a), 'Yes');
+  answerSingle(block(p2b), 'No');
+  deferBlock(block(p2c));
+  assert.equal(pill.textContent, '0 questions left', 'page 2 is complete; page 1\'s blank is not on screen');
+  const sent = press();
+  assert.equal(sent.length, 1, 'Send on a complete page posts on the first press, with no ask about another page');
+  assert.equal(sendBtn.textContent, 'Send', 'and never relabels to the unanswered ask');
+  assert.equal(block(p1b).classList.contains('flagged'), false, 'nor rings the earlier page\'s blank');
+  assert.equal(sent[0].body.round, round2, 'the body names the page on screen');
+  assert.deepEqual(sent[0].body.answers.map(a => [a.id, a.status, a.choice]),
+    [[p2a, 'answered', 'Yes'], [p2b, 'answered', 'No'], [p2c, 'deferred', null]], 'only that page\'s answers are posted');
+
+  applySubmit(board, { action: 'send', answers: sent[0].body.answers, comments: [] }, round2);
+  captured.dispatch('submitted', JSON.stringify({ round: round2, board, html: renderRoundSection(board, round2, groupCommentsByBlock([])) }));
+  await flush(1);
+  assert.equal(page(1).classList.contains('round-page-owed'), true, 'the earlier page keeps its dot');
+  assert.equal(page(round2).classList.contains('round-page-owed'), false);
+
+  page(1).dispatchEvent(new StandInEvent('click'));
+  assert.equal(block(p1a).querySelector('textarea[data-note-for]').value, 'keep this note', 'the earlier page keeps its typed note');
+  assert.equal(sendBtn.disabled, false, 'an earlier unsent page sends from its own page');
+  assert.equal(press().length, 0, 'its own Send asks about its blank');
+  assert.equal(sendBtn.textContent, '1 question unanswered — send anyway?');
+  assert.equal(block(p1b).classList.contains('flagged'), true);
+  const confirmed = press();
+  assert.equal(confirmed.length, 1);
+  assert.equal(confirmed[0].body.round, 1);
+  assert.deepEqual(confirmed[0].body.answers.map(a => [a.id, a.status, a.choice, a.note]),
+    [[p1a, 'answered', 'Yes', 'keep this note'], [p1b, 'unanswered', null, '']]);
+});
+
+check('an armed Send does not carry across a page flip: Send on the arriving page runs its own check', () => {
+  const q = prompt => ({ kind: 'question', prompt, widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] });
+  const board = createBoard({ title: 'Armed flip', blocks: [q('P1: ship it?')] });
+  addRound(board, { blocks: [q('P2: merge it?')] });
+  const document = loadBoard(renderBoardPage(board));
+  const sendBtn = document.getElementById('send-btn');
+  sendBtn.dispatchEvent(new StandInEvent('click'));
+  assert.equal(sendBtn.textContent, '1 question unanswered — send anyway?', 'setup: page 2\'s blank arms Send');
+  document.querySelector('.round-page[data-round="1"]').dispatchEvent(new StandInEvent('click'));
+  assert.equal(sendBtn.textContent, 'Send', 'leaving the page disarms');
+  const calls = withFetchCapture(() => sendBtn.dispatchEvent(new StandInEvent('click')));
+  assert.equal(calls.length, 0, 'page 1\'s own blank arms instead of sending');
+  assert.equal(document.querySelector(`.question-block[data-block-id="${board.blocks[0].id}"]`).classList.contains('flagged'), true);
+});
+
 // === what a re-render must keep ================================================
 
 check('a Defer survives an amend that re-renders its question unchanged: the fresh button shows it, matching what Send posts', () => {

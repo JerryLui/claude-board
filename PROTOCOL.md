@@ -221,8 +221,9 @@ unawaited.
 
 ### Blocks
 
-Every block has `{ id, round, kind }`. Content blocks additionally carry the resolved snapshot —
-`text` (`html`, for an `html` block) and `sha` — written once at post time and never re-read.
+Every block has `{ id, round, kind }` and may carry the card fields (`Card` below). Content blocks
+additionally carry the resolved snapshot — `text` (`html`, for an `html` block) and `sha` —
+written once at post time and never re-read.
 
 ```js
 { kind: 'markdown', source: Ref|null, text, sha, html, anchors, error? }
@@ -236,6 +237,8 @@ Ref    = { path, section?, lines? }               // lines is [from, to], 1-base
 Option = { label, description?, preview? }                  // every widget except the one below
        | { label, description?, block: ContentBlock|null }  // widget 'choose-between-rendered-variants' only
 widget = 'single' | 'multi' | 'text' | 'rank' | 'choose-between-rendered-variants'
+Card   = { title?, status?: { label, tone }, summary?, summaryHtml?, details?, detailsHtml?, detailsLabel? }
+tone   = 'good' | 'warn' | 'bad' | 'neutral'   // Card on any block, anywhere; a question refuses title, status and summary
 ```
 
 A markdown block's `anchors` is markdown's own slug index for headings and top-level list items
@@ -286,6 +289,29 @@ and stores the rendered markup beside it as `explainerHtml`, the same `text`/`ht
 that question renders with the prompt alone on its head row. It is a separate field from `context`
 because the two sit in different places: the explainer takes the card's full row with the prompt,
 while `context` is what the reviewer looks up, laid out beside the options.
+
+**Card fields** give any block the shared card look: a title line, a status chip at the card's
+right edge, one line of summary under the title and a details body folded closed. Each is
+optional, on every block kind wherever it sits (top level, a compare side, a question's `context`,
+a rendered-variant option's `block`), and absent, never empty, when not sent; a `null` counts as
+not sent, and a board stored before these fields existed renders with them absent.
+
+- `title`: plain text, 1 to 200 characters after trim, stored trimmed.
+- `status`: `{ label, tone }`, the label plain text of 1 to 40 characters after trim, the tone one
+  of `'good'`, `'warn'`, `'bad'` or `'neutral'`. A verdict goes here.
+- `summary`: markdown by value, 1 to 600 characters after trim, stored trimmed beside its rendered
+  `summaryHtml`.
+- `details`: markdown by value under the same by-value cap as `prompt`, stored as sent beside its
+  rendered `detailsHtml`, the same source/markup pair `explainer` keeps. The page folds it closed.
+- `detailsLabel`: the fold's label, plain text of 1 to 60 characters after trim, only beside
+  `details`; the page says "Details" without it.
+
+A `question` refuses `title`, `status` and `summary`: its prompt is its title, its answer state
+(Answered, Deferred) its chip and its `explainer` its summary. It may carry `details` and
+`detailsLabel`. A field of the wrong type, empty or past its cap, a `detailsLabel` without
+`details`, or a refused field on a question is a 400 naming the field, and the post stores nothing.
+A ```` ```mermaid ```` fence in `summary` or `details` is diagram input like any other (ADR 117).
+An amend into the open round stores them the same way.
 
 **`action`** is `'fire'` or `'merge'`, on a `single` question only, and absent on one that carries
 none: the question's yes is option 0, and while its round waits on an answer, the card of the
