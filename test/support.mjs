@@ -290,6 +290,15 @@ export function freePort() {
   });
 }
 
+/** `deadPid()` resolves a pid that belonged to a process that has already exited: a session
+ * bound to it reads as gone, the way a crashed one does. */
+export function deadPid() {
+  return new Promise(resolve => {
+    const child = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    child.once('exit', () => resolve(child.pid));
+  });
+}
+
 /** `secretHome(prefix, opts)` sets up a check's daemon home: a fresh `mkdtemp` directory under
  * the OS temp dir named from `prefix`, exported as `CLAUDE_BOARD_HOME` (unless
  * `opts.setHome` is false), with a `secret` file inside it holding `opts.secret`
@@ -885,16 +894,17 @@ async function buildPageHarness() {
   /** `loadIndexAgainstDaemon(port, opts)` renders the real index page and runs `indexScript`
    * against a daemon on 127.0.0.1:`port`: `globalThis.fetch` is pointed at it, carrying the
    * session cookie for `opts.secret`, and every request is tracked by a `fetchSettler`.
-   * opts: `secret` (required), `page` (renderIndexPage's argument, `{ threads: [] }`), `hash`
+   * opts: `secret` (required), `page` (renderIndexPage's argument, `{ threads: [] }`), `html`
+   * (a page as the daemon served it, loaded in place of rendering `page`), `hash`
    * (location.hash, ''), `noCookieFor` (urls sent without the cookie, to fail a write), `stream`
    * (pass a capturing EventSource stand-in; off, the declared name stays undefined), `settler`
    * (share one across loads). Returns `{ document, intervals, location, history, stream,
    * settle, restoreFetch }`: `intervals` records each setInterval and fires none, `location`
    * counts `reload()` calls, `history` records each `replaceState` url and applies its hash,
    * `settle()` drains every request in flight. Call `restoreFetch()` when done. */
-  function loadIndexAgainstDaemon(port, { secret, page = { threads: [] }, hash = '', noCookieFor = [], stream = false, settler = fetchSettler() } = {}) {
+  function loadIndexAgainstDaemon(port, { secret, page = { threads: [] }, html = null, hash = '', noCookieFor = [], stream = false, settler = fetchSettler() } = {}) {
     assert.ok(secret, 'setup failure: loadIndexAgainstDaemon needs the daemon secret for its session cookie');
-    const document = parseHTML(renderIndexPage(page));
+    const document = parseHTML(html ?? renderIndexPage(page));
     const cookie = sessionCookieHeader(secret);
     globalThis.fetch = (url, opts) => {
       const headers = { ...(opts && opts.headers), ...(noCookieFor.includes(url) ? {} : { cookie }) };

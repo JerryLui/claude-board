@@ -84,6 +84,19 @@ const RETRY_MAX_MS = Number(process.env.CLAUDE_BOARD_RETRY_MAX_MS) || 2_000;
 // somewhere deeper with a message about the daemon being broken.
 const SECRET = readSecret();
 
+// A session the Master Chief started in the background (PROTOCOL.md "MCP shim
+// environment"): it passes `assertInteractive` as any declared client does, and opens no
+// tab, since nobody is sitting at it; the board's own notification announces its rounds.
+const BACKGROUND = process.env.CLAUDE_BOARD_CLIENT === 'background';
+
+// The mission this session works for, carried on every board post so the daemon links the
+// board to it. A value that is not a mission key is ignored, never a failed post. The key
+// rule is the store's `SAFE_MISSION_KEY` (src/store.mjs), spelled again here because
+// importing the store pulls the page assets, the mermaid engine among them, into every shim.
+const MISSION_KEY_RE = /^[A-Za-z0-9_-]{1,80}$/;
+const MISSION = MISSION_KEY_RE.test(process.env.CLAUDE_MISSION || '') ? process.env.CLAUDE_MISSION : null;
+const MISSION_FIELD = MISSION ? { mission: MISSION } : {};
+
 function readPkgVersion() {
   try {
     const here = path.dirname(fileURLToPath(import.meta.url));
@@ -635,6 +648,38 @@ const READ_TOOL = {
   },
 };
 
+/** The third tool: the missions ledger (src/missions.mjs), one record per piece of work.
+ * Any agent writes its own work's status here and the missions page and the Master Chief
+ * read the same records. `relay` sits here rather than on `ask` because it is the Master
+ * Chief's write onto ANOTHER session's board, answering that session's round on the PM's
+ * words. */
+const MISSION_TOOL = {
+  name: 'mission',
+  description:
+    'The claude-board missions ledger: one record per piece of work. Any agent (Claude, Codex, ' +
+    'OpenCode) writes its work\'s status here: phase, state, summary, PRs, handoff. Never case ' +
+    'content. Actions: list, read, write (fields), relay (answer a session\'s open board round ' +
+    'on the PM\'s own words), ack (an order relayed).',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      action: { type: 'string', enum: ['list', 'read', 'write', 'relay', 'ack'] },
+      key: { type: 'string', description: 'The mission key (letters, digits, - and _), e.g. a spec\'s descriptor. read, write, ack.' },
+      all: { type: 'boolean', description: 'list: keep missions landed more than 24 hours ago.' },
+      fields: {
+        type: 'object',
+        description: 'write: the fields to set, from title cwd phase state summary waitingOn next prs handoff fire queue retiredAt.',
+      },
+      board: { type: 'string', description: 'relay: the board URL or bare board id.' },
+      round: { type: 'integer', description: 'relay: the round being answered.' },
+      answers: { type: 'array', items: { type: 'object' }, description: 'relay: [{ id, status, choice, note }], as a submit carries them.' },
+      words: { type: 'string', description: 'relay: the PM\'s words, verbatim, at most 1 KB.' },
+      order: { type: 'string', description: 'ack: the order id.' },
+    },
+    required: ['action'],
+  },
+};
+
 /** A board page URL of this daemon's own shape, for `read`'s one argument. The port is
  * not pinned: a board URL from an earlier session on another port still names a board id
  * this daemon can look up, and the id is the only part that reaches a request. The HOST
@@ -706,6 +751,7 @@ function formatAnchor(anchor) {
  * their own input; "3 comment(s)." makes that impossible and does it silently. */
 function summarizeAnswers(packet) {
   const lines = (packet.answers || []).map(a => `  - ${answerLine(a)}`);
+  if (packet.relayed) lines.unshift(relayedLine(packet.relayed));
   const comments = packet.comments || [];
   const commentBlock = comments.length
     ? [
@@ -714,6 +760,12 @@ function summarizeAnswers(packet) {
     ].join('\n')
     : 'No comments.';
   return `${lines.join('\n')}\n${commentBlock}`;
+}
+
+/** A round the Master Chief answered on the PM's typed words rather than a Send on the
+ * board: said in the text, the one channel no client drops, with the words themselves. */
+function relayedLine(relayed) {
+  return `Relayed: the Master Chief answered this round on the PM's words at ${relayed.at}: ${JSON.stringify(relayed.words)}`;
 }
 
 /** One answer entry as a line of text. Extracted from `summarizeAnswers` above only
@@ -763,7 +815,8 @@ function summarizeBoardRead(doc) {
       // reaches nobody who arrives through `read` instead. What the word means is the
       // skill's to say, in one place, rather than a second copy of that sentence here.
       `${r.action ? `, action ${r.action}` : ''}, ` +
-      `${r.awaited ? 'still awaited' : 'not awaited'}${r.deadline ? `, deadline ${r.deadline}` : ''}`
+      `${r.awaited ? 'still awaited' : 'not awaited'}${r.deadline ? `, deadline ${r.deadline}` : ''}` +
+      `${r.relayed ? `. ${relayedLine(r.relayed)}` : ''}`
     );
   }
   const entries = [];
@@ -989,7 +1042,7 @@ async function postThisRound(session, title, blocks, wait, fresh) {
     const creating = (async () => {
       const posted = await httpJson(
         'POST', `${BASE_URL}/api/board`,
-        { title, blocks, wait: Boolean(wait), noWait, cwd: process.cwd(), thread: session.thread ?? null, requestId: createRequestId },
+        { title, blocks, wait: Boolean(wait), noWait, cwd: process.cwd(), thread: session.thread ?? null, requestId: createRequestId, ...MISSION_FIELD },
         { timeoutMs: CREATE_TIMEOUT_MS }
       );
       session.boardId = posted.boardId;
@@ -1049,7 +1102,7 @@ async function postThisRound(session, title, blocks, wait, fresh) {
   try {
     posted = await httpJson(
       'POST', `${BASE_URL}/api/board`,
-      { boardId: session.boardId, blocks, title, wait: Boolean(wait), noWait, requestId },
+      { boardId: session.boardId, blocks, title, wait: Boolean(wait), noWait, requestId, ...MISSION_FIELD },
       { timeoutMs: POST_TIMEOUT_MS }
     );
   } catch (err) {
@@ -1212,7 +1265,10 @@ async function askTool(args, session, { sendProgress, cancelled }) {
   // the daemon can see every board on this machine, while this process knows one thread in
   // one project directory. Absent on a daemon from before the field existed, which opens
   // exactly as it always has.
-  if (isFirstBoard && !posted.suppressed) await openAuthorizedTab(posted.boardId, url);
+  //
+  // A background session opens none at all: nobody is sitting at it, and the daemon's
+  // notification and the missions page are how its board reaches the PM.
+  if (isFirstBoard && !posted.suppressed && !BACKGROUND) await openAuthorizedTab(posted.boardId, url);
 
   // A round with nothing awaited on it (see `isAwaited` above) has nothing a human
   // needs to submit, so there is nothing left to wait for — return the instant the
@@ -1393,6 +1449,64 @@ async function readTool(args) {
   return packetResult(`${summarizeBoardRead(packet)}\nBoard: ${packet.url}`, packet);
 }
 
+/** `mission` (MISSION_TOOL above): one daemon call per action, the answer handed back as
+ * JSON on the text channel and as `structuredContent`.
+ *
+ * No `assertInteractive`, like `read`: a status write puts nothing in front of a human,
+ * and the sessions that write most are the unattended ones. */
+async function missionTool(args) {
+  if (!SECRET) throw new ToolError(missingSecretMessage('this machine has no claude-board local secret.', 'mission'));
+  const action = args && args.action;
+  const key = args && args.key;
+  const needKey = () => {
+    if (typeof key !== 'string' || !MISSION_KEY_RE.test(key)) {
+      throw new ToolError(`mission ${action} requires "key": letters, digits, - and _, at most 80, not ${JSON.stringify(key ?? null)}`);
+    }
+    return key;
+  };
+  let method;
+  let route;
+  let body = null;
+  if (action === 'list') {
+    method = 'GET';
+    if (args.all != null && typeof args.all !== 'boolean') throw new ToolError(`mission list takes "all" as a boolean, not ${JSON.stringify(args.all)}`);
+    route = `/api/missions${args.all === true ? '?all=1' : ''}`;
+  } else if (action === 'read') {
+    method = 'GET';
+    route = `/api/mission/${needKey()}`;
+  } else if (action === 'write') {
+    const fields = args.fields;
+    if (!fields || typeof fields !== 'object' || Array.isArray(fields)) throw new ToolError('mission write requires "fields": an object of the fields to set');
+    method = 'POST';
+    route = `/api/mission/${needKey()}`;
+    body = fields;
+  } else if (action === 'relay') {
+    const boardId = boardIdFrom(args.board);
+    if (!boardId) throw new ToolError(`mission relay requires "board": a board URL or bare board id, not ${JSON.stringify(args.board ?? null)}`);
+    method = 'POST';
+    route = `/api/board/${boardId}/relay`;
+    body = { round: args.round, answers: args.answers ?? [], words: args.words };
+  } else if (action === 'ack') {
+    const order = args.order;
+    if (typeof order !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(order)) throw new ToolError(`mission ack requires "order": the order id, not ${JSON.stringify(order ?? null)}`);
+    method = 'POST';
+    route = `/api/mission/${needKey()}/order/${order}/ack`;
+    body = {};
+  } else {
+    throw new ToolError(`mission requires "action": one of list, read, write, relay, ack, not ${JSON.stringify(action ?? null)}`);
+  }
+  let answer;
+  try {
+    answer = await httpJson(method, `${BASE_URL}${route}`, body, { timeoutMs: POST_TIMEOUT_MS });
+  } catch (err) {
+    if (typeof err?.statusCode === 'number' && err.statusCode !== 401) {
+      throw new ToolError(`mission ${action} refused by the daemon (HTTP ${err.statusCode}): ${err.message}`);
+    }
+    throw toolErrorFor(err, null, 'mission');
+  }
+  return { content: [{ type: 'text', text: JSON.stringify(answer) }], isError: false, structuredContent: answer };
+}
+
 // ---------------------------------------------------------------------------
 // JSON-RPC 2.0 over newline-delimited JSON on stdio.
 // ---------------------------------------------------------------------------
@@ -1452,7 +1566,7 @@ async function handleToolsCall(id, params) {
   const args = (params && params.arguments) || {};
   const progressToken = params && params._meta && params._meta.progressToken;
 
-  if (name !== 'ask' && name !== 'read') {
+  if (name !== 'ask' && name !== 'read' && name !== 'mission') {
     return respondError(id, -32602, `unknown tool: ${name}`);
   }
 
@@ -1473,7 +1587,9 @@ async function handleToolsCall(id, params) {
     // share is `session` -- see readTool.
     const result = name === 'read'
       ? await readTool(args)
-      : await askTool(args, session, { sendProgress, cancelled });
+      : name === 'mission'
+        ? await missionTool(args)
+        : await askTool(args, session, { sendProgress, cancelled });
     if (wasCancelled) return; // MCP: a cancelled request gets no response
     return respond(id, result);
   } catch (err) {
@@ -1486,6 +1602,12 @@ async function handleToolsCall(id, params) {
     // posted sends the agent to a board that has nothing to do with the failure. An
     // argument naming no board leaves both fields null, which is what the packet's own
     // shape already means by "no board".
+    // `mission` answers in its own shape, not a board packet: its record is no board.
+    if (name === 'mission') {
+      const message = err instanceof ToolError ? err.message : `mission failed unexpectedly: ${err && err.message || err}`;
+      if (!(err instanceof ToolError)) logErr('mission failed unexpectedly:', err && err.stack || err);
+      return respond(id, { content: [{ type: 'text', text: message }], isError: true });
+    }
     const readBoardId = name === 'read' ? boardIdFrom(args && args.board) : null;
     const extra = name === 'read'
       ? { title: null, board: readBoardId, url: safeBoardUrl(readBoardId) }
@@ -1526,7 +1648,7 @@ async function handleMessage(msg) {
     case 'ping':
       return respond(id, {});
     case 'tools/list':
-      return respond(id, { tools: [ASK_TOOL, READ_TOOL] });
+      return respond(id, { tools: [ASK_TOOL, READ_TOOL, MISSION_TOOL] });
     case 'tools/call':
       return handleToolsCall(id, params);
     default:

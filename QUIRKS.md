@@ -2276,6 +2276,13 @@ chrome band; if that ever surfaces, the fix is this same resend, not a broadcast
 
 Traps that have bitten once. A second bite moves the entry up into the section it belongs to.
 
+- **A Ctrl press in headless Chrome on a Mac is a right-click: `contextmenu`, and no `click`.**
+  `Input.dispatchMouseEvent` with `button: 'left', modifiers: 2` fires `pointerdown`,
+  `mousedown`, `contextmenu`, `mouseup` and never `click`, as a real Ctrl-click does on macOS;
+  Cmd (4), Shift (8) and Alt (1) still fire `click`. A control that must answer a Ctrl press
+  listens for `contextmenu` with `ctrlKey` and `button === 0` (`onMissionsContextmenu`,
+  `src/indexpage.mjs`).
+
 - **A stage loaded inside `withFrameClock` reports its own fixture height on every turn of the
   clock.** `loadSrcdoc()` under the clock books the real `stageAgentScript`'s first report, so the
   next `clock.frames()` overwrites whatever height a check forged just before it (the stand-in's
@@ -2426,6 +2433,8 @@ Traps that have bitten once. A second bite moves the entry up into the section i
   measure those first if it creeps back. To time a script under macOS's bash 3.2, which has no
   `EPOCHREALTIME` and no `BASH_XTRACEFD`: run it under `bash -x` from a node wrapper that splits
   the trace lines (a marked `PS4`) off stderr and stamps each as it arrives.
+  Crept back (2026-10-28): 163s alone, green, and past 180s under `npm run check`'s 4-wide pool
+  on a loaded jerry-m6, with `install.sh` and the check unchanged.
 - **A stage frame that leaves the document loads again, and a Send's push used to take every
   frame out** (2026-10-19). Chrome 155: `applySubmittedPush` swapped the whole round section, so a
   video paused at 1.4s came back at 0 after a Send, and `el.replaceWith(el)` is no safe no-op
@@ -2441,3 +2450,14 @@ Traps that have bitten once. A second bite moves the entry up into the section i
   The same three steps as separate calls (the `git show` redirect alone, the probe written with the
   Write tool, then `node probe.mjs`) all ran. A probe of the pre-change code imports such a copy
   from `src/` so its relative imports resolve, and both files are deleted before committing.
+- **`scrollbar-gutter: stable` reserves nothing on an overlay-scrollbar Mac, yet the restyled
+  bar takes 11px.** `::-webkit-scrollbar { width: 11px }` (`src/styles.mjs`) gives a scrolling
+  page an 11px bar even under overlay scrollbars, where the gutter rule reserves 0 on a page that
+  does not scroll, so a short view and a long one differ by 11px. The home views use
+  `overflow-y: scroll` on the root instead (Chrome 155 headless, jerry-m6, 2026-10-28;
+  `test/browser-check-topbar.mjs` runs both scrollbar kinds).
+- **`documentElement.clientWidth` read in a module script can predate the root's scrollbar.**
+  The index's first `measureDocWidth` read 1440 on a 1440 window whose root had
+  `overflow-y: scroll` (true width 1429), so the centred `--doc-w` wash overflowed by half the
+  difference and the page scrolled sideways 6px. Re-measure on the root's `ResizeObserver` and on
+  `load`, not only on `resize`.

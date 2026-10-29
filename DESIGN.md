@@ -34,6 +34,11 @@ attached to a document that no longer exists. Underneath that defect was a shape
 had been built per stage kind, so the two exotic cases were the only ones modelled and everything
 the reviewer actually reads was uncommentable below block level.
 
+**Status's problem, found later.** Once a person ran a dozen agent sessions at a time, the board
+answered their questions but said nothing about the work around them: which session needed them,
+which had stalled, which had landed. Status was asked by hand, session by session, and the person
+was the only link between sessions, carrying merge orders and approvals across by pasting.
+
 ## Solution
 
 A **local review service**: one always-on UI daemon on this machine, plus a thin MCP server every
@@ -52,6 +57,11 @@ private design systems for a block list; `ADR.md` entries 5, 11 and 102 record w
 **Anchoring's solution.** Any element the reviewer can see can take a comment, through one model
 over the board's own rendered DOM. Diagrams and mocks become two cases of that model rather than
 the two cases it was designed around.
+
+**Status's solution.** The board keeps a mission per piece of work beside its rounds, written by
+whichever agent works on it, and its home page shows every mission in a column by state, live,
+with the one-click answers a card can honestly offer. Decisions plus status, on one surface
+(entries 123 to 129).
 
 ## Decisions
 
@@ -111,7 +121,10 @@ wider layer splitting across rounds. Rounds track the
 depth of the decision graph, not the number of branches in it. Rejected: branch-sized rounds, one
 branch per round, which serialises branches that merely sit near each other in the design. A lone
 follow-up or a yes/no still goes through `AskUserQuestion` in the terminal, because opening a tab
-for one question is worse than answering it inline.
+for one question is worse than answering it inline. [No longer: once the person answered on the
+board while a dozen sessions ran, a question in one terminal was a question unseen, so the manual
+now sends every question to the board, one question being a round of one, and a host may refuse
+the in-chat popup while the board is up. The popup is the fallback only while the board is down.]
 
 **Questions by value, content by reference, snapshotted at post time.** Content passed as a
 reference stays cheap and faithful because it never passes through the model; prior art is
@@ -720,6 +733,43 @@ anyone listening" a question five pieces of code answer independently — exactl
 "one property behind three surfaces" exists to prevent, and the same three symptoms above would
 return the moment one of the five drifted. Clearing the flag at `readBoard`, the one choke point
 every reader already passes through, makes all five correct without any of them knowing.
+
+### Entry 124: the home page is Missions
+
+**The page, top to bottom.** One top bar, then the view under it. The bar is the board page's own
+header, `.board-head` in the board page's `.board-shell`, rendered by one function for both home
+views: the mark at 30px linking home, the 20px title, the Missions and Boards tabs beside it, and
+on the right the timer, Comment and theme controls. The Boards tab carries the daemon's one waiting
+total, the same number on either view at the same moment. Under it, Missions draws a row of counts
+and then five columns, Needs you, Working, Waiting, Stalled and Landed, as a grid of columns at
+least 250px wide that wraps on a narrow window. A card is the work's title and age, its key and
+phase (with a Queued tag under Waiting), the summary, what it waits on and what comes next, its
+PRs with a mark for their state, any pending order, and a row of buttons: the latest board or the
+round asking, Fire or Merge while asked, and the Stop icon at the right while a session is live,
+asking once before it sends, or sending at once on a Cmd-click.
+Boards is the list of Threads with its filter, the home page before Missions took `/`, now at the
+bar's full width.
+
+**Why columns.** Three layouts were mocked. A needs-you-first list puts the one urgent thing on
+top and buries the rest in one undifferentiated scroll, so "what is working" has no place to be
+read at a glance. A card per mission carrying its phase track (grill, direct, landing) answers
+"how far along" well and "what needs me" badly, since the urgent cards sit wherever their work
+happens to be. Columns by state answer the question the page is opened for, and the phase still
+rides on each card.
+
+**Why the boards moved out rather than down.** The first cut put the boards list below the missions
+on one page. Boards are read on a different errand, finding a past round, and below a column grid
+that grows with the work they drift out of reach; and the list was capped at 900px while a board
+page runs to 2560px, so the two never lined up. A tab each, under one bar, keeps both at one width.
+
+**Why the board page's own header.** A home bar of its own would be a second header for the eye to
+learn and a second set of edges, so going from a card to its board would move the logo, the timer
+and the theme control. Rendering both home views through the same header, at the same shell, means
+switching tabs or opening a board moves nothing in the bar. Two measured traps sat under "moves
+nothing": the restyled scrollbar takes 11px even under overlay scrollbars, where the gutter rule
+reserves nothing on a page that does not scroll, so a short view and a long one differed by 11px
+until the home views scrolled their root always; and the first width read could predate the
+root's scrollbar (QUIRKS.md has both).
 
 ### Entry 102 — one copy of the mechanism
 

@@ -77,8 +77,8 @@ async function enablePomodoro(port) {
  * `eventSource: false` loads the page in a scope with no EventSource in it at all --
  * an older browser, and the same shape test/check-pure.mjs's narrow function-extraction
  * stand-ins run this script under. The page must still work; that is criterion 5. */
-function openIndexTab(port, { threads = [], query = '', eventSource = true } = {}) {
-  const tab = loadIndexAgainstDaemon(port, { secret: SECRET, page: { threads, query }, stream: eventSource, settler });
+function openIndexTab(port, { threads = [], query = '', html = null, eventSource = true } = {}) {
+  const tab = loadIndexAgainstDaemon(port, { secret: SECRET, page: { threads, query }, html, stream: eventSource, settler });
   const poll = tab.intervals.find(i => i.ms === 15000);
   assert.ok(poll, 'setup failure: the index must register a fifteen-second tick');
   return {
@@ -545,6 +545,27 @@ async function main() {
       }
     });
 
+    await check('the Boards view the daemon serves at /boards is the live list, polling under its own filter', async () => {
+      // The page itself, as GET /boards serves it, rather than renderIndexPage called
+      // here: the boards list moved off '/', and a route serving a page whose list the
+      // tick cannot find, or under a filter it did not render, leaves a stale list.
+      const served = await rawRequest(port, 'GET', '/boards?q=delta', { headers: { [SECRET_HEADER]: SECRET } });
+      assert.equal(served.status, 200, `GET /boards failed: ${served.status}`);
+      const tab = openIndexTab(port, { html: served.body });
+      try {
+        assert.equal(rows(tab.document).length, rows(tab.document).filter(r => r.textContent.includes('Moving session')).length,
+          'setup: the served list is already filtered');
+        const posted = await postBoard(port, SECRET, { title: 'Moving session, later', blocks: [QUESTION('Later?')], cwd: projectFor(workDir, 'delta-later') });
+        await postBoard(port, SECRET, { title: 'Outside the filter', blocks: [QUESTION('Out?')], cwd: projectFor(workDir, 'omega') });
+        await tab.tick();
+        assert.ok(rowFor(tab.document, posted.thread), 'a matching board posted after the page loaded arrives on the tick');
+        const shown = rows(tab.document).map(r => r.textContent.trim());
+        assert.ok(shown.every(t => t.includes('Moving session')), `the tick keeps the served filter, got: ${shown.join(' | ')}`);
+      } finally {
+        tab.restoreFetch();
+      }
+    });
+
     // ---------------------------------------------------------------------------------
     // The push path: the page hears about a change instead of waiting for one.
     //
@@ -565,8 +586,8 @@ async function main() {
         assert.ok(tab.stream, 'the page must open a live connection at all -- without one it is fifteen seconds behind the menu bar');
         assert.equal(tab.stream.url, '/api/events',
           'the DAEMON-WIDE stream (src/server.mjs handleStream), not a per-board one: the index has no board id to subscribe under');
-        assert.deepEqual([...tab.stream.listeners.keys()].sort(), ['open', 'pomodoro', 'waiting'],
-          'open (first connect and every reconnect), plus the two events the daemon already broadcasts -- a listener for anything else would be waiting on a push nobody sends');
+        assert.deepEqual([...tab.stream.listeners.keys()].sort(), ['missions', 'open', 'pomodoro', 'waiting'],
+          'open (first connect and every reconnect), plus the three events the daemon already broadcasts -- a listener for anything else would be waiting on a push nobody sends');
       } finally {
         tab.restoreFetch();
       }
@@ -602,6 +623,48 @@ async function main() {
           'the answered row settles on the push too');
       } finally {
         tab.restoreFetch();
+        wire.close();
+      }
+    });
+
+    await check('the Boards tab counts the rounds waiting, on the daemon\'s own push, on the Missions and the Boards view alike', async () => {
+      const wire = openWireStream(port);
+      const served = {};
+      for (const path of ['/', '/boards']) {
+        const r = await rawRequest(port, 'GET', path, { headers: { [SECRET_HEADER]: SECRET } });
+        assert.equal(r.status, 200, `GET ${path} failed: ${r.status}`);
+        served[path] = r.body;
+      }
+      const tabs = Object.values(served).map(html => openIndexTab(port, { html }));
+      const count = tab => tab.document.querySelector('span#waiting-count');
+      try {
+        await wire.connected();
+        const before = JSON.parse((await rawRequest(port, 'GET', '/api/waiting', { headers: { [SECRET_HEADER]: SECRET } })).body).total;
+        for (const tab of tabs) {
+          assert.equal(count(tab).textContent, before ? `${before} waiting` : '', 'setup: the served count is the waiting total');
+        }
+        const posted = await postBoard(port, SECRET, { title: 'Counted', blocks: [QUESTION('Counted?')], cwd: projectFor(workDir, 'kappa'), wait: true });
+        const pushed = await wire.next('waiting');
+        assert.equal(pushed.data.total, before + 1, 'setup: the post adds one round waiting');
+        for (const tab of tabs) {
+          await tab.push('waiting', pushed.data);
+          assert.equal(count(tab).textContent, `${before + 1} waiting`, 'the count follows the push');
+          assert.equal(count(tab).getAttribute('hidden'), null, 'and shows');
+        }
+        const submitted = await rawRequest(port, 'POST', `/api/board/${posted.boardId}/submit`, {
+          headers: { 'content-type': 'application/json', [SECRET_HEADER]: SECRET },
+          body: JSON.stringify({ round: 1, action: 'send', answers: [], comments: [] }),
+        });
+        assert.equal(submitted.status, 200, `submit failed: ${submitted.body}`);
+        const settled = (await wire.next('waiting')).data;
+        for (const tab of tabs) {
+          await tab.push('waiting', settled);
+          assert.equal(count(tab).textContent, settled.total ? `${settled.total} waiting` : '', 'the answered round leaves the count');
+        }
+        await tabs[0].push('waiting', { total: 0, now: Date.now() });
+        assert.equal(count(tabs[0]).getAttribute('hidden'), '', 'at zero the count hides, and the tab reads Boards alone');
+      } finally {
+        for (const tab of tabs) tab.restoreFetch();
         wire.close();
       }
     });

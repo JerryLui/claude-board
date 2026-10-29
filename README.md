@@ -9,6 +9,10 @@ reference, a side-by-side comparison. You answer in any order, click any rendere
 artifact to comment on it, and submit once. The tool call returns the whole packet as
 structured data.
 
+Beside the decisions, the board keeps the status of the work around them. Each piece of
+work is a **mission**, written by whichever agent works on it, and the board's home page
+shows every mission in a column by state: needs you, working, waiting, stalled, landed.
+
 **macOS only, by construction**: launchd supervision, `plutil` linting, `open` for the
 tab. No Linux or Windows path exists or is planned.
 
@@ -162,22 +166,25 @@ which render as `cannot read <path>: EPERM`. Reversible either way under
 
 ### The second click: notifications
 
-The launcher posts the two notifications claude-board raises: a pomodoro boundary, and
-a round left waiting on a board nobody is looking at. macOS asks once, at the end of
+The launcher posts the notifications claude-board raises: a pomodoro boundary, a round
+left waiting on a board nobody is looking at, and one line a minute at most when missions
+need you, stall or land. macOS asks once, at the end of
 the install rather than hours later. Saying no costs the notifications and nothing
-else. Each has its own switch beside the clock on the index page. Both arrive as
+else. The first two each have a switch in the settings beside the clock on the home page,
+and the rounds' Off silences the missions line too. All arrive as
 banners by default, gone in seconds; set claude-board to **Alerts** under
 **System Settings → Notifications** to make them wait for you.
 
 ### The menu bar item and the timer
 
 Installing also adds a menu-bar status item: quick access to the boards still waiting
-on an answer, so an open question is never further away than the clock. The item also
+on an answer, so an open question is never further away than the clock, and a row
+counting the missions that need you and those working, which opens the home page. The item also
 carries an optional pomodoro-style work timer, **off by default** — installing
-claude-board does not start a timer, add one to the index page, or notify you about
+claude-board does not start a timer, add one to the home page, or notify you about
 one. To opt in, flip the **Pomodoro timer** switch that leads the board's settings
-panel: the timer then appears on the menu-bar item and the index page's clock. Even
-switched on it starts nothing by itself; a timer starts only from the index page, or
+panel: the timer then appears on the menu-bar item and the home page's clock. Even
+switched on it starts nothing by itself; a timer starts only from the home page, or
 from the optional session-start hook in [INSTALL.md](INSTALL.md), which is applied by
 hand because `install.sh` never touches `~/.claude/settings.json`. Hide the icon
 entirely with **Show in menu bar** in the board's pomodoro settings, independent of
@@ -223,8 +230,8 @@ control, and its comments come back in that same call. If the cap runs out first
 anything typed and not yet sent is filed to the board and reaches whichever agent asks
 next.
 
-`http://127.0.0.1:7391/` lists every thread with its rounds-left count, filtered by
-title, project folder or thread id. Searching *inside* archived boards is
+`http://127.0.0.1:7391/boards` lists every thread with its rounds-left count, filtered
+by title, project folder or thread id. Searching *inside* archived boards is
 `GET /api/search?q=`.
 
 Content blocks reference a file rather than quoting it, and the daemon snapshots the
@@ -232,6 +239,30 @@ file at post time. A reference that does not resolve refuses the post; so does a
 does not parse, including a `mermaid` fence in markdown. The 400 names each broken diagram: fix
 the source and post again, or post an unfixable fence by value with its language changed to code
 (ADR 117).
+
+### Missions
+
+`http://127.0.0.1:7391/` is the **Missions** view, the board's home page: one card per
+piece of work, in its state's column, live. A mission is one record across all of a
+work's sessions (a design interview, the build, the landing), keyed by a short name, and
+any agent writes it through the same server's `mission` tool, or a hook over HTTP
+([PROTOCOL.md](PROTOCOL.md), "The missions routes"). It holds work names, phases, links
+and summaries, never the content of the work. A card reads stalled when its session's
+process is gone, or it has been working and silent for fifteen minutes. Missions and
+Boards share one top bar, the board page's own header, with a tab each; the Boards tab
+counts the rounds waiting.
+
+A card's **Fire** and **Merge** buttons show only while a round on that mission's own
+board asks for that answer, and a click is that round's answer, exactly a Send. Stop
+(the circle-slash icon) and a comment on a card are orders for an agent fronting the
+sessions to carry to the mission's session; the board itself stops nothing. That agent
+can also answer a round on your typed words, and the round then says it was relayed
+and quotes them.
+
+A session started in the background, with nobody at its terminal, declares it with
+`CLAUDE_BOARD_CLIENT=background`: its boards post and wait as ever, and open no tab, so
+the round reaches you through its notification and the home page. `claude -p` and other
+scripted runs are still refused.
 
 ### An example skill
 

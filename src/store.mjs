@@ -39,6 +39,11 @@ function pagesDir(home = boardHome()) {
   return path.join(home, 'pages');
 }
 
+// $CLAUDE_BOARD_HOME/missions/<key>.json, one record per mission (src/missions.mjs).
+function missionsDir(home = boardHome()) {
+  return path.join(home, 'missions');
+}
+
 /** What a board id is allowed to be. Canonical here rather than in a caller because
  * THIS module is what turns an id into a filesystem path, and a pattern enforced at the
  * route is a pattern the next route forgets: `POST /api/board` used to hand
@@ -72,6 +77,80 @@ const FILE_MODE = 0o600;
 function ensureDirs(home = boardHome()) {
   mkdirSync(boardsDir(home), { recursive: true, mode: DIR_MODE });
   mkdirSync(pagesDir(home), { recursive: true, mode: DIR_MODE });
+}
+
+/** What a mission key is allowed to be: a spec's descriptor, such as `FRONT_AGENT`. Held
+ * here for the reason `SAFE_BOARD_ID` above is: this module turns the key into a path. */
+export const SAFE_MISSION_KEY = /^[A-Za-z0-9_-]{1,80}$/;
+
+/** Throws a 400 for a key that cannot be a mission's filename, as `assertSafeId` does for a
+ * board id. */
+export function assertMissionKey(key) {
+  if (typeof key !== 'string' || !SAFE_MISSION_KEY.test(key)) {
+    throw Object.assign(new Error(`unsafe mission key: ${JSON.stringify(String(key))}`), { status: 400 });
+  }
+  return key;
+}
+
+function missionPath(key, home = boardHome()) {
+  return path.join(missionsDir(home), `${assertMissionKey(key)}.json`);
+}
+
+/** The stored mission record for `key`, or null when there is none. */
+export function readMission(key, home = boardHome()) {
+  try {
+    return JSON.parse(readFileSync(missionPath(key, home), 'utf8'));
+  } catch (err) {
+    if (err.code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+/** Atomically writes `mission` to its record, by the same temp-and-rename a board takes. */
+export function writeMission(mission, home = boardHome()) {
+  atomicWrite(missionPath(mission.key, home), JSON.stringify(mission, null, 2));
+  return mission;
+}
+
+/** Every readable mission record. An unreadable file is skipped with a warning, as
+ * `listBoards` skips one. */
+export function listMissions(home = boardHome()) {
+  let files;
+  try {
+    files = readdirSync(missionsDir(home));
+  } catch (err) {
+    if (err.code === 'ENOENT') return [];
+    throw err;
+  }
+  const missions = [];
+  for (const f of files) {
+    if (!f.endsWith('.json') || f.includes('.tmp-')) continue;
+    const key = f.slice(0, -'.json'.length);
+    try {
+      const m = readMission(key, home);
+      if (m && m.key === key) missions.push(m);
+    } catch (err) {
+      console.warn(`claude-board: skipping unreadable store file missions/${f}: ${(err && err.message) || err}`);
+    }
+  }
+  return missions;
+}
+
+/** How long a mission's record outlives its work's retirement before a prune removes it. */
+export const MISSION_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** Delete every mission record whose `retiredAt` is at least `MISSION_RETENTION_MS` old,
+ * and return their keys. A record that never retired, or whose `retiredAt` does not parse,
+ * is kept. Called from `pruneStore` alone. */
+function pruneRetiredMissions(home, now) {
+  const removed = [];
+  for (const m of listMissions(home)) {
+    const retired = Date.parse(m.retiredAt);
+    if (!Number.isFinite(retired) || now - retired < MISSION_RETENTION_MS) continue;
+    try { unlinkSync(missionPath(m.key, home)); } catch (err) { if (err.code !== 'ENOENT') throw err; }
+    removed.push(m.key);
+  }
+  return removed;
 }
 
 function boardPath(id, home = boardHome()) {
@@ -432,8 +511,9 @@ function sweepUnreferencedAssets(home) {
 }
 
 /** Remove every board older than `days`, document and emitted page alike, then every
- * shared asset no surviving page still names. Returns `{ boards, assets }` — the ids and
- * the filenames actually removed.
+ * shared asset no surviving page still names, and every mission record retired at least
+ * `MISSION_RETENTION_MS` ago. Returns `{ boards, assets, missions }` — the ids, the
+ * filenames and the mission keys actually removed.
  *
  * THE WINDOW HAS NO DEFAULT, and that is the decision this signature exists to enforce
  * (ADR 71): the one number that decides what dies is named at the call, never implied.
@@ -457,12 +537,15 @@ export function pruneStore(days, home = boardHome(), now = Date.now()) {
     );
   }
   const cutoff = now - days * 24 * 60 * 60 * 1000;
+  // Missions keep their own fixed window, 30 days after `retiredAt`, whatever `days` says:
+  // a record holds no case content, and its window is a default the ledger decided.
+  const missions = pruneRetiredMissions(home, now);
   const boards = [];
   let files;
   try {
     files = readdirSync(boardsDir(home));
   } catch (err) {
-    if (err.code === 'ENOENT') return { boards, assets: [] }; // nothing has ever been written here
+    if (err.code === 'ENOENT') return { boards, assets: [], missions }; // no board has ever been written here
     throw err;
   }
   for (const f of files) {
@@ -504,5 +587,5 @@ export function pruneStore(days, home = boardHome(), now = Date.now()) {
       { status: err.status || 500 }
     );
   }
-  return { boards, assets };
+  return { boards, assets, missions };
 }

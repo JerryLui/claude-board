@@ -353,12 +353,15 @@ async function main() {
   });
   client.notify('notifications/initialized', {});
 
-  await check('tools/list exposes exactly two tools, ask and read', async () => {
+  await check('tools/list exposes exactly three tools, ask, read and mission', async () => {
     const res = await client.request('tools/list', {});
-    // Two, and named: this shim's whole surface is what a session can call, so a third
+    // Three, and named: this shim's whole surface is what a session can call, so a fourth
     // tool appearing (or `read` quietly disappearing behind a rename) is a change to the
     // product's contract and not an implementation detail. ADR 115.
-    assert.deepEqual(res.result.tools.map(t => t.name).sort(), ['ask', 'read']);
+    assert.deepEqual(res.result.tools.map(t => t.name).sort(), ['ask', 'mission', 'read']);
+    const mission = res.result.tools.find(t => t.name === 'mission');
+    assert.deepEqual(mission.inputSchema.required, ['action']);
+    assert.deepEqual(mission.inputSchema.properties.action.enum, ['list', 'read', 'write', 'relay', 'ack']);
     const tool = res.result.tools.find(t => t.name === 'ask');
     assert.equal(tool.inputSchema.type, 'object');
     assert.ok(tool.inputSchema.properties.title);
@@ -2371,17 +2374,140 @@ async function main() {
     await pending.catch(() => {});
   });
 
-  await check('CLAUDE_BOARD_HEADLESS=1 still refuses a declared client', async () => {
-    const before = countBoardFiles(home);
-    const forcedClient = spawnShim({ ...baseEnv, CLAUDE_CODE_ENTRYPOINT: undefined, CLAUDE_BOARD_CLIENT: 'opencode', CLAUDE_BOARD_HEADLESS: '1' });
-    const res = await forcedClient.request('tools/call', {
-      name: 'ask',
-      arguments: { title: 'Declared but headless', blocks: [{ kind: 'markdown', text: '# x' }] },
-    });
-    assert.equal(res.result.isError, true);
-    assert.match(res.result.content[0].text, /CLAUDE_BOARD_HEADLESS/);
-    assert.equal(countBoardFiles(home), before);
-    forcedClient.close();
+  await check('CLAUDE_BOARD_HEADLESS=1 still refuses a declared client, a background one included', async () => {
+    for (const declared of ['opencode', 'background']) {
+      const before = countBoardFiles(home);
+      const forcedClient = spawnShim({ ...baseEnv, CLAUDE_CODE_ENTRYPOINT: undefined, CLAUDE_BOARD_CLIENT: declared, CLAUDE_BOARD_HEADLESS: '1' });
+      const res = await forcedClient.request('tools/call', {
+        name: 'ask',
+        arguments: { title: 'Declared but headless', blocks: [{ kind: 'markdown', text: '# x' }] },
+      });
+      assert.equal(res.result.isError, true, declared);
+      assert.match(res.result.content[0].text, /CLAUDE_BOARD_HEADLESS/);
+      assert.equal(countBoardFiles(home), before);
+      forcedClient.close();
+    }
+  });
+
+  // A session the Master Chief starts in the background declares itself with
+  // CLAUDE_BOARD_CLIENT=background: it posts, and opens no tab. The declared codex client
+  // beside it, on the same daemon and the same recorded opener, opens one, so the empty log
+  // is the background flag's doing and not a Suppressed open (ADR 91).
+  await check('CLAUDE_BOARD_CLIENT=background posts a board and opens no tab, where a declared codex client opens one', async () => {
+    const dir = tempHome('background');
+    const recorder = makeOpenRecorder(dir);
+    const openerEnv = { ...baseEnv, CLAUDE_CODE_ENTRYPOINT: undefined, CLAUDE_BOARD_NO_OPEN: undefined, CLAUDE_BOARD_OPEN_CMD: recorder.script, CLAUDE_BOARD_OPEN_LOG: recorder.log };
+    const background = spawnShim({ ...openerEnv, CLAUDE_BOARD_CLIENT: 'background' });
+    const codex = spawnShim({ ...openerEnv, CLAUDE_BOARD_CLIENT: 'codex' });
+    try {
+      const posted = await background.request('tools/call', { name: 'ask', arguments: { title: 'Background board', blocks: [NOTE] } });
+      assert.equal(posted.result.isError, false, posted.result.content[0].text);
+      assert.equal(posted.result.status, 'posted');
+      const control = await codex.request('tools/call', { name: 'ask', arguments: { title: 'Codex board', blocks: [NOTE] } });
+      assert.equal(control.result.isError, false, control.result.content[0].text);
+      assert.equal((await recorder.waitForOpens(1, 10_000)).length, 1, 'the codex client opens its tab');
+      await sleep(300);
+      assert.equal(recorder.opened().length, 1, 'the background session opened none');
+    } finally {
+      background.close();
+      codex.close();
+    }
+  });
+
+  // --- the mission tool ---------------------------------------------------------------
+
+  const missionHeaders = { [SECRET_HEADER]: SECRET };
+  const missionCall = (shim, args) => shim.request('tools/call', { name: 'mission', arguments: args }).then(r => r.result);
+
+  // Run as `claude -p` would be (sdk-cli, no client declared), the session `ask` refuses: a
+  // status write puts nothing in front of a human, so the unattended run may make it.
+  await check('the mission tool writes, reads, lists and acks a mission, from a session ask would refuse', async () => {
+    const shim = spawnShim({ ...baseEnv, CLAUDE_CODE_ENTRYPOINT: 'sdk-cli', CLAUDE_BOARD_CLIENT: undefined });
+    try {
+      const written = await missionCall(shim, { action: 'write', key: 'MCP_TOOL', fields: { title: 'Tool mission', phase: 'direct', state: 'working', summary: 'building B1b' } });
+      assert.equal(written.isError, false, written.content[0].text);
+      assert.equal(written.structuredContent.summary, 'building B1b');
+
+      const read = await missionCall(shim, { action: 'read', key: 'MCP_TOOL' });
+      assert.equal(read.structuredContent.title, 'Tool mission');
+      assert.equal(read.structuredContent.phase, 'direct');
+      assert.equal(JSON.parse(read.content[0].text).summary, 'building B1b', 'the text channel carries the record too');
+
+      const listed = await missionCall(shim, { action: 'list' });
+      assert.deepEqual(listed.structuredContent.missions.filter(m => m.key === 'MCP_TOOL').map(m => m.view), ['working']);
+
+      const ordered = await fetch(`${base}/api/mission/MCP_TOOL/order`, { method: 'POST', headers: writeHeaders(SECRET), body: JSON.stringify({ kind: 'stop' }) });
+      const orderId = (await ordered.json()).order.id;
+      const acked = await missionCall(shim, { action: 'ack', key: 'MCP_TOOL', order: orderId });
+      assert.equal(acked.isError, false, acked.content[0].text);
+      const stored = await (await fetch(`${base}/api/mission/MCP_TOOL`, { headers: missionHeaders })).json();
+      assert.equal(stored.orders.find(o => o.id === orderId).relayedAt, acked.structuredContent.order.relayedAt);
+      assert.equal(typeof stored.orders[0].relayedAt, 'string');
+
+      const refused = await missionCall(shim, { action: 'write', key: 'MCP_TOOL', fields: { colour: 'red' } });
+      assert.equal(refused.isError, true);
+      assert.match(refused.content[0].text, /HTTP 400.*unknown field: colour/, 'the route\'s own message comes back');
+      const absent = await missionCall(shim, { action: 'read', key: 'MCP_NOBODY' });
+      assert.equal(absent.isError, true);
+      assert.match(absent.content[0].text, /HTTP 404/);
+    } finally {
+      shim.close();
+    }
+  });
+
+  await check('a relay answers a waiting ask, whose packet and read carry relayed; a second relay on the sent round is refused', async () => {
+    const knownIds = listBoardIds(home);
+    const asker = spawnShim(baseEnv);
+    const chief = spawnShim(baseEnv);
+    try {
+      const pending = asker.request('tools/call', { name: 'ask', arguments: { title: 'Merge PR 12?', blocks: [QUESTION] } });
+      const boardId = await waitForNewBoardFile(home, knownIds);
+      const words = 'yes, merge 12 and then 14';
+      const relay = { action: 'relay', board: `${base}/b/${boardId}`, round: 1, answers: [{ id: 'q1', status: 'answered', choice: 'Yes', note: '' }], words };
+      const relayed = await missionCall(chief, relay);
+      assert.equal(relayed.isError, false, relayed.content[0].text);
+
+      const asked = (await withTimeout(pending, 8000, 'timed out after 8000ms: the relay must wake the waiting ask')).result;
+      assert.equal(asked.status, 'submitted');
+      assert.deepEqual(asked.answers.map(a => [a.id, a.choice]), [['q1', 'Yes']]);
+      assert.deepEqual(Object.keys(asked.structuredContent.relayed).sort(), ['at', 'words']);
+      assert.equal(asked.structuredContent.relayed.words, words);
+      assert.ok(Number.isFinite(Date.parse(asked.structuredContent.relayed.at)));
+      assert.ok(asked.content[0].text.includes(`Relayed: the Master Chief answered this round on the PM's words at ${asked.structuredContent.relayed.at}: "${words}"`), asked.content[0].text);
+
+      const read = (await chief.request('tools/call', { name: 'read', arguments: { board: boardId } })).result;
+      assert.deepEqual(read.structuredContent.rounds[0].relayed, asked.structuredContent.relayed);
+
+      const again = await missionCall(chief, { ...relay, words: 'no, hold it' });
+      assert.equal(again.isError, true);
+      assert.match(again.content[0].text, /HTTP 409.*already been submitted/);
+      const after = (await chief.request('tools/call', { name: 'read', arguments: { board: boardId } })).result;
+      assert.equal(after.structuredContent.rounds[0].relayed.words, words, 'the refused relay changed nothing');
+    } finally {
+      asker.close();
+      chief.close();
+    }
+  });
+
+  await check('CLAUDE_MISSION links each board the shim posts to that mission, and an invalid value is ignored', async () => {
+    let knownIds = listBoardIds(home);
+    const linked = spawnShim({ ...baseEnv, CLAUDE_MISSION: 'MCP_LINKED' });
+    const invalid = spawnShim({ ...baseEnv, CLAUDE_MISSION: '../not a key' });
+    try {
+      const posted = (await linked.request('tools/call', { name: 'ask', arguments: { title: 'Linked board', blocks: [NOTE] } })).result;
+      assert.equal(posted.isError, false, posted.content[0].text);
+      const view = await (await fetch(`${base}/api/mission/MCP_LINKED`, { headers: missionHeaders })).json();
+      assert.deepEqual(view.boards.map(b => b.id), [posted.board]);
+
+      knownIds = listBoardIds(home);
+      const plain = (await invalid.request('tools/call', { name: 'ask', arguments: { title: 'Unlinked board', blocks: [NOTE] } })).result;
+      assert.equal(plain.isError, false, plain.content[0].text);
+      const boardId = await waitForNewBoardFile(home, knownIds);
+      assert.equal(JSON.parse(readFileSync(path.join(home, 'boards', `${boardId}.json`), 'utf8')).mission ?? null, null);
+    } finally {
+      linked.close();
+      invalid.close();
+    }
   });
 }
 

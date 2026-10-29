@@ -1,6 +1,6 @@
 ---
 name: claude-board
-description: One browser page for a round of questions or an artifact to react to. Read before asking the user more than one question, showing a mock or diagram, or when a skill names the board.
+description: One browser page for a round of questions or an artifact to react to, and the work's status beside it. Read before asking the user any question, showing a mock or diagram, recording a mission's status, or when a skill names the board.
 ---
 
 <!-- Copied by install.sh from the clone's skills/claude-board/SKILL.md; edit it there, since a reinstall overwrites this copy. -->
@@ -130,6 +130,16 @@ It works in a session with nobody watching; only a stopped daemon refuses it.
 
 `ask` fails loudly and writes nothing, through `isError`, on three triggers: the board is unreachable, the session is headless, or the daemon cannot open a tab. Report the message verbatim, including any recovery command it names, say which trigger fired, then take your own path and say what it costs: off the board, questions lose multi-select, ranking, attached context and comment anchoring. A rendered artifact loses only its trip to the board: it is a file on disk, so `open` it and say where it is, because nothing else points at it.
 
-## When not to use the board
+## Every question goes to the board
 
-`AskUserQuestion` fits exactly two cases: a lone follow-up with no siblings in its branch, and a plain yes/no confirmation. Anything bigger, a branch with more than one question or one question needing options, multi-select, ranking, free text or context beside it, goes through `ask`.
+Every question for the user goes through `ask`, a lone follow-up and a plain yes/no included: one question is a round of one. A host may refuse the in-chat question popup (`AskUserQuestion` in Claude Code) while the board is up, and the popup is the fallback only while the board is down, under "When the board is unavailable" above.
+
+## Recording the work's status
+
+When your work is a mission (`CLAUDE_MISSION` in your environment names its key, or your caller does), record its status through the `mission` tool on the same server (`mcp__claude-board__mission` in Claude Code), as it changes:
+
+```js
+mission({ action: 'write', key, fields: { phase, state, summary, waitingOn, next, prs } })
+```
+
+A mission holds work names, phases, links and closing summaries, never case content: nothing from the material the work handles goes in a field. `list` and `read` read missions back; `relay` and `ack` are the Master Chief's, never a working session's.

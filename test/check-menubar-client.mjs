@@ -368,6 +368,7 @@ async function probe({ home, port, args = [] }) {
     }
     if (line.startsWith('row=')) state.rows.push(line.slice(4));
     else if (line.startsWith('morerow=')) state.morerow = line.slice(8);
+    else if (line.startsWith('missionsrow=')) state.missionsrow = line.slice(12);
     else if (line.startsWith('caption=')) state.caption = line.slice(8);
     else if (line.startsWith('status=')) state.status = line.slice(7);
     else if (line.startsWith('url=')) state.url = line.slice(4);
@@ -1727,6 +1728,46 @@ async function main() {
     });
   });
 
+  await check('the missions row: /api/waiting carries the counts needing the PM and working, and the popover names them in one row below the boards, absent at zero', async () => {
+    await withDaemon(runningDoc(null), async ({ probeHome, port, secret }) => {
+      const setMission = async (key, state) => {
+        const r = await fetch(`http://127.0.0.1:${port}/api/mission/${key}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', [SECRET_HEADER]: secret },
+          body: JSON.stringify({ state }),
+        });
+        assert.equal(r.status, 200, await r.text());
+      };
+      const counts = async () => (await (await fetch(`http://127.0.0.1:${port}/api/waiting`, {
+        headers: { [SECRET_HEADER]: secret },
+      })).json()).missions;
+
+      assert.deepEqual(await counts(), { needsYou: 0, working: 0 });
+      assert.equal((await probe({ home: probeHome, port })).missionsrow, undefined, 'no missions, no row');
+
+      await setMission('CHARLIE', 'needs-you');
+      assert.equal((await probe({ home: probeHome, port })).missionsrow, 'Missions: 1 needs you');
+      await setMission('DELTA', 'needs-you');
+      assert.equal((await probe({ home: probeHome, port })).missionsrow, 'Missions: 2 need you');
+      await setMission('ALPHA', 'working');
+      await setMission('BRAVO', 'waiting');
+      assert.deepEqual(await counts(), { needsYou: 2, working: 1 }, 'a waiting mission is in neither count');
+      assert.equal((await probe({ home: probeHome, port })).missionsrow, 'Missions: 2 need you, 1 working');
+
+      const layout = await probe({ home: probeHome, port, args: ['layout'] });
+      const rowNames = Object.keys(layout.frames).filter(name => /^row\d+$/.test(name))
+        .sort((a, b) => Number(a.slice(3)) - Number(b.slice(3)));
+      const rows = rowNames.map(name => layout.frames[name]);
+      assert.deepEqual(rows.map(row => row.class), ['NSStackView', 'NSButton'],
+        `with the switch off and nothing waiting: the caption+gear row, then the missions row; got ${JSON.stringify(rows.map(r => r.class))}`);
+      assertRowsSpanPanel(rows, 'row (missions)');
+
+      await setMission('CHARLIE', 'landed');
+      await setMission('DELTA', 'landed');
+      assert.equal((await probe({ home: probeHome, port })).missionsrow, 'Missions: 1 working');
+    });
+  });
+
   await check('criterion 6: a title too long for a row is elided rather than allowed to widen the popover', async () => {
     // A board title is arbitrary text from the reader's own machine. The elision is at a
     // byte count, so it also has to not cut a multi-byte character in half -- half a
@@ -2010,7 +2051,7 @@ async function main() {
       '-pressRow: opens only when nothing was raised');
 
     // And the two index opens are plain, which is only visible as an absence.
-    for (const method of ['pressIndex', 'pressSettings']) {
+    for (const method of ['pressIndex', 'pressBoards', 'pressSettings']) {
       const start = menubar.indexOf(`- (void)${method}:(id)sender`);
       assert.ok(start > 0, `setup: -${method}: must still exist`);
       const body = menubar.slice(start, menubar.indexOf('\n}', start));
@@ -2155,6 +2196,17 @@ async function main() {
         // remaining row.
         assert.equal(state.rowIndex.gear, 0, 'the gear is still in the (only) row');
       });
+  });
+
+  await check('structurally: the "N more waiting" row opens the Boards view (/boards), and the missions row the home page (/), Missions', () => {
+    const source = readFileSync(path.join(repoRoot, 'bin', 'menubar.m'), 'utf8');
+    const body = method => source.slice(source.indexOf(`- (void)${method}:(id)sender`), source.indexOf('\n}', source.indexOf(`- (void)${method}:(id)sender`)));
+    assert.match(body('pressBoards'), /cb_open_url\(cb_index_url\(@"boards"\)\)/, 'the overflow row\'s action opens /boards');
+    assert.match(body('pressIndex'), /cb_open_url\(cb_index_url\(@""\)\)/, 'the missions row\'s action opens /');
+    assert.match(source, /waiting\.more_label\][^;]*;\s*\n\s*\[rows addObject:cb_row_button\([\s\S]*?@selector\(pressBoards:\)/,
+      'the overflow row is wired to -pressBoards:');
+    assert.match(source, /NSString \*missions = \[NSString stringWithUTF8String:waiting\.missions_label\];[\s\S]{0,300}?@selector\(pressIndex:\)/,
+      'the missions row is wired to -pressIndex:');
   });
 
   await check('criterion 3, structurally: the gear\'s URL is the same #pomodoro-settings anchor whether the switch is on or off -- one gear, one wire, never rebuilt per state', async () => {

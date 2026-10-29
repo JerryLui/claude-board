@@ -14,6 +14,8 @@
 import path from 'node:path';
 import { styles, faviconLink, markSvg } from './styles.mjs';
 import { themeBootScript, themeToggle } from './theme.mjs';
+import { commentModeToggle } from './render.mjs';
+import { trackDocWidth } from './ui.mjs';
 import { roundIsAwaited } from './badge.mjs';
 // formatCountdown only -- src/pomodoro.mjs's document shape, HTTP surface and
 // clock are owned by other tickets and stay untouched here (this file consumes
@@ -241,6 +243,396 @@ export function renderThreadRows({ threads = [], query = '' } = {}) {
     : '<p class="empty-state">No threads yet. Boards posted by a session will show up here.</p>';
 }
 
+// The Missions view's client, spliced into indexScript below after missionsParts' source.
+const missionsScript = `
+/** The Missions view's client (renderMissionsPage): the columns stay live and the card
+ * buttons act. Appended to indexScript after missionsParts' own source, so the cards it
+ * repaints are drawn by the same function the server drew the first paint with. Every
+ * part is guarded on the mount 'section#missions', so on the Boards view all of this
+ * stays still.
+ *
+ * Live: patchMissions re-reads GET /api/missions on the daemon-wide stream's 'missions'
+ * and 'waiting' events, on connect, and on the fifteen-second tick (a stalled session
+ * raises no event of its own), one fetch at a time like patchRows. A repaint patches
+ * card by card: a card whose markup is unchanged is left alone, and a card holding an
+ * open comment is never replaced under the reader's typing: only its buttons' disabled
+ * state and its error line are written onto it in place.
+ *
+ * Fire and Merge answer the round their button names, through the board's own submit:
+ * the question set to option 0, the round number, nothing else. Stop asks once, inline,
+ * then posts a stop order; a Cmd-click posts it at once, with no question. The card says
+ * the order is on its way from the post until the Master Chief acks it, and a second
+ * Stop on the card posts nothing until the daemon's missions show the first. With Comment on in the bar, a click on a card opens a note that posts a
+ * comment order. Same quoting rules as the rest of this script: no backticks and no
+ * dollar-brace below. */
+var missionsUi = { confirming: {}, sending: {}, errors: {}, commenting: {}, drafts: {}, stopSent: {} };
+var missionsData = null;
+var missionsCardHtml = {};
+var missionsInFlight = false;
+var missionsPending = false;
+
+function missionsMount() {
+  return document.querySelector('section#missions');
+}
+
+function missionsFind(key) {
+  var cards = document.querySelectorAll('article.mission-card');
+  for (var i = 0; i < cards.length; i++) if (cards[i].getAttribute('data-mission-key') === key) return cards[i];
+  return null;
+}
+
+function missionsNode(html) {
+  var holder = document.createElement('div');
+  holder.innerHTML = html;
+  return holder.firstElementChild;
+}
+
+// Comment is on offer while any card is shown, and off again when the last one goes.
+function setMissionsCommentable(on) {
+  var toggle = document.querySelector('button#comment-mode-toggle');
+  if (!toggle) return;
+  if (on) {
+    toggle.removeAttribute('disabled');
+    toggle.removeAttribute('title');
+    return;
+  }
+  toggle.setAttribute('disabled', '');
+  toggle.setAttribute('title', 'Nothing here is waiting on a comment');
+  setMissionsCommentMode(false);
+}
+
+function setMissionsCommentMode(on) {
+  var toggle = document.querySelector('button#comment-mode-toggle');
+  if (toggle) {
+    toggle.setAttribute('aria-pressed', on ? 'true' : 'false');
+    if (on) toggle.classList.add('active'); else toggle.classList.remove('active');
+  }
+  if (document.body) {
+    if (on) document.body.classList.add('comment-mode'); else document.body.classList.remove('comment-mode');
+  }
+}
+
+function missionsCommentModeOn() {
+  return !!(document.body && document.body.classList.contains('comment-mode'));
+}
+
+// A card is held while its comment box is open on screen: replacing it would drop the
+// caret and whatever the reader is in the middle of typing.
+function missionsCardHeld(node, key) {
+  return !!(missionsUi.commenting[key] && node.querySelector('textarea.mission-comment-text'));
+}
+
+// What a repaint would change on a held card, written onto it in place: its buttons
+// disabled while a request is out, its Stop question open or shut, and its error line,
+// taken from the card's fresh markup 'html' so it reads as a repainted card's would.
+function missionsSyncHeld(node, key, html) {
+  var busy = !!missionsUi.sending[key];
+  var btns = node.querySelectorAll('button.mission-act, button.mission-stop, button.mission-stop-confirm, button.mission-comment-send');
+  for (var i = 0; i < btns.length; i++) {
+    if (busy) btns[i].setAttribute('disabled', ''); else btns[i].removeAttribute('disabled');
+  }
+  var fresh = missionsNode(html);
+  var stop = node.querySelector('button.mission-stop');
+  var freshStop = fresh.querySelector('button.mission-stop');
+  if (stop && freshStop) stop.setAttribute('aria-expanded', freshStop.getAttribute('aria-expanded'));
+  else if (stop) stop.replaceWith();
+  var asking = node.querySelector('div.mission-confirm');
+  var freshAsking = fresh.querySelector('div.mission-confirm');
+  if (asking && freshAsking) asking.replaceWith(freshAsking);
+  else if (asking) asking.replaceWith();
+  else if (freshAsking) node.insertBefore(freshAsking, node.querySelector('div.mission-comment'));
+  var was = node.querySelector('p.mission-error');
+  var now = fresh.querySelector('p.mission-error');
+  if (was && now) { was.replaceWith(now); return; }
+  if (was) { was.replaceWith(); return; }
+  if (!now) return;
+  // In the fresh markup the error sits just above the card's first row of controls.
+  var before = null;
+  for (var j = 0; j < node.children.length && !before; j++) {
+    var cl = node.children[j].classList;
+    if (cl.contains('mission-btns') || cl.contains('mission-confirm') || cl.contains('mission-comment')) before = node.children[j];
+  }
+  node.insertBefore(now, before);
+}
+
+function paintMissions() {
+  var mount = missionsMount();
+  if (!mount || !missionsData) return;
+  var parts = missionsParts(missionsData, missionsUi);
+  setMissionsCommentable(parts.columns.length > 0);
+  var cols = mount.querySelector('div.mission-cols');
+  if (!parts.columns.length || !cols) {
+    missionsCardHtml = {};
+    mount.innerHTML = parts.html;
+    parts.columns.forEach(function (c) { c.cards.forEach(function (k) { missionsCardHtml[k.key] = k.html; }); });
+    return;
+  }
+  var held = {};
+  parts.columns.forEach(function (c) {
+    c.cards.forEach(function (k) {
+      var node = missionsFind(k.key);
+      if (!node || !missionsCardHeld(node, k.key)) return;
+      held[k.key] = node;
+      missionsSyncHeld(node, k.key, k.html);
+    });
+  });
+  var counts = mount.querySelector('div.mission-counts');
+  if (counts) counts.innerHTML = parts.countsHtml;
+  var seen = {};
+  parts.columns.forEach(function (c) {
+    var section = null;
+    var sections = mount.querySelectorAll('section.mission-col');
+    for (var i = 0; i < sections.length; i++) if (sections[i].getAttribute('data-col') === c.col) section = sections[i];
+    if (!section) return;
+    var count = section.querySelector('span.mission-col-count');
+    if (count) count.textContent = String(c.count);
+    var list = section.querySelector('div.mission-col-list');
+    var have = list.querySelectorAll('article.mission-card');
+    var sameKeys = have.length === c.cards.length && c.cards.every(function (k, idx) {
+      return have[idx].getAttribute('data-mission-key') === k.key;
+    });
+    if (sameKeys) {
+      c.cards.forEach(function (k, idx) {
+        seen[k.key] = true;
+        if (held[k.key] || missionsCardHtml[k.key] === k.html) return;
+        have[idx].replaceWith(missionsNode(k.html));
+        missionsCardHtml[k.key] = k.html;
+      });
+      return;
+    }
+    list.innerHTML = c.cards.map(function (k) { return k.html; }).join('');
+    c.cards.forEach(function (k) {
+      seen[k.key] = true;
+      missionsCardHtml[k.key] = k.html;
+      if (!held[k.key]) return;
+      var fresh = null;
+      var cards = list.querySelectorAll('article.mission-card');
+      for (var j = 0; j < cards.length; j++) if (cards[j].getAttribute('data-mission-key') === k.key) fresh = cards[j];
+      if (fresh) fresh.replaceWith(held[k.key]);
+    });
+  });
+  Object.keys(missionsCardHtml).forEach(function (key) { if (!seen[key]) delete missionsCardHtml[key]; });
+}
+
+function patchMissions() {
+  if (!missionsMount()) return;
+  if (missionsInFlight) { missionsPending = true; return; }
+  missionsInFlight = true;
+  return fetch('/api/missions', { credentials: 'same-origin' })
+    .then(function (r) {
+      if (!r.ok) throw new Error('missions fetch failed: ' + r.status);
+      return r.json();
+    })
+    .then(function (data) {
+      if (!data || !Array.isArray(data.missions)) return;
+      missionsData = data;
+      missionsSettleStops(data.missions);
+      paintMissions();
+    })
+    .catch(function () { /* leave the columns as they are, as patchRows does */ })
+    .then(function () {
+      missionsInFlight = false;
+      if (missionsPending) {
+        missionsPending = false;
+        return patchMissions();
+      }
+    });
+}
+
+// A stop this page sent stays on its card until the daemon's missions show it, or show
+// the session gone: only then does the card read the order from the daemon alone.
+function missionsSettleStops(missions) {
+  Object.keys(missionsUi.stopSent).forEach(function (key) {
+    var m = missions.filter(function (x) { return x.key === key; })[0];
+    var orders = m && Array.isArray(m.orders) ? m.orders : [];
+    if (!m || !m.live || orders.some(function (o) { return o.kind === 'stop'; })) delete missionsUi.stopSent[key];
+  });
+}
+
+function postMissionJson(url, body) {
+  return fetch(url, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+// One request per card at a time; the card's buttons are disabled while it is out, and
+// the card is re-read once it lands, whatever the answer. Answers a promise of whether
+// it went through, false at once for a click while one is still out.
+function missionsSend(key, request, failure) {
+  if (missionsUi.sending[key]) return Promise.resolve(false);
+  missionsUi.sending[key] = true;
+  delete missionsUi.errors[key];
+  paintMissions();
+  return request()
+    .then(function (r) {
+      // 409 on a submit: the round was answered already, here or elsewhere. The re-read
+      // below takes the button away, which is the whole of the right response.
+      if (!r.ok && r.status !== 409) throw new Error(failure + ' (' + r.status + ')');
+      return true;
+    })
+    .catch(function (err) {
+      missionsUi.errors[key] = (err && err.message) || failure;
+      return false;
+    })
+    .then(function (ok) {
+      delete missionsUi.sending[key];
+      paintMissions();
+      return Promise.resolve(patchMissions()).then(function () { return ok; });
+    });
+}
+
+// The round's own answer: the question the button stands for, set to option 0.
+function missionsAnswer(key, btn) {
+  var board = btn.getAttribute('data-board');
+  var round = Number(btn.getAttribute('data-round'));
+  var question = btn.getAttribute('data-question');
+  var choice = btn.getAttribute('data-choice');
+  return missionsSend(key, function () {
+    return postMissionJson('/api/board/' + encodeURIComponent(board) + '/submit', {
+      action: 'send',
+      via: 'card',
+      round: round,
+      answers: [{ id: question, status: 'answered', choice: choice, note: '' }],
+      comments: [],
+    });
+  }, 'Could not send the answer');
+}
+
+function missionsOrder(key, body, failure) {
+  return missionsSend(key, function () {
+    return postMissionJson('/api/mission/' + encodeURIComponent(key) + '/order', body);
+  }, failure);
+}
+
+function missionsStop(key) {
+  delete missionsUi.confirming[key];
+  if (missionsUi.stopSent[key] || missionsUi.sending[key]) { paintMissions(); return; }
+  missionsUi.stopSent[key] = true;
+  missionsOrder(key, { kind: 'stop' }, 'Could not send the stop').then(function (ok) {
+    if (ok) return;
+    delete missionsUi.stopSent[key];
+    paintMissions();
+  });
+}
+
+function focusIn(key, selector) {
+  var node = missionsFind(key);
+  var el = node && node.querySelector(selector);
+  if (el && el.focus) el.focus();
+}
+
+function onMissionsClick(ev) {
+  var t = ev.target;
+  if (!t || !t.closest) return;
+  var cardEl = t.closest('article.mission-card');
+  if (!cardEl) return;
+  var key = cardEl.getAttribute('data-mission-key');
+  var act = t.closest('button.mission-act');
+  if (act) { if (!act.disabled) missionsAnswer(key, act); return; }
+  var stop = t.closest('button.mission-stop');
+  if (stop) {
+    if (stop.disabled) return;
+    // Cmd-click stops at once. A Mac Ctrl press comes in as contextmenu and still asks.
+    if (ev.type === 'click' && ev.metaKey) { missionsStop(key); return; }
+    missionsUi.confirming[key] = !missionsUi.confirming[key];
+    paintMissions();
+    if (missionsUi.confirming[key]) focusIn(key, 'button.mission-stop-confirm');
+    return;
+  }
+  if (t.closest('button.mission-stop-cancel')) {
+    delete missionsUi.confirming[key];
+    paintMissions();
+    focusIn(key, 'button.mission-stop');
+    return;
+  }
+  if (t.closest('button.mission-stop-confirm')) {
+    missionsStop(key);
+    return;
+  }
+  if (t.closest('button.mission-comment-cancel')) {
+    delete missionsUi.commenting[key];
+    delete missionsUi.drafts[key];
+    paintMissions();
+    return;
+  }
+  if (t.closest('button.mission-comment-send')) {
+    var box = cardEl.querySelector('textarea.mission-comment-text');
+    var text = box ? String(box.value || '') : '';
+    if (!text.trim()) { if (box && box.focus) box.focus(); return; }
+    missionsUi.drafts[key] = text;
+    missionsOrder(key, { kind: 'comment', text: text }, 'Could not send the comment').then(function (ok) {
+      if (!ok) return;
+      delete missionsUi.commenting[key];
+      delete missionsUi.drafts[key];
+      paintMissions();
+    });
+    return;
+  }
+  if (!missionsCommentModeOn() || missionsUi.commenting[key]) return;
+  if (t.closest('a') || t.closest('button') || t.closest('textarea')) return;
+  missionsUi.commenting[key] = true;
+  paintMissions();
+  focusIn(key, 'textarea.mission-comment-text');
+}
+
+// On a Mac, Ctrl with the primary button is the secondary click: the browser fires
+// contextmenu and no click at all. On the Stop icon it asks, as a plain click does.
+function onMissionsContextmenu(ev) {
+  var t = ev.target;
+  if (!ev.ctrlKey || ev.button !== 0 || !t || !t.closest) return;
+  var stop = t.closest('button.mission-stop');
+  if (!stop || stop.disabled) return;
+  ev.preventDefault();
+  onMissionsClick(ev);
+}
+
+function onMissionsInput(ev) {
+  var t = ev.target;
+  if (!t || !t.closest || !t.classList || !t.classList.contains('mission-comment-text')) return;
+  var cardEl = t.closest('article.mission-card');
+  if (cardEl) missionsUi.drafts[cardEl.getAttribute('data-mission-key')] = t.value;
+}
+
+function onMissionsKeydown(ev) {
+  var t = ev.target;
+  if (!ev || ev.key !== 'Escape' || !t || !t.closest) return;
+  var cardEl = t.closest('article.mission-card');
+  if (!cardEl) return;
+  var key = cardEl.getAttribute('data-mission-key');
+  if (missionsUi.commenting[key] && t.closest('div.mission-comment')) {
+    delete missionsUi.commenting[key];
+    delete missionsUi.drafts[key];
+  } else if (missionsUi.confirming[key]) {
+    delete missionsUi.confirming[key];
+  } else {
+    return;
+  }
+  paintMissions();
+  focusIn(key, 'button.mission-stop');
+}
+
+function initMissions() {
+  var mount = missionsMount();
+  if (!mount) return;
+  mount.addEventListener('click', onMissionsClick);
+  mount.addEventListener('contextmenu', onMissionsContextmenu);
+  mount.addEventListener('input', onMissionsInput);
+  mount.addEventListener('keydown', onMissionsKeydown);
+  var toggle = document.querySelector('button#comment-mode-toggle');
+  if (toggle) {
+    toggle.addEventListener('click', function () {
+      if (toggle.disabled) return;
+      setMissionsCommentMode(!missionsCommentModeOn());
+    });
+  }
+  patchMissions();
+}
+initMissions();
+`;
+
 /** The index page's only client script. Two jobs on one fifteen-second tick: it
  * keeps each row's `updated` timestamp reading as relative time ("an hour ago")
  * instead of a one-shot server-rendered string that goes stale in a tab left open
@@ -452,9 +844,40 @@ function patchRows() {
     });
 }
 
+// The Boards tab's count of rounds waiting (renderTopBar), the same total GET
+// /api/waiting serves and the stream's 'waiting' event carries. Hidden at zero, so
+// the tab reads 'Boards' alone when nothing waits. Both home views carry the tab,
+// so both keep it live, off the stream alone (initIndexStream below): every change
+// to the total is broadcast, and a reconnect asks again. Not on the tick, which
+// owns one request at a time for the rows.
+function setWaitingCount(total) {
+  var el = document.querySelector('span#waiting-count');
+  if (!el || typeof total !== 'number') return;
+  el.textContent = total > 0 ? total + ' waiting' : '';
+  if (total > 0) el.removeAttribute('hidden'); else el.setAttribute('hidden', '');
+}
+
+// Failures swallowed, as patchRows swallows its own: a daemon mid-restart leaves the
+// count as it was.
+function fetchWaitingCount() {
+  if (!document.querySelector('span#waiting-count')) return;
+  return fetch('/api/waiting', { credentials: 'same-origin' })
+    .then(function (r) {
+      if (!r.ok) throw new Error('waiting fetch failed: ' + r.status);
+      return r.json();
+    })
+    .then(function (data) { if (data) setWaitingCount(data.total); })
+    .catch(function () { /* see this function's own comment */ });
+}
+
+// The top bar's wash runs the window's full width: '--doc-w', kept by trackDocWidth
+// (src/ui.mjs), spliced in after this script's own text and started there, the same
+// measurement the board page runs.
+
 function tick() {
   refresh();
   patchRows();
+  patchMissions();
 }
 
 refresh();
@@ -1231,21 +1654,23 @@ function wakePomodoro() {
 // visible the moment the reviewer presses something in the menu bar popover with
 // this page on screen.
 //
-// A push WAKES A FETCH, and nothing here reads what it carried. The 'waiting' event
-// is a count, not rows, and 'pomodoro' is a document that was current at the instant
-// it was sent -- while patchRows above is the one place that knows how to patch the
-// list without disturbing the page, and fetchPomodoro is the one place that
-// recomputes the clock offset the countdown is rendered from. So neither listener
-// below takes an argument at all: what a push says is only 'ask again now'.
+// A push WAKES A FETCH for the list and the widget, and neither reads what it
+// carried. The 'waiting' event is a count, not rows, and 'pomodoro' is a document
+// that was current at the instant it was sent -- while patchRows above is the one
+// place that knows how to patch the list without disturbing the page, and
+// fetchPomodoro is the one place that recomputes the clock offset the countdown is
+// rendered from. The one thing taken off a push is that count itself, for the Boards
+// tab, since it is exactly the number the tab shows.
 //
 // 'open' fires on the first connection AND on every automatic reconnect, which is
 // exactly the set of moments this tab may have missed something: nothing backfills
 // events sent while it was disconnected, so coming back live means asking what the
 // state is NOW. That is what makes an index left open through a daemon restart go
-// live again on its own. The first 'open' costs one extra pair of fetches at load,
-// which is the price of not keeping a 'have I connected before' flag to tell a
-// connect from a reconnect -- and the rows fetch would have happened on the first
-// tick anyway. src/ui.mjs's board stream resyncs on 'open' for the same reason.
+// live again on its own. The first 'open' repeats two fetches the page already made
+// at load, the timer's and, on Missions, the columns', which is the price of not
+// keeping a 'have I connected before' flag to tell a connect from a reconnect; its
+// rows and waiting-count fetches are the first of their kind, ahead of the first
+// tick. src/ui.mjs's board stream resyncs on 'open' for the same reason.
 //
 // No reconnect and no backoff written here: EventSource does it natively, which is
 // the whole reason this page subscribes with one. Guarded on typeof exactly as
@@ -1255,11 +1680,14 @@ function wakePomodoro() {
 // EventSource sends it same-origin, like the board page's per-board one, so nothing
 // here needs a secret of its own.
 //
-// Only the two events the daemon already broadcasts (broadcastWaiting and
-// broadcastPomodoro, src/server.mjs) are listened for. A row change with no
-// broadcast behind it -- a prune, a last-activity stamp drifting -- keeps arriving on
-// the tick; teaching the daemon a new event is a decision of its own, not a line
-// added here.
+// Only the events the daemon already broadcasts (broadcastWaiting, broadcastPomodoro
+// and broadcastMissions, src/server.mjs) are listened for. 'waiting' wakes the
+// missions columns too, though a write to a mission's own board sends 'missions'
+// beside it (broadcastWaiting), so a submit there re-reads the columns twice: the
+// second wake lands while the first fetch is out and runs once it is back
+// (patchMissions). A row change with no broadcast behind it -- a prune, a
+// last-activity stamp drifting -- keeps arriving on the tick; teaching the daemon a
+// new event is a decision of its own, not a line added here.
 //
 // ponytail: one held connection per open index tab, the shape a board tab already
 // has. Ceiling: a reviewer who leaves a dozen index tabs open for days costs the
@@ -1269,12 +1697,23 @@ function wakePomodoro() {
 function initIndexStream() {
   if (typeof EventSource === 'undefined') return;
   var es = new EventSource('/api/events');
-  es.addEventListener('open', function () { patchRows(); wakePomodoro(); });
-  es.addEventListener('waiting', function () { patchRows(); });
+  es.addEventListener('open', function () { patchRows(); patchMissions(); wakePomodoro(); fetchWaitingCount(); });
+  // The one listener that reads what a push carried: the event's total IS the
+  // count the Boards tab shows, so asking again would only fetch the same number.
+  es.addEventListener('waiting', function (ev) {
+    patchRows();
+    patchMissions();
+    var data = null;
+    try { data = JSON.parse(ev && ev.data); } catch (e) { data = null; }
+    if (data) setWaitingCount(data.total);
+  });
   es.addEventListener('pomodoro', function () { wakePomodoro(); });
+  // A mission changed (src/server.mjs's broadcastMissions): re-read the columns.
+  es.addEventListener('missions', function () { patchMissions(); });
 }
 initIndexStream();
-`;
+` + '\n' + missionsParts.toString() + '\n' + missionsScript
+  + '\n' + trackDocWidth.toString() + '\ntrackDocWidth();\n';
 
 /** Filter the thread index down to the sessions a query names. Matches on what
  * IDENTIFIES a session and nothing else — its title, its project folder, the
@@ -1297,51 +1736,260 @@ export function filterThreads(threads, query) {
     .some(v => typeof v === 'string' && v.toLowerCase().includes(q)));
 }
 
-/** Render the complete index page: the thread list (with rounds-left counts, round
- * counts and a visual live/settled distinction), filtered to `query` when one is
- * given — a plain GET-form round trip needing no client JS of its own. The
- * page's one script (`indexScript` above) only ever touches `.rel-time` text
- * content, the contents of `.thread-list`, and the pomodoro widget; nothing here
- * depends on it running, and the served list is correct as of the moment it was
- * served whether or not it ever does.
+/** The Missions view's markup, from `GET /api/missions`'s answer (src/missions.mjs's
+ * `missionsOverview`) and the tab's own per-card state `ui` (a Stop being confirmed, a
+ * click in flight, an error, a comment being written). Pure and self-contained: the
+ * server renders the first paint with it and indexScript carries its source to repaint
+ * from every later fetch, so the two can never draw a card differently.
  *
- * `pomodoroEnabled` (ADR 103, default true — "a settings document without the new
- * key reads as on") is the one piece of pomodoro state this function ever takes: a
- * plain boolean, decided by the CALLER (src/server.mjs's own `GET /` route reads
- * `settings.enabled` off pomodoro.json for it) rather than read here, so this
- * function stays what it always was — a pure render over its arguments, no fs
- * access of its own. It does nothing but pick which of pomodoroWidget()'s two
- * shapes renders into the header below; every other pomodoro field still reaches
- * the page the way src/pomodoro-widget.mjs's own header comment describes, one
- * fetch after load. */
-export function renderIndexPage({ threads = [], query = '', pomodoroEnabled = true } = {}) {
-  const threadsHtml = renderThreadRows({ threads, query });
+ * Five columns by derived state (`view`), queued shown under waiting. A card's Fire or
+ * Merge button exists only while `actions` holds that kind, which the daemon fills only
+ * from a round still waiting on the PM; the button carries what a click submits. Stop
+ * shows while a session is live and no stop is already on its way.
+ *
+ * Answers `{ html, countsHtml, columns: [{ col, label, count, cards: [{ key, html }] }] }`,
+ * `html` being the mount's whole contents: the empty state when there is no mission. */
+function missionsParts(overview, ui) {
+  var state = ui || {};
+  var pick = function (name, key) { return !!(state[name] && state[name][key]); };
+  var esc = function (s) {
+    return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  };
+  var COLUMNS = [['needs-you', 'Needs you'], ['working', 'Working'], ['waiting', 'Waiting'], ['stalled', 'Stalled'], ['landed', 'Landed']];
+  var ACTION_LABELS = { fire: 'Fire', merge: 'Merge' };
+  var PR_MARKS = { green: '✓', merged: '✓', open: '○', draft: '○' };
+  var STOP_ICON = '<svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="1.8"/><line x1="4.7" y1="4.7" x2="15.3" y2="15.3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
+  var data = overview || {};
+  var missions = Array.isArray(data.missions) ? data.missions : [];
+  var nowMs = Date.parse(data.now);
+  if (!isFinite(nowMs)) nowMs = Date.now();
 
+  function age(iso) {
+    var then = Date.parse(iso);
+    if (!isFinite(then)) return '';
+    var minutes = Math.floor(Math.max(0, nowMs - then) / 60000);
+    if (minutes < 1) return 'now';
+    if (minutes < 60) return minutes + ' min';
+    var hours = Math.floor(minutes / 60);
+    if (hours < 24) return hours + ' h';
+    return Math.floor(hours / 24) + ' d';
+  }
+
+  function columnOf(m) {
+    return m.view === 'queued' ? 'waiting' : m.view;
+  }
+
+  function orderLines(m, sent) {
+    var orders = Array.isArray(m.orders) ? m.orders : [];
+    var lines = [];
+    var stop = null;
+    var comments = 0;
+    for (var i = 0; i < orders.length; i++) {
+      if (orders[i].kind === 'stop') stop = orders[i];
+      else if (orders[i].kind === 'comment' && !orders[i].relayedAt) comments += 1;
+    }
+    if (!stop && sent) stop = {};
+    if (stop && m.live) {
+      lines.push(stop.relayedAt
+        ? 'Stop relayed: the session finishes its step, writes its Handoff and ends'
+        : 'Stop asked: waiting for the Master Chief to relay it');
+    }
+    if (comments) lines.push(comments === 1 ? 'Comment waiting for the Master Chief' : comments + ' comments waiting for the Master Chief');
+    return { lines: lines, stopPending: !!(stop && m.live) };
+  }
+
+  function card(m) {
+    var key = m.key;
+    var actions = Array.isArray(m.actions) ? m.actions : [];
+    var boards = Array.isArray(m.boards) ? m.boards : [];
+    var latest = boards.length ? boards[boards.length - 1] : null;
+    var orders = orderLines(m, pick('stopSent', key));
+    var busy = pick('sending', key);
+    var out = '<article class="mission-card" data-mission-key="' + esc(key) + '" data-view="' + esc(m.view) + '">';
+    out += '<div class="mission-card-head"><b class="mission-title">' + esc(m.title || key) + '</b>'
+      + '<span class="mission-age" title="' + esc(m.updatedAt) + '">' + esc(age(m.updatedAt)) + '</span></div>';
+    out += '<div class="mission-ident"><span class="mission-key">' + esc(key) + ' / ' + esc(m.phase) + '</span>'
+      + (m.view === 'queued' ? '<span class="mission-tag">Queued</span>' : '') + '</div>';
+    if (m.summary) out += '<p class="mission-summary">' + esc(m.summary) + '</p>';
+    if (m.waitingOn || m.next) {
+      out += '<dl class="mission-facts">'
+        + (m.waitingOn ? '<dt>Waiting on</dt><dd>' + esc(m.waitingOn) + '</dd>' : '')
+        + (m.next ? '<dt>Next</dt><dd>' + esc(m.next) + '</dd>' : '')
+        + '</dl>';
+    }
+    var prs = Array.isArray(m.prs) ? m.prs : [];
+    if (prs.length) {
+      out += '<div class="mission-prs">';
+      for (var p = 0; p < prs.length; p++) {
+        var pr = prs[p];
+        var name = pr.repo + ' #' + pr.number;
+        // Only a web address becomes a link: the url is whatever the writing agent sent.
+        var tag = /^https?:\/\//i.test(String(pr.url)) ? 'a' : 'span';
+        out += '<' + tag + ' class="mission-pr" data-state="' + esc(pr.state) + '"' + (tag === 'a' ? ' href="' + esc(pr.url) + '"' : '')
+          + ' title="' + esc(name + ': ' + pr.state) + '">'
+          + '<i aria-hidden="true">' + (PR_MARKS[pr.state] || '○') + '</i>' + esc(name) + '</' + tag + '>';
+      }
+      out += '</div>';
+    }
+    for (var l = 0; l < orders.lines.length; l++) out += '<p class="mission-order" role="status">' + esc(orders.lines[l]) + '</p>';
+    if (state.errors && state.errors[key]) out += '<p class="mission-error" role="alert">' + esc(state.errors[key]) + '</p>';
+
+    var btns = '';
+    if (actions.length) {
+      btns += '<a class="mission-btn primary" href="/b/' + esc(actions[0].board) + '">Open round ' + esc(actions[0].round) + '</a>';
+    } else if (latest) {
+      btns += '<a class="mission-btn' + (m.view === 'needs-you' ? ' primary' : '') + '" href="/b/' + esc(latest.id) + '">Open board</a>';
+    }
+    var shown = {};
+    for (var a = 0; a < actions.length; a++) {
+      var act = actions[a];
+      if (!ACTION_LABELS[act.kind] || shown[act.kind]) continue;
+      shown[act.kind] = true;
+      btns += '<button type="button" class="mission-btn mission-act" data-action="' + esc(act.kind) + '" data-board="' + esc(act.board)
+        + '" data-round="' + esc(act.round) + '" data-question="' + esc(act.question) + '" data-choice="' + esc(act.choice) + '"'
+        + (busy ? ' disabled' : '') + '>' + ACTION_LABELS[act.kind] + '</button>';
+    }
+    if (m.live && !orders.stopPending) {
+      var confirming = pick('confirming', key);
+      btns += '<button type="button" class="mission-stop" aria-label="Stop session" title="Stop: finish the step, hand off, end. Cmd-click stops at once" aria-expanded="'
+        + (confirming ? 'true' : 'false') + '"' + (busy ? ' disabled' : '') + '>' + STOP_ICON + '</button>';
+    }
+    if (btns) out += '<div class="mission-btns">' + btns + '</div>';
+    if (m.live && !orders.stopPending && pick('confirming', key)) {
+      out += '<div class="mission-confirm" role="group" aria-label="Stop this session">'
+        + '<p class="mission-confirm-text">Stop this session? It finishes its step, writes its Handoff and ends.</p>'
+        + '<div class="mission-btns"><button type="button" class="mission-btn danger mission-stop-confirm" aria-label="Stop this session"' + (busy ? ' disabled' : '') + '>Stop</button>'
+        + '<button type="button" class="mission-btn mission-stop-cancel" aria-label="Keep it working">Keep</button></div></div>';
+    }
+    if (pick('commenting', key)) {
+      var draft = state.drafts && state.drafts[key] ? state.drafts[key] : '';
+      out += '<div class="mission-comment">'
+        + '<textarea class="mission-comment-text" rows="3" aria-label="' + esc('Comment for ' + (m.title || key)) + '" placeholder="A note for this mission’s session">' + esc(draft) + '</textarea>'
+        + '<div class="mission-btns"><button type="button" class="mission-btn primary mission-comment-send"' + (busy ? ' disabled' : '') + '>Send to session</button>'
+        + '<button type="button" class="mission-btn mission-comment-cancel">Cancel</button></div></div>';
+    }
+    return out + '</article>';
+  }
+
+  if (!missions.length) {
+    return { html: '<p class="empty-state">No missions yet. Work a session records as a mission shows up here.</p>', countsHtml: '', columns: [] };
+  }
+  var columns = COLUMNS.map(function (c) { return { col: c[0], label: c[1], count: 0, cards: [] }; });
+  var byCol = {};
+  columns.forEach(function (c) { byCol[c.col] = c; });
+  missions.forEach(function (m) {
+    var c = byCol[columnOf(m)];
+    if (!c) return;
+    c.count += 1;
+    c.cards.push({ key: m.key, html: card(m) });
+  });
+  var countsHtml = columns.map(function (c) {
+    return '<span class="mission-count"><b>' + c.count + '</b> ' + esc(c.label.toLowerCase()) + '</span>';
+  }).join('');
+  var html = '<div class="mission-counts">' + countsHtml + '</div><div class="mission-cols">' + columns.map(function (c) {
+    return '<section class="mission-col" data-col="' + c.col + '" aria-label="' + esc(c.label) + '">'
+      + '<h2 class="mission-col-head"><span class="mission-badge" data-col="' + c.col + '">' + esc(c.label) + '</span>'
+      + '<span class="mission-col-count">' + c.count + '</span></h2>'
+      + '<div class="mission-col-list">' + c.cards.map(function (k) { return k.html; }).join('') + '</div></section>';
+  }).join('') + '</div>';
+  return { html: html, countsHtml: countsHtml, columns: columns };
+}
+
+/** The one top bar the two home views share: the board page's own header
+ * (`.board-head` in src/render.mjs's renderBoardPage: the mark at 30px, the 20px
+ * title, the actions row), holding the Missions and Boards tabs beside the title
+ * and the timer, Comment and theme controls on the right. Both views call this
+ * with nothing different but `active`, so switching tabs moves nothing in the bar:
+ * both tabs carry the same weight and border whichever is on, and the Boards tab's
+ * count is the daemon's one waiting total (src/server.mjs's `/api/waiting`), the
+ * same number on either view at the same moment.
+ *
+ * `active` is 'missions' or 'boards'. `waitingCount` is the rounds waiting when the
+ * page was served; indexScript keeps it live off the stream. `commentable` is false
+ * until a view holds something a comment can reach (ADR 46, 98): the Comment control
+ * then renders disabled, in its place. */
+export function renderTopBar({ active, waitingCount = 0, pomodoroEnabled = true, commentable = false } = {}) {
+  const tab = (view, href, label, extra = '') => {
+    const on = view === active;
+    return `<a class="view-tab${on ? ' on' : ''}" href="${href}"${on ? ' aria-current="page"' : ''}>${label}${extra}</a>`;
+  };
+  const n = Number(waitingCount) || 0;
+  const count = `<span class="view-tab-count" id="waiting-count"${n ? '' : ' hidden'}>${n ? `${n} waiting` : ''}</span>`;
+  return `<header class="board-head">
+    <div class="board-head-title">
+      <a class="back-to-index" href="/" aria-label="Missions" title="Missions">${markSvg(30)}</a>
+      <div class="board-head-ident"><h1>claude-board</h1></div>
+      <nav class="view-tabs" aria-label="Views">${tab('missions', '/', 'Missions')}${tab('boards', '/boards', 'Boards', count)}</nav>
+    </div>
+    <div class="board-head-actions">
+      ${pomodoroWidget({ enabled: pomodoroEnabled })}
+      ${commentModeToggle({ inert: !commentable })}
+      ${themeToggle()}
+    </div>
+  </header>`;
+}
+
+/** A home view's page: the top bar over `body`, in the board page's own shell
+ * (`.board-shell`, the window's width up to 2560px), so the bar sits on the same
+ * edges a board page's header does. */
+function renderHomePage({ active, title, body, waitingCount, pomodoroEnabled, commentable = false }) {
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>claude-board</title>
+<title>${escHtml(title)}</title>
 ${faviconLink}
 <script>${themeBootScript}</script>
 <style>${styles}</style>
 </head>
-<body>
-<div class="index-shell">
-  <header class="index-head">
-    <div class="index-head-titles">
-      ${markSvg(36)}
-      <h1>claude-board</h1>
-    </div>
-    <div class="index-head-actions">
-      ${pomodoroWidget({ enabled: pomodoroEnabled })}
-      ${themeToggle()}
-    </div>
-  </header>
+<body class="home-page">
+<div class="board-shell">
+  ${renderTopBar({ active, waitingCount, pomodoroEnabled, commentable })}
+  <main class="home-view" id="${active}-view">
+${body}
+  </main>
+</div>
+<script type="module">${indexScript}</script>
+</body>
+</html>
+`;
+}
 
-  <form class="search-form" action="/" method="get">
-    <input class="search-input" type="text" name="q" placeholder="Filter sessions — by title, project folder or thread id…" value="${escAttr(query)}">
+/** The Missions view, the board's home page (`GET /`): the mount point
+ * `section#missions` holding the columns drawn from `overview` (`GET /api/missions`'s
+ * answer, `missionsOverview` in src/missions.mjs), or the empty state when it holds no
+ * mission. indexScript keeps it live from there. Comment is on offer in the bar while a
+ * card is shown, since a note on a card reaches its session (ADR 46, 98). */
+export function renderMissionsPage({ waitingCount = 0, pomodoroEnabled = true, overview = null } = {}) {
+  const parts = missionsParts(overview, null);
+  const body = `    <section class="missions" id="missions" aria-label="Missions">${parts.html}</section>`;
+  return renderHomePage({
+    active: 'missions', title: 'claude-board', body, waitingCount, pomodoroEnabled,
+    commentable: parts.columns.length > 0,
+  });
+}
+
+/** Render the Boards view (`GET /boards`): the thread list (with rounds-left counts,
+ * round counts and a visual live/settled distinction), filtered to `query` when one
+ * is given -- a plain GET-form round trip needing no client JS of its own. The
+ * page's one script (`indexScript` above) only ever touches `.rel-time` text
+ * content, the contents of `.thread-list`, the waiting count and the pomodoro
+ * widget; nothing here depends on it running, and the served list is correct as of
+ * the moment it was served whether or not it ever does.
+ *
+ * `pomodoroEnabled` (ADR 103, default true -- "a settings document without the new
+ * key reads as on") is the one piece of pomodoro state this function ever takes: a
+ * plain boolean, decided by the CALLER (src/server.mjs's own route reads
+ * `settings.enabled` off pomodoro.json for it) rather than read here, so this
+ * function stays a pure render over its arguments, no fs access of its own. It does
+ * nothing but pick which of pomodoroWidget()'s two shapes renders into the bar;
+ * every other pomodoro field still reaches the page the way
+ * src/pomodoro-widget.mjs's own header comment describes, one fetch after load. */
+export function renderIndexPage({ threads = [], query = '', pomodoroEnabled = true, waitingCount = 0 } = {}) {
+  const threadsHtml = renderThreadRows({ threads, query });
+  const body = `  <form class="search-form" action="/boards" method="get">
+    <input class="search-input" type="text" name="q" placeholder="Filter sessions — by title, project folder or thread id…" aria-label="Filter sessions" value="${escAttr(query)}">
     <button class="search-btn" type="submit">Filter</button>
   </form>
 
@@ -1352,10 +2000,6 @@ ${faviconLink}
        location carrying a hash and nothing else. -->
   <div class="thread-list" data-query="${escAttr(query)}">
     ${threadsHtml}
-  </div>
-</div>
-<script type="module">${indexScript}</script>
-</body>
-</html>
-`;
+  </div>`;
+  return renderHomePage({ active: 'boards', title: 'Boards - claude-board', body, waitingCount, pomodoroEnabled });
 }

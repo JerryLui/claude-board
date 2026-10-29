@@ -40,6 +40,10 @@ export const KIND_LETTER = {
 
 export const WIDGETS = ['single', 'multi', 'text', 'rank', 'choose-between-rendered-variants'];
 
+/** What a `single` question's yes does when its mission's card offers it as a button
+ * (Fire or Merge): the yes is option 0, and a card click answers the round with it. */
+export const QUESTION_ACTIONS = ['fire', 'merge'];
+
 function hex(n) {
   return randomBytes(n).toString('hex');
 }
@@ -570,6 +574,13 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
         throw new Error(`unknown widget: ${JSON.stringify(raw.widget)} (expected one of ${WIDGETS.join(', ')})`);
       }
       const widget = raw.widget ?? 'single';
+      // A card button stands for option 0, so only a one-pick question can carry one.
+      if (raw.action != null) {
+        if (!QUESTION_ACTIONS.includes(raw.action)) {
+          throw new Error(`unknown question action: ${JSON.stringify(raw.action)} (expected one of ${QUESTION_ACTIONS.join(', ')})`);
+        }
+        if (widget !== 'single') throw new Error(`question action '${raw.action}' needs widget 'single', not '${widget}'`);
+      }
       const context = Array.isArray(raw.context)
         ? raw.context.map((c, index) => normalizeBlock(c, round, counters, cwd, ids, {
           topLevel: false,
@@ -647,6 +658,7 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
         context,
         widget,
         options,
+        ...(raw.action != null ? { action: raw.action } : {}),
       };
     }
     default:
@@ -816,7 +828,7 @@ function mintAwait(blocks, round, wait, postedAt, awaitTimeoutMs) {
   };
 }
 
-/** Create a new board (round 1) from posted args: `{ title, blocks, cwd, thread, wait }`.
+/** Create a new board (round 1) from posted args: `{ title, blocks, cwd, thread, wait, mission }`.
  * `threadCwd` (additive) is the project directory already bound to `thread`, when the
  * caller is starting a second board in a thread that exists; the request may agree with
  * it but never change it. `wait` is round 1's own declared-awaited flag (ADR.md entry
@@ -827,7 +839,7 @@ function mintAwait(blocks, round, wait, postedAt, awaitTimeoutMs) {
  * `threadCwd`). It only ever narrows what `mintThreadId` may draw -- see its own comment
  * for why a collision is a routing fault rather than a cosmetic one -- and is irrelevant
  * when the caller names the thread. */
-export function createBoard({ title, blocks, cwd = null, thread = null, threadCwd = null, wait = false, awaitTimeoutMs = DEFAULT_AWAIT_TIMEOUT_MS, takenThreads = null }) {
+export function createBoard({ title, blocks, cwd = null, thread = null, threadCwd = null, wait = false, awaitTimeoutMs = DEFAULT_AWAIT_TIMEOUT_MS, takenThreads = null, mission = null }) {
   const now = new Date().toISOString();
   const boundCwd = bindBoardCwd(cwd, threadCwd);
   const counters = {};
@@ -849,6 +861,9 @@ export function createBoard({ title, blocks, cwd = null, thread = null, threadCw
     blocks: normalized,
     answers: {},
     comments: [],
+    // The mission this board belongs to (src/missions.mjs), written only when the post
+    // names one, so a board posted without one keeps the stored shape it always had.
+    ...(mission ? { mission } : {}),
   };
 }
 
@@ -1184,7 +1199,7 @@ export const MAX_ANSWER_CHOICES = 200;
  * settled answer from a later round's Send) are all dropped silently rather than
  * stored -- there is nothing for the reviewer to fix, and a request that carries one
  * is not a request the human made. */
-export function applySubmit(board, { action, answers, comments }, round) {
+export function applySubmit(board, { action, answers, comments, relayed }, round) {
   const now = new Date().toISOString();
 
   // Both length gates run BEFORE anything is merged, so an over-cap submit changes
@@ -1288,6 +1303,10 @@ export function applySubmit(board, { action, answers, comments }, round) {
     // reported "Board submitted." and the agent never got the stop instruction.
     // The round's own outcome cannot be overwritten by a later round.
     r.action = action === 'discuss' ? 'discuss' : 'submitted';
+    // A round answered by the Master Chief on the PM's typed words, not by a Send on this
+    // board (`POST /api/board/:id/relay`): the words as relayed, and when, so every packet
+    // and read of the round says who answered it.
+    if (relayed) r.relayed = { words: relayed.words, at: now };
   }
   board.state = action === 'discuss' ? 'discuss' : 'submitted';
   board.updatedAt = now;
@@ -1544,6 +1563,7 @@ export function buildPacket(board, round, url) {
     answers,
     comments,
     url,
+    ...(sentRound?.relayed ? { relayed: sentRound.relayed } : {}),
   };
 }
 

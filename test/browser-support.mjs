@@ -1,10 +1,8 @@
-// The Chrome/CDP harness the four real-browser checks share:
-// test/browser-check-stage-fold.mjs, test/browser-check-mermaid-stage.mjs,
-// test/browser-check-video.mjs and test/browser-check-round-width.mjs. The branch's
-// own bin/daemon.mjs on a scratch port and a scratch store, headless Chrome over the
-// DevTools Protocol with Node's native WebSocket (zero npm dependencies), and a
-// `--proxy-server` witness for the checks that assert what left the machine. A fix
-// for a CDP trap lands here once.
+// The Chrome/CDP harness every real-browser check (test/browser-check-*.mjs) shares.
+// The branch's own bin/daemon.mjs on a scratch port and a scratch store, headless
+// Chrome over the DevTools Protocol with Node's native WebSocket (zero npm
+// dependencies), and a `--proxy-server` witness for the checks that assert what left
+// the machine. A fix for a CDP trap lands here once.
 //
 // Not a check, and no browser check is on test/run.mjs's explicit list: that suite
 // has to pass on a machine with no Chrome installed. Each browser check stays
@@ -298,6 +296,73 @@ export function postJson(urlStr, body, secret) {
     req.on('error', reject);
     req.end(data);
   }), 10000, 'POST /api/board never answered');
+}
+
+/** GET `urlStr` with the daemon secret and answer its JSON body; a 4xx or 5xx rejects, as
+ * `postJson` does. */
+export function getJson(urlStr, secret) {
+  const u = new URL(urlStr);
+  return withTimeout(new Promise((resolve, reject) => {
+    http.get({ hostname: u.hostname, port: u.port, path: u.pathname + u.search, headers: { [SECRET_HEADER]: secret } }, res => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        if (res.statusCode >= 400) return reject(new Error(`daemon responded ${res.statusCode}: ${text}`));
+        try { resolve(JSON.parse(text)); } catch (err) { reject(new Error(`invalid JSON: ${err.message}`)); }
+      });
+    }).on('error', reject);
+  }), 10000, `GET ${u.pathname} never answered`);
+}
+
+/** Opens `url` in a fresh tab at `width` x `height` under `theme` ('light' or 'dark'), with
+ * the session cookie `cookie`, waits for load, then polls `expr` until it reads the same for
+ * 500ms (a home view's timer and counts settle one fetch after load). Answers the tab's own
+ * `sp(method, params)`, `evalPage(expr)` and `close()`, and `measured`, the value `expr`
+ * held still at. The tab is closed if it never loads or never holds still. */
+export async function openTab(send, onEvent, url, cookie, { width, height, theme, expr }) {
+  const { targetId } = await send('Target.createTarget', { url: 'about:blank' });
+  const { sessionId } = await send('Target.attachToTarget', { targetId, flatten: true });
+  const sp = (method, params) => send(method, params, sessionId);
+  const evalPage = e => sp('Runtime.evaluate', { expression: e, returnByValue: true }).then(r => {
+    if (r.exceptionDetails) throw new Error(`page eval threw: ${r.exceptionDetails.exception?.description || r.exceptionDetails.text}`);
+    return r.result.value;
+  });
+  const close = () => send('Target.closeTarget', { targetId });
+  try {
+    const loadFired = new Promise(resolve => {
+      const off = onEvent(msg => {
+        if (msg.method === 'Page.loadEventFired' && msg.sessionId === sessionId) { off(); resolve(); }
+      });
+    });
+    await sp('Page.enable');
+    await sp('Runtime.enable');
+    await sp('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
+    await sp('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: theme }] });
+    await setSessionCookie(sp, cookie);
+    await sp('Page.navigate', { url });
+    await withTimeout(loadFired, 20000, `page never fired load: ${url}`);
+    const deadline = Date.now() + 15000;
+    let last = null;
+    let since = Date.now();
+    for (;;) {
+      await sleep(100);
+      const now = JSON.stringify(await evalPage(expr));
+      if (now !== last) { last = now; since = Date.now(); }
+      else if (Date.now() - since >= 500) return { sp, evalPage, close, measured: JSON.parse(now) };
+      if (Date.now() >= deadline) throw new Error(`layout never held still at ${width}px: ${url}`);
+    }
+  } catch (err) {
+    await close();
+    throw err;
+  }
+}
+
+/** `openTab`, closed again once `expr` holds still: answers only what it read. */
+export async function measureTab(send, onEvent, url, cookie, opts) {
+  const tab = await openTab(send, onEvent, url, cookie, opts);
+  await tab.close();
+  return tab.measured;
 }
 
 /** The page plus every sibling it names, copied out of the scratch store's pages/

@@ -45,9 +45,9 @@ Four exclusions, each of which makes an edit worse than no edit:
   and the reader did not author the file.
 - A caller that runs unattended (a cron line, `claude -p`, CI). The board refuses a headless
   session by design, so routing one there converts a working run into a fallback path.
-- A caller whose whole interview is a lone follow-up or a yes/no. The manual's "When not to
-  use the board" section keeps those in the terminal; opening a tab for one question is
-  worse than answering it inline.
+- A caller whose whole interview is a lone follow-up or a yes/no. The manual's "Every
+  question goes to the board" section already sends those to the board without an edit,
+  so routing one changes nothing but adds a copy to drift.
 
 Report the survivors as a list — path, what each asks, how many questions in a run — and
 stop.
@@ -110,7 +110,8 @@ waits for the index page's switch. Both defer to the board's own **Pomodoro time
 switch in its settings panel: with that off — and off is the default (ADR 105) —
 `ensure` is refused by the daemon and this hook starts nothing, hook installed or not.
 
-**Ask before applying it.** Put a yes/no question to the reader with `AskUserQuestion` —
+**Ask before applying it.** Put a yes/no question to the reader on the board, as a round of
+one (`AskUserQuestion` only while the board is down) —
 "Install the SessionStart hook that starts a pomodoro when a Claude Code session starts?"
 — and edit `~/.claude/settings.json` only on a yes. On a no, stop here: the rest of this
 section is the yes branch, and nothing else in the install depends on it.

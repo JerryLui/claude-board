@@ -45,7 +45,7 @@ link where it is worth reading.
 | 47 | [The wait is 40 minutes, for every round, and the page shows what is left](.agents/adr/0047-wait-is-40-minutes-for-every-round-and.md) | 2026-08-07 | accepted |
 | 50 | [A wait that dies is recorded on the round](.agents/adr/0050-wait-that-dies-is-recorded-on-the-round.md) | 2026-08-08 | completes 45 |
 | 55 | [A stranded round is announced, not opened onto](.agents/adr/0055-stranded-round-is-announced-not-opened-onto.md) | 2026-08-09 | narrows 4; widened by 58; narrowed by 74; narrowed by 91; widened by 92 |
-| 56 | [The launcher may compose a notification body, behind a filter](.agents/adr/0056-launcher-may-compose-a-notification-body-behind-a.md) | 2026-08-09 | narrows 19 |
+| 56 | [The launcher may compose a notification body, behind a filter](.agents/adr/0056-launcher-may-compose-a-notification-body-behind-a.md) | 2026-08-09 | narrows 19; widened by 128 |
 | 57 | [The banner opens the board it names](.agents/adr/0057-banner-opens-the-board-it-names.md) | 2026-08-09 | narrows 72; narrowed by 75; narrowed by 93 |
 | 58 | [One notifier for a round, and it is the daemon's](.agents/adr/0058-one-notifier-for-a-round-and-it-is.md) | 2026-08-09 | widens 55; narrowed by 73 |
 | 59 | [The board clears its own chrome band, the artifact does not](.agents/adr/0059-board-clears-its-own-chrome-band-the-artifact.md) | 2026-08-09 | narrows 40 |
@@ -102,10 +102,17 @@ link where it is worth reading.
 | 113 | [A stage link is handled by the board, and an outbound address opens at once](.agents/adr/0113-a-stage-link-is-handled-by-the-board.md) | 2026-09-10 | relates to 95, 59 |
 | 114 | [An Abandoned round accepts a late Send](.agents/adr/0114-an-abandoned-round-accepts-a-late-send.md) | 2026-09-10 | narrows 69; relates to 50, 107 |
 | 115 | [`read` is a pure read of a board](.agents/adr/0115-read-is-a-pure-read-of-a-board.md) | 2026-09-10 | relates to 35, 107, 114 |
-| 116 | [One daemon, three clients: the registration declares the human](.agents/adr/0116-one-daemon-three-clients-the-registration-declares-the-human.md) | 2026-09-10 | relates to 5, 68, 100 |
+| 116 | [One daemon, three clients: the registration declares the human](.agents/adr/0116-one-daemon-three-clients-the-registration-declares-the-human.md) | 2026-09-10 | relates to 5, 68, 100; widened by 127 |
 | 117 | [A post with a diagram that does not parse is refused](.agents/adr/0117-a-post-with-a-diagram-that-does-not-parse-is-refused.md) | 2026-09-18 | widens 112; relates to 62 |
 | 118 | [Remote review rides an SSH tunnel; the daemon stays loopback-only](.agents/adr/0118-remote-review-rides-an-ssh-tunnel.md) | 2026-09-28 | relates to 116 |
 | 119 | [A stage fits its content and folds past 600px](.agents/adr/0119-a-stage-fits-its-content-and-folds-past-600px.md) | 2026-10-12 | widens 110 |
 | 120 | [One Pull-out in the corner of every rendered block](.agents/adr/0120-one-pull-out-in-the-corner-of-every-rendered-block.md) | 2026-10-12 | relates to 22, 110 |
 | 121 | [An html stage may carry the post limit](.agents/adr/0121-an-html-stage-may-carry-the-post-limit.md) | 2026-10-19 | amends 7; relates to 112, 117; amended by 122 |
 | 122 | [A page carries each stage once](.agents/adr/0122-a-page-carries-each-stage-once.md) | 2026-10-19 | amends 121; relates to 32, 42 |
+| 123 | [The board keeps missions beside its rounds](.agents/adr/0123-the-board-keeps-missions-beside-its-rounds.md) | 2026-10-28 | relates to 5, 71, 115 |
+| 124 | [The home page is Missions, in columns by state, under one top bar](.agents/adr/0124-the-home-page-is-missions-under-one-top-bar.md) | 2026-10-28 | relates to 30, 46, 87, 98, 123 |
+| 125 | [A card's Fire and Merge answer a live round; Stop is an order](.agents/adr/0125-a-cards-fire-and-merge-answer-a-live-round.md) | 2026-10-28 | relates to 46, 114, 123, 126 |
+| 126 | [A relay answers a round on the person's words, marked relayed](.agents/adr/0126-a-relay-answers-a-round-on-the-persons-words.md) | 2026-10-28 | relates to 114, 115, 125 |
+| 127 | [A background session passes the guard and opens no tab](.agents/adr/0127-a-background-session-passes-the-guard-and-opens-no-tab.md) | 2026-10-28 | widens 116 |
+| 128 | [Mission changes speak once a minute, from a read-only watch](.agents/adr/0128-mission-changes-speak-once-a-minute-from-a-read-only-watch.md) | 2026-10-28 | widens 56; relates to 71, 72, 94, 106 |
+| 129 | [A mission's session is live while bound and not gone](.agents/adr/0129-a-missions-session-is-live-while-bound-and-not-gone.md) | 2026-10-28 | relates to 123, 125 |

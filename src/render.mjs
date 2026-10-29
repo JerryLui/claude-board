@@ -179,9 +179,16 @@ const PULL_OUT_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="non
  *
  * The label is the static word `Comment`, never
  * `Comment mode: on`/`off` -- on/off is carried by `.active` and `aria-pressed`
- * alone, so src/ui.mjs's setCommentMode never has to rewrite it. */
-function commentModeToggle() {
-  return `<button type="button" id="comment-mode-toggle" class="mode-toggle" aria-pressed="false">${COMMENT_ICON}<span class="mode-toggle-label">Comment</span></button>`;
+ * alone, so src/ui.mjs's setCommentMode never has to rewrite it.
+ *
+ * `inert` is the home views' shape (src/indexpage.mjs's renderTopBar): the same
+ * control, disabled, where nothing on screen is waiting on a comment (ADR 46, 98).
+ * Disabled rather than hidden there, because the top bar has to hold one box across
+ * its two tabs, and a control that came and went would move every one beside it. A
+ * board page never passes it, so its bytes are as they were. */
+export function commentModeToggle({ inert = false } = {}) {
+  const off = inert ? ' disabled title="Nothing here is waiting on a comment"' : '';
+  return `<button type="button" id="comment-mode-toggle" class="mode-toggle" aria-pressed="false"${off}>${COMMENT_ICON}<span class="mode-toggle-label">Comment</span></button>`;
 }
 
 /** The Pull-out (ADR.md entry 120): the one way into the lens, for a stage
@@ -3487,7 +3494,7 @@ ${faviconLink}
   <div class="readonly-banner">Read-only: opened from disk, without the daemon running.</div>
   <header class="board-head">
     <div class="board-head-title">
-      <a class="back-to-index" href="/" aria-label="All threads" title="All threads">${markSvg(30)}</a>
+      <a class="back-to-index" href="/" aria-label="Home" title="Home">${markSvg(30)}</a>
       <div class="board-head-ident">
         <h1>${escHtml(board.title || 'Untitled board')}</h1>
         <div class="meta">${escHtml(board.thread)} · ${escHtml(board.id)}</div>

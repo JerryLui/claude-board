@@ -78,7 +78,7 @@ far up the ladder this work goes, so recommend the rung the repo's prior art alr
 4. **Full integration** — live dependencies, slow, and on a key-configured machine it spends
    real money.
 
-On rung 3 or 4, "which fixtures, which live deps" is a lone follow-up in chat. The user has
+On rung 3 or 4, "which fixtures, which live deps" is a lone follow-up, a round of one question. The user has
 no view into seams, so every testing question keeps this shape.
 
 ## Write as you go, stop when aligned

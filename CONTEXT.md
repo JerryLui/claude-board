@@ -1,7 +1,7 @@
 # CONTEXT — the words this project uses
 
 **Board**: one page a human opens, reads and answers, owned by the session that posted it.
-The unit the index lists and the archive keeps. _Avoid_: page, form, review.
+The unit the Boards view lists and the archive keeps. _Avoid_: page, form, review.
 
 **Conversation**: one continuous stretch of Claude context, from a session's start or a `/clear` to
 the next `/clear`. Invisible to the daemon and to the shim alike — the agent's own context is the
@@ -21,7 +21,7 @@ Round 6 does not redeliver rounds 1-5. _Avoid_: turn, batch, post.
 
 **Awaited**: of a round, that the `ask` call which posted it is still blocked on it, so a submit
 reaches a listening agent. The property behind three surfaces — the sendable badge, the Banner,
-and the index's per-Thread count of rounds still open — until the round is sent, Abandoned, or its
+and the Boards view's per-Thread count of rounds still open — until the round is sent, Abandoned, or its
 wait ends.
 _Avoid_: waiting (of a round — a round is Awaited, a Board is Waiting), blocking, live, pending,
 rounds left, outstanding.
@@ -81,14 +81,15 @@ a second Banner. _Avoid_: notified, alerted, signalled.
 
 **Banner**: the native macOS notification the daemon raises for a Stranded round, naming the
 project and carrying its board so that clicking it lands there. The only notification this
-product raises *about a round*; the Notice below is in-page and is about an interaction, not
-a round. _Avoid_: alert, toast, notification (unqualified) — also collides with macOS's own
-banner/alert distinction.
+product raises *about a round*; the Missions notification is about missions, and the Notice below
+is in-page and is about an interaction, not a round. _Avoid_: alert, toast, notification
+(unqualified) — also collides with macOS's own banner/alert distinction.
 
 **Banner level**: the four-step setting saying when a Stranded round earns its Banner — Off,
 on when no board is Attended, on when this board is not Attended (the default, and today's
 rule), always on. Strictly monotone, each step bannering in more cases than the last, and it
-replaces the binary notifyRounds toggle; Off alone is absolute (ADR 106). _Avoid_:
+replaces the binary notifyRounds toggle; Off alone is absolute (ADR 106), and silences the
+Missions notification too, which every On level lets through. _Avoid_:
 notification level, alert mode, notifyRounds (the superseded key).
 
 **Notice**: the in-page message the board raises when a gesture cannot land, saying why —
@@ -202,8 +203,10 @@ is a second process of the same bundle, never a second app. _Avoid_: menu bar ap
 icon, systray.
 
 **Popover**: the panel a click on the Status item opens — the Timer's phase and controls, the
-Boards waiting for an answer, and a way through to settings. It carries no state of its own: every
-row is a snapshot of the daemon taken when it opened. _Avoid_: menu, dropdown, panel, window.
+Boards waiting for an answer, one row counting the Missions that need you and those working
+(it opens the Missions view, and is absent while both are zero), and a way through to
+settings. It carries no state of its own: every row is a snapshot of the daemon taken when it
+opened. _Avoid_: menu, dropdown, panel, window.
 
 **Cue**: the sound a boundary's notification carries, chosen per phase — the name of one of the
 sounds macOS ships, or `None`. It rides on the notification rather than being played beside it,
@@ -227,3 +230,68 @@ _Avoid_: enable flag, feature flag, kill switch, toggle (every checkbox is one).
 **Board glyph**: the Status item's off-state mark, holding the item's place while the Master switch
 is off (ADR 103) — the brand mark's square and rows redrawn as line art, square like the 32 × 32
 favicon it echoes, never a portrait rect. _Avoid_: off icon, placeholder icon, app icon.
+
+## Missions
+
+**Mission**: one piece of work across all its sessions, its grill, direct and landing alike,
+keyed by a short name such as a spec's descriptor (`FRONT_AGENT`). Its record holds work names,
+phases, links and closing summaries, never case content, and is written by whichever agent works
+on it. _Avoid_: task, job, ticket, project, session (a Mission outlives several).
+
+**Ledger**: every Mission the board holds, beside its boards and read live by the Missions view
+and the Master Chief. The board's status half, as boards are its decision half. _Avoid_:
+tracker, status board, queue.
+
+**Master Chief**: the one long-lived agent session a person talks to instead of each session:
+it launches the sessions, reads the Ledger, and relays Orders and answers to them. It lives
+outside this repo; the board knows it only by the calls it makes. _Avoid_: front agent,
+orchestrator, lead.
+
+**Background session**: a session the Master Chief started with nobody at its terminal, declared
+by `CLAUDE_BOARD_CLIENT=background`: it posts boards and opens no tab, since its human answers on
+the board. Unlike an Unattended session, which must not post at all. _Avoid_: headless (that is
+the refusal), detached, bot.
+
+**Missions view**: the board's home page (`/`), every Mission in the column of its Mission state,
+each a card with its summary, PRs, board link and buttons. _Avoid_: dashboard, overview, index
+(the old name of the page now at `/boards`).
+
+**Boards view**: the list of Threads with its filter, at `/boards`; the home page until the
+Missions view took `/`. _Avoid_: index, index page.
+
+**Top bar**: the board page's own header, shared by the Missions and Boards views with one tab
+for each; switching tabs moves nothing in it. _Avoid_: nav bar, header (unqualified: a board
+page has its own).
+
+**Mission state**: the column a Mission shows in, derived on every read: needs you, working,
+waiting, stalled or landed. Needs you is any linked board with a round still open that asks the
+person a question or was posted Awaited, a Lapsed one included; waiting is the Mission waiting on
+something else (a check, another PR, a Queued launch). _Avoid_: status (collides with the
+Packet's), phase (grill, direct or landing), column.
+
+**Live**: of a Mission's session, that it holds the Mission: bound or reserved, its Mission has
+not recorded its end, and its process is not gone. Only one session is Live per Mission, and only
+a Live one has a Stop. _Avoid_: alive, running, active, open.
+
+**Stalled**: of a Mission, that its session's process is gone, no process bound its launch
+within five minutes, or it has been working and silent fifteen minutes. A silent session whose process
+lives is Stalled and still Live. _Avoid_: dead, hung, crashed, stale.
+
+**Queued**: of a Mission, that its launch waits for a slot, past six sessions working or twelve
+alive; shown under waiting with its tag, launched by the Master Chief when one frees. _Avoid_:
+pending, backlog, deferred.
+
+**Action**: the answer a `single` question names in its `action` field, `fire` or `merge`, its
+yes being option 0. While its round waits on an answer, the Mission's card offers that yes as a
+button, and a click is that round's Send. _Avoid_: shortcut, quick answer, command.
+
+**Order**: a Stop or a comment sent from a Mission's card, for the Master Chief to carry to the
+Live session and mark relayed. A request, never a signal: the board ends no process. _Avoid_:
+command, signal, message, kill.
+
+**Relayed**: of a round, answered by the Master Chief on the person's own words, carried verbatim
+with the answer, rather than by a Send on the page. _Avoid_: forwarded, proxied, approved.
+
+**Missions notification**: the one native notification for a batch of Missions turning needs you,
+stalled or landed within a minute, naming the work or counting it. Silent at the daemon's start,
+and silenced by the Banner level's Off. _Avoid_: Banner (that is a round's), mission alert.
