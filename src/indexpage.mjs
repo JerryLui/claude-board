@@ -355,6 +355,14 @@ function missionsSyncHeld(node, key, html) {
   node.insertBefore(now, before);
 }
 
+// The watcher-down notice over the columns, put up or taken down in place.
+function missionsSyncNotice(mount, html) {
+  var was = mount.querySelector('p.missions-notice');
+  if (!html) { if (was) was.replaceWith(); return; }
+  var now = missionsNode(html);
+  if (was) was.replaceWith(now); else mount.insertBefore(now, mount.firstElementChild);
+}
+
 function paintMissions() {
   var mount = missionsMount();
   if (!mount || !missionsData) return;
@@ -376,6 +384,7 @@ function paintMissions() {
       missionsSyncHeld(node, k.key, k.html);
     });
   });
+  missionsSyncNotice(mount, parts.noticeHtml);
   var counts = mount.querySelector('div.mission-counts');
   if (counts) counts.innerHTML = parts.countsHtml;
   var seen = {};
@@ -426,7 +435,7 @@ function patchMissions() {
     .then(function (data) {
       if (!data || !Array.isArray(data.missions)) return;
       missionsData = data;
-      missionsSettleStops(data.missions);
+      missionsSettleStops(data);
       paintMissions();
     })
     .catch(function () { /* leave the columns as they are, as patchRows does */ })
@@ -440,10 +449,14 @@ function patchMissions() {
 }
 
 // A stop this page sent stays on its card until the daemon's missions show it, or show
-// the session gone: only then does the card read the order from the daemon alone.
-function missionsSettleStops(missions) {
+// the session gone: only then does the card read the order from the daemon alone. A tab
+// is live while it is listed at all.
+function missionsSettleStops(data) {
+  var tabs = Array.isArray(data.tabs) ? data.tabs : [];
   Object.keys(missionsUi.stopSent).forEach(function (key) {
-    var m = missions.filter(function (x) { return x.key === key; })[0];
+    var m = key.indexOf('tab:') === 0
+      ? tabs.filter(function (t) { return 'tab:' + t.id === key; }).map(function (t) { return { live: true, orders: t.orders }; })[0]
+      : data.missions.filter(function (x) { return x.key === key; })[0];
     var orders = m && Array.isArray(m.orders) ? m.orders : [];
     if (!m || !m.live || orders.some(function (o) { return o.kind === 'stop'; })) delete missionsUi.stopSent[key];
   });
@@ -501,9 +514,16 @@ function missionsAnswer(key, btn) {
   }, 'Could not send the answer');
 }
 
+// A tab card's key is 'tab:' and its session id (missionsParts); its orders go to the
+// session route, a mission's to its own.
+function missionsOrderUrl(key) {
+  if (key.indexOf('tab:') === 0) return '/api/session/' + encodeURIComponent(key.slice(4)) + '/order';
+  return '/api/mission/' + encodeURIComponent(key) + '/order';
+}
+
 function missionsOrder(key, body, failure) {
   return missionsSend(key, function () {
-    return postMissionJson('/api/mission/' + encodeURIComponent(key) + '/order', body);
+    return postMissionJson(missionsOrderUrl(key), body);
   }, failure);
 }
 
@@ -1747,8 +1767,16 @@ export function filterThreads(threads, query) {
  * from a round still waiting on the PM; the button carries what a click submits. Stop
  * shows while a session is live and no stop is already on its way.
  *
- * Answers `{ html, countsHtml, columns: [{ col, label, count, cards: [{ key, html }] }] }`,
- * `html` being the mount's whole contents: the empty state when there is no mission. */
+ * A tab (`tabs`, a session the watcher reports that no mission launched; ADR 131) is a
+ * card of its own in its state's column, after the missions: tagged "tab", its login and
+ * folder, "your turn" while it waits, an Open round link per round it has waiting, a
+ * blocked job's reason, and the mission card's Stop and comment. Its key is 'tab:' and its
+ * session id, which no mission key can be. A watcher that posted in this daemon's life
+ * and then went quiet (`watcher.up` false, `lastAt` set) puts a notice over the columns;
+ * a board that never had a watcher shows none. Columns count their cards, so a needs-you tab counts once there.
+ *
+ * Answers `{ html, countsHtml, noticeHtml, columns: [{ col, label, count, cards: [{ key, html }] }] }`,
+ * `html` being the mount's whole contents: the empty state when there is no card. */
 function missionsParts(overview, ui) {
   var state = ui || {};
   var pick = function (name, key) { return !!(state[name] && state[name][key]); };
@@ -1761,6 +1789,8 @@ function missionsParts(overview, ui) {
   var STOP_ICON = '<svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="1.8"/><line x1="4.7" y1="4.7" x2="15.3" y2="15.3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
   var data = overview || {};
   var missions = Array.isArray(data.missions) ? data.missions : [];
+  var tabs = Array.isArray(data.tabs) ? data.tabs : [];
+  var TAB_KEY_PREFIX = 'tab:';
   var nowMs = Date.parse(data.now);
   if (!isFinite(nowMs)) nowMs = Date.now();
 
@@ -1849,13 +1879,22 @@ function missionsParts(overview, ui) {
         + '" data-round="' + esc(act.round) + '" data-question="' + esc(act.question) + '" data-choice="' + esc(act.choice) + '"'
         + (busy ? ' disabled' : '') + '>' + ACTION_LABELS[act.kind] + '</button>';
     }
-    if (m.live && !orders.stopPending) {
-      var confirming = pick('confirming', key);
-      btns += '<button type="button" class="mission-stop" aria-label="Stop session" title="Stop: finish the step, hand off, end. Cmd-click stops at once" aria-expanded="'
-        + (confirming ? 'true' : 'false') + '"' + (busy ? ' disabled' : '') + '>' + STOP_ICON + '</button>';
-    }
+    var stoppable = m.live && !orders.stopPending;
+    if (stoppable) btns += stopButton(key, busy);
     if (btns) out += '<div class="mission-btns">' + btns + '</div>';
-    if (m.live && !orders.stopPending && pick('confirming', key)) {
+    out += stopQuestionAndNote(key, stoppable, m.title || key, 'A note for this mission’s session', busy);
+    return out + '</article>';
+  }
+
+  function stopButton(key, busy) {
+    return '<button type="button" class="mission-stop" aria-label="Stop session" title="Stop: finish the step, hand off, end. Cmd-click stops at once" aria-expanded="'
+      + (pick('confirming', key) ? 'true' : 'false') + '"' + (busy ? ' disabled' : '') + '>' + STOP_ICON + '</button>';
+  }
+
+  // The Stop question and the comment note, the same on a mission's card and a tab's.
+  function stopQuestionAndNote(key, stoppable, label, placeholder, busy) {
+    var out = '';
+    if (stoppable && pick('confirming', key)) {
       out += '<div class="mission-confirm" role="group" aria-label="Stop this session">'
         + '<p class="mission-confirm-text">Stop this session? It finishes its step, writes its Handoff and ends.</p>'
         + '<div class="mission-btns"><button type="button" class="mission-btn danger mission-stop-confirm" aria-label="Stop this session"' + (busy ? ' disabled' : '') + '>Stop</button>'
@@ -1864,15 +1903,56 @@ function missionsParts(overview, ui) {
     if (pick('commenting', key)) {
       var draft = state.drafts && state.drafts[key] ? state.drafts[key] : '';
       out += '<div class="mission-comment">'
-        + '<textarea class="mission-comment-text" rows="3" aria-label="' + esc('Comment for ' + (m.title || key)) + '" placeholder="A note for this mission’s session">' + esc(draft) + '</textarea>'
+        + '<textarea class="mission-comment-text" rows="3" aria-label="' + esc('Comment for ' + label) + '" placeholder="' + esc(placeholder) + '">' + esc(draft) + '</textarea>'
         + '<div class="mission-btns"><button type="button" class="mission-btn primary mission-comment-send"' + (busy ? ' disabled' : '') + '>Send to session</button>'
         + '<button type="button" class="mission-btn mission-comment-cancel">Cancel</button></div></div>';
     }
+    return out;
+  }
+
+  // A login folder as a card names it: '~/.claude' reads 'claude', '~/.claude-jerrylui'
+  // reads 'jerrylui'.
+  function loginLabel(login) {
+    var base = String(login).replace(/\/+$/, '').split('/').pop().replace(/^\./, '');
+    return base.replace(/^claude-(?=.)/, '') || base;
+  }
+
+  // A session the watcher reports that no mission launched (src/sessions.mjs deriveTabs):
+  // its own card, keyed apart from every mission key by the colon no mission key can hold.
+  function tabCard(t) {
+    var key = TAB_KEY_PREFIX + t.id;
+    var orders = orderLines({ live: true, orders: t.orders }, pick('stopSent', key));
+    var busy = pick('sending', key);
+    var title = t.name || t.command || (t.kind === 'bg' && t.jobId ? 'Background job ' + t.jobId : 'Session ' + String(t.id).slice(0, 8));
+    var out = '<article class="mission-card tab-card" data-mission-key="' + esc(key) + '" data-view="' + esc(t.state) + '">';
+    out += '<div class="mission-card-head"><b class="mission-title" title="' + esc(title) + '">' + esc(title) + '</b>'
+      + '<span class="tab-tags"><span class="mission-tag tab-tag">tab</span>'
+      + (t.yourTurn ? '<span class="mission-tag tab-turn">your turn</span>' : '') + '</span></div>';
+    var where = [];
+    if (t.login) where.push('<span class="tab-login" title="' + esc(t.login) + '">' + esc(loginLabel(t.login)) + '</span>');
+    if (t.folder) where.push('<span class="tab-folder" title="' + esc(t.cwd) + '">' + esc(t.folder) + '</span>');
+    if (where.length) out += '<div class="mission-ident"><span class="mission-key">' + where.join(', ') + '</span></div>';
+    if (t.reason) out += '<p class="mission-summary tab-reason">' + esc('Blocked: ' + t.reason) + '</p>';
+    for (var l = 0; l < orders.lines.length; l++) out += '<p class="mission-order" role="status">' + esc(orders.lines[l]) + '</p>';
+    if (state.errors && state.errors[key]) out += '<p class="mission-error" role="alert">' + esc(state.errors[key]) + '</p>';
+    var btns = '';
+    var rounds = Array.isArray(t.rounds) ? t.rounds : [];
+    for (var r = 0; r < rounds.length; r++) {
+      var href = /^https?:\/\//i.test(String(rounds[r].url)) ? rounds[r].url : '/b/' + encodeURIComponent(rounds[r].board);
+      btns += '<a class="mission-btn' + (r === 0 ? ' primary' : '') + '" href="' + esc(href) + '">Open round ' + esc(rounds[r].round) + '</a>';
+    }
+    if (!orders.stopPending) btns += stopButton(key, busy);
+    out += '<div class="mission-btns">' + btns + '</div>';
+    out += stopQuestionAndNote(key, !orders.stopPending, title, 'A note for this tab’s session', busy);
     return out + '</article>';
   }
 
-  if (!missions.length) {
-    return { html: '<p class="empty-state">No missions yet. Work a session records as a mission shows up here.</p>', countsHtml: '', columns: [] };
+  var watcherDown = !!(data.watcher && data.watcher.up === false && data.watcher.lastAt);
+  var noticeHtml = watcherDown
+    ? '<p class="missions-notice" role="status"><b>Session watcher down.</b> Tabs started by hand show again once it reports.</p>'
+    : '';
+  if (!missions.length && !tabs.length) {
+    return { html: noticeHtml + '<p class="empty-state">No missions yet. Work a session records as a mission shows up here.</p>', countsHtml: '', noticeHtml: noticeHtml, columns: [] };
   }
   var columns = COLUMNS.map(function (c) { return { col: c[0], label: c[1], count: 0, cards: [] }; });
   var byCol = {};
@@ -1883,16 +1963,22 @@ function missionsParts(overview, ui) {
     c.count += 1;
     c.cards.push({ key: m.key, html: card(m) });
   });
+  tabs.forEach(function (t) {
+    var c = byCol[t.state];
+    if (!c) return;
+    c.count += 1;
+    c.cards.push({ key: TAB_KEY_PREFIX + t.id, html: tabCard(t) });
+  });
   var countsHtml = columns.map(function (c) {
     return '<span class="mission-count"><b>' + c.count + '</b> ' + esc(c.label.toLowerCase()) + '</span>';
   }).join('');
-  var html = '<div class="mission-counts">' + countsHtml + '</div><div class="mission-cols">' + columns.map(function (c) {
+  var html = noticeHtml + '<div class="mission-counts">' + countsHtml + '</div><div class="mission-cols">' + columns.map(function (c) {
     return '<section class="mission-col" data-col="' + c.col + '" aria-label="' + esc(c.label) + '">'
       + '<h2 class="mission-col-head"><span class="mission-badge" data-col="' + c.col + '">' + esc(c.label) + '</span>'
       + '<span class="mission-col-count">' + c.count + '</span></h2>'
       + '<div class="mission-col-list">' + c.cards.map(function (k) { return k.html; }).join('') + '</div></section>';
   }).join('') + '</div>';
-  return { html: html, countsHtml: countsHtml, columns: columns };
+  return { html: html, countsHtml: countsHtml, noticeHtml: noticeHtml, columns: columns };
 }
 
 /** The one top bar the two home views share: the board page's own header

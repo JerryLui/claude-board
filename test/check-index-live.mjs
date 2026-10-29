@@ -37,7 +37,8 @@ import path from 'node:path';
 import http from 'node:http';
 import { SECRET_HEADER } from '../src/secret.mjs';
 import { startServer } from '../src/server.mjs';
-import { StandInEvent, fetchSettler } from './dom-stand-in.mjs';
+import { renderMissionsPage } from '../src/indexpage.mjs';
+import { StandInEvent, fetchSettler, parseHTML } from './dom-stand-in.mjs';
 import { check, runMain, secretHome, writeStub, rawRequest, projectFor, pageHarness, postBoard, sleep } from './support.mjs';
 
 const { loadIndexAgainstDaemon } = await pageHarness();
@@ -169,10 +170,10 @@ function openWireStream(port) {
     connected: () => until("the stream's own ': connected' line", () => raw.includes(': connected') || null),
     /** The next event of that name, removed from the queue so a second call waits
      * for a genuinely new one rather than re-reading the last. */
-    next: name => until(`a '${name}' event`, () => {
+    next: (name, ms) => until(`a '${name}' event`, () => {
       const i = events.findIndex(e => e.name === name);
       return i === -1 ? null : events.splice(i, 1)[0];
-    }),
+    }, ms),
     close() { req.destroy(); },
   };
 }
@@ -794,6 +795,92 @@ async function main() {
         assert.ok(rowFor(silent.document, posted.thread), 'a silent stream must not cost the page its own tick');
       } finally {
         silent.restoreFetch();
+      }
+    });
+
+    await check('a session the watcher reports is a tab card in its state\'s column on first paint and live, leaves with its process, a watcher gone quiet says so while one that never posted says nothing; no name reaches the store (ADR 131)', async () => {
+      const START = '2026-10-29T08:00:00Z';
+      const session = (id, fields) => ({ id, pid: null, procStart: null, kind: 'interactive', jobId: null, login: null, name: null, status: 'idle', reason: null, ...fields });
+      const busy = session('tab-busy', { pid: 50001, procStart: START, cwd: '/Users/pm/Documents/arkivia', login: '/Users/pm/.claude-jerrylui', name: '/direct DEPLOY_ON_MERGE nametoken-busy', status: 'busy' });
+      const idle = session('tab-idle', { pid: 50002, procStart: START, cwd: '/Users/pm/Documents/arkivia-service', login: '/Users/pm/.claude', name: 'catchup nametoken-idle' });
+      const asking = session('tab-asking', { pid: 50003, procStart: START, cwd: '/Users/pm/Documents/claude-board', login: '/Users/pm/.claude-caleb', name: '/grill nametoken-asking' });
+      const blocked = session('tab-blocked', { kind: 'bg', jobId: 'bc01dc2a', cwd: '/Users/pm/Documents/arkivia-admin', status: 'blocked', reason: 'usage limit nametoken-reason' });
+      const snapshot = (sessions, intervalMs = 30000) => rawRequest(port, 'POST', '/api/sessions', {
+        headers: { 'content-type': 'application/json', [SECRET_HEADER]: SECRET },
+        body: JSON.stringify({ intervalMs, sessions }),
+      });
+      const tabCard = (doc, id) => doc.querySelectorAll('article.tab-card').find(c => c.getAttribute('data-mission-key') === `tab:${id}`) || null;
+      const columnOf = (doc, id) => {
+        const card = tabCard(doc, id);
+        return card ? card.closest('section.mission-col').getAttribute('data-col') : null;
+      };
+      const tags = card => card.querySelectorAll('span.mission-tag').map(t => t.textContent);
+      const text = (card, selector) => (card.querySelector(selector) || { textContent: null }).textContent;
+
+      assert.equal((await snapshot([busy, idle, asking, blocked])).status, 200);
+      const round = await postBoard(port, SECRET, { title: 'Asked from a tab', blocks: [QUESTION('Which way?')], session: { pid: asking.pid, procStart: START } });
+
+      const wire = openWireStream(port);
+      let tab = null;
+      try {
+        await wire.connected();
+        const served = await rawRequest(port, 'GET', '/', { headers: { [SECRET_HEADER]: SECRET } });
+        assert.equal(served.status, 200);
+        tab = openIndexTab(port, { html: served.body });
+        for (const [doc, when] of [[parseHTML(served.body), 'first paint'], [tab.document, 'live']]) {
+          assert.deepEqual([busy, idle, asking, blocked].map(s => columnOf(doc, s.id)), ['working', 'waiting', 'needs-you', 'needs-you'], when);
+          const working = tabCard(doc, busy.id);
+          assert.deepEqual(tags(working), ['tab'], `${when}: a busy tab is tagged tab and nothing else`);
+          assert.equal(text(working, 'b.mission-title'), busy.name);
+          assert.equal(text(working, 'span.tab-login'), 'jerrylui');
+          assert.equal(text(working, 'span.tab-folder'), 'arkivia');
+          const waiting = tabCard(doc, idle.id);
+          assert.deepEqual(tags(waiting), ['tab', 'your turn'], `${when}: an idle tab waits on the PM's turn`);
+          assert.equal(text(waiting, 'span.tab-login'), 'claude', `${when}: ~/.claude reads claude`);
+          const needs = tabCard(doc, asking.id);
+          assert.deepEqual(tags(needs), ['tab'], `${when}: a tab with a round open needs the PM, it is not merely their turn`);
+          assert.deepEqual(needs.querySelectorAll('a.mission-btn').map(a => [a.textContent, a.getAttribute('href')]),
+            [['Open round 1', `http://127.0.0.1:${port}/b/${round.boardId}`]]);
+          const stuck = tabCard(doc, blocked.id);
+          assert.equal(text(stuck, 'p.tab-reason'), 'Blocked: usage limit nametoken-reason');
+          assert.equal(text(stuck, 'b.mission-title'), 'Background job bc01dc2a', `${when}: a job with no name is titled by its job id`);
+          assert.equal(stuck.querySelector('span.tab-login'), null, `${when}: no login, no login label`);
+          assert.equal(text(doc.querySelector('section.mission-col[data-col="needs-you"]'), 'span.mission-col-count'), '2');
+          assert.equal(doc.querySelector('p.missions-notice'), null, `${when}: the watcher is up`);
+        }
+
+        // The busy tab's process ended: the watcher's next snapshot leaves it out.
+        assert.equal((await snapshot([idle, asking, blocked], 1000)).status, 200);
+        await tab.push('missions', (await wire.next('missions')).data);
+        assert.equal(tabCard(tab.document, busy.id), null, 'the card goes with its process');
+        assert.equal(columnOf(tab.document, idle.id), 'waiting', 'the others stay');
+
+        // No snapshot for two intervals: the watcher reads down and its cards go.
+        const watcherUp = async () => JSON.parse((await rawRequest(port, 'GET', '/api/missions', { headers: { [SECRET_HEADER]: SECRET } })).body).watcher.up;
+        for (let i = 0; i < 50 && await watcherUp(); i++) await sleep(100);
+        assert.equal(await watcherUp(), false, 'setup: two missed one-second intervals read the watcher down');
+        await tab.push('missions', (await wire.next('missions')).data);
+        assert.equal(text(tab.document, 'p.missions-notice'), 'Session watcher down. Tabs started by hand show again once it reports.');
+        assert.equal(tab.document.querySelectorAll('article.tab-card').length, 0);
+
+        assert.equal((await snapshot([idle])).status, 200);
+        await tab.push('missions', (await wire.next('missions')).data);
+        assert.equal(tab.document.querySelector('p.missions-notice'), null, 'a snapshot takes the notice down');
+        assert.equal(columnOf(tab.document, idle.id), 'waiting');
+
+        // A daemon no watcher ever posted to reads down two default intervals after its
+        // start, with no lastAt (src/sessions.mjs); a board run with no watcher says nothing.
+        const neverPosted = parseHTML(renderMissionsPage({ overview: { missions: [], tabs: [], watcher: { up: false, lastAt: null }, now: new Date().toISOString() } }));
+        assert.equal(neverPosted.querySelector('p.missions-notice'), null, 'no snapshot ever: no notice');
+
+        const onDisk = readdirSync(workDir, { recursive: true }).map(f => path.join(workDir, f)).filter(f => statSync(f).isFile());
+        assert.ok(onDisk.length > 0, 'setup: the store holds files to search');
+        const named = onDisk.filter(f => readFileSync(f, 'utf8').includes('nametoken'));
+        assert.deepEqual(named, [], 'a session name or reason lives in memory only, never in the store');
+      } finally {
+        wire.close();
+        if (tab) tab.restoreFetch();
+        await snapshot([]);
       }
     });
 
