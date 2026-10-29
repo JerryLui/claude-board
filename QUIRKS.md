@@ -2461,3 +2461,14 @@ Traps that have bitten once. A second bite moves the entry up into the section i
   `overflow-y: scroll` (true width 1429), so the centred `--doc-w` wash overflowed by half the
   difference and the page scrolled sideways 6px. Re-measure on the root's `ResizeObserver` and on
   `load`, not only on `resize`.
+- **`test/check-mcp.mjs` fails 7 tab-opening checks when run inside an agent session.** The
+  session's environment carries `CLAUDE_BOARD_OPEN_CMD`, `CLAUDE_MISSION`, `CLAUDE_BOARD_CLIENT`
+  and `CLAUDE_CODE_ENTRYPOINT`, which the shim reads, so a check expecting a tab to open, or the
+  guard to refuse, sees the session's answer instead (2026-10-29). Run it as
+  `env -u CLAUDE_BOARD_OPEN_CMD -u CLAUDE_MISSION -u CLAUDE_BOARD_CLIENT -u CLAUDE_CODE_ENTRYPOINT node test/check-mcp.mjs`.
+  `test/check-boundary.mjs` fails 6 rows the same way, on `main` too.
+- **Headless Chromium does not paint a sandboxed stage frame wholly below the first screen in a
+  full-page screenshot.** The frame is captured blank, so a before/after compare low on a long
+  board looked empty although it rendered once scrolled into view (2026-10-29). Before a
+  full-page shot, raise the viewport to the page's full height, or scroll each stage into view
+  first.

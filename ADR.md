@@ -96,7 +96,7 @@ link where it is worth reading.
 | 107 | [Answers a packet never carried ride the next packet](.agents/adr/0107-answers-a-packet-never-carried-ride-the-next-packet.md) | 2026-08-17 | widens 35; relates to 50, 115 |
 | 108 | [The board lends its engine to a marked stage](.agents/adr/0108-the-board-lends-its-engine-to-a-marked-stage.md) | 2026-08-19 | widens 95; relates to 70 |
 | 109 | [The positions payload is answered in frame viewport coordinates](.agents/adr/0109-positions-are-answered-in-frame-viewport-coordinates.md) | 2026-08-20 | relates to 99 |
-| 110 | [A question's context is one panel, and long prose folds](.agents/adr/0110-a-questions-context-is-one-panel-and-long-prose-folds.md) | 2026-09-03 | widens 26; relates to 28, 111; widened by 119 |
+| 110 | [A question's context is one panel, and long prose folds](.agents/adr/0110-a-questions-context-is-one-panel-and-long-prose-folds.md) | 2026-09-03 | widens 26; relates to 28, 111; widened by 119; amended by 133 |
 | 111 | [A question carries an explainer of its own](.agents/adr/0111-a-question-carries-an-explainer-of-its-own.md) | 2026-09-03 | relates to 26, 110 |
 | 112 | [A post with a failed reference is refused](.agents/adr/0112-a-post-with-a-failed-reference-is-refused.md) | 2026-09-03 | relates to 3; widened by 117 |
 | 113 | [A stage link is handled by the board, and an outbound address opens at once](.agents/adr/0113-a-stage-link-is-handled-by-the-board.md) | 2026-09-10 | relates to 95, 59 |
@@ -107,13 +107,18 @@ link where it is worth reading.
 | 118 | [Remote review rides an SSH tunnel; the daemon stays loopback-only](.agents/adr/0118-remote-review-rides-an-ssh-tunnel.md) | 2026-09-28 | relates to 116 |
 | 119 | [A stage fits its content and folds past 600px](.agents/adr/0119-a-stage-fits-its-content-and-folds-past-600px.md) | 2026-10-12 | widens 110 |
 | 120 | [One Pull-out in the corner of every rendered block](.agents/adr/0120-one-pull-out-in-the-corner-of-every-rendered-block.md) | 2026-10-12 | relates to 22, 110 |
-| 121 | [An html stage may carry the post limit](.agents/adr/0121-an-html-stage-may-carry-the-post-limit.md) | 2026-10-19 | amends 7; relates to 112, 117; amended by 122 |
-| 122 | [A page carries each stage once](.agents/adr/0122-a-page-carries-each-stage-once.md) | 2026-10-19 | amends 121; relates to 32, 42 |
-| 123 | [The board keeps missions beside its rounds](.agents/adr/0123-the-board-keeps-missions-beside-its-rounds.md) | 2026-10-28 | relates to 5, 71, 115; amended by 130 |
-| 124 | [The home page is Missions, in columns by state, under one top bar](.agents/adr/0124-the-home-page-is-missions-under-one-top-bar.md) | 2026-10-28 | relates to 30, 46, 87, 98, 123 |
-| 125 | [A card's Fire and Merge answer a live round; Stop is an order](.agents/adr/0125-a-cards-fire-and-merge-answer-a-live-round.md) | 2026-10-28 | relates to 46, 114, 123, 126 |
+| 121 | [An html stage may carry the post limit](.agents/adr/0121-an-html-stage-may-carry-the-post-limit.md) | 2026-10-19 | amends 7; relates to 112, 117; amended by 122; narrowed by 136 |
+| 122 | [A page carries each stage once](.agents/adr/0122-a-page-carries-each-stage-once.md) | 2026-10-19 | amends 121; relates to 32, 42; narrowed by 136 |
+| 123 | [The board keeps missions beside its rounds](.agents/adr/0123-the-board-keeps-missions-beside-its-rounds.md) | 2026-10-28 | relates to 5, 71, 115; amended by 130; narrowed by 134 |
+| 124 | [The home page is Missions, in columns by state, under one top bar](.agents/adr/0124-the-home-page-is-missions-under-one-top-bar.md) | 2026-10-28 | relates to 30, 46, 87, 98, 123; amended by 135 |
+| 125 | [A card's Fire and Merge answer a live round; Stop is an order](.agents/adr/0125-a-cards-fire-and-merge-answer-a-live-round.md) | 2026-10-28 | relates to 46, 114, 123, 126; narrowed by 134 |
 | 126 | [A relay answers a round on the person's words, marked relayed](.agents/adr/0126-a-relay-answers-a-round-on-the-persons-words.md) | 2026-10-28 | relates to 114, 115, 125 |
 | 127 | [A background session passes the guard and opens no tab](.agents/adr/0127-a-background-session-passes-the-guard-and-opens-no-tab.md) | 2026-10-28 | widens 116 |
 | 128 | [Mission changes speak once a minute, from a read-only watch](.agents/adr/0128-mission-changes-speak-once-a-minute-from-a-read-only-watch.md) | 2026-10-28 | widens 56; relates to 71, 72, 94, 106; amended by 130 |
 | 129 | [A mission's session is live while bound and not gone](.agents/adr/0129-a-missions-session-is-live-while-bound-and-not-gone.md) | 2026-10-28 | relates to 123, 125 |
 | 130 | [A mission's last state is released, and landed records migrate](.agents/adr/0130-a-missions-last-state-is-released.md) | 2026-10-28 | amends 123, 128; relates to 124, 129 |
+| 132 | [Any block may carry card fields](.agents/adr/0132-any-block-may-carry-card-fields.md) | 2026-10-29 | relates to 133 |
+| 133 | [Every block is a titled card, with no type caption](.agents/adr/0133-every-block-is-a-titled-card-with-no-type-caption.md) | 2026-10-29 | amends 110; relates to 28, 132 |
+| 134 | [Send covers the page on screen, and needs you reads a board's newest asking round](.agents/adr/0134-send-covers-the-page-on-screen.md) | 2026-10-29 | narrows 123, 125; relates to 42, 114 |
+| 135 | [Mission cards share one height, and Boards is a card grid from 1440px](.agents/adr/0135-mission-cards-share-one-height.md) | 2026-10-29 | amends 124; relates to 123, 133 |
+| 136 | [From 1440px every card on a board page is one width, up to 1700px](.agents/adr/0136-from-1440px-every-card-is-one-width.md) | 2026-10-29 | narrows 121, 122; relates to 26, 110, 120 |
