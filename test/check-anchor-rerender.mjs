@@ -31,7 +31,8 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { createBoard, applySubmit, buildPacket } from '../src/board.mjs';
-import { renderBoardPage } from '../src/render.mjs';
+import { renderBoardPage, renderBlock } from '../src/render.mjs';
+import { sectionRootFrom, legacySectionRoot, resolveSteps, pathToSteps } from '../src/anchor.mjs';
 import { StandInEvent } from './dom-stand-in.mjs';
 import { check, finish, pageHarness } from './support.mjs';
 
@@ -254,6 +255,41 @@ check('an archived board carrying stored markdown comments renders without them 
   const mermaidSection = document.querySelector('.mermaid-block');
   assert.ok(mermaidSection.querySelector('pre.mermaid'), 'setup failure: no pre.mermaid rendered for the old board\'s mermaid block');
   assert.ok(pageHtml.includes('#4 · A'), 'the mermaid node-id comment must render resolved (its node id, not "lost: ...")');
+});
+
+// --- a board stored before the titled card: its comments keep their spots -----
+//
+// test/fixtures/pre-titled-cards-board.json was written by createBoard at commit
+// e467704, the tip before block type captions were dropped: a markdown block
+// opening with a heading, and a question with an explainer, each carrying a
+// stored dom comment whose ref counts the old caption as the section's (the
+// question head's) first child -- '2.2', the paragraph after the heading, and
+// '1.2', the prompt. Today's card has no caption and lifts the heading into its
+// head, so those refs walked over today's section address nothing, or the wrong
+// element.
+const titledFixture = JSON.parse(readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'pre-titled-cards-board.json'), 'utf8'));
+
+check('a board stored before block type captions were dropped still resolves its comments to the same spots: a markdown paragraph after a lifted heading, and a question\'s prompt', () => {
+  const [md, q] = titledFixture.blocks;
+  const byBlock = Object.fromEntries(titledFixture.comments.map(c => [c.blockId, c]));
+  assert.deepEqual([byBlock[md.id].anchor.ref, byBlock[q.id].anchor.ref], ['2.2', '1.2'], 'setup failure: the fixture\'s refs are not the captioned ones');
+
+  const packet = buildPacket(titledFixture, 1, 'http://127.0.0.1/b/titled');
+  assert.deepEqual(packet.comments.map(c => [c.n, c.lost]), [[1, undefined], [2, undefined]], 'neither stored comment reports lost');
+
+  // The same elements, not merely some element: each ref, read through the
+  // captioned view, lands on the very node today's page shows at that spot.
+  const today = block => sectionRootFrom(renderBlock(block, titledFixture, new Map(), false));
+  const mdRoot = today(md);
+  const body = mdRoot.children.find(c => (c.cls || []).includes('md-content'));
+  const paragraph = resolveSteps(legacySectionRoot(mdRoot), pathToSteps('2.2'));
+  assert.equal(paragraph, body.children[0], 'the markdown comment lands on the paragraph that opens today\'s body');
+  assert.equal(byBlock[md.id].anchor.hint, 'Settled: release steps run at merge.');
+  const qRoot = today(q);
+  const prompt = resolveSteps(legacySectionRoot(qRoot), pathToSteps('1.2'));
+  assert.equal(prompt, qRoot.children[0].children[0].children[0], 'the question comment lands on today\'s prompt, the title in its card head');
+  assert.ok(prompt.cls.includes('question-prompt'));
+
 });
 
 finish('anchor-rerender');

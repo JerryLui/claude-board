@@ -607,12 +607,12 @@ await checkAsync('an ordinary board whose round was abandoned stops counting dow
 // through renderRoundSection, which computes it itself -- but the amend branch
 // renders bare blocks with no round wrapper, so it has to derive it too. Passing
 // nothing meant `false`: the pushed fragment came back as an ORDINARY stage, and
-// applyRoundPush replaces the block outright, so a page board picked up a kicker
+// applyRoundPush replaces the block outright, so a page board picked up a card head
 // and a Pull-out over its 100vh frame and lost `.page-comments`, dropping
 // the comment form below the fold of a page that cannot scroll. Nothing repaired
 // it short of a reload, and the reload rendered something different.
 
-check('an amend push of a page-board block renders it as a PAGE, byte-identical to what a reload of the same board renders, and an ordinary stage keeps its kicker on the same path', () => {
+check('an amend push of a page-board block renders it as a PAGE, byte-identical to what a reload of the same board renders, and an ordinary stage keeps its card head on the same path', () => {
   // An awaited lone html block: a page board whose comment surface is live.
   const board = createBoard({
     title: 'Rendered artifact',
@@ -636,7 +636,7 @@ check('an amend push of a page-board block renders it as a PAGE, byte-identical 
   assert.equal(section(payload.html).trim(), section(reloaded).trim(),
     'the amend fragment and the reload must be the same block markup -- one board cannot render two ways');
 
-  assert.ok(!payload.html.includes('block-kicker'), 'no kicker over a full-viewport artifact');
+  assert.ok(!payload.html.includes('card-head'), 'no card head over a full-viewport artifact');
   assert.ok(!payload.html.includes('pull-out'), 'and no Pull-out');
   assert.ok(payload.html.includes('page-comments'), 'and the comment surface still floats over the frame');
 
@@ -647,7 +647,7 @@ check('an amend push of a page-board block renders it as a PAGE, byte-identical 
     blocks: [{ kind: 'html', html: '<div class="doc"><h1>Quarterly</h1></div>' }, { kind: 'markdown', text: 'a stats line' }],
   });
   const ordinaryPush = buildRoundPushPayload(ordinary, 1, 'amend', [ordinary.blocks[0].id]);
-  assert.ok(ordinaryPush.html.includes('block-kicker'), 'an ordinary stage keeps its kicker on the same path');
+  assert.ok(ordinaryPush.html.includes('card-head'), 'an ordinary stage keeps its card head on the same path');
   assert.ok(ordinaryPush.html.includes('pull-out'), 'and its Pull-out');
 });
 

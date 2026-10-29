@@ -277,7 +277,7 @@ const NON_ANCHORABLE_KIND_CASES = [
   { name: 'prose', find: doc => doc.querySelectorAll('.md-content p').find(el => el.textContent.indexOf('paragraph of prose') !== -1) },
   { name: 'a list item', find: doc => doc.querySelectorAll('.md-content li').find(el => el.textContent.trim() === 'alpha item') },
   { name: 'a table cell', find: doc => doc.querySelectorAll('.md-content td').find(el => el.textContent.trim() === '42') },
-  { name: 'a heading', find: doc => doc.querySelector('.md-content h1') },
+  { name: 'a heading', find: doc => doc.querySelector('.markdown-block h1') },
   { name: 'the body of a code reference', find: doc => doc.querySelector('.code-block pre') },
   { name: 'a line of a code reference', find: doc => doc.querySelector('.code-block code') },
 ];
@@ -710,19 +710,19 @@ check('comment mode: the toggle\'s aria-pressed attribute and .active class both
 
 // --- ANCHOR_CHROME_SELECTOR: each entry, dropped individually -------------------
 
-check('comment mode: clicking a block\'s own "comment" kicker chrome (not the button itself, which self-excludes via the anchorRootFor/el===root guard -- the surrounding .block-kicker div, which carries no data-block-id of its own) opens no comment form at all (ablation: dropping .block-kicker, .comment-btn from ANCHOR_CHROME_SELECTOR mints a dom anchor against it instead)', () => {
+check('comment mode: clicking a block\'s own card head around its "comment" button (not the button itself, which self-excludes via the anchorRootFor/el===root guard -- the surrounding .card-head div, which carries no data-block-id of its own) opens no comment form at all (ablation: dropping .card-head, .comment-btn from ANCHOR_CHROME_SELECTOR mints a dom anchor against it instead)', () => {
   const document = loadBoard(pageHtml);
   enableCommentMode(document);
   const btn = document.querySelector(`.comment-btn[data-block-id="${diagramBlock.id}"]`);
   assert.ok(btn, 'setup failure: no comment-btn for the diagram block');
-  const kicker = btn.closest('.block-kicker');
-  assert.ok(kicker, 'setup failure: the comment button is not inside a .block-kicker');
+  const head = btn.closest('.card-head');
+  assert.ok(head, 'setup failure: the comment button is not inside a .card-head');
 
-  kicker.dispatchEvent(new StandInEvent('click'));
+  head.dispatchEvent(new StandInEvent('click'));
 
   const form = document.getElementById('comment-form-' + diagramBlock.id);
   assert.equal(form.classList.contains('open'), false,
-    'clicking the kicker chrome around the comment button (not the button itself) must not open any comment form -- with the kicker unexcluded, the generic listener mints a dom anchor against it instead, since the kicker itself carries no data-block-id to trip the self-guard the button has');
+    'clicking the card head around the comment button (not the button itself) must not open any comment form -- with the head unexcluded, the generic listener mints a dom anchor against it instead, since the head itself carries no data-block-id to trip the self-guard the button has');
 });
 
 // NOT independently observable through a click, and reported rather than papered
@@ -1016,6 +1016,8 @@ const WRAPPER_BOARD = createBoard({
   ],
 });
 const [wrapperChoiceBlock, wrapperRankBlock, wrapperCompareBlock] = WRAPPER_BOARD.blocks;
+// Stored as a post carrying the card's optional title, so the compare draws a head.
+wrapperCompareBlock.title = 'Two takes';
 const wrapperContextStage = wrapperChoiceBlock.context[0];
 const wrapperContextDiagram = wrapperChoiceBlock.context[1];
 const wrapperContextProse = wrapperChoiceBlock.context[2];
@@ -1098,11 +1100,11 @@ check("comment mode: clicking a question block's own answer textarea mints no co
   assertNotAnchorable(document, textarea, 'the answer textarea');
 });
 
-// --- a compare block's own wrapper: kicker, grid, a side's label, a side with --
+// --- a compare block's own wrapper: head, grid, a side's label, a side with ----
 // no content block --------------------------------------------------------------
 
 const COMPARE_WRAPPER_CASES = [
-  { name: 'the kicker', find: doc => doc.querySelectorAll('.compare-block .block-kicker')[0] },
+  { name: 'card head', find: doc => doc.querySelectorAll('.compare-block .card-title')[0] },
   { name: 'the grid', find: doc => doc.querySelector('.compare-grid') },
   { name: "a side's label", find: doc => doc.querySelectorAll('.compare-label')[0] },
   { name: 'a side that carries no content block', find: doc => doc.querySelectorAll('.compare-side .unsupported-widget')[0] },

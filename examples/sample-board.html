@@ -139,7 +139,7 @@
   }
 })();
 </script>
-<link rel="stylesheet" href="styles-0d6f1c0cad2e1126.css">
+<link rel="stylesheet" href="styles-1f02b8bae6ad9694.css">
 </head>
 <body class="sent-page">
 <div class="board-shell">
@@ -1189,16 +1189,17 @@
   <div class="round-label">Round 2 · Routing walkthrough · sent</div>
   
 <section class="block markdown-block folded" data-block-id="d1" data-block-kind="markdown">
-  <div class="block-kicker">Markdown</div>
-  <div class="md-content fold-body" id="fold-d1"><h1 id="order-routing-redesign">Order-routing redesign</h1><p>The kitchen display one page back is the mockup. Three things change for the pass, and the routing rewrite underneath them is what this round is asking about:</p><ul><li id="order-routing-redesign-li1">Fewer manual status updates per ticket</li><li id="order-routing-redesign-li2">A single "Ready for pickup" state visible to front-of-house</li><li id="order-routing-redesign-li3">Rush tickets float to the top automatically</li></ul><p>The payload each station receives on a status transition:</p><div class="fence-lang" data-lang="json"><pre><code>{
+  <div class="card-head"><h1 class="card-title" id="order-routing-redesign">Order-routing redesign</h1></div>
+  <div class="md-content fold-body" id="fold-d1"><p>The kitchen display one page back is the mockup. Three things change for the pass, and the routing rewrite underneath them is what this round is asking about:</p><ul><li id="order-routing-redesign-li1">Fewer manual status updates per ticket</li><li id="order-routing-redesign-li2">A single "Ready for pickup" state visible to front-of-house</li><li id="order-routing-redesign-li3">Rush tickets float to the top automatically</li></ul><p>The payload each station receives on a status transition:</p><div class="fence-lang" data-lang="json"><pre><code>{
   "ticketId": <span class="tok-number">482</span>,
   "status": <span class="tok-string">"ready_for_pickup"</span>,
   "notifiedStations": [<span class="tok-string">"grill"</span>, <span class="tok-string">"expo"</span>]
-}</code></pre></div><div class="table-scroll"><table><tr><th>Station</th><th>Avg. ticket time (today)</th><th>Avg. ticket time (proposed)</th></tr><tr><td>Grill</td><td>46s</td><td>33s</td></tr><tr><td>Salad</td><td>28s</td><td>24s</td></tr><tr><td>Expo</td><td>19s</td><td>15s</td></tr></table></div></div><button type="button" class="fold-toggle" aria-expanded="false" aria-controls="fold-d1">Show more</button>
+}</code></pre></div><div class="table-scroll"><table><tr><th>Station</th><th>Avg. ticket time (today)</th><th>Avg. ticket time (proposed)</th></tr><tr><td>Grill</td><td>46s</td><td>33s</td></tr><tr><td>Salad</td><td>28s</td><td>24s</td></tr><tr><td>Expo</td><td>19s</td><td>15s</td></tr></table></div></div><button type="button" class="fold-toggle" aria-expanded="false" aria-controls="fold-d1">Show the rest</button>
+  
 </section>
 
 <section class="block mermaid-block" data-block-id="m1" data-block-kind="mermaid">
-  <div class="block-kicker">Mermaid <button type="button" class="comment-btn" data-block-id="m1" data-anchor-kind="block"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>comment</button></div>
+  <div class="card-head"><button type="button" class="comment-btn" data-block-id="m1" data-anchor-kind="block"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>comment</button></div>
   
   <div class="stage-wrap">
     <pre class="mermaid">flowchart LR
@@ -1207,6 +1208,7 @@
     <button type="button" class="pull-out" data-pull-out-for="m1" aria-label="Open this diagram full size" title="Open full size"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6"/><path d="M10 20H4v-6"/><path d="M20 4l-7 7"/><path d="M4 20l7-7"/></svg></button>
   </div>
   <div class="pin-layer" data-block-id="m1"></div>
+  
   
     <div class="comment-target" id="comment-target-m1">commenting on: whole block</div>
     <form class="comment-form" id="comment-form-m1" data-block-id="m1" data-anchor-kind="block">
@@ -1217,16 +1219,17 @@
 </section>
 
 <section class="block code-block" data-block-id="c1" data-block-kind="code">
-  <div class="block-kicker">Code · javascript</div>
+  
   <pre><code><span class="code-row" data-line="1"><span class="tok-keyword">function</span> <span class="tok-function">priorityScore</span>(ticket) {</span>
 <span class="code-row" data-line="2">  <span class="tok-keyword">const</span> waitMs = Date.<span class="tok-function">now</span>() - ticket.placedAt;</span>
 <span class="code-row" data-line="3">  <span class="tok-keyword">const</span> rushBonus = ticket.rush ? <span class="tok-number">500</span> : <span class="tok-number">0</span>;</span>
 <span class="code-row" data-line="4">  <span class="tok-keyword">return</span> waitMs + rushBonus;</span>
-<span class="code-row" data-line="5">}</span></code></pre>
+<span class="code-row" data-line="5">}</span></code></pre><div class="context-caption">javascript</div>
+  
 </section>
 
 <section class="block code-block" data-block-id="c2" data-block-kind="code">
-  <div class="block-kicker">Code · diff</div>
+  
   <pre><code class="code-diff"><span class="code-row"><span class="diff-meta">--- a/routing.js</span></span>
 <span class="code-row"><span class="diff-meta">+++ b/routing.js</span></span>
 <span class="code-row"><span class="diff-meta">@@ -1,5 +1,7 @@</span></span>
@@ -1236,17 +1239,18 @@
 <span class="code-row diff-del" data-line="4">-  return waitMs + rushBonus;</span>
 <span class="code-row diff-add" data-line="4">+  const recallBonus = ticket.recalled ? 1500 : 0;</span>
 <span class="code-row diff-add" data-line="5">+  return waitMs + rushBonus + recallBonus;</span>
-<span class="code-row" data-line="6"> }</span></code></pre>
+<span class="code-row" data-line="6"> }</span></code></pre><div class="context-caption">diff</div>
+  
 </section>
 
 <section class="block compare-block" data-block-id="x1" data-block-kind="compare">
-  <div class="block-kicker">Compare</div>
+  
   <div class="compare-grid">
     <div class="compare-side">
     <div class="compare-label">Before</div>
     
 <section class="block html-block" data-block-id="h2" data-block-kind="html">
-  <div class="block-kicker">HTML stage <button type="button" class="comment-btn" data-block-id="h2" data-anchor-kind="block"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>comment</button></div>
+  <div class="card-head"><button type="button" class="comment-btn" data-block-id="h2" data-anchor-kind="block"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>comment</button></div>
   <div class="stage-wrap">
     <iframe class="html-stage" sandbox="allow-scripts" data-sha="d2f4bf94fc4f9fb3efc463751e1b1558f6c726ee18d6c6cb32ce16e89d5afe7e" srcdoc="&lt;style&gt;html,body{margin:0;padding:0}&lt;/style&gt;&lt;style&gt;
   body { margin: 0; padding: 16px 0; font-family: system-ui, sans-serif; background: #f3f4f6; }
@@ -2218,6 +2222,7 @@
   </div>
   <div class="stage-fold"><button type="button" class="stage-fold-toggle" aria-expanded="false">Show full height</button></div>
   
+  
     <div class="comment-target" id="comment-target-h2">commenting on: whole block</div>
     <form class="comment-form" id="comment-form-h2" data-block-id="h2" data-anchor-kind="block">
       <input type="text" placeholder="Add a comment" disabled>
@@ -2230,7 +2235,7 @@
     <div class="compare-label">After</div>
     
 <section class="block html-block" data-block-id="h3" data-block-kind="html">
-  <div class="block-kicker">HTML stage <button type="button" class="comment-btn" data-block-id="h3" data-anchor-kind="block"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>comment</button></div>
+  <div class="card-head"><button type="button" class="comment-btn" data-block-id="h3" data-anchor-kind="block"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>comment</button></div>
   <div class="stage-wrap">
     <iframe class="html-stage" sandbox="allow-scripts" data-sha="22d5a3e98bc92a5b3b0c9b31e3d273cdc5e44418a219e1c6e2c2e3c1d67d359c" srcdoc="&lt;style&gt;html,body{margin:0;padding:0}&lt;/style&gt;&lt;style&gt;
   body { margin: 0; padding: 16px 0; font-family: system-ui, sans-serif; }
@@ -3204,6 +3209,7 @@
   </div>
   <div class="stage-fold"><button type="button" class="stage-fold-toggle" aria-expanded="false">Show full height</button></div>
   
+  
     <div class="comment-target" id="comment-target-h3">commenting on: whole block</div>
     <form class="comment-form" id="comment-form-h3" data-block-id="h3" data-anchor-kind="block">
       <input type="text" placeholder="Add a comment" disabled>
@@ -3213,12 +3219,13 @@
 </section>
   </div>
   </div>
+  
 </section>
 
 <section class="block question-block" data-block-id="q1" data-block-kind="question" data-widget="single">
   <div class="question-head">
-    <div class="block-kicker">Question · single</div>
-    <p class="question-prompt">Does the kitchen display in round 1 match the routing flow (Placed -&gt; In prep -&gt; Ready -&gt; Served) we discussed?</p>
+    <div class="card-head"><p class="question-prompt card-title">Does the kitchen display in round 1 match the routing flow (Placed -&gt; In prep -&gt; Ready -&gt; Served) we discussed?</p><span class="card-status answer-status" data-status="answered">Answered</span></div>
+    
     <div class="question-explainer md-content"><p>This decides whether round 1's mockup ships as drawn. A tweak here changes the display only; the routing rewrite underneath it ships either way.</p></div>
   </div>
   <div class="question-main">
@@ -3242,19 +3249,19 @@
   </div>
   <div class="question-context"><div class="context-item" data-block-id="d2" data-block-kind="markdown"><div class="md-content"><p>Background: average ticket time today is 31 seconds across the three prep stations (grill, salad, expo).</p></div></div></div>
   <div class="note-field">
-    <label for="note-q1">Note</label>
+    <div class="note-head">
+      <label for="note-q1">Note</label>
+      <button type="button" class="btn-defer" data-defer-for="q1" disabled>Defer</button>
+    </div>
     <textarea id="note-q1" data-note-for="q1" placeholder="Optional note" disabled>Add a Recall step from Ready back to Prepping for remakes.</textarea>
   </div>
-  <div class="question-footer">
-    <button type="button" class="btn-defer" data-defer-for="q1" disabled>Defer</button>
-    <span class="answer-status" data-status="answered">status: answered</span>
-  </div>
+  
 </section>
 
 <section class="block question-block" data-block-id="q2" data-block-kind="question" data-widget="multi">
   <div class="question-head">
-    <div class="block-kicker">Question · multi</div>
-    <p class="question-prompt">Which stations need their ticket displays updated to match the round 1 mockup?</p>
+    <div class="card-head"><p class="question-prompt card-title">Which stations need their ticket displays updated to match the round 1 mockup?</p><span class="card-status answer-status" data-status="answered">Answered</span></div>
+    <p class="question-picks">Pick as many as apply.</p>
     
   </div>
   <div class="question-main">
@@ -3293,19 +3300,19 @@
   </div>
   
   <div class="note-field">
-    <label for="note-q2">Note</label>
+    <div class="note-head">
+      <label for="note-q2">Note</label>
+      <button type="button" class="btn-defer" data-defer-for="q2" disabled>Defer</button>
+    </div>
     <textarea id="note-q2" data-note-for="q2" placeholder="Optional note" disabled>Bar can wait until next sprint.</textarea>
   </div>
-  <div class="question-footer">
-    <button type="button" class="btn-defer" data-defer-for="q2" disabled>Defer</button>
-    <span class="answer-status" data-status="answered">status: answered</span>
-  </div>
+  
 </section>
 
 <section class="block question-block" data-block-id="q3" data-block-kind="question" data-widget="text">
   <div class="question-head">
-    <div class="block-kicker">Question · text</div>
-    <p class="question-prompt">Anything else the kitchen team should flag before we ship?</p>
+    <div class="card-head"><p class="question-prompt card-title">Anything else the kitchen team should flag before we ship?</p><span class="card-status answer-status" data-status="answered">Answered</span></div>
+    
     
   </div>
   <div class="question-main">
@@ -3314,19 +3321,19 @@
   </div>
   
   <div class="note-field">
-    <label for="note-q3">Note</label>
+    <div class="note-head">
+      <label for="note-q3">Note</label>
+      <button type="button" class="btn-defer" data-defer-for="q3" disabled>Defer</button>
+    </div>
     <textarea id="note-q3" data-note-for="q3" placeholder="Optional note" disabled></textarea>
   </div>
-  <div class="question-footer">
-    <button type="button" class="btn-defer" data-defer-for="q3" disabled>Defer</button>
-    <span class="answer-status" data-status="answered">status: answered</span>
-  </div>
+  
 </section>
 
 <section class="block question-block" data-block-id="q4" data-block-kind="question" data-widget="rank">
   <div class="question-head">
-    <div class="block-kicker">Question · rank</div>
-    <p class="question-prompt">Rank these three palettes for the status chips (In prep / Rush / Ready for pickup) by legibility under kitchen pass lighting, most legible first. The display one page back uses the first of them.</p>
+    <div class="card-head"><p class="question-prompt card-title">Rank these three palettes for the status chips (In prep / Rush / Ready for pickup) by legibility under kitchen pass lighting, most legible first. The display one page back uses the first of them.</p><span class="card-status answer-status" data-status="answered">Answered</span></div>
+    <p class="question-picks">Drag them into order, most important first.</p>
     
   </div>
   <div class="question-main">
@@ -3356,19 +3363,19 @@
   </div>
   
   <div class="note-field">
-    <label for="note-q4">Note</label>
+    <div class="note-head">
+      <label for="note-q4">Note</label>
+      <button type="button" class="btn-defer" data-defer-for="q4" disabled>Defer</button>
+    </div>
     <textarea id="note-q4" data-note-for="q4" placeholder="Optional note" disabled>Pastel washes out completely under the heat-lamp lighting.</textarea>
   </div>
-  <div class="question-footer">
-    <button type="button" class="btn-defer" data-defer-for="q4" disabled>Defer</button>
-    <span class="answer-status" data-status="answered">status: answered</span>
-  </div>
+  
 </section>
 
 <section class="block question-block" data-block-id="q5" data-block-kind="question" data-widget="choose-between-rendered-variants">
   <div class="question-head">
-    <div class="block-kicker">Question · choose-between-rendered-variants</div>
-    <p class="question-prompt">Which ticket-card layout reads faster at a glance?</p>
+    <div class="card-head"><p class="question-prompt card-title">Which ticket-card layout reads faster at a glance?</p><span class="card-status answer-status" data-status="answered">Answered</span></div>
+    
     
   </div>
   <div class="question-main">
@@ -3380,7 +3387,7 @@
     </div>
     
 <section class="block html-block" data-block-id="h4" data-block-kind="html">
-  <div class="block-kicker">HTML stage <button type="button" class="comment-btn" data-block-id="h4" data-anchor-kind="block"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>comment</button></div>
+  <div class="card-head"><button type="button" class="comment-btn" data-block-id="h4" data-anchor-kind="block"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>comment</button></div>
   <div class="stage-wrap">
     <iframe class="html-stage" sandbox="allow-scripts" data-sha="f9a5a0eae4bfb8e37f564df601089bf20340fd0664dc81f55ce23de254ede822" srcdoc="&lt;style&gt;html,body{margin:0;padding:0}&lt;/style&gt;&lt;style&gt;
   body { margin: 0; padding: 16px 0; font-family: system-ui, sans-serif; }
@@ -4344,6 +4351,7 @@
   </div>
   
   
+  
     <div class="comment-target" id="comment-target-h4">commenting on: whole block</div>
     <form class="comment-form" id="comment-form-h4" data-block-id="h4" data-anchor-kind="block">
       <input type="text" placeholder="Add a comment" disabled>
@@ -4358,7 +4366,7 @@
     </div>
     
 <section class="block html-block" data-block-id="h5" data-block-kind="html">
-  <div class="block-kicker">HTML stage <button type="button" class="comment-btn" data-block-id="h5" data-anchor-kind="block"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>comment</button></div>
+  <div class="card-head"><button type="button" class="comment-btn" data-block-id="h5" data-anchor-kind="block"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>comment</button></div>
   <div class="stage-wrap">
     <iframe class="html-stage" sandbox="allow-scripts" data-sha="ae7daf4d634328cacbb56dbdd5a5c4451e4a93dfc4b032a54c4b478386cbd39c" srcdoc="&lt;style&gt;html,body{margin:0;padding:0}&lt;/style&gt;&lt;style&gt;
   body { margin: 0; padding: 16px 0; font-family: system-ui, sans-serif; }
@@ -5327,6 +5335,7 @@
   </div>
   
   
+  
     <div class="comment-target" id="comment-target-h5">commenting on: whole block</div>
     <form class="comment-form" id="comment-form-h5" data-block-id="h5" data-anchor-kind="block">
       <input type="text" placeholder="Add a comment" disabled>
@@ -5338,13 +5347,13 @@
   </div>
   
   <div class="note-field">
-    <label for="note-q5">Note</label>
+    <div class="note-head">
+      <label for="note-q5">Note</label>
+      <button type="button" class="btn-defer" data-defer-for="q5" disabled>Defer</button>
+    </div>
     <textarea id="note-q5" data-note-for="q5" placeholder="Optional note" disabled></textarea>
   </div>
-  <div class="question-footer">
-    <button type="button" class="btn-defer" data-defer-for="q5" disabled>Defer</button>
-    <span class="answer-status" data-status="answered">status: answered</span>
-  </div>
+  
 </section>
   
 </section>
@@ -5365,6 +5374,6 @@
   </div>
 </div>
 <script id="board-data" type="application/json">{"id":"b_00112233445566778899aabbccddeeff","thread":"th_01234567","title":"feature/kitchen-routing-v2","createdAt":"2026-07-14T09:12:00.000Z","updatedAt":"2026-07-15T10:31:00.000Z","state":"submitted","rounds":[{"n":1,"postedAt":"2026-07-14T09:12:00.000Z","status":"open","sentAt":null,"title":"feature/kitchen-routing-v2","awaited":false,"awaitDeadline":null},{"n":2,"postedAt":"2026-07-15T10:05:00.000Z","status":"sent","sentAt":"2026-07-15T10:31:00.000Z","title":"Routing walkthrough","awaited":true,"awaitDeadline":"2026-07-15T10:45:00.000Z","action":"submitted"}],"blocks":[{"round":1,"id":"h1","kind":"html","source":null,"sha":"e66bfc1cdc4d618e4e0813f9628a8f013292841fadcb16cd7eca5cbf20f6165f"},{"round":2,"id":"d1","kind":"markdown","source":null,"text":"# Order-routing redesign\n\nThe kitchen display one page back is the mockup. Three things change for the pass, and the routing rewrite underneath them is what this round is asking about:\n\n- Fewer manual status updates per ticket\n- A single \"Ready for pickup\" state visible to front-of-house\n- Rush tickets float to the top automatically\n\nThe payload each station receives on a status transition:\n\n```json\n{\n  \"ticketId\": 482,\n  \"status\": \"ready_for_pickup\",\n  \"notifiedStations\": [\"grill\", \"expo\"]\n}\n```\n\n| Station | Avg. ticket time (today) | Avg. ticket time (proposed) |\n| --- | --- | --- |\n| Grill | 46s | 33s |\n| Salad | 28s | 24s |\n| Expo | 19s | 15s |","sha":"30f276f0b30161582322dcef1c9a3c4466f1619e8f63611f292a5a08d3b6b303","html":"\u003ch1 id=\"order-routing-redesign\">Order-routing redesign\u003c/h1>\u003cp>The kitchen display one page back is the mockup. Three things change for the pass, and the routing rewrite underneath them is what this round is asking about:\u003c/p>\u003cul>\u003cli id=\"order-routing-redesign-li1\">Fewer manual status updates per ticket\u003c/li>\u003cli id=\"order-routing-redesign-li2\">A single \"Ready for pickup\" state visible to front-of-house\u003c/li>\u003cli id=\"order-routing-redesign-li3\">Rush tickets float to the top automatically\u003c/li>\u003c/ul>\u003cp>The payload each station receives on a status transition:\u003c/p>\u003cdiv class=\"fence-lang\" data-lang=\"json\">\u003cpre>\u003ccode>{\n  \"ticketId\": \u003cspan class=\"tok-number\">482\u003c/span>,\n  \"status\": \u003cspan class=\"tok-string\">\"ready_for_pickup\"\u003c/span>,\n  \"notifiedStations\": [\u003cspan class=\"tok-string\">\"grill\"\u003c/span>, \u003cspan class=\"tok-string\">\"expo\"\u003c/span>]\n}\u003c/code>\u003c/pre>\u003c/div>\u003cdiv class=\"table-scroll\">\u003ctable>\u003ctr>\u003cth>Station\u003c/th>\u003cth>Avg. ticket time (today)\u003c/th>\u003cth>Avg. ticket time (proposed)\u003c/th>\u003c/tr>\u003ctr>\u003ctd>Grill\u003c/td>\u003ctd>46s\u003c/td>\u003ctd>33s\u003c/td>\u003c/tr>\u003ctr>\u003ctd>Salad\u003c/td>\u003ctd>28s\u003c/td>\u003ctd>24s\u003c/td>\u003c/tr>\u003ctr>\u003ctd>Expo\u003c/td>\u003ctd>19s\u003c/td>\u003ctd>15s\u003c/td>\u003c/tr>\u003c/table>\u003c/div>","anchors":[{"kind":"md","ref":"order-routing-redesign","label":"Order-routing redesign"},{"kind":"md","ref":"order-routing-redesign-li1","label":"Fewer manual status updates per ticket"},{"kind":"md","ref":"order-routing-redesign-li2","label":"A single \"Ready for pickup\" state visible to front-of-house"},{"kind":"md","ref":"order-routing-redesign-li3","label":"Rush tickets float to the top automatically"}]},{"round":2,"id":"m1","kind":"mermaid","source":null,"text":"flowchart LR\n  Placed[Order placed] --> Prepping[In prep] --> Ready[Ready for pickup] --> Served[Served]","sha":"0730e47488c90846e75d0577056f696c04cc7c4c4e64ad7a16ddc98d6ddba561"},{"round":2,"id":"c1","kind":"code","source":null,"text":"function priorityScore(ticket) {\n  const waitMs = Date.now() - ticket.placedAt;\n  const rushBonus = ticket.rush ? 500 : 0;\n  return waitMs + rushBonus;\n}","sha":"6e558853c35e89523f1588343da1ee9b1238bcb0df3d25b321582daa452fb690","lang":"javascript"},{"round":2,"id":"c2","kind":"code","source":null,"text":"--- a/routing.js\n+++ b/routing.js\n@@ -1,5 +1,7 @@\n function priorityScore(ticket) {\n   const waitMs = Date.now() - ticket.placedAt;\n   const rushBonus = ticket.rush ? 500 : 0;\n-  return waitMs + rushBonus;\n+  const recallBonus = ticket.recalled ? 1500 : 0;\n+  return waitMs + rushBonus + recallBonus;\n }","sha":"8144b07ac5240a2448b9475511c377247c069376848e0f05a115ac0f1ab61679","lang":"diff"},{"round":2,"id":"x1","kind":"compare","left":{"label":"Before","block":{"round":2,"id":"h2","kind":"html","source":null,"sha":"d2f4bf94fc4f9fb3efc463751e1b1558f6c726ee18d6c6cb32ce16e89d5afe7e"}},"right":{"label":"After","block":{"round":2,"id":"h3","kind":"html","source":null,"sha":"22d5a3e98bc92a5b3b0c9b31e3d273cdc5e44418a219e1c6e2c2e3c1d67d359c"}}},{"round":2,"id":"q1","kind":"question","prompt":"Does the kitchen display in round 1 match the routing flow (Placed -> In prep -> Ready -> Served) we discussed?","explainer":"This decides whether round 1's mockup ships as drawn. A tweak here changes the display only; the routing rewrite underneath it ships either way.","explainerHtml":"\u003cp>This decides whether round 1's mockup ships as drawn. A tweak here changes the display only; the routing rewrite underneath it ships either way.\u003c/p>","context":[{"round":2,"id":"d2","kind":"markdown","source":null,"text":"Background: average ticket time today is 31 seconds across the three prep stations (grill, salad, expo).","sha":"05178d55126abc3fe8e2f881c14f407099dbd591085b71844695445ef041d892","html":"\u003cp>Background: average ticket time today is 31 seconds across the three prep stations (grill, salad, expo).\u003c/p>","anchors":[]}],"widget":"single","options":[{"label":"Yes, ship it","description":"","preview":null},{"label":"Close, one tweak needed","description":"","preview":null},{"label":"No, rework it","description":"","preview":null}]},{"round":2,"id":"q2","kind":"question","prompt":"Which stations need their ticket displays updated to match the round 1 mockup?","context":[],"widget":"multi","options":[{"label":"Grill","description":"","preview":null},{"label":"Salad","description":"","preview":null},{"label":"Expo","description":"","preview":null},{"label":"Bar","description":"","preview":null},{"label":"None of these","description":"","preview":null}]},{"round":2,"id":"q3","kind":"question","prompt":"Anything else the kitchen team should flag before we ship?","context":[],"widget":"text","options":[]},{"round":2,"id":"q4","kind":"question","prompt":"Rank these three palettes for the status chips (In prep / Rush / Ready for pickup) by legibility under kitchen pass lighting, most legible first. The display one page back uses the first of them.","context":[],"widget":"rank","options":[{"label":"High-contrast","description":"","preview":null},{"label":"Pastel","description":"","preview":null},{"label":"Monochrome","description":"","preview":null}]},{"round":2,"id":"q5","kind":"question","prompt":"Which ticket-card layout reads faster at a glance?","context":[],"widget":"choose-between-rendered-variants","options":[{"label":"Layout A","description":"Compact, single line","block":{"round":2,"id":"h4","kind":"html","source":null,"sha":"f9a5a0eae4bfb8e37f564df601089bf20340fd0664dc81f55ce23de254ede822"}},{"label":"Layout B","description":"Spacious, three lines","block":{"round":2,"id":"h5","kind":"html","source":null,"sha":"ae7daf4d634328cacbb56dbdd5a5c4451e4a93dfc4b032a54c4b478386cbd39c"}}]}],"answers":{"q1":{"id":"q1","status":"answered","choice":"Close, one tweak needed","note":"Add a Recall step from Ready back to Prepping for remakes."},"q2":{"id":"q2","status":"answered","choice":["Grill","Expo"],"note":"Bar can wait until next sprint."},"q3":{"id":"q3","status":"answered","choice":"Make sure the Recall state also resets the rush-bonus timer, or repeat rush tickets will always sort to the top.","note":""},"q4":{"id":"q4","status":"answered","choice":["High-contrast","Monochrome","Pastel"],"note":"Pastel washes out completely under the heat-lamp lighting."},"q5":{"id":"q5","status":"answered","choice":"Layout A","note":""}},"comments":[{"n":1,"blockId":"m1","blockKind":"mermaid","anchor":{"kind":"block"},"text":"This matches the walkthrough from Tuesday's stand-up. Nice work.","round":2,"createdAt":"2026-07-15T10:31:00.000Z","resolved":true},{"n":2,"blockId":"h1","blockKind":"html","anchor":{"kind":"dom","ref":"1.2.1.3.1","hint":"Confirm"},"text":"Consider making this button say 'Confirm order' for clarity.","round":2,"createdAt":"2026-07-15T10:31:00.000Z","resolved":true},{"n":3,"blockId":"m1","blockKind":"mermaid","anchor":{"kind":"mermaid","ref":"Ready"},"text":"Should Ready also branch to a Recall state if an item comes back?","round":2,"createdAt":"2026-07-15T10:31:00.000Z","resolved":true}]}</script>
-<script defer src="ui-9c97781fa56fa783.js"></script>
+<script defer src="ui-c026cfcef570f7a9.js"></script>
 </body>
 </html>

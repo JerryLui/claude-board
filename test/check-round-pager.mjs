@@ -269,8 +269,8 @@ check('criterion 19 + ADR 42: the layout follows the PAGE -- an artifact round f
   assert.equal(currentPage(document), '1');
   assert.equal(document.body.classList.contains('page-board'), true,
     'flipping to the artifact page puts the full-viewport layout back -- the page-board class follows the page, not the board');
-  assert.equal(document.querySelectorAll('.round[data-round="1"] .block-kicker').length, 0,
-    'and that page is still the one that was RENDERED as a page: no kicker over a full-viewport artifact, before or after a round arrived');
+  assert.equal(document.querySelectorAll('.round[data-round="1"] .card-head').length, 0,
+    'and that page is still the one that was RENDERED as a page: no card head over a full-viewport artifact, before or after a round arrived');
 
   click(document.querySelector('button#round-next'));
   assert.equal(document.body.classList.contains('page-board'), false, 'and flipping back takes it away again');

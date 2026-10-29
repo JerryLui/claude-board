@@ -3130,7 +3130,7 @@ async function main() {
     const page1 = markup.slice(r1, r2);
     const page2 = markup.slice(r2);
     assert.ok(page1.includes('TWO_ASK_ARTIFACT'), 'setup failure: the artifact is not in round 1\'s markup');
-    assert.ok(!page1.includes('block-kicker'), 'the artifact\'s page carries no kicker');
+    assert.ok(!page1.includes('card-head'), 'the artifact\'s page carries no card head');
     assert.ok(!page1.includes('pull-out'), 'and no Pull-out');
     assert.ok(page1.includes('page-comments'), 'and its comment surface floats over the frame');
     assert.ok(page2.includes('question-block'), 'round 2 renders as an ordinary question round on its own page');
