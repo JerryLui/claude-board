@@ -2018,7 +2018,6 @@ function missionsParts(overview, ui) {
     return show ? '<details class="mission-more"' + (pick('expanded', key) ? ' open' : '') + '><summary>Show the rest</summary></details>' : '';
   }
 
-  // A card's title, and the link to its board where it has one (cardShell).
   // A card's title, and the link to its board where it has one. The link's box covers the
   // card, its key line included, so the link carries the card's tooltip: the whole title
   // and what the key line cuts short (cardTip).
