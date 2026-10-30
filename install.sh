@@ -1552,33 +1552,49 @@ HEALTH_ELAPSED_SECONDS=$((SECONDS - HEALTH_START_SECONDS))
 # it: it runs as node, has no bundle to grant, and its launcher step already said so.
 #
 # 120s because a reset grant prompts on this very open and holds it until somebody
-# answers; an open that is not waiting on a person answers at once.
+# answers; an open that is not waiting on a person answers at once. The TCC steps are for a
+# refused read alone: a read that timed out or never reached the daemon says so instead.
 DOCUMENTS_REFUSED=""
+DOCUMENTS_HOW=""
+# Test seam, as CLAUDE_BOARD_HEALTH_TRIES is: the checks that prove a timeout fails the
+# install cannot wait the two minutes a person gets.
+DOCUMENTS_SECONDS="${CLAUDE_BOARD_DOCUMENTS_PROBE_SECONDS:-120}"
 if [ "$USE_LAUNCHER" -eq 1 ]; then
   DOCUMENTS_RC=0
   # The secret goes in on stdin (curl -K -), never on argv, where ps shows it.
   DOCUMENTS_BODY="$(printf 'header = "x-claude-board-secret: %s"\n' "$(cat "$SECRET_FILE")" \
-    | curl -fsS --noproxy '*' --max-time 120 -K - "http://127.0.0.1:${PORT}/api/probe/documents" 2>/dev/null)" \
+    | curl -fsS --noproxy '*' --max-time "$DOCUMENTS_SECONDS" -K - "http://127.0.0.1:${PORT}/api/probe/documents" 2>/dev/null)" \
     || DOCUMENTS_RC=$?
   case "$DOCUMENTS_BODY" in
     *'"ok":true'*|*'"code":"ENOENT"'*) ;;
     *'"code":"EPERM"'*|*'"code":"EACCES"'*)
+      DOCUMENTS_HOW="refused"
       DOCUMENTS_REFUSED="~/Documents refused ($(printf '%s' "$DOCUMENTS_BODY" | sed -n 's/.*"code":"\([A-Z]*\)".*/\1/p'))" ;;
     *)
       if [ "$DOCUMENTS_RC" -eq 28 ]; then
-        DOCUMENTS_REFUSED="a read under ~/Documents did not answer in 120s"
+        DOCUMENTS_HOW="timed out"
+        DOCUMENTS_REFUSED="a read under ~/Documents timed out after ${DOCUMENTS_SECONDS}s"
       else
+        DOCUMENTS_HOW="unasked"
         DOCUMENTS_REFUSED="could not ask for a read under ~/Documents"
       fi ;;
   esac
 fi
 if [ -n "$DOCUMENTS_REFUSED" ]; then
   cbs_step_fail "health" "responding, but $DOCUMENTS_REFUSED" "${HEALTH_ELAPSED_SECONDS}s"
-  cbs_detail "every board reference into ~/Documents will fail: cannot read <path>: EPERM"
-  cbs_detail "a rebuilt $LABEL.app loses its grant; to grant it again, run"
-  cbs_detail "  tccutil reset SystemPolicyDocumentsFolder $BUNDLE_ID"
-  cbs_detail "  launchctl kickstart -k gui/\$(id -u)/$LABEL"
-  cbs_detail "then the next post referencing a ~/Documents file prompts (re-running ./install.sh is one): click Allow"
+  case "$DOCUMENTS_HOW" in
+    refused)
+      cbs_detail "every board reference into ~/Documents will fail: cannot read <path>: EPERM"
+      cbs_detail "a rebuilt $LABEL.app loses its grant; to grant it again, run"
+      cbs_detail "  tccutil reset SystemPolicyDocumentsFolder $BUNDLE_ID"
+      cbs_detail "  launchctl kickstart -k gui/\$(id -u)/$LABEL"
+      cbs_detail "then the next post referencing a ~/Documents file prompts (re-running ./install.sh is one): click Allow" ;;
+    'timed out')
+      cbs_detail "the daemon held the read without answering: a macOS prompt for ~/Documents may be waiting"
+      cbs_detail "answer it, then re-run ./install.sh" ;;
+    *)
+      cbs_detail "the daemon did not answer the read (curl exit $DOCUMENTS_RC); re-run ./install.sh" ;;
+  esac
   cbs_detail "logs: $(display_path "$ERR_LOG")"
 elif [ "$USE_LAUNCHER" -eq 1 ]; then
   cbs_step_ok "health" "responding, ~/Documents ok" "${HEALTH_ELAPSED_SECONDS}s"

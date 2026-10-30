@@ -672,6 +672,19 @@ async function main() {
     assert.equal(viewOf({ session: null }, () => false).gone, null);
   });
 
+  await check('a view reads its session\'s process once, so its view, gone and live agree when the process dies while it is read', () => {
+    const now = Date.parse('2026-10-28T12:00:00Z');
+    const session = { pid: 4444, id: 's', startedAt: iso(now - minutes(60)), seenAt: iso(now - minutes(1)) };
+    for (const diesAfter of [0, 1, 2]) {
+      let asked = 0;
+      const dying = () => asked++ < diesAfter;
+      const v = missionView({ key: 'K', state: 'working', phase: 'direct', boards: [], session }, { home, now, isAlive: dying });
+      const alive = diesAfter > 0;
+      assert.deepEqual([v.view, v.gone, v.live], alive ? ['working', null, true] : ['stalled', { lastSeenAt: session.seenAt }, false],
+        `the process answering alive ${diesAfter} time(s), then dead`);
+    }
+  });
+
   await check('POST /api/mission/:key/facts sets each listed PR\'s state and head in the view, replacing by repo and number, and drops a fact for a PR not listed', async () => {
     const pr = (repo, number) => ({ repo, number, url: `https://github.com/o/${repo}/pull/${number}` });
     await post('/api/mission/FACTS', { title: 'Facts', prs: [{ ...pr('service', 12), state: 'merged' }, pr('admin', 7)] });
@@ -704,6 +717,35 @@ async function main() {
     }
     assert.deepEqual(readMission('FACTS', home).prFacts, record.prFacts, 'a refused post writes nothing');
     assert.equal((await post('/api/mission/NO_SUCH_MISSION/facts', { prs: [] })).status, 404);
+  });
+
+  await check('a PR list read from a view, a PR appended, writes back: the view\'s state, head and checkedAt are dropped, checking included, and so is the write\'s own answer', async () => {
+    const pr = (repo, number) => ({ repo, number, url: `https://github.com/o/${repo}/pull/${number}` });
+    await post('/api/mission/ROUND_TRIP', { title: 'Round trip', prs: [pr('service', 4), pr('admin', 9)] });
+    await post('/api/mission/ROUND_TRIP/facts', { prs: [{ repo: 'service', number: 4, state: 'green', head: 'abc123', checkedAt: '2026-10-30T11:00:00.000Z' }] });
+    const read = (await getJson('/api/mission/ROUND_TRIP')).body;
+    assert.deepEqual(read.prs.map(p => [p.state, p.head]), [['green', 'abc123'], ['checking', null]], 'setup: one PR with a fact, one checking');
+
+    const written = await post('/api/mission/ROUND_TRIP', { prs: [...read.prs, pr('client', 2)] });
+    assert.equal(written.status, 200, JSON.stringify(written.body));
+    assert.deepEqual(readMission('ROUND_TRIP', home).prs, [pr('service', 4), pr('admin', 9), pr('client', 2)], 'stored by name alone');
+    assert.deepEqual(written.body.prs, [...read.prs, { ...pr('client', 2), state: 'checking', head: null, checkedAt: null }], 'the view reads as before, the new PR checking');
+    const again = await post('/api/mission/ROUND_TRIP', { prs: written.body.prs });
+    assert.equal(again.status, 200, JSON.stringify(again.body));
+    assert.deepEqual(again.body.prs, written.body.prs);
+  });
+
+  await check('a PR stored with a state before PR facts existed reads that state until its first fact, and keeps it when the list is read and written back', () => {
+    const dir = scratchHome('stored-states');
+    const now = Date.parse('2026-10-30T12:00:00Z');
+    const pr = (repo, number) => ({ repo, number, url: `https://github.com/o/${repo}/pull/${number}` });
+    seed(dir, 'OLD_RECORD', { state: 'released', now, prs: [{ ...pr('service', 5), state: 'merged' }, { ...pr('admin', 8), state: 'green' }, pr('client', 1)] });
+    writeMission({ ...readMission('OLD_RECORD', dir), prFacts: [{ repo: 'admin', number: 8, state: 'red', head: 'aaa111', checkedAt: iso(now) }] }, dir);
+    const viewed = missionView(readMission('OLD_RECORD', dir), { home: dir, now });
+    assert.deepEqual(viewed.prs.map(p => [p.repo, p.state, p.head]), [['service', 'merged', null], ['admin', 'red', 'aaa111'], ['client', 'checking', null]],
+      'the stored state with no fact, a fact over a stored state, checking with neither');
+    const rewritten = upsertMission('OLD_RECORD', { prs: viewed.prs }, { home: dir, now: now + 1000 });
+    assert.deepEqual(missionView(rewritten, { home: dir, now }).prs, viewed.prs, 'read and written back, it reads the same');
   });
 
   await check('a card\'s recheck, by the cookie, drops the cached overview and answers the fresh view, so a gone session shows at once', async () => {
@@ -962,6 +1004,19 @@ async function main() {
     });
     assert.equal(sent.status, 200, JSON.stringify(sent.body));
     assert.equal((await getJson('/api/mission/LINKED')).body.view, 'waiting', 'answered, it reads its stored state again');
+  });
+
+  await check('a later round on a board whose mission was pruned links nothing and remakes no mission; naming the mission again makes it', async () => {
+    const blocks = [{ kind: 'question', prompt: 'Next?', widget: 'single', options: [{ label: 'Yes' }] }];
+    const first = await post('/api/board', { title: 'Before the prune', mission: 'PRUNED_LINK', blocks });
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    rmSync(path.join(home, 'missions', 'PRUNED_LINK.json'));
+    const later = await post('/api/board', { boardId: first.body.boardId, blocks });
+    assert.equal(later.status, 200, JSON.stringify(later.body));
+    assert.equal(readMission('PRUNED_LINK', home), null, 'the board\'s own mission field remakes no record');
+    const named = await post('/api/board', { boardId: first.body.boardId, mission: 'PRUNED_LINK', blocks });
+    assert.equal(named.status, 200, JSON.stringify(named.body));
+    assert.deepEqual(readMission('PRUNED_LINK', home).boards.map(b => b.id), [first.body.boardId]);
   });
 
   await check('a board posted by a session bound to a mission, naming none, links to that mission; once the session leaves, its next board links to none', async () => {

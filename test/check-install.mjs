@@ -250,7 +250,8 @@ http.createServer((req, res) => {
   }
   // The read under ~/Documents install.sh asks for after health. Credentialed like the
   // daemon's own route: a run that stopped sending the secret gets the 401 the daemon
-  // would give. Granted unless argv names the error code the read is refused with.
+  // would give. Granted unless argv names the error code the read is refused with, or
+  // HANG (a read held, as a pending prompt holds it) or BROKEN (a 500).
   if (req.url === '/api/probe/documents') {
     if (!/^[0-9a-f]{64}$/.test(String(req.headers['x-claude-board-secret'] || ''))) {
       res.writeHead(401);
@@ -258,6 +259,12 @@ http.createServer((req, res) => {
       return;
     }
     const refusedWith = process.argv[5];
+    if (refusedWith === 'HANG') return;
+    if (refusedWith === 'BROKEN') {
+      res.writeHead(500);
+      res.end();
+      return;
+    }
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify(refusedWith ? { ok: false, code: refusedWith } : { ok: true }));
     return;
@@ -2406,6 +2413,41 @@ http.createServer((req, res) => {
       assert.ok(JSON.parse(readFileSync(registrations, 'utf8'))['claude-board'], 'the board is up for everything else, so the client is still registered');
     } finally {
       refused.kill();
+    }
+  });
+
+  await check('a read under ~/Documents that times out or fails to reach the daemon fails the install saying so, without the steps for a refused grant', async () => {
+    for (const [answer, says, next] of [
+      ['HANG', 'a read under ~/Documents timed out after 2s', 'answer it, then re-run ./install.sh'],
+      ['BROKEN', 'could not ask for a read under ~/Documents', 'the daemon did not answer the read (curl exit 22); re-run ./install.sh'],
+    ]) {
+      const stubPort = await freePort();
+      const stub = spawn(process.execPath, [healthStub, String(stubPort), workDir, repoRoot, answer], { stdio: 'ignore' });
+      try {
+        assert.ok(await waitForHealthy(stubPort, 5000), 'setup: the daemon must be answering health');
+        const root = path.join(workDir, `documents-${answer.toLowerCase()}-run`);
+        const r = spawnSync('bash', [installScript], {
+          env: {
+            ...env,
+            ...quietStubs(`documents-${answer.toLowerCase()}`),
+            CLAUDE_BOARD_PORT: String(stubPort),
+            CLAUDE_BOARD_DOCUMENTS_PROBE_SECONDS: '2',
+            CLAUDE_BOARD_LAUNCH_AGENTS_DIR: path.join(root, 'LaunchAgents'),
+            CLAUDE_BOARD_LOG_DIR: path.join(root, 'Logs'),
+            CLAUDE_BOARD_SKILLS_DIR: path.join(root, 'skills'),
+            STUB_CLAUDE_STATE: path.join(root, 'claude-registrations.json'),
+            STUB_LAUNCHCTL_PRINT_PID: String(stub.pid),
+          },
+          encoding: 'utf8',
+        });
+        assert.equal(r.status, 1, `${answer}: the install must fail\nstdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
+        assert.ok(r.stderr.includes(`health     responding, but ${says}`), `${answer}: the health step says what happened:\n${r.stderr}`);
+        assert.ok(r.stderr.includes(next), `${answer}: and what to do next:\n${r.stderr}`);
+        assert.doesNotMatch(r.stderr, /tccutil|loses its grant/, `${answer}: no grant was refused, so no steps to grant it again`);
+        assert.ok(r.stdout.includes(`claude-board installed and running, but ${says}`), r.stdout);
+      } finally {
+        stub.kill();
+      }
     }
   });
 

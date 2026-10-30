@@ -7938,7 +7938,8 @@ check('a live row opens the board AT the round still owed an answer; a settled r
   // browser's own post-load scroll positioning and the reviewer stays at the top
   // -- which is exactly how this shipped broken the first time. The wiring, not
   // just the intent, has to survive.
-  assert.match(ui, /window\.addEventListener\('load', jumpToOpenRoundAfterPaint\)/, 'the jump must be deferred to the load event, not issued inline while the document is still loading');
+  assert.match(ui, /onFragmentSentinel\(function \(\) \{ return !!location && location\.hash === '#open-round'; \}, jumpToOpenRoundAfterPaint, false\)/, 'the sentinel is wired through the one fragment scaffold');
+  assert.match(ui, /function onFragmentSentinel\([^)]*\)\s*\{[\s\S]{0,200}?window\.addEventListener\('load', jump\)/, 'the jump must be deferred to the load event, not issued inline while the document is still loading');
 });
 
 // --- the index page's client script ------------------------------------
