@@ -1580,8 +1580,10 @@ if [ "$USE_LAUNCHER" -eq 1 ]; then
       fi ;;
   esac
 fi
+# The ~/Documents lines carry no measured wait: their result outruns the column the wait
+# prints in, and a passing install's transcript reads the same run to run.
 if [ -n "$DOCUMENTS_REFUSED" ]; then
-  cbs_step_fail "health" "responding, but $DOCUMENTS_REFUSED" "${HEALTH_ELAPSED_SECONDS}s"
+  cbs_step_fail "health" "responding, but $DOCUMENTS_REFUSED"
   case "$DOCUMENTS_HOW" in
     refused)
       cbs_detail "every board reference into ~/Documents will fail: cannot read <path>: EPERM"
@@ -1597,7 +1599,7 @@ if [ -n "$DOCUMENTS_REFUSED" ]; then
   esac
   cbs_detail "logs: $(display_path "$ERR_LOG")"
 elif [ "$USE_LAUNCHER" -eq 1 ]; then
-  cbs_step_ok "health" "responding, ~/Documents ok" "${HEALTH_ELAPSED_SECONDS}s"
+  cbs_step_ok "health" "responding, ~/Documents ok"
 else
   cbs_step_ok "health" "responding" "${HEALTH_ELAPSED_SECONDS}s"
 fi

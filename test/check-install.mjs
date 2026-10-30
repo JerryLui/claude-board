@@ -2441,7 +2441,7 @@ http.createServer((req, res) => {
           encoding: 'utf8',
         });
         assert.equal(r.status, 1, `${answer}: the install must fail\nstdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
-        assert.ok(r.stderr.includes(`health     responding, but ${says}`), `${answer}: the health step says what happened:\n${r.stderr}`);
+        assert.ok(r.stderr.includes(`health     responding, but ${says}\n`), `${answer}: the health step says what happened, and nothing after it:\n${r.stderr}`);
         assert.ok(r.stderr.includes(next), `${answer}: and what to do next:\n${r.stderr}`);
         assert.doesNotMatch(r.stderr, /tccutil|loses its grant/, `${answer}: no grant was refused, so no steps to grant it again`);
         assert.ok(r.stdout.includes(`claude-board installed and running, but ${says}`), r.stdout);
@@ -3433,8 +3433,8 @@ http.createServer((req, res) => {
 
     const ansi = /\x1b\[[0-9;]*m/g;
     const strip = s => s.replace(ansi, '');
-    // install.sh's one genuinely time-dependent transcript token: the health step's
-    // measured wait (install.sh:1528-1529, "${HEALTH_ELAPSED_SECONDS}s"). This check
+    // install.sh's one genuinely time-dependent transcript token: the degraded install's
+    // health step's measured wait ("${HEALTH_ELAPSED_SECONDS}s"). This check
     // runs three SEPARATE real installs, each polling /api/health afresh, so a run
     // whose wait straddles a second boundary prints a different digit than one that
     // doesn't -- a flake unrelated to anything a line-for-line comparison exists to
@@ -3450,6 +3450,7 @@ http.createServer((req, res) => {
     assert.notEqual(normalizeTiming(coloured.stderr), normalizeTiming(plain.stderr), 'setup sanity: and on stderr too');
     assert.equal(normalizeTiming(strip(coloured.stdout)), normalizeTiming(plain.stdout), 'stripping ANSI from the coloured run\'s stdout must reproduce the plain run\'s, line for line');
     assert.equal(normalizeTiming(strip(coloured.stderr)), normalizeTiming(plain.stderr), 'and the same for stderr');
+    assert.match(plain.stdout, /✓ {2}health {5}responding, ~\/Documents ok\n/, 'a passing ~/Documents read carries no measured wait, so its line reads the same run to run');
   });
 
   // --- the shared transcript-styling block (colour, step lines, header/banner/footer) ---

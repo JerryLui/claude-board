@@ -1576,8 +1576,8 @@ which it binds in place. A fresh bind moves the mission to `working`, in `phase`
 the previous session's `pid`, `procStart` and `id` go to `ended`; the bound session joining its
 released mission again moves it to `working` too. Two joins are refused whatever holds the
 mission: the session `ended` names (a launch replaced it, and it has not left), and a session
-bound to another mission that is not released, which is named, so one session is never two
-missions' (it leaves the one it holds first). The session `ended` names, resumed in a new process,
+bound to another mission that is not released, which is named, its own released mission's
+rejoin included, so one session is never two missions' (it leaves the one it holds first). The session `ended` names, resumed in a new process,
 is not refused: the same `id` with a process told apart from `ended`'s, its `pid` reused under
 another `procStart`, or another `pid` once `ended`'s process is gone (`mission-launch --resume`
 after stopping the old process). It binds, and `ended` is dropped, so its heartbeats land. The old
@@ -1606,8 +1606,12 @@ POST /api/mission/:key/session      { pid?, procStart?, id?, name?, login?, type
 
 Binds a session, or heartbeats the one bound (`seenAt` now); a hook calls it at every turn's end,
 and `typed: true` also sets `typedAt`, the PM having typed in the session.
-The bound `pid` under a new `id` (after a `/clear`) is a heartbeat that takes the `id`. A
-different `pid`, or a different `id` when the bound session has no `pid`, while the bound session
+The bound `pid` under a new `id` (after a `/clear`) is a heartbeat that takes the `id`, and the
+bound `id` in a new process once the bound one is gone (a resume) is a heartbeat that takes the
+`pid` and `procStart`; a bind or beat from the bound session carrying a `procStart` fills one the
+record lacks. A gone process is one whose `pid` runs no longer or, its `procStart` known, runs a
+process started at another second (the OS reused the pid), here and wherever `ended`'s process is
+read. A different `pid`, or a different `id` when the bound session has no `pid`, while the bound session
 holds the mission is a 409, and so is the `pid` or `id` of the session that ended before this
 launch, unless it is that session resumed in a new process as a join reads it, which binds and
 drops `ended`; a different `pid` or `id` once the bound session is gone, or silent with no `pid`, starts a

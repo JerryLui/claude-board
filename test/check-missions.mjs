@@ -14,9 +14,10 @@ import { readBoard, readMission, writeBoard, writeMission, pruneStore, MISSION_R
 import { createBoard } from '../src/board.mjs';
 import { createSessionList } from '../src/sessions.mjs';
 import {
-  missionsOverview, missionView, launchMission, bindSession, joinMission, leaveMission, upsertMission, bindingFor, deriveState, MAX_WORKING, MAX_ALIVE, STALL_SILENCE_MS, UNBOUND_GRACE_MS, RELEASED_VISIBLE_MS,
+  missionsOverview, missionView, launchMission, bindSession, joinMission, leaveMission, upsertMission, bindingFor, deriveState, pidAlive, MAX_WORKING, MAX_ALIVE, STALL_SILENCE_MS, UNBOUND_GRACE_MS, RELEASED_VISIBLE_MS,
 } from '../src/missions.mjs';
 import { createMissionsCache, MISSIONS_CACHE_MS } from '../src/missions-cache.mjs';
+import { processStartUtc } from '../src/proc-start.mjs';
 import { check, deadPid, openSseClient, rawRequest, runMain, secretFetch, secretHome, sessionCookieHeader, waitFor, writeHeaders } from './support.mjs';
 
 const { home, secret: SECRET } = secretHome('claude-board-missions-');
@@ -591,6 +592,43 @@ async function main() {
     assert.equal(readMission('RESERVED_BEAT', dir).session.id, undefined);
   });
 
+  await check('a bind or beat from the bound id carrying a process start fills the start of a record bound without one, so its process names it after', () => {
+    const dir = scratchHome('fill-start');
+    const t0 = Date.parse('2026-10-30T11:35:00Z');
+    const start = '2026-10-30T11:00:00Z';
+    const isAlive = () => true;
+    for (const [key, beat] of [['FILLED_BY_BIND', false], ['FILLED_BY_BEAT', true]]) {
+      joinMission(key, { id: `sess-${key}`, pid: 7313 }, { home: dir, now: t0, isAlive });
+      assert.equal(bindingFor([readMission(key, dir)], { pid: 7313, procStart: start }).key, null, `${key}: a pid alone names no one`);
+      const filled = bindSession(key, { id: `sess-${key}`, pid: 7313, procStart: start, ...(beat ? { beat } : {}) }, { home: dir, now: t0 + 1000, isAlive });
+      assert.equal(filled.session.procStart, start, key);
+      assert.equal(bindingFor([readMission(key, dir)], { pid: 7313, procStart: start }).key, key, `${key}: its process names it`);
+    }
+  });
+
+  await check('the bound id resumed in a new process once the bound one is gone binds and beats as the bound session, taking the new process; while the bound one lives it is a 409 live', () => {
+    const dir = scratchHome('resume-bind');
+    const t0 = Date.parse('2026-10-30T11:45:00Z');
+    const start = '2026-10-30T11:00:00Z';
+    const resumedStart = '2026-10-30T11:44:00Z';
+    const listed = { at: t0 + 1000, sessions: [{ id: 'sess-a', pid: 7402, procStart: resumedStart, since: t0 + 1000 }] };
+    joinMission('RESUMED_BIND', { id: 'sess-a', pid: 7401, procStart: start }, { home: dir, now: t0, isAlive: () => true });
+    assert.throws(() => bindSession('RESUMED_BIND', { id: 'sess-a', pid: 7402, procStart: resumedStart }, { home: dir, now: t0 + 1000, isAlive: () => true, listed }),
+      { status: 409, message: 'live' }, 'a second process under the id while the bound one runs');
+    const oldGone = pid => pid !== 7401;
+    for (const [label, beat] of [['its bind', false], ['its beat', true]]) {
+      const bound = bindSession('RESUMED_BIND', { id: 'sess-a', pid: 7402, procStart: resumedStart, ...(beat ? { beat } : {}) }, { home: dir, now: t0 + 2000, isAlive: oldGone, listed });
+      assert.deepEqual([bound.session.pid, bound.session.procStart, bound.session.startedAt, bound.session.seenAt], [7402, resumedStart, iso(t0), iso(t0 + 2000)], label);
+    }
+    assert.equal(missionView(readMission('RESUMED_BIND', dir), { home: dir, now: t0 + 3000, isAlive: oldGone, listed }).rejoin, null, 'bound to its new process, it needs no rejoin');
+  });
+
+  await check('pidAlive reads a pid running under another process start as gone', async () => {
+    const gone = await deadPid();
+    assert.deepEqual([pidAlive(process.pid), pidAlive(process.pid, processStartUtc(process.pid)), pidAlive(process.pid, '2001-01-01T00:00:00Z'), pidAlive(gone)],
+      [true, true, false, false]);
+  });
+
   await check('a session that left is not carried as ended by the session bound after it, so it stays a tab', () => {
     const dir = scratchHome('left-not-ended');
     const t0 = Date.parse('2026-10-30T11:40:00Z');
@@ -626,8 +664,13 @@ async function main() {
     const start = '2026-10-30T11:00:00Z';
     const newStart = '2026-10-30T12:00:01Z';
     const ended = e => e.status === 409 && e.answer.error === 'ended';
-    for (const [label, resumedPid, resumedStart] of [['another pid', 7102, newStart], ['the same pid, reused under another start', 7101, newStart]]) {
-      const key = resumedPid === 7101 ? 'RESUME_REUSED_PID' : 'RESUME_NEW_PID';
+    // The old pid alive again under another start: the OS reused it, so the old process is gone.
+    const oldPidReused = (pid, procStart) => pid !== 7101 || procStart !== start;
+    for (const [label, key, resumedPid, resumedStart, aliveAfter] of [
+      ['another pid', 'RESUME_NEW_PID', 7102, newStart, pid => pid !== 7101],
+      ['the same pid, reused under another start', 'RESUME_REUSED_PID', 7101, newStart, () => true],
+      ['another pid, the old pid reused by a process started later', 'RESUME_OLD_PID_REUSED', 7103, newStart, oldPidReused],
+    ]) {
       const id = `sess-${key}`;
       joinMission(key, { id, pid: 7101, procStart: start }, { home: dir, now: t0, isAlive: () => true });
       assert.deepEqual(launchMission(key, { phase: 'direct' }, { home: dir, now: t0 + 1000, isAlive: pid => pid !== 7101 }), { launch: true });
@@ -637,8 +680,7 @@ async function main() {
         assert.throws(() => joinMission(key, { id, pid: resumedPid, procStart: resumedStart }, { home: dir, now: t0 + 2000, isAlive: () => true }), ended,
           `${label}: a new process while the old one still runs`);
       }
-      // A reused pid is the new process, alive; another pid leaves the old one gone.
-      const isAlive = resumedPid === 7101 ? () => true : pid => pid !== 7101;
+      const isAlive = aliveAfter;
       const joined = joinMission(key, { id, pid: resumedPid, procStart: resumedStart }, { home: dir, now: t0 + 3000, isAlive });
       assert.deepEqual([joined.status, joined.session.pid, joined.session.ended], [200, resumedPid, undefined], `${label}: the resume binds and drops ended`);
       const beat = bindSession(key, { id, pid: resumedPid, procStart: resumedStart, beat: true }, { home: dir, now: t0 + 4000, isAlive });
@@ -659,6 +701,14 @@ async function main() {
     leaveMission('FIRST_HELD', { id: 'sess-a' }, { home: dir, now: t0 + 2000 });
     assert.equal(joinMission('SECOND_WANTED', { id: 'sess-a', pid: 8080 }, { home: dir, now: t0 + 3000, isAlive }).status, 200);
     assert.equal(bindingFor([readMission('FIRST_HELD', dir), readMission('SECOND_WANTED', dir)], { id: 'sess-a' }).key, 'SECOND_WANTED');
+
+    // Still bound to its released mission, the session joins another, then rejoins the released one.
+    joinMission('RELEASED_FIRST', { id: 'sess-r', pid: 8282 }, { home: dir, now: t0, isAlive });
+    upsertMission('RELEASED_FIRST', { state: 'released' }, { home: dir, now: t0 + 1000 });
+    assert.equal(joinMission('JOINED_AFTER', { id: 'sess-r', pid: 8282 }, { home: dir, now: t0 + 2000, isAlive }).status, 200);
+    assert.throws(() => joinMission('RELEASED_FIRST', { id: 'sess-r', pid: 8282 }, { home: dir, now: t0 + 3000, isAlive }),
+      e => e.status === 409 && e.answer.error === 'bound elsewhere' && e.answer.mission === 'JOINED_AFTER', 'its released mission\'s rejoin too');
+    assert.equal(readMission('RELEASED_FIRST', dir).state, 'released', 'and the released mission stays released');
   });
 
   await check('the bound session joining its released mission again moves it to working, and its binding names the mission', () => {

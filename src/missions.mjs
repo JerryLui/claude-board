@@ -22,6 +22,7 @@
 import { randomBytes } from 'node:crypto';
 import { readBoard, boardHome, readMission, writeMission, listMissions, assertMissionKey, SAFE_MISSION_KEY, MISSION_RETENTION_MS } from './store.mjs';
 import { questionBlocks } from './badge.mjs';
+import { processStartUtc } from './proc-start.mjs';
 
 export { SAFE_MISSION_KEY, assertMissionKey, MISSION_RETENTION_MS };
 
@@ -80,14 +81,17 @@ function notFound(key) {
 }
 
 /** True while a process with this pid exists. `EPERM` is a process this user cannot signal,
- * which still exists. */
-export function pidAlive(processId) {
+ * which still exists. Given the process's start (`procStart`), a pid the OS reused for a
+ * process started at another second is not it; a start that cannot be read counts as it. */
+export function pidAlive(processId, procStart) {
   try {
     process.kill(processId, 0);
-    return true;
   } catch (err) {
-    return err.code === 'EPERM';
+    if (err.code !== 'EPERM') return false;
   }
+  if (procStart == null) return true;
+  const running = processStartUtc(processId);
+  return running == null || sameStart(running, procStart);
 }
 
 // --- validation -----------------------------------------------------------------------
@@ -641,7 +645,8 @@ function endedOf(previous) {
 const endedOn = previous => (previous && !previous.leftAt && previous.ended) || null;
 
 /** `POST /api/mission/:key/session`: binds a session, or heartbeats the one bound
- * (`seenAt` now); the bound pid under a new id is a heartbeat that takes the id. With
+ * (`seenAt` now); the bound pid under a new id is a heartbeat that takes the id, and so is
+ * the bound id in a new process once the bound process is gone (a resume), taking the pid. With
  * `beat: true` it is a heartbeat only: a caller that is not the bound session
  * (`sessionMatches`), a launch's bare reservation included, is a 409
  * `{ error: 'not bound', session }` and nothing is written. A
@@ -673,7 +678,11 @@ export function bindSession(key, body, { home = boardHome(), now = Date.now(), i
   }
   // The session a launch replaced, or one that left: neither binds by a plain bind again.
   const ended = m.session?.ended;
-  const otherPid = bound && bound.pid != null && given.pid !== undefined && given.pid !== bound.pid;
+  const newPid = bound && bound.pid != null && given.pid !== undefined && given.pid !== bound.pid;
+  // The bound id in a new process once the bound one is gone is that session resumed: its
+  // heartbeat, which takes the new process.
+  const resumed = newPid && bound.id != null && given.id === bound.id && !isAlive(bound.pid, bound.procStart);
+  const otherPid = newPid && !resumed;
   // A session bound by pid is that process: its own bind under a new id (after a /clear)
   // is its heartbeat. Only a session bound by id alone is told apart by its id.
   const otherId = bound && bound.pid == null && bound.id != null && given.id !== undefined && given.id !== bound.id;
@@ -684,7 +693,7 @@ export function bindSession(key, body, { home = boardHome(), now = Date.now(), i
   }
   m.session = !bound || otherPid || otherId
     ? boundFrom(given, at, m.session)
-    : { ...bound, ...given, seenAt: at };
+    : heardFrom(bound, given, at);
   dropResumed(m.session, given, isAlive);
   touch(m, now);
   return writeMission(m, home);
@@ -739,13 +748,23 @@ export function boundTo(m, ref) {
 /** `ref` is the session `ended` names resumed in a new process, not that process lingering:
  * the same id, a process told apart from `ended`'s, and `ended`'s gone. A pid the OS reused
  * (the same pid, another start) is a new process whose predecessor is gone; another pid
- * counts once `ended`'s process is gone. Without both pids, or with the same pid and no
- * start to tell them apart, it is the ended process. `mission-launch --resume` resumes a
- * session this way after stopping its old process. */
+ * counts once `ended`'s process is gone, its pid running no longer or, with `ended`'s start
+ * known, running a process started at another second. Without both pids, or with the same
+ * pid and no start to tell them apart, it is the ended process. `mission-launch --resume`
+ * resumes a session this way after stopping its old process. */
 function resumedFrom(ended, ref, isAlive) {
   if (!ended || ended.id == null || ref.id !== ended.id || ended.pid == null || ref.pid == null) return false;
   if (ref.pid === ended.pid) return ended.procStart != null && ref.procStart != null && !sameStart(ended.procStart, ref.procStart);
-  return !isAlive(ended.pid);
+  return !isAlive(ended.pid, ended.procStart);
+}
+
+/** The bound session `s` heard from again as `ref`: `ref`'s fields over its own, its process
+ * start `ref`'s alone once `ref` names another pid, so a start never outlives its process. A
+ * bind or beat from the bound id carrying a start fills one a record bound without it. */
+function heardFrom(s, ref, at) {
+  const { procStart, ...rest } = s;
+  const keepStart = procStart != null && (ref.pid === undefined || ref.pid === s.pid);
+  return { ...rest, ...(keepStart ? { procStart } : {}), ...ref, seenAt: at };
 }
 
 /** Drops `session.ended` once `ref`, now bound there, is that session resumed
@@ -781,8 +800,9 @@ function conflict(answer) {
  * released mission again. Two joins are refused whatever holds the mission: the session a
  * launch replaced (`ended`, not left), a 409 `{ error: 'ended', session }`, unless it is
  * that session resumed in a new process (`resumedFrom`), which binds and drops `ended`; and a session
- * bound to another mission (`bindingFor`'s rule), a 409 `{ error: 'bound elsewhere',
- * mission, session }` naming it, so one session is never two missions'. */
+ * bound to another mission (`bindingFor`'s rule), its own released mission's rejoin
+ * included, a 409 `{ error: 'bound elsewhere', mission, session }` naming it, so one
+ * session is never two missions'. */
 export function joinMission(key, body, { home = boardHome(), now = Date.now(), isAlive = pidAlive, listed = null } = {}) {
   assertMissionKey(key);
   assertObject(body, 'the body');
@@ -797,12 +817,14 @@ export function joinMission(key, body, { home = boardHome(), now = Date.now(), i
   if (!rejoin) {
     const ended = endedOn(m.session);
     if (sessionMatches(ended, ref) && !resumedFrom(ended, ref, isAlive)) throw conflict({ error: 'ended', session: m.session });
-    const held = listMissions(home).find(o => o.key !== key && o.state !== 'released' && boundTo(o, ref));
-    if (held) throw conflict({ error: 'bound elsewhere', mission: held.key, session: held.session });
   }
+  // A rejoin too: the session still bound to its released mission may since have joined
+  // another, and reviving the released one would bind it twice.
+  const held = listMissions(home).find(o => o.key !== key && o.state !== 'released' && boundTo(o, ref));
+  if (held) throw conflict({ error: 'bound elsewhere', mission: held.key, session: held.session });
   let answer;
   if (rejoin) {
-    m.session = { ...bound, ...ref, seenAt: at };
+    m.session = heardFrom(bound, ref, at);
     if (m.state === 'released') moveTo(m, { phase: phase || m.phase, state: 'working' }, now);
     else if (phase && phase !== m.phase) moveTo(m, { phase }, now);
     answer = { status: 200, bound: true, session: m.session };

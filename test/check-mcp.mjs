@@ -2587,7 +2587,7 @@ async function main() {
 
   // ADR 141: the board a shim reuses keeps the mission it first linked to, so a join or
   // leave through the tool starts the next ask on a board of its own.
-  await check('a join or leave through the mission tool starts the next ask on a board of its own, linked to the mission the session holds now; joining the same mission again keeps the board', async () => {
+  await check('a join or leave through the mission tool starts the next ask on a board of its own, linked to the mission the session holds now; joining the same mission again, or a join left pending a takeover, keeps the board', async () => {
     const shim = spawnShim(baseEnv);
     const boardsOf = async key => (await (await fetch(`${base}/api/mission/${key}`, { headers: missionHeaders })).json()).boards.map(b => b.id);
     const ask = async title => {
@@ -2613,8 +2613,15 @@ async function main() {
       assert.notEqual(loose, second);
       assert.equal(JSON.parse(readFileSync(path.join(home, 'boards', `${loose}.json`), 'utf8')).mission ?? null, null, 'after a leave the next board links to no mission');
       assert.deepEqual(await boardsOf('FOLLOW_B'), [second]);
+
+      const held = await fetch(`${base}/api/mission/FOLLOW_C/join`, { method: 'POST', headers: writeHeaders(SECRET), body: JSON.stringify({ id: 'follow-holder' }) });
+      assert.equal(held.status, 200);
+      const pending = await missionCall(shim, { action: 'join', key: 'FOLLOW_C', session: 'follow-sess', takeover: true });
+      assert.equal(pending.structuredContent.takeover, 'pending', pending.content[0].text);
+      assert.equal(await ask('Round while the takeover waits'), loose, 'a join that bound nothing keeps the board');
     } finally {
-      for (const key of ['FOLLOW_A', 'FOLLOW_B']) await missionCall(shim, { action: 'leave', key, session: 'follow-sess' });
+      await fetch(`${base}/api/mission/FOLLOW_C/leave`, { method: 'POST', headers: writeHeaders(SECRET), body: JSON.stringify({ id: 'follow-holder' }) });
+      for (const key of ['FOLLOW_A', 'FOLLOW_B', 'FOLLOW_C']) await missionCall(shim, { action: 'leave', key, session: 'follow-sess' });
       shim.close();
     }
   });
