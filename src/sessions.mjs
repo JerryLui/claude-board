@@ -26,7 +26,7 @@
 // start time, so it never inherits a round or revives a card.
 
 import { randomBytes } from 'node:crypto';
-import { CARD_ORDER_KINDS, roundWantsAnswer } from './missions.mjs';
+import { CARD_ORDER_KINDS, roundWantsAnswer, sameStart } from './missions.mjs';
 import { questionBlocks } from './badge.mjs';
 import { folderName } from './indexpage.mjs';
 
@@ -77,13 +77,6 @@ function validPid(value) {
 
 function validProcStart(value) {
   return typeof value === 'string' && UTC_ISO.test(value) && Number.isFinite(Date.parse(value));
-}
-
-/** Two process starts name one second (`...:15Z`, `...:15.000Z` and `...:15.400Z` alike):
- * the contract allows milliseconds, and the board tool's post sends whole seconds. */
-function sameStart(a, b) {
-  if (typeof a !== 'string' || typeof b !== 'string') return false;
-  return Math.floor(Date.parse(a) / 1000) === Math.floor(Date.parse(b) / 1000);
 }
 
 // --- validation -----------------------------------------------------------------------

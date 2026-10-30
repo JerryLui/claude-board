@@ -540,11 +540,8 @@ export function launchMission(key, body, { home = boardHome(), now = Date.now(),
     throw Object.assign(refuse('live', 409), { session: m.session, ...(silent ? { silent } : {}) });
   }
   // The session this launch replaces is over, finished or gone or silent, yet its process
-  // may still run: its pid and id never bind the next one. A record that is only `ended`
-  // passes its own on.
-  // A session that left (`leaveMission`) went back to being a tab: its own `ended` is not
-  // carried, so it never reads as this mission's again.
-  const ended = m.session ? endedSession(m.session) ?? (m.session.leftAt ? null : m.session.ended) ?? null : null;
+  // may still run: its pid and id never bind the next one (`endedOf`).
+  const ended = endedOf(m.session);
   const others = listMissions(home).filter(o => o.key !== key).map(o => missionView(o, { home, now, isAlive }));
   const live = liveCounts(others);
   const at = iso(now);
@@ -566,24 +563,48 @@ export function launchMission(key, body, { home = boardHome(), now = Date.now(),
   return answer;
 }
 
-/** The `pid` and `id` of a session that ended, kept on the session launched after it. */
+/** The `pid`, `procStart` and `id` of a session that ended, kept on the session launched
+ * after it. */
 function endedSession(s) {
-  const ended = { ...(s.pid != null ? { pid: s.pid } : {}), ...(s.id != null ? { id: s.id } : {}) };
-  return Object.keys(ended).length ? ended : null;
+  const ended = {
+    ...(s.pid != null ? { pid: s.pid } : {}),
+    ...(s.procStart != null ? { procStart: s.procStart } : {}),
+    ...(s.id != null ? { id: s.id } : {}),
+  };
+  return s.pid != null || s.id != null ? ended : null;
 }
 
+/** The `ended` a session taking `previous`'s place carries: `previous` itself when a process
+ * or id was bound there, else the `ended` it carried. A session that left (`leaveMission`)
+ * went back to being a tab: its `ended` is not carried, so it never reads as this
+ * mission's again. */
+function endedOf(previous) {
+  if (!previous) return null;
+  return endedSession(previous) ?? (previous.leftAt ? null : previous.ended) ?? null;
+}
+
+/** The session `previous` names as ended, while it has not left: a session a launch replaced,
+ * whose process may linger and must not take its successor's place. */
+const endedOn = previous => (previous && !previous.leftAt && previous.ended) || null;
+
 /** `POST /api/mission/:key/session`: binds a session, or heartbeats the one bound
- * (`seenAt` now); the bound pid under a new id is a heartbeat that takes the id. A
+ * (`seenAt` now); the bound pid under a new id is a heartbeat that takes the id. With
+ * `beat: true` it is a heartbeat only: a caller that is not the bound session
+ * (`sessionMatches`), a launch's bare reservation included, is a 409
+ * `{ error: 'not bound', session }` and nothing is written. A
  * different pid, or a different id when the bound session has no pid, while the bound one
  * still holds the mission (`sessionHolds`) is a second live session and throws a 409
  * carrying the bound one; once the bound one is gone, or silent with no pid, it starts a
- * fresh session. The pid or id of the session that ended before this launch is a 409 too:
- * that process lingers, and must not take its successor's place. Answers the stored record. */
+ * fresh session, carrying `endedOf` the record it replaces. The pid or id of the session
+ * that ended before this launch, or that left, is a 409 too: that process lingers, and must
+ * not take its successor's place. Answers the stored record. */
 export function bindSession(key, body, { home = boardHome(), now = Date.now(), isAlive = pidAlive } = {}) {
   assertMissionKey(key);
   assertObject(body, 'the body');
-  assertOnly(body, ['pid', 'procStart', 'id', 'name', 'login', 'typed'], 'the body');
-  if (body.typed !== undefined && typeof body.typed !== 'boolean') throw refuse('typed must be a boolean');
+  assertOnly(body, ['pid', 'procStart', 'id', 'name', 'login', 'typed', 'beat'], 'the body');
+  for (const f of ['typed', 'beat']) {
+    if (body[f] !== undefined && typeof body[f] !== 'boolean') throw refuse(`${f} must be a boolean`);
+  }
   const given = sessionRef(body, { needId: false });
   for (const f of ['name', 'login']) {
     if (body[f] !== undefined) given[f] = str(body[f], f, MAX_NAME_CHARS);
@@ -593,6 +614,10 @@ export function bindSession(key, body, { home = boardHome(), now = Date.now(), i
   if (!m) throw notFound(key);
   const at = iso(now);
   const bound = currentSession(m);
+  if (body.beat && !(bound && !isReservation(bound) && sessionMatches(bound, given))) {
+    throw conflict({ error: 'not bound', session: m.session ?? null });
+  }
+  // The session a launch replaced, or one that left: neither binds by a plain bind again.
   const ended = m.session?.ended;
   const otherPid = bound && bound.pid != null && given.pid !== undefined && given.pid !== bound.pid;
   // A session bound by pid is that process: its own bind under a new id (after a /clear)
@@ -604,7 +629,7 @@ export function bindSession(key, body, { home = boardHome(), now = Date.now(), i
     throw Object.assign(refuse('live', 409), { session: m.session });
   }
   m.session = !bound || otherPid || otherId
-    ? { ...given, startedAt: at, seenAt: at, ...(ended ? { ended } : {}) }
+    ? boundFrom(given, at, m.session)
     : { ...bound, ...given, seenAt: at };
   touch(m, now);
   return writeMission(m, home);
@@ -626,26 +651,41 @@ function sessionRef(body, { needId }) {
   return ref;
 }
 
-/** Two process starts name one second: a watcher's reading and a shim's may differ in their
- * milliseconds (src/sessions.mjs reads them the same way). */
-function sameStart(a, b) {
+/** Two process starts name one second (`...:15Z`, `...:15.000Z` and `...:15.400Z` alike):
+ * a watcher's reading and a shim's may differ in their milliseconds. Anything but two
+ * strings is no match. */
+export function sameStart(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
   return Math.floor(Date.parse(a) / 1000) === Math.floor(Date.parse(b) / 1000);
 }
 
-/** `ref` names the session `s`: by its id, or by its process, the same pid with no process
- * start telling them apart (a pid the OS reused has another start). */
+/** `ref` names the session `s`: by its id, or by its process, the same pid with the same
+ * process start. A pid alone names no one: the OS reuses a dead session's pid, and only the
+ * start tells the two apart. */
 export function sessionMatches(s, ref) {
   if (!s || !ref) return false;
   if (s.id != null && ref.id != null && s.id === ref.id) return true;
-  if (s.pid == null || ref.pid == null || s.pid !== ref.pid) return false;
-  return s.procStart == null || ref.procStart == null || sameStart(s.procStart, ref.procStart);
+  return s.pid != null && s.pid === ref.pid && sameStart(s.procStart, ref.procStart);
+}
+
+/** `ref` is the session `m` records as ended: it left, was taken over, or a launch replaced
+ * it, and no launch has run since it left. */
+export function endedHere(m, ref) {
+  return sessionMatches(m?.session?.ended, ref);
+}
+
+/** `ref` is the session bound to `m`: matched, and not a launch's bare reservation. A
+ * released mission's session still is, until another binds. */
+export function boundTo(m, ref) {
+  const s = m && currentSession(m);
+  return !!s && !isReservation(s) && sessionMatches(s, ref);
 }
 
 /** A reservation `launchMission` made that no process has bound yet. */
 const isReservation = s => s.pid == null && s.id == null;
 
 function boundFrom(ref, at, previous) {
-  const ended = previous ? endedSession(previous) ?? (previous.leftAt ? null : previous.ended) ?? null : null;
+  const ended = endedOf(previous);
   return { ...ref, startedAt: at, seenAt: at, ...(ended ? { ended } : {}) };
 }
 
@@ -663,7 +703,11 @@ function conflict(answer) {
  * `takeover: true` it is recorded as `takeover: { by, at }` and answers
  * `{ status: 202, takeover: 'pending', session }`, the bound session told through
  * `bindingFor` to finish its step and leave. A fresh bind moves the mission to working, in
- * `phase` when given, and clears any takeover. */
+ * `phase` when given, and clears any takeover; so does the bound session joining its
+ * released mission again. Two joins are refused whatever holds the mission: the session a
+ * launch replaced (`ended`, not left), a 409 `{ error: 'ended', session }`, and a session
+ * bound to another mission (`bindingFor`'s rule), a 409 `{ error: 'bound elsewhere',
+ * mission, session }` naming it, so one session is never two missions'. */
 export function joinMission(key, body, { home = boardHome(), now = Date.now(), isAlive = pidAlive } = {}) {
   assertMissionKey(key);
   assertObject(body, 'the body');
@@ -674,10 +718,17 @@ export function joinMission(key, body, { home = boardHome(), now = Date.now(), i
   const m = readMission(key, home) || newMission(key, now, { phase: phase || 'grill', state: 'working' });
   const at = iso(now);
   const bound = currentSession(m);
+  const rejoin = bound && !isReservation(bound) && sessionMatches(bound, ref);
+  if (!rejoin) {
+    if (sessionMatches(endedOn(m.session), ref)) throw conflict({ error: 'ended', session: m.session });
+    const held = listMissions(home).find(o => o.key !== key && o.state !== 'released' && boundTo(o, ref));
+    if (held) throw conflict({ error: 'bound elsewhere', mission: held.key, session: held.session });
+  }
   let answer;
-  if (bound && !isReservation(bound) && sessionMatches(bound, ref)) {
+  if (rejoin) {
     m.session = { ...bound, ...ref, seenAt: at };
-    if (phase && phase !== m.phase) moveTo(m, { phase }, now);
+    if (m.state === 'released') moveTo(m, { phase: phase || m.phase, state: 'working' }, now);
+    else if (phase && phase !== m.phase) moveTo(m, { phase }, now);
     answer = { status: 200, bound: true, session: m.session };
   } else if (bound && isReservation(bound) && hasLiveSession(m, now, isAlive)) {
     m.session = { ...bound, ...ref, seenAt: at };
@@ -717,7 +768,7 @@ export function leaveMission(key, body, { home = boardHome(), now = Date.now() }
   const m = readMission(key, home);
   if (!m) throw notFound(key);
   const bound = currentSession(m);
-  if (!bound || isReservation(bound) || !sessionMatches(bound, ref)) throw conflict({ error: 'not bound', session: m.session ?? null });
+  if (!boundTo(m, ref)) throw conflict({ error: 'not bound', session: m.session ?? null });
   const at = iso(now);
   const t = m.takeover;
   if (t) {
@@ -745,9 +796,8 @@ const unseenOrders = m => (m.orders || []).filter(o => o.kind === 'pm' && !o.ack
 export function bindingFor(records, ref) {
   let hit = null;
   for (const m of records) {
-    const s = currentSession(m);
-    if (!s || isReservation(s) || m.state === 'released' || !sessionMatches(s, ref)) continue;
-    if (!hit || String(s.seenAt) > String(currentSession(hit).seenAt)) hit = m;
+    if (m.state === 'released' || !boundTo(m, ref)) continue;
+    if (!hit || String(m.session.seenAt) > String(hit.session.seenAt)) hit = m;
   }
   if (!hit) return { key: null, takeover: null, orders: [], handoff: null };
   return {
@@ -811,8 +861,7 @@ export function seenOrder(key, id, body, { home = boardHome(), now = Date.now() 
   return markOrder(key, id, 'ackedAt', {
     home, now,
     check: m => {
-      const s = currentSession(m);
-      if (!s || isReservation(s) || !sessionMatches(s, ref)) throw conflict({ error: 'not bound', session: m.session ?? null });
+      if (!boundTo(m, ref)) throw conflict({ error: 'not bound', session: m.session ?? null });
     },
   });
 }

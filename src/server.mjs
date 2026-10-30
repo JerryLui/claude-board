@@ -1015,10 +1015,14 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, s
   // the process it names, or by the id the watcher's list holds for that process. A lookup
   // that fails links nothing, and the post goes on.
   let mission = namedMission;
+  // The posting session as the bindings match it, kept only when its binding was read.
+  let postingSession = null;
   if (!mission && sessionRef && bindings) {
     try {
       const id = sessions ? sessions.matchId(sessionRef.pid, sessionRef.procStart) : null;
-      mission = bindings.binding({ ...sessionRef, ...(id ? { id } : {}) }).key;
+      const ref = { ...sessionRef, ...(id ? { id } : {}) };
+      mission = bindings.binding(ref).key;
+      postingSession = ref;
     } catch (err) {
       console.error(`claude-board: the posting session's mission could not be read: ${(err && err.message) || err}`);
     }
@@ -1256,7 +1260,25 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, s
   if (body.requestId) board.lastRequestId = body.requestId;
   // A later round naming a mission binds a board that had none; a board never moves
   // from one mission to another. Refused here, before the persist, so nothing is written.
-  // A board bound by its session's mission and not by name stays with the mission it has.
+  // A board bound by its session's mission and not by name stays with the mission it has,
+  // unless its session has moved on: bound to another mission now, or the session the
+  // board's mission records as ended (it left, was taken over, or a launch replaced it).
+  // Its round would put that mission's card in Needs you, so it is refused and the agent
+  // asks with `fresh` for a board of its own (ADR 141).
+  if (!namedMission && board.mission && postingSession) {
+    let moved = null;
+    if (mission && mission !== board.mission) moved = `is bound to mission ${mission}`;
+    else if (!mission) {
+      try {
+        if (bindings.ended(board.mission, postingSession)) moved = 'has left it';
+      } catch (err) {
+        console.error(`claude-board: mission ${board.mission} could not be read: ${(err && err.message) || err}`);
+      }
+    }
+    if (moved) {
+      return sendJson(res, 400, { error: `board ${board.id} belongs to mission ${board.mission}, and the posting session ${moved}: ask with fresh for a board of its own` });
+    }
+  }
   const inherited = !namedMission && !!board.mission;
   if (inherited) mission = board.mission;
   if (mission && board.mission && board.mission !== mission) {

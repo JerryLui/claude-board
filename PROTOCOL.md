@@ -975,7 +975,12 @@ board never moves from one mission to another, so naming a second is a **400**, 
 off the pattern, both before anything is written. **A post naming no mission links to the one
 its session is bound to** (ADR 141, "The missions routes"): the post's `session` (below), or the
 id the session watcher lists for that process, matched against each mission's bound session; a
-board that already belongs to a mission stays with it. The shim names no mission itself.
+board that already belongs to a mission stays with it. A later round naming no mission on a board
+whose session has moved on, now bound to another mission or the session the board's mission
+records as `ended` (it left, was taken over, or a launch replaced it), is a **400** before anything
+is written, `board <id> belongs to mission <key>, and the posting session is bound to mission
+<other>` (or `has left it`) `: ask with fresh for a board of its own`: its round would put the
+old mission's card in Needs you. The shim names no mission itself.
 
 **`session: { pid, procStart }` (either form) names the agent session posting** (ADR 131): the
 process id of the agent session the shim runs under, and that process's start, UTC ISO-8601 to the
@@ -1530,7 +1535,7 @@ POST /api/mission/:key/launch       { phase, login?, prompt? }
 The one check that keeps a mission to one live session. The 409 names the live `session`, and
 carries `silent: true` when that session reads stalled by silence while its process lives, which
 is how a launcher tells a hang from a busy session. A launch ends the session it replaces,
-finished, gone or silent, and that session's `pid` and `id` move to the new session's `ended`; a
+finished, gone or silent, and that session's `pid`, `procStart` and `id` move to the new session's `ended`; a
 queued launch keeps no session, only that `ended`, until it launches.
 
 ```
@@ -1538,6 +1543,8 @@ POST /api/mission/:key/join         { id, pid?, procStart?, phase?, takeover? }
        -> { bound: true, session }                 bound; the mission is created when new
        -> 202 { takeover: 'pending', session }     with takeover: true, another live session bound
        -> 409 { error: 'live', session }           another live session bound
+       -> 409 { error: 'ended', session }          this is the session a launch replaced
+       -> 409 { error: 'bound elsewhere', mission, session }   this session holds another mission
 POST /api/mission/:key/leave        { id, pid?, procStart? } -> { left: true, session }
        -> 409 { error: 'not bound', session }
 GET  /api/binding?id=<session id>[&pid=&procStart=]
@@ -1548,9 +1555,14 @@ GET  /api/binding?id=<session id>[&pid=&procStart=]
 (Claude Code's `CLAUDE_CODE_SESSION_ID`), and by its process, `pid` and `procStart` (UTC
 ISO-8601), which a `/clear` keeps while the id changes. No environment variable names a mission.
 A join binds when no session holds the mission (`live` above), when the bound session is this one
-(its id, or its `pid` with no `procStart` telling them apart, which takes the new id), or when the
-mission holds only a launch's reservation, which it binds in place. A fresh bind moves the mission
-to `working`, in `phase` when given, and the previous session's `pid` and `id` go to `ended`.
+(its id, or its `pid` and `procStart` both, which takes the new id; a `pid` alone names no one,
+since the OS reuses a dead session's pid), or when the mission holds only a launch's reservation,
+which it binds in place. A fresh bind moves the mission to `working`, in `phase` when given, and
+the previous session's `pid`, `procStart` and `id` go to `ended`; the bound session joining its
+released mission again moves it to `working` too. Two joins are refused whatever holds the
+mission: the session `ended` names (a launch replaced it, and it has not left), and a session
+bound to another mission that is not released, which is named, so one session is never two
+missions' (it leaves the one it holds first).
 Another live session bound is a 409 naming it; with `takeover: true` the join is recorded as
 `takeover` and answers 202, the bound session reads it on its binding, finishes its step, writes
 its handoff and leaves, and the leave binds the session that asked. A bound session whose process
@@ -1563,11 +1575,13 @@ Any other session's leave is a 409. The binding is read off the stored records a
 derived and no board read, for a hook that asks every minute: the mission the session is bound to
 (a released mission, a bare reservation and a session that left bind no one), its pending
 `takeover`, the `pm` orders it has not marked seen, and its `handoff`. Either `id` or `pid` is
-needed, else a 400. Secret only, the binding included: it carries the PM's words.
+needed, else a 400; a `pid` names the session only with its `procStart`. Secret only, the binding
+included: it carries the PM's words.
 
 ```
-POST /api/mission/:key/session      { pid?, procStart?, id?, name?, login?, typed? } -> { session }
+POST /api/mission/:key/session      { pid?, procStart?, id?, name?, login?, typed?, beat? } -> { session }
        -> 409 { error: 'live', session }
+       -> 409 { error: 'not bound', session }      with beat: true, not the bound session
 ```
 
 Binds a session, or heartbeats the one bound (`seenAt` now); a hook calls it at every turn's end,
@@ -1576,7 +1590,9 @@ The bound `pid` under a new `id` (after a `/clear`) is a heartbeat that takes th
 different `pid`, or a different `id` when the bound session has no `pid`, while the bound session
 holds the mission is a 409, and so is the `pid` or `id` of the session that ended before this
 launch; a different `pid` or `id` once the bound session is gone, or silent with no `pid`, starts a
-fresh session. An absent mission is a 404.
+fresh session. With `beat: true` it is a heartbeat only: a caller that is not the bound session
+(matched as a join is), a bare reservation included, is a 409 `not bound` that writes nothing.
+An absent mission is a 404.
 
 ```
 POST /api/mission/:key/order             { kind: 'stop' | 'comment' | 'pm', text? } -> { order }
@@ -2235,8 +2251,11 @@ call's post to actually land, because a refused post (ADR 112) must close nothin
 conversation's open round is still the reviewer's until something replaces it, and a re-post with
 the reference fixed is what closes it. The abandon itself is best-effort, its failure a stderr
 line. Every result text of a `fresh` call names the board it walked away from, in one fixed
-sentence: `Abandoned board: <url> (the previous conversation's board, closed by this fresh ask).
-Call read with that URL to collect any answer left on it.` That id does not survive the boundary
+sentence: `Abandoned board: <url> (the board this conversation left by a fresh ask or a mission join
+or leave, closed by this ask). Call read with that URL to collect any answer left on it.` A join
+or leave through the `mission` tool declares the same boundary, since the board a shim reuses
+keeps the mission it first linked to; joining again the mission the shim last joined keeps the
+board. That id does not survive the boundary
 any other way, and a reviewer answering after the abandon is exactly the case ADR 114 stopped
 throwing away, so the URL is what makes the answer reachable at all. `fresh` on a conversation
 that has posted no board is a
@@ -2297,8 +2316,9 @@ above:
 list    { all? }                              GET  /api/missions, `?all=1` when all is true
 read    { key }                               GET  /api/mission/:key
 write   { key, fields, session? }             POST /api/mission/:key, with fields as the body;
-                                              with session, POST .../session first (its
-                                              heartbeat), and a 409 there writes nothing
+                                              with session, POST .../session first with
+                                              beat: true (a heartbeat only), and a 409
+                                              there writes nothing
 join    { key, session, phase?, takeover? }   POST /api/mission/:key/join
 leave   { key, session }                      POST /api/mission/:key/leave
 binding { session }                           GET  /api/binding
