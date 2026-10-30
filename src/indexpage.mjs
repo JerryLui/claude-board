@@ -12,7 +12,8 @@
 // of keying by project directory instead.
 
 import path from 'node:path';
-import { styles, faviconLink, markSvg } from './styles.mjs';
+import { faviconLink, markSvg } from './styles.mjs';
+import { STYLE_ASSET } from './assets.mjs';
 import { themeBootScript, themeToggle } from './theme.mjs';
 import { commentModeToggle } from './render.mjs';
 import { trackDocWidth } from './ui.mjs';
@@ -157,16 +158,21 @@ function formatDate(iso) {
   }
 }
 
-/** The row's headline is the board title; a title-less board falls back to the
- * project's folder name, and a board with neither falls back to a plain label —
- * never the literal word this codebase used to headline ("untitled"), since that
- * would now read as if it WERE the title. The full `cwd` moves to a `title`
- * attribute wherever it is the only thing standing in for a name. */
+/** One board's line in the Boards list: a 38px row of cells, its dot, the headline (one
+ * line, cut with an ellipsis), the rounds-left chip where any, then the folder, round
+ * count, last update and thread id as fixed columns at the line's end. The whole line is
+ * the link.
+ *
+ * The headline is the board title; a title-less board falls back to the project's folder
+ * name, and a board with neither falls back to a plain label, never the literal word this
+ * codebase used to headline ("untitled"), since that would now read as if it WERE the
+ * title. The folder column carries only the basename, the full `cwd` on its `title`
+ * attribute; it is left out when the headline already is the folder, or there is none. */
 function threadRow(t) {
   const liveCls = t.live ? ' live' : '';
   // Absent entirely at zero, never a zero-reading badge: `roundsLeft` and
   // `live` are both derived from `openAwaitedRounds` (src/indexpage.mjs), so this
-  // element and the pulsing `.live-dot` above it can never disagree about whether
+  // chip and the pulsing `.live-dot` beside it can never disagree about whether
   // the row owes the reader anything.
   const badge = t.roundsLeft > 0
     ? `<div class="thread-status"><span class="rounds-left-badge">${t.roundsLeft} round${t.roundsLeft === 1 ? '' : 's'} left</span></div>`
@@ -174,10 +180,12 @@ function threadRow(t) {
   const folder = folderName(t.cwd);
   const headline = t.title || folder || '(untitled)';
   const headlineIsFolder = !t.title && !!folder;
-  const liveDot = t.live ? '<span class="live-dot" aria-hidden="true"></span> ' : '';
-  const pathLine = headlineIsFolder
-    ? ''
-    : `<div class="thread-path"${folder ? ` title="${escAttr(t.cwd)}"` : ''}>${escHtml(folder || '(no project directory)')}</div>`;
+  const dot = t.live
+    ? '<span class="live-dot" aria-hidden="true"></span>'
+    : '<span class="settled-dot" aria-hidden="true"></span>';
+  const pathCell = t.title && folder
+    ? `<div class="thread-path" title="${escAttr(t.cwd)}">${escHtml(folder)}</div>`
+    : '';
   const updatedIso = escAttr(t.updatedAt);
   // escAttr, not escHtml: this value lands in BOTH the `title` attribute and the
   // element's text content below, and escHtml alone does not escape `"` -- a
@@ -188,16 +196,16 @@ function threadRow(t) {
   // A count, not an ordinal: "round N" reads as a position (which round you're
   // ON), and `rounds` here is a total, not a position -- the exact confusion
   // src/badge.mjs's own doc comment names as a real bug rather than a wording
-  // nitpick. Suppressed entirely at zero (a board-shaped object with no rounds
-  // at all) rather than reading "0 rounds", which nothing on a live board ever
-  // is: `rounds` is always >= 1 once a board exists.
-  const roundsText = t.rounds > 0 ? `${t.rounds} round${t.rounds === 1 ? '' : 's'} · ` : '';
+  // nitpick. Empty at zero (a board-shaped object with no rounds at all) rather
+  // than reading "0 rounds", which nothing on a live board ever is: `rounds` is
+  // always >= 1 once a board exists. The cell stays, so the columns line up.
+  const roundsText = t.rounds > 0 ? `${t.rounds} round${t.rounds === 1 ? '' : 's'}` : '';
   // Two threads can headline identically -- the same title, or both title-less
   // with the same folder, the ordinary shape for a repo run without ever setting
-  // a title -- and in the title-less case `pathLine` above is also suppressed,
+  // a title -- and in the title-less case the folder column is also left out,
   // leaving nothing else on the row to vary. The thread id is always emitted
-  // here for exactly that: a discriminator that survives however the headline
-  // and path happen to collide — and, since the search box became a filter over
+  // for exactly that: a discriminator that survives however the headline
+  // and folder happen to collide, and, since the search box became a filter over
   // these rows, the only thing on the row a reader can type to isolate one of
   // two identically-headlined sessions (filterThreads matches it).
   // A live row opens the board AT the round that still needs an answer, not at
@@ -214,20 +222,31 @@ function threadRow(t) {
   const href = `/b/${escAttr(t.boardId)}${t.live ? '#open-round' : ''}`;
   return `
 <a class="thread-item${liveCls}" href="${href}" data-thread-id="${escAttr(t.thread)}" data-rounds-left="${t.roundsLeft}" data-live="${t.live}">
-  <div class="thread-main">
-    <div class="thread-title"${headlineIsFolder ? ` title="${escAttr(t.cwd)}"` : ''}>${liveDot}${escHtml(headline)}</div>
-    ${pathLine}
-    <div class="thread-meta">${roundsText}updated <time class="rel-time" datetime="${updatedIso}" title="${updatedAbs}">${updatedAbs}</time> · ${escHtml(t.thread)}</div>
-  </div>
+  ${dot}
+  <div class="thread-title"${headlineIsFolder ? ` title="${escAttr(t.cwd)}"` : ''}>${escHtml(headline)}</div>
   ${badge}
+  ${pathCell}
+  <span class="thread-rounds">${roundsText}</span>
+  <span class="thread-updated"><time class="rel-time" datetime="${updatedIso}" title="${updatedAbs}">${updatedAbs}</time></span>
+  <span class="thread-id">${escHtml(t.thread)}</span>
 </a>`;
 }
 
-/** The contents of `.thread-list`: the filtered rows, or whichever empty state
- * applies. The ONE renderer for that markup, called both by `renderIndexPage`
- * below (server-rendered first paint) and by `GET /api/index/rows` (the poll the
- * page runs on its own fifteen-second tick, ADR 77) — so what the poll patches in
- * can never drift from what the page was served with.
+/** The Boards list's two groups, in this order: boards with a round waiting on the PM
+ * (`live`, the same `openAwaitedRounds` fact the dot, the chip and the bar's waiting
+ * count read), then every other board. */
+const THREAD_GROUPS = [
+  { key: 'waiting', label: 'Waiting on you', has: t => t.live },
+  { key: 'earlier', label: 'Earlier', has: t => !t.live },
+];
+
+/** The contents of `.thread-list`: the filtered rows split into THREAD_GROUPS, each under
+ * a header with its count, an empty group left out; or whichever empty state applies.
+ * The ONE renderer for that markup, called both by `renderIndexPage` below
+ * (server-rendered first paint) and by `GET /api/index/rows` (the poll the page runs on
+ * its own fifteen-second tick and on every stream push, ADR 77), so what a repaint
+ * patches in can never drift from what the page was served with, and a board whose
+ * round is answered or posted moves group on the next repaint.
  *
  * Two different empty states, because they mean two different things: an empty
  * STORE is "nothing has happened yet, here is what would put something here",
@@ -237,7 +256,15 @@ function threadRow(t) {
 export function renderThreadRows({ threads = [], query = '' } = {}) {
   const filtering = query.trim().length > 0;
   const shown = filterThreads(threads, query);
-  if (shown.length) return shown.map(threadRow).join('\n');
+  if (shown.length) {
+    return THREAD_GROUPS.map(g => {
+      const rows = shown.filter(g.has);
+      if (!rows.length) return '';
+      return `<div class="thread-group" data-group="${g.key}">
+<h2 class="thread-group-head"><span class="thread-group-dot" aria-hidden="true"></span>${g.label}<span class="thread-group-count">${rows.length}</span></h2>${rows.map(threadRow).join('')}
+</div>`;
+    }).join('\n');
+  }
   return filtering
     ? `<p class="empty-state">No sessions match “${escHtml(query.trim())}”.</p>`
     : '<p class="empty-state">No threads yet. Boards posted by a session will show up here.</p>';
@@ -351,11 +378,11 @@ function missionsSyncHeld(node, key, html) {
   if (was && now) { was.replaceWith(now); return; }
   if (was) { was.replaceWith(); return; }
   if (!now) return;
-  // In the fresh markup the error sits just above the card's first row of controls.
+  // In the fresh markup the error sits just above the card's foot and controls.
   var before = null;
   for (var j = 0; j < node.children.length && !before; j++) {
     var cl = node.children[j].classList;
-    if (cl.contains('mission-btns') || cl.contains('mission-confirm') || cl.contains('mission-comment')) before = node.children[j];
+    if (cl.contains('mission-foot') || cl.contains('mission-confirm') || cl.contains('mission-comment')) before = node.children[j];
   }
   node.insertBefore(now, before);
 }
@@ -374,7 +401,7 @@ function paintMissions() {
 }
 
 // A card's fold shows only while one of its fields is cut short; a shut fold over text
-// that already fits is hidden but keeps its line, so the card keeps its height.
+// that already fits takes no room, so the card is as tall as its text.
 function missionsMarkFits() {
   var folds = document.querySelectorAll('details.mission-more');
   for (var i = 0; i < folds.length; i++) {
@@ -401,7 +428,35 @@ function onMissionsToggle(ev) {
   missionsMarkFits();
 }
 
+// A repaint replaces a card whose markup changed (its age moves every minute), and the
+// focus inside it would fall to the page: the card's link, its Stop or the card itself
+// takes it back on the fresh card.
+function missionsFocusMark() {
+  var el = document.activeElement;
+  var cardEl = el && el.closest && el.closest('article.mission-card');
+  if (!cardEl) return null;
+  var cl = el.classList;
+  var sel = el === cardEl ? '' : cl.contains('mission-link') ? 'a.mission-link' : cl.contains('mission-stop') ? 'button.mission-stop' : null;
+  return sel === null ? null : { key: cardEl.getAttribute('data-mission-key'), sel: sel };
+}
+
+function missionsFocusRestore(mark) {
+  if (!mark) return;
+  var el = document.activeElement;
+  if (el && el !== document.body && el.isConnected !== false) return;
+  if (mark.sel === 'button.mission-stop') { focusStop(mark.key); return; }
+  var node = missionsFind(mark.key);
+  var target = node && (mark.sel ? node.querySelector(mark.sel) : node);
+  if (target && target.focus) target.focus();
+}
+
 function paintMissionsCards() {
+  var mark = missionsFocusMark();
+  paintMissionsCardsIn();
+  missionsFocusRestore(mark);
+}
+
+function paintMissionsCardsIn() {
   var mount = missionsMount();
   if (!mount || !missionsData) return;
   var parts = missionsParts(missionsData, missionsUi);
@@ -582,6 +637,18 @@ function focusIn(key, selector) {
   if (el && el.focus) el.focus();
 }
 
+// Stop shows only on its card's hover or focus, and a repainted card has neither, so a
+// hidden Stop could not take the focus Keep and Escape hand back to it: it is held in
+// view until that focus leaves.
+function focusStop(key) {
+  var node = missionsFind(key);
+  var stop = node && node.querySelector('button.mission-stop');
+  if (!stop || !stop.focus) return;
+  stop.classList.add('mission-stop-held');
+  stop.addEventListener('blur', function () { stop.classList.remove('mission-stop-held'); }, { once: true });
+  stop.focus();
+}
+
 function onMissionsClick(ev) {
   var t = ev.target;
   if (!t || !t.closest) return;
@@ -603,7 +670,7 @@ function onMissionsClick(ev) {
   if (t.closest('button.mission-stop-cancel')) {
     delete missionsUi.confirming[key];
     paintMissions();
-    focusIn(key, 'button.mission-stop');
+    focusStop(key);
     return;
   }
   if (t.closest('button.mission-stop-confirm')) {
@@ -629,11 +696,38 @@ function onMissionsClick(ev) {
     });
     return;
   }
-  if (!missionsCommentModeOn() || missionsUi.commenting[key]) return;
-  if (t.closest('a') || t.closest('button') || t.closest('textarea') || t.closest('summary')) return;
+  // The card opens its board through its title's link, whose box covers the card under
+  // its chips, controls, fold and forms: the browser follows it, a Cmd or middle press
+  // into a new tab. Comment mode turns that press, a click or Enter, into a note.
+  var link = t.closest('a.mission-link');
+  if (missionsCommentModeOn()) {
+    if (link) ev.preventDefault();
+    if (!link && (t.closest('a') || t.closest('button') || t.closest('textarea') || t.closest('summary'))) return;
+    missionsOpenNote(key);
+    return;
+  }
+  // A double-press's second click is not a click on the card: on Stop, the first one
+  // took Stop off the card, and the link under it would take the second.
+  if (link && ev.detail > 1) ev.preventDefault();
+}
+
+function missionsOpenNote(key) {
+  if (missionsUi.commenting[key]) return;
   missionsUi.commenting[key] = true;
   paintMissions();
   focusIn(key, 'textarea.mission-comment-text');
+}
+
+// A middle press fires auxclick, never click: with Comment on, a middle press on a card's
+// link opens its note rather than its board in a new tab.
+function onMissionsAuxclick(ev) {
+  var t = ev.target;
+  if (ev.button !== 1 || !t || !t.closest || !missionsCommentModeOn()) return;
+  var link = t.closest('a.mission-link');
+  var cardEl = link && link.closest('article.mission-card');
+  if (!cardEl) return;
+  ev.preventDefault();
+  missionsOpenNote(cardEl.getAttribute('data-mission-key'));
 }
 
 // On a Mac, Ctrl with the primary button is the secondary click: the browser fires
@@ -669,13 +763,14 @@ function onMissionsKeydown(ev) {
     return;
   }
   paintMissions();
-  focusIn(key, 'button.mission-stop');
+  focusStop(key);
 }
 
 function initMissions() {
   var mount = missionsMount();
   if (!mount) return;
   mount.addEventListener('click', onMissionsClick);
+  mount.addEventListener('auxclick', onMissionsAuxclick);
   mount.addEventListener('contextmenu', onMissionsContextmenu);
   mount.addEventListener('input', onMissionsInput);
   mount.addEventListener('keydown', onMissionsKeydown);
@@ -1812,11 +1907,12 @@ export function filterThreads(threads, query) {
  * Five columns by derived state (`view`), queued shown under waiting. A card's Fire or
  * Merge button exists only while `actions` holds that kind, which the daemon fills only
  * from a round still waiting on the PM; the button carries what a click submits. Stop
- * shows while a session is live and no stop is already on its way.
+ * is offered while a session is live and no stop is already on its way. The whole card
+ * opens its board, the round waiting on the PM where there is one.
  *
  * A tab (`tabs`, a session the watcher reports that no mission launched; ADR 131) is a
  * card of its own in its state's column, after the missions: tagged "tab", its login and
- * folder, "your turn" while it waits, an Open round link per round it has waiting, a
+ * folder, "your turn" while it waits, a click opening the first round it has waiting, a
  * blocked job's reason, and the mission card's Stop and comment. Its key is TAB_KEY_PREFIX
  * and its session id, which no mission key can be. A watcher that posted in this daemon's life
  * and then went quiet (`watcher.up` false, `lastAt` set) puts a notice over the columns;
@@ -1877,23 +1973,29 @@ function missionsParts(overview, ui) {
     return { lines: lines, stopPending: !!(stop && live) };
   }
 
-  // The frame a mission's card and a tab's share: the article, `inner` (what sits between
-  // it and the orders), the order lines, the error, the button row with Stop last while
-  // the session is live and no stop is on its way, and the Stop question and comment note.
+  // The frame a mission's card and a tab's share: the article, `inner` (the text, its
+  // title the link to the card's board), Stop in its top-right corner while the session
+  // is live and no stop is on its way (shown on the card's hover or focus, styles.mjs),
+  // the order lines, the error, the foot of chips and buttons, and the Stop question and
+  // comment note. Stop follows the text so the Tab after the title's link reaches it. A
+  // card with Stop and no board takes the focus itself, so Stop is reachable by Tab.
   function cardShell(o) {
     var key = o.key;
     var busy = pick('sending', key);
     var orders = orderLines(o.orders, o.live, pick('stopSent', key));
     var stoppable = o.live && !orders.stopPending;
-    var out = '<article class="' + o.className + '" data-mission-key="' + esc(key) + '" data-view="' + esc(o.view) + '">' + o.inner;
-    for (var l = 0; l < orders.lines.length; l++) out += '<p class="mission-order" role="status">' + esc(orders.lines[l]) + '</p>';
-    if (state.errors && state.errors[key]) out += '<p class="mission-error" role="alert">' + esc(state.errors[key]) + '</p>';
-    var btns = o.btns;
+    var reach = !o.href && stoppable ? ' role="group" tabindex="0" aria-label="' + esc(o.label) + '"' : '';
+    // A card with no board has no link to carry its tooltip (cardTitle), so it carries it.
+    var tip = o.href ? '' : ' title="' + esc(o.tip) + '"';
+    var out = '<article class="' + o.className + '" data-mission-key="' + esc(key) + '" data-view="' + esc(o.view) + '"' + reach + tip + '>';
+    out += o.inner;
     if (stoppable) {
-      btns += '<button type="button" class="mission-stop" aria-label="Stop session" title="Stop: finish the step, hand off, end. Cmd-click stops at once" aria-expanded="'
+      out += '<button type="button" class="mission-stop" aria-label="Stop session" title="Stop: finish the step, hand off, end. Cmd-click stops at once" aria-expanded="'
         + (pick('confirming', key) ? 'true' : 'false') + '"' + (busy ? ' disabled' : '') + '>' + STOP_ICON + '</button>';
     }
-    if (btns) out += '<div class="mission-btns">' + btns + '</div>';
+    for (var l = 0; l < orders.lines.length; l++) out += '<p class="mission-order" role="status">' + esc(orders.lines[l]) + '</p>';
+    if (state.errors && state.errors[key]) out += '<p class="mission-error" role="alert">' + esc(state.errors[key]) + '</p>';
+    if (o.foot) out += '<div class="mission-foot">' + o.foot + '</div>';
     if (stoppable && pick('confirming', key)) {
       out += '<div class="mission-confirm" role="group" aria-label="Stop this session">'
         + '<p class="mission-confirm-text">Stop this session? It finishes its step, writes its Handoff and ends.</p>'
@@ -1911,9 +2013,22 @@ function missionsParts(overview, ui) {
   }
 
   // The one 'Show the rest' fold a mission or tab card carries when any field of it may
-  // be cut (ADR 135), open while the card is expanded; '' when nothing can be.
+  // be cut, open while the card is expanded; '' when nothing can be.
   function moreFold(key, show) {
     return show ? '<details class="mission-more"' + (pick('expanded', key) ? ' open' : '') + '><summary>Show the rest</summary></details>' : '';
+  }
+
+  // A card's title, and the link to its board where it has one. The link's box covers the
+  // card, its key line included, so the link carries the card's tooltip: the whole title
+  // and what the key line cuts short (cardTip).
+  function cardTitle(title, href, tip) {
+    var text = esc(title);
+    return '<b class="mission-title">' + (href ? '<a class="mission-link" href="' + esc(href) + '" title="' + esc(tip) + '">' + text + '</a>' : text) + '</b>';
+  }
+
+  // The card's tooltip, one fact a line: its whole title, then each key-line fact in full.
+  function cardTip(title, facts) {
+    return [title].concat(facts.filter(Boolean)).join('\n');
   }
 
   function card(m) {
@@ -1921,56 +2036,47 @@ function missionsParts(overview, ui) {
     var actions = Array.isArray(m.actions) ? m.actions : [];
     var boards = Array.isArray(m.boards) ? m.boards : [];
     var latest = boards.length ? boards[boards.length - 1] : null;
+    // The card opens the round waiting on the PM where there is one, else its latest board.
+    var href = actions.length ? '/b/' + actions[0].board : latest ? '/b/' + latest.id : '';
     var busy = pick('sending', key);
-    var out = '<div class="mission-text"><div class="mission-card-head"><b class="mission-title">' + esc(m.title || key) + '</b>'
-      + '<span class="mission-age" title="' + esc(m.updatedAt) + '">' + esc(age(m.updatedAt)) + '</span></div>';
-    out += '<div class="mission-ident"><span class="mission-key">' + esc(key) + ' / ' + esc(m.phase) + '</span>'
-      + (m.view === 'queued' ? '<span class="mission-tag">Queued</span>' : '') + '</div>';
+    var title = m.title || key;
+    // A card whose title is its key names it once, in the title.
+    var ident = title === key ? m.phase : key + ' / ' + m.phase;
+    var tip = cardTip(title, ['Updated ' + m.updatedAt]);
+    var out = '<div class="mission-text"><div class="mission-ident"><span class="mission-key">' + esc(ident) + '</span>'
+      + '<span class="mission-age">' + esc(age(m.updatedAt)) + '</span></div>'
+      + cardTitle(title, href, tip);
     if (m.summary) out += '<p class="mission-summary">' + esc(m.summary) + '</p>';
-    if (m.waitingOn || m.next) {
-      out += '<dl class="mission-facts">'
-        + (m.waitingOn ? '<dt>Waiting on</dt><dd class="mission-waiting">' + esc(m.waitingOn) + '</dd>' : '')
-        + (m.next ? '<dt>Next</dt><dd class="mission-next">' + esc(m.next) + '</dd>' : '')
-        + '</dl>';
-    }
-    // Every card in a row is one height whatever its text: the title, summary, waiting
-    // on and next each stop at a few lines, and this one fold shows them whole. It is
-    // hidden again on screen while nothing is cut (missionsMarkFits).
-    out += moreFold(key, m.summary || m.waitingOn || m.next || String(m.title || key).length > FOLD_TITLE_CHARS);
+    if (m.waitingOn) out += '<p class="mission-fact mission-waiting"><span class="mission-label">Waiting on</span>' + esc(m.waitingOn) + '</p>';
+    if (m.next) out += '<p class="mission-fact mission-next"><span class="mission-label">Next</span>' + esc(m.next) + '</p>';
+    // The title, summary, waiting on and next each stop at a few lines, and this one fold
+    // shows them whole. It is hidden on screen while nothing is cut (missionsMarkFits).
+    out += moreFold(key, m.summary || m.waitingOn || m.next || String(title).length > FOLD_TITLE_CHARS);
     out += '</div>';
-    var prs = Array.isArray(m.prs) ? m.prs : [];
-    if (prs.length) {
-      out += '<div class="mission-prs">';
-      for (var p = 0; p < prs.length; p++) {
-        var pr = prs[p];
-        var name = pr.repo + ' #' + pr.number;
-        // Only a web address becomes a link: the url is whatever the writing agent sent.
-        var tag = /^https?:\/\//i.test(String(pr.url)) ? 'a' : 'span';
-        out += '<' + tag + ' class="mission-pr" data-state="' + esc(pr.state) + '"' + (tag === 'a' ? ' href="' + esc(pr.url) + '"' : '')
-          + ' title="' + esc(name + ': ' + pr.state) + '">'
-          + '<i aria-hidden="true">' + (PR_MARKS[pr.state] || '○') + '</i>' + esc(name) + '</' + tag + '>';
-      }
-      out += '</div>';
-    }
 
-    var btns = '';
-    if (actions.length) {
-      btns += '<a class="mission-btn primary" href="/b/' + esc(actions[0].board) + '">Open round ' + esc(actions[0].round) + '</a>';
-    } else if (latest) {
-      btns += '<a class="mission-btn' + (m.view === 'needs-you' ? ' primary' : '') + '" href="/b/' + esc(latest.id) + '">Open board</a>';
+    var foot = m.view === 'queued' ? '<span class="mission-tag">Queued</span>' : '';
+    var prs = Array.isArray(m.prs) ? m.prs : [];
+    for (var p = 0; p < prs.length; p++) {
+      var pr = prs[p];
+      var name = pr.repo + ' #' + pr.number;
+      // Only a web address becomes a link: the url is whatever the writing agent sent.
+      var tag = /^https?:\/\//i.test(String(pr.url)) ? 'a' : 'span';
+      foot += '<' + tag + ' class="mission-pr" data-state="' + esc(pr.state) + '"' + (tag === 'a' ? ' href="' + esc(pr.url) + '"' : '')
+        + ' title="' + esc(name + ': ' + pr.state) + '">'
+        + '<i aria-hidden="true">' + (PR_MARKS[pr.state] || '○') + '</i>' + esc(name) + '</' + tag + '>';
     }
     var shown = {};
     for (var a = 0; a < actions.length; a++) {
       var act = actions[a];
       if (!ACTION_LABELS[act.kind] || shown[act.kind]) continue;
       shown[act.kind] = true;
-      btns += '<button type="button" class="mission-btn mission-act" data-action="' + esc(act.kind) + '" data-board="' + esc(act.board)
+      foot += '<button type="button" class="mission-btn mission-act" data-action="' + esc(act.kind) + '" data-board="' + esc(act.board)
         + '" data-round="' + esc(act.round) + '" data-question="' + esc(act.question) + '" data-choice="' + esc(act.choice) + '"'
         + (busy ? ' disabled' : '') + '>' + ACTION_LABELS[act.kind] + '</button>';
     }
     return cardShell({
-      key: key, view: m.view, className: 'mission-card', inner: out, orders: m.orders, live: m.live, btns: btns,
-      label: m.title || key, placeholder: 'A note for this mission’s session',
+      key: key, view: m.view, className: 'mission-card', inner: out, orders: m.orders, live: m.live, foot: foot, href: href,
+      label: title, tip: tip, placeholder: 'A note for this mission’s session',
     });
   }
 
@@ -1983,29 +2089,28 @@ function missionsParts(overview, ui) {
 
   // A session the watcher reports that no mission launched (src/sessions.mjs deriveTabs):
   // its own card, keyed apart from every mission key by the colon no mission key can hold.
+  // A tab card is a mission card: the same clamped fields, the same one fold, and a click
+  // opens its first waiting round.
   function tabCard(t) {
     var title = t.name || t.command || (t.kind === 'bg' && t.jobId ? 'Background job ' + t.jobId : 'Session ' + String(t.id).slice(0, 8));
     var key = TAB_KEY_PREFIX + t.id;
-    var out = '<div class="mission-text"><div class="mission-card-head"><b class="mission-title" title="' + esc(title) + '">' + esc(title) + '</b>'
-      + '<span class="tab-tags"><span class="mission-tag tab-tag">tab</span>'
-      + (t.yourTurn ? '<span class="mission-tag tab-turn">your turn</span>' : '') + '</span></div>';
+    var rounds = Array.isArray(t.rounds) ? t.rounds : [];
+    var href = '';
+    if (rounds.length) href = /^https?:\/\//i.test(String(rounds[0].url)) ? rounds[0].url : '/b/' + encodeURIComponent(rounds[0].board);
     var where = [];
-    if (t.login) where.push('<span class="tab-login" title="' + esc(t.login) + '">' + esc(loginLabel(t.login)) + '</span>');
-    if (t.folder) where.push('<span class="tab-folder" title="' + esc(t.cwd) + '">' + esc(t.folder) + '</span>');
+    if (t.login) where.push('<span class="tab-login">' + esc(loginLabel(t.login)) + '</span>');
+    if (t.folder) where.push('<span class="tab-folder">' + esc(t.folder) + '</span>');
+    var tip = cardTip(title, [t.login && 'Login ' + t.login, t.folder && 'Folder ' + t.cwd]);
+    var out = '<div class="mission-text">';
     if (where.length) out += '<div class="mission-ident"><span class="mission-key">' + where.join(', ') + '</span></div>';
+    out += cardTitle(title, href, tip);
     if (t.reason) out += '<p class="mission-summary tab-reason">' + esc('Blocked: ' + t.reason) + '</p>';
-    // A tab card is a mission card (ADR 135): the same clamped fields and the same one fold.
     out += moreFold(key, t.reason || title.length > FOLD_TITLE_CHARS);
     out += '</div>';
-    var btns = '';
-    var rounds = Array.isArray(t.rounds) ? t.rounds : [];
-    for (var r = 0; r < rounds.length; r++) {
-      var href = /^https?:\/\//i.test(String(rounds[r].url)) ? rounds[r].url : '/b/' + encodeURIComponent(rounds[r].board);
-      btns += '<a class="mission-btn' + (r === 0 ? ' primary' : '') + '" href="' + esc(href) + '">Open round ' + esc(rounds[r].round) + '</a>';
-    }
+    var foot = '<span class="mission-tag tab-tag">tab</span>' + (t.yourTurn ? '<span class="mission-tag tab-turn">your turn</span>' : '');
     return cardShell({
-      key: key, view: t.state, className: 'mission-card tab-card', inner: out, orders: t.orders, live: true, btns: btns,
-      label: title, placeholder: 'A note for this tab’s session',
+      key: key, view: t.state, className: 'mission-card tab-card', inner: out, orders: t.orders, live: true, foot: foot, href: href,
+      label: title, tip: tip, placeholder: 'A note for this tab’s session',
     });
   }
 
@@ -2089,7 +2194,7 @@ function renderHomePage({ active, title, body, waitingCount, pomodoroEnabled, co
 <title>${escHtml(title)}</title>
 ${faviconLink}
 <script>${themeBootScript}</script>
-<style>${styles}</style>
+<link rel="stylesheet" href="/b/${STYLE_ASSET}">
 </head>
 <body class="home-page">
 <div class="board-shell">
@@ -2118,8 +2223,8 @@ export function renderMissionsPage({ waitingCount = 0, pomodoroEnabled = true, o
   });
 }
 
-/** Render the Boards view (`GET /boards`): the thread list (with rounds-left counts,
- * round counts and a visual live/settled distinction), filtered to `query` when one
+/** Render the Boards view (`GET /boards`): the thread list, one panel at every width,
+ * grouped into "Waiting on you" and "Earlier" (renderThreadRows), filtered to `query` when one
  * is given -- a plain GET-form round trip needing no client JS of its own. The
  * page's one script (`indexScript` above) only ever touches `.rel-time` text
  * content, the contents of `.thread-list`, the waiting count and the pomodoro
@@ -2137,7 +2242,7 @@ export function renderMissionsPage({ waitingCount = 0, pomodoroEnabled = true, o
 export function renderIndexPage({ threads = [], query = '', pomodoroEnabled = true, waitingCount = 0 } = {}) {
   const threadsHtml = renderThreadRows({ threads, query });
   const body = `  <form class="search-form" action="/boards" method="get">
-    <input class="search-input" type="text" name="q" placeholder="Filter sessions — by title, project folder or thread id…" aria-label="Filter sessions" value="${escAttr(query)}">
+    <input class="search-input" type="text" name="q" placeholder="Filter sessions by title, project folder or thread id…" aria-label="Filter sessions" value="${escAttr(query)}">
     <button class="search-btn" type="submit">Filter</button>
   </form>
 

@@ -2,11 +2,17 @@
 // pixels on `/` (cards in every column, Comment on offer) as on `/boards`; the five columns
 // lay out in one row across the bar's whole content width, at 1440 and 2560 wide, light
 // and dark, with nothing scrolling sideways; every mission card at rest, a tab card's too,
-// is one height whatever its text, its long fields cut short with an ellipsis under one
-// fold that shows them whole; the Boards view is a card grid filling the width from 1440 up and today's
-// list at 1280; and Stop, pressed with a real mouse, plain or
-// with Ctrl, Shift or Alt held, asks once and then sends its order, its Stop and Keep on
-// one line, while a Cmd double-press sends one order with no question. Layout and a real press, which the DOM stand-in has none of (QUIRKS.md "The DOM
+// is as tall as its own text, in a list's density, its long fields cut short with an
+// ellipsis under one fold that shows them whole; the card's title is a real link whose box
+// covers the card under its chips and controls, so a click anywhere else on it or Enter on
+// the link opens its board, while in comment mode both open its note instead; its Stop
+// shows only on its hover or focus, on a screen with no hover always, keeps clear of a tab
+// card's key line, and takes the focus back after Keep or Escape; the Boards view is one
+// grouped list at 1280, 1440 and 2560, a 38px line a board under "Waiting on you" and
+// "Earlier", the whole line a link (test/check-pure.mjs owns the filter); and Stop, pressed
+// with a real mouse, plain or with Ctrl, Shift or Alt held, asks once and then sends its
+// order, its Stop and Keep on one line, while a Cmd double-press sends one order with no
+// question. Layout and a real press, which the DOM stand-in has none of (QUIRKS.md "The DOM
 // stand-in's ceilings"): test/check-missions-view.mjs holds the markup and the requests.
 //
 // NOT wired into test/run.mjs's `checks` array, on purpose: that suite has to pass on a
@@ -24,7 +30,7 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { sessionToken } from '../src/secret.mjs';
-import { deadPid, runMain, skipFile } from './support.mjs';
+import { deadPid, runMain, skipFile, sleep } from './support.mjs';
 import { CHROME, getJson, guardRun, measureTab, openTab, postJson, row, startScratchDaemon, withChrome } from './browser-support.mjs';
 
 if (!existsSync(CHROME)) skipFile('browser-check-missions', `browser-check-missions: no Chrome at ${CHROME} (set CLAUDE_BOARD_CHROME_BIN to override)`);
@@ -34,13 +40,17 @@ const HEIGHT = 900;
 const THEMES = ['light', 'dark'];
 const BOARDS = 14; // enough rows that the boards list scrolls at HEIGHT
 const COLUMNS = ['needs-you', 'working', 'waiting', 'stalled', 'released'];
-const NARROW = 1280; // under the wide layout: the Boards view stays a list
+const NARROW = 1280; // the Boards view is measured here too, so it is checked at every width
+const LINE = 38; // a board's line on the Boards view
 const LONG = 'LONG_CARD'; // every field at the store's longest
 const LONG_TAB = 'tab:tab-long'; // a tab card with its name and blocked reason at their longest (ADR 131)
 // The lines each long field stops at, and the class that draws it.
-const CUTS = { title: ['b.mission-title', 2], summary: ['p.mission-summary', 2], 'waiting on': ['dd.mission-waiting', 2], next: ['dd.mission-next', 1] };
+const CUTS = { title: ['b.mission-title', 2], summary: ['p.mission-summary', 2], 'waiting on': ['p.mission-waiting', 2], next: ['p.mission-next', 1] };
+const TITLE_ONLY = 'TITLE_ONLY'; // a title and its key line, nothing else
+const ASKING_TAB = 'tab:tab-asking'; // a tab card with a round waiting, so a link over its key line
 const words = (n, seed) => Array.from({ length: n }, (_, i) => `${seed}${i}`).join(' ');
 const longText = (max, seed) => words(200, seed).slice(0, max);
+const LONG_BOARD = longText(400, 'boardtitle'); // a board title far wider than its line
 
 guardRun('browser-check-missions', { deadlineMs: 240000 });
 
@@ -74,8 +84,35 @@ const MEASURE_EXPR = `(function () {
   var cards = [].slice.call(document.querySelectorAll('article.mission-card')).map(function (c) {
     var list = [].slice.call(c.parentNode.children);
     var fold = c.querySelector('details.mission-more');
+    var s = getComputedStyle(c);
+    var r = c.getBoundingClientRect();
+    // The last child the card lays out, and how far its bottom sits above the card's padding edge.
+    var flow = [].slice.call(c.children).filter(function (k) {
+      var ks = getComputedStyle(k);
+      return ks.position !== 'absolute' && ks.display !== 'none';
+    });
+    var last = flow[flow.length - 1];
+    var title = c.querySelector('b.mission-title');
+    var ident = c.querySelector('span.mission-key');
+    var stop = c.querySelector('button.mission-stop');
+    var link = c.querySelector('a.mission-link');
+    // What a press lands on at the card's corners, inside its border.
+    var corners = link ? [[r.left + 3, r.top + 3], [r.right - 3, r.bottom - 3], [r.left + 3, r.bottom - 3]].map(function (p) {
+      var hit = document.elementFromPoint(p[0], p[1]);
+      return hit && hit.closest('a.mission-link') === link;
+    }) : null;
     return Object.assign(rect(c), { key: c.getAttribute('data-mission-key'), index: list.indexOf(c),
-      fold: fold ? getComputedStyle(fold).visibility : null });
+      col: c.closest('section.mission-col').getAttribute('data-col'),
+      fold: fold ? getComputedStyle(fold).display : null,
+      footGap: r.bottom - parseFloat(s.borderBottomWidth) - parseFloat(s.paddingBottom) - last.getBoundingClientRect().bottom,
+      pad: s.paddingTop + ' ' + s.paddingRight + ' ' + s.paddingBottom + ' ' + s.paddingLeft,
+      radius: s.borderRadius, shadow: s.boxShadow,
+      title: title ? getComputedStyle(title).fontSize + ' ' + getComputedStyle(title).fontWeight : null,
+      ident: ident ? getComputedStyle(ident).fontSize : null,
+      stop: stop ? getComputedStyle(stop).visibility : null,
+      link: link ? link.getAttribute('href') : null, corners: corners,
+      keyClear: stop && ident && !c.querySelector('.mission-age') ? stop.getBoundingClientRect().left - ident.getBoundingClientRect().right : null,
+      openButtons: [].slice.call(c.querySelectorAll('a, button')).filter(function (b) { return /Open (board|round)/.test(b.textContent); }).length });
   });
   var long = document.querySelector('article.mission-card[data-mission-key=${JSON.stringify(LONG)}]');
   var longTab = document.querySelector('article.mission-card[data-mission-key=${JSON.stringify(LONG_TAB)}]');
@@ -102,7 +139,24 @@ const MEASURE_EXPR = `(function () {
     longFolds: long ? long.querySelectorAll('details.mission-more').length : 0,
     tabCuts: tabCuts,
     longTabFolds: longTab ? longTab.querySelectorAll('details.mission-more').length : 0,
-    threads: [].slice.call(document.querySelectorAll('a.thread-item')).map(rect),
+    boardList: (function () {
+      var lists = document.querySelectorAll('div.thread-list');
+      if (!lists.length) return null;
+      var long = [].slice.call(document.querySelectorAll('div.thread-title')).filter(function (t) { return t.textContent === ${JSON.stringify(LONG_BOARD)}; })[0];
+      var ls = long && getComputedStyle(long);
+      return {
+        panels: lists.length,
+        list: rect(lists[0]),
+        form: rect(document.querySelector('form.search-form')),
+        groups: [].slice.call(document.querySelectorAll('div.thread-group')).map(function (g) {
+          var head = g.querySelector('h2.thread-group-head');
+          var count = head.querySelector('.thread-group-count').textContent;
+          return { key: g.getAttribute('data-group'), label: head.textContent.slice(0, -count.length).trim(), count: Number(count), head: rect(head),
+            lines: [].slice.call(g.querySelectorAll('a.thread-item')).map(function (a) { return Object.assign(rect(a), { live: a.getAttribute('data-live') }); }) };
+        }),
+        longTitle: long ? { whiteSpace: ls.whiteSpace, textOverflow: ls.textOverflow, lineHeight: parseFloat(ls.lineHeight), height: long.getBoundingClientRect().height, client: long.clientWidth, scroll: long.scrollWidth } : null,
+      };
+    })(),
     commentOn: !!document.querySelector('button#comment-mode-toggle:not([disabled])'),
     background: getComputedStyle(document.body).backgroundColor,
     docW: document.documentElement.clientWidth,
@@ -133,6 +187,33 @@ async function press(tab, selector, modifiers = 0, times = 1) {
   }
 }
 
+/** The path the tab's top frame has gone to once it leaves the Missions page (`/`), or
+ * '/' when it has not left within five seconds. A read that lands mid-swap ("Not attached
+ * to an active page") is read again. */
+async function landedAt(tab) {
+  let path = '/';
+  for (let i = 0; i < 100 && path === '/'; i++) {
+    try {
+      const { currentIndex, entries } = await tab.sp('Page.getNavigationHistory');
+      path = new URL(entries[currentIndex].url).pathname;
+    } catch (err) {
+      if (!/Not attached to an active page/.test(err.message)) throw err;
+    }
+    if (path === '/') await new Promise(r => setTimeout(r, 50));
+  }
+  return path;
+}
+
+/** Presses `key` ('Enter', 'Tab' or 'Escape') on whatever has the tab's focus, as a keyboard does.
+ * Enter is its key-down alone: the page may already be navigating away by its key-up. */
+async function pressKey(tab, key) {
+  const code = { Enter: 13, Tab: 9, Escape: 27 }[key];
+  const down = { key, code: key, windowsVirtualKeyCode: code, nativeVirtualKeyCode: code };
+  if (key === 'Enter') { await tab.sp('Input.dispatchKeyEvent', { type: 'keyDown', text: '\r', ...down }); return; }
+  await tab.sp('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...down });
+  await tab.sp('Input.dispatchKeyEvent', { type: 'keyUp', ...down });
+}
+
 /** The stop orders `key`'s card has sent from this tab, once every request the press
  * started, and the repaint after it, has landed (openTab's `quiet`). */
 async function ordersSent(tab, key) {
@@ -149,6 +230,8 @@ async function main() {
     for (let i = 0; i < BOARDS; i++) {
       await post('/api/board', { title: `Session ${i + 1}`, blocks: [{ kind: 'markdown', text: `Board ${i + 1}` }] });
     }
+    await post('/api/board', { title: LONG_BOARD, blocks: [{ kind: 'markdown', text: 'A title wider than its line' }] });
+    await post('/api/board', { title: 'Invoice reminders: notes', blocks: [{ kind: 'markdown', text: 'Settled, beside the waiting grill board' }] });
     const live = async (key, fields) => {
       await post(`/api/mission/${key}`, { phase: 'direct', state: 'working', ...fields });
       await post(`/api/mission/${key}/session`, { pid: process.pid, id: `sess-${key}` });
@@ -164,10 +247,16 @@ async function main() {
     await post('/api/board', { title: 'Model vendors: merge', mission: 'MODEL_MAP', blocks: [
       { kind: 'question', prompt: 'Merge both PRs?', widget: 'single', action: 'merge', options: [{ label: 'Merge' }, { label: 'Hold' }] },
     ] });
+    // A board after the merge round: the card still opens the round waiting on the PM.
+    await post('/api/board', { title: 'Model vendors: notes', mission: 'MODEL_MAP', blocks: [{ kind: 'markdown', text: 'Notes' }] });
     await live('FILETYPE_FOLLOWUP', { title: 'File types, part 2', summary: 'Wave 2 of 3, 4 owners', next: 'wave 3',
-      prs: [{ repo: 'service', number: 1866, url: 'https://github.com/o/service/pull/1866', state: 'draft' }] });
+      prs: [{ repo: 'service', number: 1866, url: 'https://github.com/o/service/pull/1866', state: 'draft' },
+        { repo: 'admin', number: 77, url: 'admin#77', state: 'draft' }] });
+    await post('/api/board', { title: 'File types: wave 2', mission: 'FILETYPE_FOLLOWUP', blocks: [{ kind: 'markdown', text: 'Wave 2' }] });
+    await live(TITLE_ONLY, { title: 'Release notes' });
     await live('ANNOUNCEMENTS', { title: 'In-app announcements', summary: 'Wave 1 of 2, 3 owners' });
     await live('BANK_EXPORT', { title: 'Bank export', summary: 'Wave 1 of 1, 1 owner' });
+    await post('/api/board', { title: 'Bank export: plan', mission: 'BANK_EXPORT', blocks: [{ kind: 'markdown', text: 'Plan' }] });
     await post('/api/mission/SCHEDULED', { title: 'Scheduled steps', phase: 'landing', state: 'waiting', waitingOn: 'checks on service #1880' });
     await post('/api/mission/PAGE_READ_ROLLOUT', { title: 'Page reading rollout', phase: 'direct', state: 'queued', next: 'starts when a slot frees' });
     await post('/api/mission/SMALL_FIXES', { title: 'Security small fixes', phase: 'direct', state: 'working', summary: 'Silent since its last step' });
@@ -176,19 +265,37 @@ async function main() {
       summary: longText(280, 'summary'), waitingOn: longText(280, 'waiting'), next: longText(280, 'next') });
     await post('/api/mission/ESTATE_GOLDENS', { title: 'Estate case goldens', phase: 'landing', state: 'released', summary: 'Released, nothing left',
       prs: [{ repo: 'service', number: 1862, url: 'https://github.com/o/service/pull/1862', state: 'merged' }] });
+    // A board for the released mission, so a card with no Stop still opens one.
+    await post('/api/board', { title: 'Estate goldens: notes', mission: 'ESTATE_GOLDENS', blocks: [{ kind: 'markdown', text: 'Notes' }] });
 
     const tabSession = (id, fields) => ({ id, pid: null, procStart: null, kind: 'interactive', jobId: null, cwd: '/Users/pm/work/tab-repo',
       login: '/Users/pm/.claude-a', name: null, status: 'busy', reason: null, ...fields });
     await post('/api/sessions', { intervalMs: 600000, sessions: [
-      tabSession('tab-long', { kind: 'bg', jobId: 'job-long', name: longText(200, 'tabname'), status: 'blocked', reason: longText(300, 'reason') }),
+      tabSession('tab-long', { kind: 'bg', jobId: 'job-long', name: longText(200, 'tabname'), status: 'blocked', reason: longText(300, 'reason'),
+        cwd: `/Users/pm/work/${'a-folder-name-wider-than-its-line-'.repeat(4)}` }),
       tabSession('tab-short', { pid: 61002, procStart: '2026-10-29T11:10:15Z', name: '/grill' }),
+      tabSession(ASKING_TAB.slice(4), { pid: 61003, procStart: '2026-10-29T11:12:00Z', name: '/review', login: '/Users/pm/.claude-b', cwd: '/Users/pm/work/asking-repo' }),
+    ] });
+    // A round asked from that tab, so its card links to it.
+    const asked = await post('/api/board', { title: 'Asked from a tab', session: { pid: 61003, procStart: '2026-10-29T11:12:00Z' }, blocks: [
+      { kind: 'question', prompt: 'Which way?', widget: 'single', options: [{ label: 'This way' }, { label: 'That way' }] },
     ] });
 
     const counts = Object.fromEntries(COLUMNS.map(c => [c, 0]));
     const overview = await getJson(`${origin}/api/missions`, daemon.secret);
     for (const m of overview.missions) counts[m.view === 'queued' ? 'waiting' : m.view] += 1;
     for (const t of overview.tabs) counts[t.state] += 1;
-    assert.deepEqual(overview.tabs.map(t => `${t.id} ${t.state}`).sort(), ['tab-long needs-you', 'tab-short working'], 'setup: both tabs listed');
+    assert.deepEqual(overview.tabs.map(t => `${t.id} ${t.state}`).sort(), ['tab-asking needs-you', 'tab-long needs-you', 'tab-short working'], 'setup: every tab listed');
+    const byKey = Object.fromEntries(overview.missions.map(m => [m.key, m]));
+    // Where a click on a card lands: the round waiting on the PM, else the latest board.
+    const target = {
+      MODEL_MAP: `/b/${byKey.MODEL_MAP.actions[0].board}`,
+      FILETYPE_FOLLOWUP: `/b/${byKey.FILETYPE_FOLLOWUP.boards.at(-1).id}`,
+      [ASKING_TAB]: `/b/${asked.boardId}`,
+    };
+    assert.notEqual(target.MODEL_MAP, `/b/${byKey.MODEL_MAP.boards.at(-1).id}`, 'setup: MODEL_MAP posted a board after its merge round');
+    // The cards Stop is offered on: a live session with no stop on its way, and every tab.
+    const stoppable = [...overview.missions.filter(m => m.live).map(m => m.key), ...overview.tabs.map(t => `tab:${t.id}`)].sort();
 
     for (const [mode, classicScrollbars] of [['classic scrollbars', true], ['default scrollbars', false]]) {
       await withChrome({ tag: 'cb-missions', classicScrollbars }, async ({ send, onEvent }) => {
@@ -252,17 +359,56 @@ async function main() {
         }
 
         for (const [key, m] of Object.entries(at)) {
-          await row(`${mode}, at ${key}: every mission card and tab card at rest is one height whatever its text, so the columns' cards line up row by row`, note => {
+          await row(`${mode}, at ${key}: every mission card and tab card is as tall as its own text, 6px apart in its column`, note => {
             const { cards } = m.missions;
             const long = cards.find(c => c.key === LONG);
-            assert.ok(long, 'setup: the long card is on the page');
-            note(`card heights ${[...new Set(cards.map(c => px(c.height)))].join(', ')} over ${cards.length} cards`);
-            assert.deepEqual(cards.filter(c => Math.abs(c.height - long.height) > 0.5).map(c => `${c.key} ${px(c.height)}`), [],
-              `every card is the long card's ${px(long.height)}`);
-            const byIndex = {};
-            for (const c of cards) (byIndex[c.index] ||= []).push(c);
-            const askew = Object.values(byIndex).filter(row => row.some(c => Math.abs(c.top - row[0].top) > 0.5));
-            assert.deepEqual(askew.map(row => row.map(c => `${c.key} ${px(c.top)}`).join(', ')), [], 'the cards at one place in their columns share a top');
+            const short = cards.find(c => c.key === TITLE_ONLY);
+            assert.ok(long && short, 'setup: the long and the title-only cards are on the page');
+            note(`title-only ${px(short.height)}, long ${px(long.height)}; foot gaps ${[...new Set(cards.map(c => px(c.footGap)))].join(', ')}`);
+            assert.ok(short.height < long.height, 'a title-only card is shorter than one with every field');
+            assert.deepEqual(cards.filter(c => Math.abs(c.footGap) > 1).map(c => `${c.key} ${px(c.footGap)}`), [],
+              'no card has room between its last line and its foot');
+            const apart = [];
+            for (const col of COLUMNS) {
+              const list = cards.filter(c => c.col === col).sort((a, b) => a.index - b.index);
+              for (let i = 1; i < list.length; i++) apart.push(`${list[i].key} ${px(list[i].top - list[i - 1].top - list[i - 1].height)}`);
+            }
+            note(`apart: ${apart.join(', ')}`);
+            assert.ok(apart.length > 0, 'setup: a column holds two cards');
+            assert.deepEqual(apart.filter(a => a.split(' ')[1] !== '6px'), []);
+          });
+
+          await row(`${mode}, at ${key}: every card is padded 10 by 12 with 8px corners and no shadow, its title 13px medium, its key line 12px, no Open board button`, note => {
+            const { cards } = m.missions;
+            note(`${cards[0].pad}, ${cards[0].radius}, ${cards[0].shadow}, title ${cards[0].title}, key line ${cards[0].ident}`);
+            const wrong = cards.filter(c => c.pad !== '10px 12px 10px 12px' || c.radius !== '8px' || c.shadow !== 'none'
+              || c.title !== '13px 500' || (c.ident !== null && c.ident !== '12px') || c.openButtons !== 0);
+            assert.deepEqual(wrong.map(c => `${c.key}: ${c.pad}, ${c.radius}, ${c.shadow}, ${c.title}, ${c.ident}, ${c.openButtons} open buttons`), []);
+          });
+
+          await row(`${mode}, at ${key}: Stop is offered only where a session can be stopped, and hidden at rest`, note => {
+            const { cards } = m.missions;
+            const offered = cards.filter(c => c.stop !== null);
+            note(`Stop on ${offered.length} of ${cards.length} cards: ${[...new Set(offered.map(c => c.stop))].join(', ')}`);
+            assert.deepEqual(offered.map(c => c.key).sort(), stoppable);
+            assert.deepEqual(offered.filter(c => c.stop !== 'hidden').map(c => c.key), []);
+          });
+
+          await row(`${mode}, at ${key}: a card with a board has a real link to it, and a press at the card's corners lands on that link`, note => {
+            const { cards } = m.missions;
+            note(`MODEL_MAP links ${cards.find(c => c.key === 'MODEL_MAP').link}, FILETYPE_FOLLOWUP ${cards.find(c => c.key === 'FILETYPE_FOLLOWUP').link}`);
+            assert.equal(cards.find(c => c.key === 'MODEL_MAP').link, target.MODEL_MAP);
+            assert.equal(cards.find(c => c.key === 'FILETYPE_FOLLOWUP').link, target.FILETYPE_FOLLOWUP);
+            const linked = cards.filter(c => c.link);
+            assert.ok(linked.length >= 4, 'setup: several cards open a board');
+            assert.deepEqual(linked.filter(c => c.corners.some(hit => !hit)).map(c => `${c.key} ${c.corners}`), []);
+          });
+
+          await row(`${mode}, at ${key}: a tab card's Stop keeps clear of its key line's text`, note => {
+            const clear = m.missions.cards.filter(c => c.keyClear !== null);
+            note(clear.map(c => `${c.key} ${px(c.keyClear)}`).join(', '));
+            assert.ok(clear.some(c => c.key === LONG_TAB), 'setup: the long tab card has a key line and Stop');
+            assert.deepEqual(clear.filter(c => c.keyClear < 0).map(c => `${c.key} ${px(c.keyClear)}`), []);
           });
 
           await row(`${mode}, at ${key}: the long card cuts its title, summary and waiting on at two lines and next at one, with an ellipsis, under one fold`, note => {
@@ -276,9 +422,9 @@ async function main() {
               assert.ok(c.scroll > c.client + 1, `${field} has more than it shows`);
             }
             assert.equal(longFolds, 1, 'one fold on the card');
-            assert.equal(cards.find(c => c.key === LONG).fold, 'visible', 'the fold shows while text is cut');
+            assert.equal(cards.find(c => c.key === LONG).fold, 'block', 'the fold shows while text is cut');
             const short = cards.find(c => c.key === 'BANK_EXPORT');
-            assert.equal(short.fold, 'hidden', 'a card whose text all fits shows no fold');
+            assert.equal(short.fold, 'none', 'a card whose text all fits shows no fold, and keeps no room for it');
           });
 
           await row(`${mode}, at ${key}: the long tab card cuts its name and blocked reason at two lines, with an ellipsis, under one fold`, note => {
@@ -292,30 +438,45 @@ async function main() {
               assert.ok(c.scroll > c.client + 1, `${field} has more than it shows`);
             }
             assert.equal(longTabFolds, 1, 'one fold on the tab card');
-            assert.equal(cards.find(c => c.key === LONG_TAB).fold, 'visible', 'the fold shows while text is cut');
+            assert.equal(cards.find(c => c.key === LONG_TAB).fold, 'block', 'the fold shows while text is cut');
             assert.equal(cards.find(c => c.key === 'tab:tab-short').fold, null, 'a short tab card has no fold');
-          });
-
-          await row(`${mode}, at ${key}: the Boards view lays its boards in a grid of at least three columns across the bar's content width`, note => {
-            const { content, threads } = m.boards;
-            assert.ok(threads.length >= BOARDS, 'setup: every board is on the view');
-            const firstRow = threads.filter(t => Math.abs(t.top - threads[0].top) <= 0.5);
-            note(`${firstRow.length} across: ${firstRow.map(t => `${px(t.left)}+${px(t.width)}`).join(', ')}; content ${px(content.left)} + ${px(content.width)}`);
-            assert.ok(firstRow.length >= 3, 'at least three columns');
-            assert.ok(threads.every(t => Math.abs(t.width - threads[0].width) <= 0.5), 'one card width');
-            assert.ok(Math.abs(firstRow[0].left - content.left) <= 0.5, 'the first starts where the bar\'s content does');
-            const last = firstRow[firstRow.length - 1];
-            assert.ok(Math.abs(last.left + last.width - (content.left + content.width)) <= 0.5, 'the last ends where it does');
           });
         }
 
-        for (const [theme, m] of Object.entries(narrow)) {
-          await row(`${mode}, at ${NARROW} ${theme}: the Boards view is a list, one board a line across the bar's content width`, note => {
-            const { content, threads } = m;
-            note(`${threads.length} boards at ${[...new Set(threads.map(t => `${px(t.left)}+${px(t.width)}`))].join(', ')}; content ${px(content.left)} + ${px(content.width)}`);
-            assert.ok(threads.length >= BOARDS, 'setup: every board is on the view');
-            for (let i = 1; i < threads.length; i++) assert.ok(threads[i].top >= threads[i - 1].top + threads[i - 1].height, 'one a line');
-            assert.ok(threads.every(t => Math.abs(t.left - content.left) <= 0.5 && Math.abs(t.width - content.width) <= 0.5), 'each the content\'s width');
+        const boardsAt = [
+          ...Object.entries(at).map(([key, m]) => [key, m.boards]),
+          ...Object.entries(narrow).map(([theme, m]) => [`${NARROW} ${theme}`, m]),
+        ];
+        for (const [key, m] of boardsAt) {
+          await row(`${mode}, at ${key}: the Boards view is one list in one panel under the filter, a ${LINE}px line a board, Waiting on you over Earlier, each header with its count`, note => {
+            const { content, boardList: b } = m;
+            assert.ok(b, 'setup: the Boards view has its list');
+            assert.equal(b.panels, 1, 'one panel');
+            note(`list ${px(b.list.left)} + ${px(b.list.width)} at ${px(b.list.top)}; filter ends at ${px(b.form.top + b.form.height)}; content ${px(content.left)} + ${px(content.width)}`);
+            assert.ok(b.form.top + b.form.height <= b.list.top, 'the filter sits above the list');
+            assert.ok(Math.abs(b.list.left - content.left) <= 0.5 && Math.abs(b.list.width - content.width) <= 0.5, 'the list runs the bar\'s content width');
+            note(b.groups.map(g => `${g.label} ${g.count}: ${g.lines.length} lines`).join('; '));
+            assert.deepEqual(b.groups.map(g => [g.key, g.label]), [['waiting', 'Waiting on you'], ['earlier', 'Earlier']]);
+            const lines = b.groups.flatMap(g => g.lines);
+            assert.ok(lines.length >= BOARDS + 2, 'setup: every board is on the view');
+            for (const g of b.groups) {
+              assert.equal(g.count, g.lines.length, `${g.label} counts its own lines`);
+              assert.ok(g.lines.every(l => l.live === (g.key === 'waiting' ? 'true' : 'false')), `${g.label} holds exactly the boards ${g.key === 'waiting' ? 'with' : 'without'} a round waiting`);
+              assert.ok(g.head.top + g.head.height <= g.lines[0].top + 0.5, `${g.label}'s header sits above its boards`);
+            }
+            const lastWaiting = b.groups[0].lines[b.groups[0].lines.length - 1];
+            assert.ok(lastWaiting.top + lastWaiting.height <= b.groups[1].head.top + 0.5, 'Earlier starts under the last waiting board');
+            const heights = [...new Set(lines.map(l => px(l.height)))];
+            note(`line heights ${heights.join(', ')}`);
+            assert.ok(lines.every(l => Math.abs(l.height - LINE) <= 1), `every line ${LINE}px tall, within 1px`);
+            for (let i = 1; i < lines.length; i++) assert.ok(lines[i].top >= lines[i - 1].top + lines[i - 1].height - 0.5, 'one board a line');
+            assert.ok(lines.every(l => l.left >= b.list.left && l.left + l.width <= b.list.left + b.list.width + 0.5), 'every line inside the one panel');
+            const t = b.longTitle;
+            assert.ok(t, 'setup: the long-titled board is on the view');
+            note(`long title: ${px(t.client)} shown of ${px(t.scroll)}, ${px(t.height)} tall at line-height ${px(t.lineHeight)}`);
+            assert.deepEqual([t.whiteSpace, t.textOverflow], ['nowrap', 'ellipsis'], 'cut on one line with an ellipsis');
+            assert.ok(t.scroll > t.client + 1, 'the title has more than it shows');
+            assert.ok(t.height <= t.lineHeight + 1, 'one line tall');
           });
         }
 
@@ -337,16 +498,19 @@ async function main() {
 
     await withChrome({ tag: 'cb-missions-stop' }, async ({ send, onEvent }) => {
       const cookie = sessionToken(daemon.secret);
-      await row('Stop, double-pressed with Cmd held, sends one stop order with no question and says so on the card', async note => {
+      await row('Stop, double-pressed with Cmd held, sends one stop order with no question, says so on the card, and opens no board', async note => {
         const tab = await openTab(send, onEvent, `${origin}/`, cookie, tabAt(1440, 'light'));
         try {
           const card = 'article.mission-card[data-mission-key="BANK_EXPORT"]';
+          assert.ok(await tab.evalPage(`!!document.querySelector('${card} a.mission-link')`), 'setup: the card opens a board');
+          await tab.evalPage(`window.__opened = []; window.open = function (u) { window.__opened.push(u); return null; }`);
           await press(tab, `${card} button.mission-stop`, 4, 2);
           const said = await tab.until(`(document.querySelector('${card} p.mission-order') || {}).textContent`, 'the order line');
           note(said);
           assert.equal(said, 'Stop asked: waiting for the Master Chief to relay it');
           assert.equal(await ordersSent(tab, 'BANK_EXPORT'), 1, 'one order left the tab for the two presses');
           assert.equal(await tab.evalPage(`!!document.querySelector('${card} div.mission-confirm')`), false, 'no question');
+          assert.deepEqual(await tab.evalPage('window.__opened'), [], 'the second press opens no board');
           const orders = (await getJson(`${origin}/api/mission/BANK_EXPORT`, daemon.secret)).orders;
           note(`orders: ${orders.map(o => o.kind).join(', ')}`);
           assert.deepEqual(orders.map(o => o.kind), ['stop']);
@@ -399,6 +563,199 @@ async function main() {
         }
       }
 
+      await row('after Keep and after Escape on the Stop question, the focus is on a visible Stop, which hides again once the focus leaves; the Tab after a card\'s link reaches Stop', async note => {
+        const tab = await openTab(send, onEvent, `${origin}/`, cookie, tabAt(1440, 'light'));
+        const card = 'article.mission-card[data-mission-key="FILETYPE_FOLLOWUP"]';
+        const away = () => tab.sp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 2, y: HEIGHT - 2, button: 'none', modifiers: 0, clickCount: 0 });
+        const focusOnStop = `(function () {
+          var stop = document.querySelector('${card} button.mission-stop');
+          return { on: document.activeElement === stop, seen: getComputedStyle(stop).visibility, hovered: !!document.querySelector('${card}:hover') };
+        })()`;
+        try {
+          for (const [how, shut] of [['Keep', async () => { await pressKey(tab, 'Tab'); await pressKey(tab, 'Enter'); }], ['Escape', () => pressKey(tab, 'Escape')]]) {
+            await press(tab, `${card} button.mission-stop`);
+            await tab.until(`document.activeElement === document.querySelector('${card} button.mission-stop-confirm')`, `the Stop question before ${how}`);
+            await away();
+            await shut();
+            await tab.until(`!document.querySelector('${card} div.mission-confirm')`, `${how} shutting the question`);
+            const after = await tab.evalPage(focusOnStop);
+            note(`${how}: focus on Stop ${after.on}, Stop ${after.seen}, card hovered ${after.hovered}`);
+            assert.deepEqual(after, { on: true, seen: 'visible', hovered: false }, `${how} hands the focus to a visible Stop`);
+            await tab.evalPage('document.activeElement.blur()');
+            assert.equal((await tab.evalPage(focusOnStop)).seen, 'hidden', `${how}: Stop hides once the focus leaves`);
+          }
+          await tab.evalPage(`document.querySelector('${card} a.mission-link').focus()`);
+          await pressKey(tab, 'Tab');
+          const next = await tab.evalPage(focusOnStop);
+          note(`Tab after the link: focus on Stop ${next.on}, Stop ${next.seen}`);
+          assert.deepEqual([next.on, next.seen], [true, 'visible']);
+        } finally {
+          await tab.close();
+        }
+      });
+
+      await row('a repaint that replaces a card keeps the focus on its link, or on its Stop, still visible', async note => {
+        const tab = await openTab(send, onEvent, `${origin}/`, cookie, tabAt(1440, 'light'));
+        const card = 'article.mission-card[data-mission-key="FILETYPE_FOLLOWUP"]';
+        try {
+          for (const [what, sel, n] of [['link', 'a.mission-link', 1], ['Stop', 'button.mission-stop', 2]]) {
+            await tab.evalPage(`document.querySelector('${card} a.mission-link').focus()`);
+            if (sel === 'button.mission-stop') await pressKey(tab, 'Tab');
+            const was = await tab.evalPage(`document.activeElement === document.querySelector('${card} ${sel}')`);
+            assert.equal(was, true, `setup: the focus is on the card's ${what} before the repaint`);
+            const summary = `Wave 2 of 3, 4 owners, repaint ${n}`;
+            await post('/api/mission/FILETYPE_FOLLOWUP', { phase: 'direct', state: 'working', summary });
+            await tab.until(`(document.querySelector('${card} p.mission-summary') || {}).textContent === ${JSON.stringify(summary)}`, `the repaint (${what})`);
+            const after = await tab.evalPage(`(function () {
+              var el = document.querySelector('${card} ${sel}');
+              return { on: document.activeElement === el, seen: getComputedStyle(el).visibility };
+            })()`);
+            note(`${what}: focus kept ${after.on}, ${after.seen}`);
+            assert.deepEqual(after, { on: true, seen: 'visible' });
+          }
+        } finally {
+          await tab.close();
+        }
+      });
+
+      await row('on a screen with no hover, Stop shows at rest over the age, and a press on it asks rather than opening the board', async note => {
+        const tab = await openTab(send, onEvent, `${origin}/`, cookie, tabAt(1440, 'light'));
+        const card = 'article.mission-card[data-mission-key="FILETYPE_FOLLOWUP"]';
+        try {
+          // Chrome's media emulation takes no 'hover' feature; a touch screen's does.
+          await tab.sp('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 });
+          assert.equal(await tab.evalPage(`matchMedia('(hover: none)').matches`), true, 'setup: the page reads no hover');
+          const seen = await tab.evalPage(`[].slice.call(document.querySelectorAll('article.mission-card')).filter(function (c) { return c.querySelector('button.mission-stop'); }).map(function (c) {
+            var age = c.querySelector('.mission-age');
+            return c.getAttribute('data-mission-key') + ' ' + getComputedStyle(c.querySelector('button.mission-stop')).visibility + ' ' + (age ? getComputedStyle(age).visibility : '-');
+          })`);
+          note(seen.join(', '));
+          assert.deepEqual(seen.map(line => line.split(' ').slice(1).join(' ')).filter(v => v !== 'visible hidden' && v !== 'visible -'), []);
+          await press(tab, `${card} button.mission-stop`);
+          await tab.until(`!!document.querySelector('${card} div.mission-confirm')`, 'the Stop question');
+          assert.equal(await tab.evalPage('location.pathname'), '/', 'still on Missions');
+          await press(tab, `${card} button.mission-stop-cancel`);
+        } finally {
+          await tab.close();
+        }
+      });
+
+      await row('with Comment on, Enter on a card\'s link opens its note and stays on Missions', async note => {
+        const tab = await openTab(send, onEvent, `${origin}/`, cookie, tabAt(1440, 'light'));
+        const card = 'article.mission-card[data-mission-key="MODEL_MAP"]';
+        try {
+          await press(tab, 'button#comment-mode-toggle');
+          await tab.until(`document.body.classList.contains('comment-mode')`, 'Comment on');
+          await tab.evalPage(`document.querySelector('${card} a.mission-link').focus()`);
+          await pressKey(tab, 'Enter');
+          await tab.until(`document.activeElement === document.querySelector('${card} textarea.mission-comment-text')`, 'the note, focused');
+          const landed = await landedAt(tab);
+          note(`note open, on ${landed}`);
+          assert.equal(landed, '/');
+        } finally {
+          await tab.close();
+        }
+      });
+
+      await row('a real hover on a card, with Stop or without, a link or not, shows its key line in full as a tooltip: a mission\'s exact time, a tab\'s login and folder; on a linked card the press under the age, login and folder is the link\'s own', async note => {
+        const tab = await openTab(send, onEvent, `${origin}/`, cookie, tabAt(1440, 'light'));
+        // Read now: rows before this one move some missions on.
+        const fresh = await getJson(`${origin}/api/missions`, daemon.secret);
+        const tabs = Object.fromEntries(fresh.tabs.map(t => [`tab:${t.id}`, t]));
+        const byKey = Object.fromEntries(fresh.missions.map(m => [m.key, m]));
+        // [card, the span hovered, whether the card offers Stop and a link, the lines its tooltip must hold]
+        const cases = [
+          ['FILETYPE_FOLLOWUP', '.mission-key', 'Stop, link', [`Updated ${byKey.FILETYPE_FOLLOWUP.updatedAt}`]],
+          ['ESTATE_GOLDENS', '.mission-age', 'link', [`Updated ${byKey.ESTATE_GOLDENS.updatedAt}`]],
+          ['SCHEDULED', '.mission-age', 'none', [`Updated ${byKey.SCHEDULED.updatedAt}`]],
+          ['ANNOUNCEMENTS', '.mission-key', 'Stop', [`Updated ${byKey.ANNOUNCEMENTS.updatedAt}`]],
+          [ASKING_TAB, '.tab-login', 'Stop, link', [`Login ${tabs[ASKING_TAB].login}`, `Folder ${tabs[ASKING_TAB].cwd}`]],
+          [ASKING_TAB, '.tab-folder', 'Stop, link', [`Login ${tabs[ASKING_TAB].login}`, `Folder ${tabs[ASKING_TAB].cwd}`]],
+          ['tab:tab-short', '.tab-folder', 'Stop', [`Login ${tabs['tab:tab-short'].login}`, `Folder ${tabs['tab:tab-short'].cwd}`]],
+        ];
+        try {
+          for (const [key, span, offers, lines] of cases) {
+            const card = `article.mission-card[data-mission-key="${key}"]`;
+            const at = await tab.evalPage(`(function () {
+              var c = document.querySelector('${card}');
+              c.scrollIntoView({ block: 'center' });
+              var r = c.querySelector('${span}').getBoundingClientRect();
+              return { x: r.left + Math.min(6, r.width / 2), y: r.top + r.height / 2,
+                offers: [c.querySelector('button.mission-stop') && 'Stop', c.querySelector('a.mission-link') && 'link'].filter(Boolean).join(', ') || 'none' };
+            })()`);
+            assert.equal(at.offers, offers, `setup: ${key} offers ${offers}`);
+            await tab.sp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: at.x, y: at.y, button: 'none', modifiers: 0, clickCount: 0 });
+            const seen = await tab.evalPage(`(function () {
+              var c = document.querySelector('${card}');
+              var hit = document.elementFromPoint(${at.x}, ${at.y});
+              var tipped = hit && hit.closest('[title]');
+              var age = c.querySelector('.mission-age');
+              return { hovered: c.matches(':hover'), tip: tipped && c.contains(tipped) ? tipped.getAttribute('title') : null,
+                onLink: !!(hit && hit.closest('a.mission-link')), age: age ? getComputedStyle(age).visibility : null };
+            })()`);
+            note(`${key} ${span} (${offers}): hovered ${seen.hovered}, age ${seen.age}, on the link ${seen.onLink}, tooltip ${JSON.stringify(seen.tip)}`);
+            assert.equal(seen.hovered, true, `${key}: the card is hovered`);
+            if (offers.startsWith('Stop') && seen.age !== null) assert.equal(seen.age, 'hidden', `${key}: Stop has taken the age's place`);
+            assert.ok(seen.tip && lines.every(l => seen.tip.split('\n').includes(l)), `${key}: the tooltip holds ${lines.join(' and ')}`);
+            assert.equal(seen.onLink, offers.endsWith('link'), `${key}: a press there is the link's own exactly where the card has one`);
+          }
+          // The release that clicks may answer from a page already navigating away.
+          await press(tab, `article.mission-card[data-mission-key="${ASKING_TAB}"] .tab-folder`).catch(err => {
+            if (!/Not attached to an active page/.test(err.message)) throw err;
+          });
+          const landed = await landedAt(tab);
+          note(`a press on the folder landed on ${landed}`);
+          assert.equal(landed, target[ASKING_TAB]);
+        } finally {
+          await tab.close();
+        }
+      });
+
+      await row('with Comment on, a middle press on a card opens its note and no board', async note => {
+        const tab = await openTab(send, onEvent, `${origin}/`, cookie, tabAt(1440, 'light'));
+        const card = 'article.mission-card[data-mission-key="MODEL_MAP"]';
+        const boardTabs = async () => (await send('Target.getTargets')).targetInfos.filter(t => t.type === 'page' && /\/b\//.test(t.url)).length;
+        try {
+          await press(tab, 'button#comment-mode-toggle');
+          await tab.until(`document.body.classList.contains('comment-mode')`, 'Comment on');
+          const before = await boardTabs();
+          const at = await tab.evalPage(`(function () {
+            var el = document.querySelector('${card} p.mission-summary') || document.querySelector('${card} p.mission-waiting');
+            el.scrollIntoView({ block: 'center' });
+            var r = el.getBoundingClientRect();
+            var hit = document.elementFromPoint(r.left + 4, r.top + r.height / 2);
+            return { x: r.left + 4, y: r.top + r.height / 2, onLink: !!(hit && hit.closest('a.mission-link')) };
+          })()`);
+          assert.equal(at.onLink, true, 'setup: the press lands on the card\'s link');
+          await tab.sp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: at.x, y: at.y, button: 'none', clickCount: 0 });
+          for (const type of ['mousePressed', 'mouseReleased']) {
+            await tab.sp('Input.dispatchMouseEvent', { type, x: at.x, y: at.y, button: 'middle', clickCount: 1 });
+          }
+          await tab.until(`!!document.querySelector('${card} textarea.mission-comment-text')`, 'the note');
+          await sleep(1000);
+          const after = await boardTabs();
+          note(`note open; board tabs ${before} before, ${after} after; on ${await tab.evalPage('location.pathname')}`);
+          assert.equal(after, before, 'no board opened in a new tab');
+          assert.equal(await tab.evalPage('location.pathname'), '/');
+        } finally {
+          await tab.close();
+        }
+      });
+
+      await row('a click on a PR chip that is not a web link opens nothing', async note => {
+        const tab = await openTab(send, onEvent, `${origin}/`, cookie, tabAt(1440, 'light'));
+        const chip = 'article.mission-card[data-mission-key="FILETYPE_FOLLOWUP"] span.mission-pr';
+        try {
+          assert.equal(await tab.evalPage(`document.querySelector('${chip}').textContent`), '○admin #77', 'setup: the chip is not a link');
+          await press(tab, chip);
+          const landed = await landedAt(tab);
+          note(`on ${landed}`);
+          assert.equal(landed, '/');
+        } finally {
+          await tab.close();
+        }
+      });
+
       await row('Stop, pressed with a mouse, asks once, then sends the order and says so on the card', async note => {
         const tab = await openTab(send, onEvent, `${origin}/`, cookie, tabAt(1440, 'light'));
         try {
@@ -421,6 +778,69 @@ async function main() {
           await tab.close();
         }
       });
+
+      for (const width of WIDTHS) {
+        for (const theme of THEMES) {
+          await row(`a click on a card's body, off its title, opens its latest board, at ${width}px ${theme}`, async note => {
+            const tab = await openTab(send, onEvent, `${origin}/`, cookie, tabAt(width, theme));
+            try {
+              // The release that clicks may answer from a page already navigating away.
+              await press(tab, 'article.mission-card[data-mission-key="FILETYPE_FOLLOWUP"] p.mission-summary').catch(err => {
+                if (!/Not attached to an active page/.test(err.message)) throw err;
+              });
+              const landed = await landedAt(tab);
+              note(`landed on ${landed}`);
+              assert.equal(landed, target.FILETYPE_FOLLOWUP);
+            } finally {
+              await tab.close();
+            }
+          });
+
+          await row(`Enter on a card's focused link opens the round waiting on the PM, not its later board, at ${width}px ${theme}`, async note => {
+            const tab = await openTab(send, onEvent, `${origin}/`, cookie, tabAt(width, theme));
+            try {
+              await tab.evalPage(`document.querySelector('article.mission-card[data-mission-key="MODEL_MAP"] a.mission-link').focus()`);
+              await pressKey(tab, 'Enter');
+              const landed = await landedAt(tab);
+              note(`landed on ${landed}`);
+              assert.equal(landed, target.MODEL_MAP);
+            } finally {
+              await tab.close();
+            }
+          });
+
+          await row(`Stop shows on a card's keyboard focus, takes the next Tab, and shows on its hover, at ${width}px ${theme}`, async note => {
+            const tab = await openTab(send, onEvent, `${origin}/`, cookie, tabAt(width, theme));
+            const seen = sel => tab.evalPage(`getComputedStyle(document.querySelector('${sel} button.mission-stop')).visibility`);
+            try {
+              const focused = 'article.mission-card[data-mission-key="tab:tab-short"]';
+              const hovered = `article.mission-card[data-mission-key="${TITLE_ONLY}"]`;
+              assert.deepEqual([await seen(focused), await seen(hovered)], ['hidden', 'hidden'], 'setup: both at rest');
+              await tab.evalPage(`document.querySelector('${focused}').focus()`);
+              const onFocus = await seen(focused);
+              await pressKey(tab, 'Tab');
+              const next = await tab.evalPage(`document.activeElement === document.querySelector('${focused} button.mission-stop')`);
+              note(`focus: ${onFocus}, the next Tab on Stop: ${next}`);
+              assert.equal(onFocus, 'visible');
+              assert.equal(next, true);
+              await tab.evalPage('document.activeElement.blur()');
+              const at = await tab.evalPage(`(function () {
+                var el = document.querySelector('${hovered} b.mission-title');
+                el.scrollIntoView({ block: 'center' });
+                var r = el.getBoundingClientRect();
+                return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+              })()`);
+              assert.equal(await seen(hovered), 'hidden', 'setup: the mouse is not on it yet');
+              await tab.sp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: at.x, y: at.y, button: 'none', modifiers: 0, clickCount: 0 });
+              const onHover = await seen(hovered);
+              note(`hover: ${onHover}`);
+              assert.equal(onHover, 'visible');
+            } finally {
+              await tab.close();
+            }
+          });
+        }
+      }
 
       await row('Show the rest opens the long card\'s every field whole, grows only that card, and stays open across a repaint', async note => {
         const tab = await openTab(send, onEvent, `${origin}/`, cookie, tabAt(1440, 'light'));
@@ -456,12 +876,45 @@ async function main() {
 
           const next = longText(280, 'later');
           await post(`/api/mission/${LONG}`, { phase: 'direct', state: 'waiting', next });
-          await tab.until(`(document.querySelector('${card} dd.mission-next') || {}).textContent === ${JSON.stringify(next)}`, 'the repaint');
+          await tab.until(`(document.querySelector('${card} p.mission-next') || {}).textContent === ${JSON.stringify('Next' + next)}`, 'the repaint');
           assert.equal(await tab.evalPage(`!!document.querySelector('${card} details.mission-more[open]')`), true, 'still open after the repaint');
         } finally {
           await tab.close();
         }
       });
+    });
+
+    await withChrome({ tag: 'cb-missions-boards' }, async ({ send, onEvent }) => {
+      const cookie = sessionToken(daemon.secret);
+      for (const width of [NARROW, ...WIDTHS]) {
+        await row(`at ${width}px: a press anywhere on a board's line opens that board, its far end included`, async note => {
+          const tab = await openTab(send, onEvent, `${origin}/boards`, cookie, { width, height: HEIGHT, theme: 'dark', expr: '1' });
+          try {
+            const target = await tab.evalPage(`(function () {
+              var a = [].slice.call(document.querySelectorAll('a.thread-item')).filter(function (l) {
+                return l.querySelector('div.thread-title').textContent === 'Session 3';
+              })[0];
+              a.scrollIntoView({ block: 'center' });
+              var r = a.getBoundingClientRect();
+              return { href: a.getAttribute('href'), x: r.right - 6, y: r.top + r.height / 2 };
+            })()`);
+            note(`press at ${px(target.x)},${px(target.y)}, the line's last 6px`);
+            await tab.sp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: target.x, y: target.y, button: 'left', clickCount: 0 });
+            for (const type of ['mousePressed', 'mouseReleased']) {
+              await tab.sp('Input.dispatchMouseEvent', { type, x: target.x, y: target.y, button: 'left', clickCount: 1 });
+            }
+            let at = null;
+            for (let i = 0; i < 50 && at !== target.href; i++) {
+              await sleep(100);
+              at = await tab.evalPage('location.pathname + location.hash').catch(() => null);
+            }
+            note(`landed on ${at}`);
+            assert.equal(at, target.href, 'the board the line names opened');
+          } finally {
+            await tab.close();
+          }
+        });
+      }
     });
   } finally {
     await daemon.stop();

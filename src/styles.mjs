@@ -6,8 +6,12 @@
 // highlighting cannot be done in one accent -- ADR.md entry 63 states that this
 // discipline stops describing that one surface, and holds everywhere else. Dark by default; a light palette (designed against the accent, not a
 // mechanical inversion) takes over under `prefers-color-scheme: light` — see the
-// DARK/LIGHT objects below. No web fonts and no external assets — the standalone
-// `file:` archive has to look identical with the network off (see src/render.mjs).
+// DARK/LIGHT objects below. No external assets -- the standalone `file:` archive has to
+// look identical with the network off (see src/render.mjs). The one web font, Inter, is
+// therefore not fetched but inlined: its Latin woff2 files (src/vendor/inter/, OFL, its
+// licence beside them) ride in this stylesheet as `data:` URLs, under the `font-src data:`
+// both page policies already allow. Inter heads the `body` stack and today's system stack
+// follows it, so a face that fails to load still reads like the page did before it.
 //
 // Everything is driven by the tokens in `:root`. Rules below reference tokens, never
 // a raw hex or rgba literal, so a palette change is a one-block edit (enforced by
@@ -15,7 +19,27 @@
 // test/check-pure.mjs also asserts every class ruled on here is a class the markup
 // actually emits — a rule for a class nothing renders is a failure, not dead code.
 
+import { readFileSync } from 'node:fs';
 import { MERMAID_NODE_SELECTOR } from './anchor.mjs';
+
+/** The Inter weights the stylesheet carries. The rules ask for 400 to 700, 550 and 650
+ * among them; CSS weight matching takes 550 to the 600 face and 650 to the 700 one, so
+ * four static faces cover every weight used without a variable font's extra bytes. */
+export const INTER_WEIGHTS = [400, 500, 600, 700];
+
+/** One '@font-face' per weight, each face's woff2 inlined as a base64 'data:' URL so a
+ * page served by the daemon and a saved copy opened from disk load it the same way:
+ * from the stylesheet's own bytes, with no request. */
+const interFaces = INTER_WEIGHTS.map(weight => {
+  const woff2 = readFileSync(new URL(`./vendor/inter/inter-latin-${weight}-normal.woff2`, import.meta.url));
+  return `@font-face {
+  font-family: Inter;
+  font-style: normal;
+  font-weight: ${weight};
+  font-display: swap;
+  src: url(data:font/woff2;base64,${woff2.toString('base64')}) format("woff2");
+}`;
+}).join('\n');
 
 /** Scope the shared mermaid-node selector list under a prefix. The selector is two
  * alternatives (mermaid 11's prefixed ids and mermaid 10's bare ones), so it cannot
@@ -126,7 +150,6 @@ const DARK = {
   '--warning-soft': 'rgba(229, 176, 77, 0.12)',
   '--warning-ink': '#f0cd8c',
   '--warning-border': 'rgba(229, 176, 77, 0.35)',
-  '--warning-line': 'rgba(229, 176, 77, 0.4)',
   '--warning-border-strong': 'rgba(229, 176, 77, 0.45)',
   '--warning-ring': 'rgba(229, 176, 77, 0.5)',
   '--warning-fade': 'rgba(229, 176, 77, 0)',
@@ -214,7 +237,7 @@ const LIGHT = {
   // color composited under its own *-soft background) -- with room to spare,
   // not sitting on the boundary: light --warning on --warning-soft measures
   // 4.96:1, light --good on --history-bg 5.54:1, light --critical on
-  // --critical-soft 5.07:1. warning-soft/border/line/border-strong/ring/fade
+  // --critical-soft 5.07:1. warning-soft/border/border-strong/ring/fade
   // and critical-soft/border share --warning's/--critical's own RGB triple at
   // varying alpha, same convention as DARK above; --warning-ink is untouched
   // (still clears 5.58:1 on the new --warning-soft).
@@ -232,7 +255,6 @@ const LIGHT = {
   '--warning-soft': 'rgba(128, 83, 0, 0.12)',
   '--warning-ink': '#7a4a00',
   '--warning-border': 'rgba(128, 83, 0, 0.35)',
-  '--warning-line': 'rgba(128, 83, 0, 0.4)',
   '--warning-border-strong': 'rgba(128, 83, 0, 0.45)',
   '--warning-ring': 'rgba(128, 83, 0, 0.5)',
   '--warning-fade': 'rgba(128, 83, 0, 0)',
@@ -273,7 +295,7 @@ export const palettes = { dark: DARK, light: LIGHT };
 // hierarchy the mark carries. rx 9 rather than 8 to match the heavier bars.
 //
 // --warning is also how the product says "waiting on you" (.live-dot,
-// .rounds-left-badge, .thread-item.live), but the pending badge in src/ui.mjs
+// .rounds-left-badge, the "Waiting on you" group dot), but the pending badge in src/ui.mjs
 // does not spend it a second way: the tile stays this same constant amber in
 // every state, and ink mass is the signal instead of hue -- three hairline
 // rows here already read as "some ink"; a pending round replaces them with a
@@ -316,6 +338,8 @@ ${Object.entries(palette).map(([name, value]) => `  ${name}: ${value};`).join('\
 }`;
 
 export const styles = `
+${interFaces}
+
 ${tokenBlock(':root', DARK, 'dark')}
 
 @media (prefers-color-scheme: light) {
@@ -330,6 +354,9 @@ ${tokenBlock(':root[data-theme="light"]', LIGHT, 'light')}
 
   --r-sm: 6px;
   --r-md: 10px;
+  /* a round page's card, and the boxes inside it (an option, the context
+     panel): Linear's tighter corner, at every width */
+  --r-card: 8px;
   --r-lg: 14px;
   --r-pill: 999px;
 
@@ -362,7 +389,7 @@ body {
   min-height: 100vh;
   background: var(--bg);
   color: var(--ink);
-  font: 14px/1.6 "Inter var", Inter, -apple-system, BlinkMacSystemFont, "SF Pro Text", ui-sans-serif, system-ui, sans-serif;
+  font: 14px/1.6 Inter, -apple-system, BlinkMacSystemFont, "SF Pro Text", ui-sans-serif, system-ui, sans-serif;
   font-feature-settings: "cv05" 1, "ss01" 1;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
@@ -409,12 +436,9 @@ svg { flex: none; }
    matching the expression the Tray clears the dock with.
 
    The shell is as wide as the window, up to 2560px, the widest common display
-   in CSS px; its header runs that wide. The cards under it stop at 1700px on
-   the title's left edge (the width section near the end of this file), wide
-   enough for a mock to read at a laptop screen's size: the shell used to stop
-   at 1120px, which drew a wide screen's mocks smaller than the screens they
-   stood for. Prose does not follow the cards out: '--prose' (the same
-   section) holds every line of it to a reading measure. */
+   in CSS px; its header runs that wide. From a 1440px window the cards under
+   it, the board's title and its meta line sit in one 1100px column centred on
+   the window (the width section near the end of this file). */
 .board-shell { position: relative; z-index: 1; max-width: 2560px; margin: 0 auto; padding: 0 var(--space-5); }
 
 /* the board's identity stays on screen: a long board scrolls for a while, and
@@ -432,7 +456,7 @@ svg { flex: none; }
      none. One or the other; the fade is the one that survives the scroll. */
 }
 .board-head-title { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
-.board-head h1 { font-size: 20px; margin: 0; font-weight: 650; letter-spacing: -0.015em; }
+.board-head h1 { font-size: 20px; margin: 0; font-weight: 600; letter-spacing: -0.01em; }
 .board-head .meta { color: var(--muted); font-size: 11.5px; font-family: ui-monospace, "SF Mono", Menlo, monospace; margin-top: 2px; }
 /* the one way back to the thread
    index. Absent under body.readonly -- a standalone file://
@@ -582,7 +606,7 @@ body.sent-page .comment-btn { display: none; }
 
    scroll-margin-top clears the sticky .board-head when a flip scrolls the
    arriving page's top back under it. */
-.round { display: none; flex-direction: column; gap: var(--space-4); scroll-margin-top: var(--head-clear); }
+.round { display: none; flex-direction: column; gap: var(--space-2); scroll-margin-top: var(--head-clear); }
 .round.round-current { display: flex; }
 .round-label {
   align-self: flex-start;
@@ -610,12 +634,16 @@ body.sent-page .comment-btn { display: none; }
   color: var(--muted); padding: 0 var(--space-2);
 }
 
+/* A round page's card in Linear's density, at every width: 13px text, 14px by
+   16px of padding, 8px corners, 8px between cards (the '.round' gap above).
+   The home page draws no '.block', so none of it reaches Missions or Boards. */
 .block {
   position: relative;
+  font-size: 13px;
   background: var(--panel);
   border: 1px solid var(--hairline);
-  border-radius: var(--r-lg);
-  padding: var(--space-4) var(--space-5) var(--space-5);
+  border-radius: var(--r-card);
+  padding: 14px var(--space-4);
   box-shadow: var(--shadow-1);
   transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
 }
@@ -625,9 +653,9 @@ body.sent-page .comment-btn { display: none; }
    it sits at the card's own right edge. No block names its own type. A block
    nested in a compare side, a question's context or a variant option takes the
    same head on a smaller scale (below). */
-.card-head { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-3); min-width: 0; }
+.card-head { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-2); min-width: 0; }
 .card-head > .card-title { flex: 1 1 auto; min-width: 0; margin: 0; color: var(--ink);
-  font-size: 16px; font-weight: 650; line-height: 1.4; letter-spacing: -0.01em; }
+  font-size: 13px; font-weight: 600; line-height: 1.4; letter-spacing: 0; }
 .card-head > :first-child:not(.card-title), .card-head > .card-title + * { margin-left: auto; }
 .card-status { flex: none; align-self: flex-start; display: inline-flex; align-items: center;
   font-size: 11.5px; font-weight: 600; line-height: 1.3; white-space: nowrap;
@@ -651,13 +679,15 @@ body.sent-page .comment-btn { display: none; }
 .card-details > .md-content { margin-top: var(--space-2); }
 .card-details > .md-content > :first-child { margin-top: 0; }
 .compare-side .card-head, .context-item .card-head, .variant-card .card-head { margin-bottom: var(--space-2); }
-.compare-side .card-title, .context-item .card-title, .variant-card .card-title { font-size: 13.5px; font-weight: 600; }
+.compare-side .card-title, .context-item .card-title, .variant-card .card-title { font-size: 12.5px; font-weight: 600; }
 
 .md-content h1, .md-content h2, .md-content h3, .md-content h4 { font-weight: 650; line-height: 1.3; letter-spacing: -0.01em; margin: 1.1em 0 0.5em; }
 .md-content > :first-child { margin-top: 0; }
-.md-content h1 { font-size: 19px; }
-.md-content h2 { font-size: 16.5px; }
-.md-content h3, .md-content h4 { font-size: 14px; }
+/* a text card ends on its padding, not on its last paragraph's margin too */
+.markdown-block > .md-content > :last-child { margin-bottom: 0; }
+.md-content h1 { font-size: 16px; }
+.md-content h2 { font-size: 14.5px; }
+.md-content h3, .md-content h4 { font-size: 13px; }
 .md-content p { margin: 0.65em 0; color: var(--ink-2); }
 .md-content ul, .md-content ol { padding-left: 1.35em; color: var(--ink-2); }
 .md-content li { margin: 0.3em 0; }
@@ -754,7 +784,7 @@ body.sent-page .comment-btn { display: none; }
    own gap; each brings its own typography and none brings a card or a kind
    label. */
 .question-context { min-width: 0; background: var(--panel-2); border: 1px solid var(--hairline);
-  border-radius: var(--r-md); padding: var(--space-3) var(--space-4);
+  border-radius: var(--r-card); padding: var(--space-3) var(--space-4);
   display: flex; flex-direction: column; gap: var(--space-3); }
 /* The prose counterpart to '.question-context' above, for a question that
    carries a rendered stage (ADR.md entry 26): no background, no border, no
@@ -819,7 +849,7 @@ body.sent-page .comment-btn { display: none; }
    second control wearing it would be counted as a lens control that is not
    there. */
 .fold-toggle { margin-top: 6px; }
-.question-prompt { font-size: 16px; font-weight: 600; line-height: 1.4; letter-spacing: -0.01em; margin: 0 0 var(--space-3); }
+.question-prompt { font-size: 13px; font-weight: 600; line-height: 1.4; margin: 0 0 var(--space-3); }
 /* A widget that takes several picks says so, in plain words, under the prompt. */
 .question-picks { margin: calc(-1 * var(--space-2)) 0 var(--space-3); font-size: 12.5px; color: var(--muted); }
 
@@ -827,15 +857,15 @@ body.sent-page .comment-btn { display: none; }
 .card-choice {
   display: block; width: 100%; min-height: 44px; text-align: left;
   background: var(--panel-2); border: 1px solid var(--hairline); color: var(--ink);
-  border-radius: var(--r-md); padding: 11px 14px; font: inherit;
+  border-radius: var(--r-card); padding: 10px 12px; font: inherit;
   transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease), transform var(--dur) var(--ease);
 }
 .card-choice:hover:not(:disabled) { border-color: var(--hairline-2); background: var(--panel-3); }
 .card-choice:active:not(:disabled) { transform: scale(0.995); }
 .card-choice.selected { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
 .card-choice:disabled { opacity: 0.75; }
-.card-choice .opt-label { font-weight: 600; font-size: 13.5px; }
-.card-choice .opt-desc { color: var(--muted); font-size: 12.5px; margin-top: 2px; line-height: 1.45; }
+.card-choice .opt-label { font-weight: 600; font-size: 13px; }
+.card-choice .opt-desc { color: var(--muted); font-size: 12px; margin-top: 2px; line-height: 1.45; }
 .card-choice.selected .opt-desc { color: var(--ink-2); }
 
 .unsupported-widget { color: var(--warning); font-size: 12.5px; font-style: italic; }
@@ -891,8 +921,8 @@ body.sent-page .comment-btn { display: none; }
    the escape hatch for a state with no class of its own. */
 .variant-card[aria-disabled="true"] { cursor: default; opacity: 0.75; }
 .variant-label { margin-bottom: var(--space-2); }
-.variant-label .opt-label { font-weight: 600; font-size: 13.5px; }
-.variant-label .opt-desc { color: var(--muted); font-size: 12.5px; margin-top: 2px; line-height: 1.45; display: block; }
+.variant-label .opt-label { font-weight: 600; font-size: 13px; }
+.variant-label .opt-desc { color: var(--muted); font-size: 12px; margin-top: 2px; line-height: 1.45; display: block; }
 /* the nested block renders through the same renderBlock dispatch a compare
    side's own block does, and is stripped of its own card chrome for exactly
    the same reason .compare-side .block is (below): without this, an option
@@ -936,7 +966,7 @@ body.sent-page .comment-btn { display: none; }
 /* free text: a comfortable writing surface, not a cramped input */
 .answer-textarea { width: 100%; min-height: 220px; resize: vertical; background: var(--panel-2);
   border: 1px solid var(--hairline); color: var(--ink); border-radius: var(--r-md); padding: 14px 16px;
-  font: inherit; font-size: 14px; line-height: 1.65; margin-bottom: var(--space-3);
+  font: inherit; font-size: 13px; line-height: 1.65; margin-bottom: var(--space-3);
   transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease); }
 .answer-textarea::placeholder, .note-field textarea::placeholder, .search-input::placeholder,
 .comment-form input[type=text]::placeholder { color: var(--muted); }
@@ -1869,12 +1899,12 @@ body.home-page .mode-toggle:disabled { opacity: 0.5; cursor: default; }
    it is empty until something has happened. */
 .pomodoro-settings-status { font-size: 11px; color: var(--muted); align-self: center; }
 
-.search-form { display: flex; gap: var(--space-2); margin: 0 0 var(--space-5); }
-.search-input { flex: 1; min-width: 0; background: var(--panel-2); border: 1px solid var(--hairline); color: var(--ink);
-  border-radius: var(--r-md); padding: 10px 14px; font: inherit;
+.search-form { display: flex; gap: var(--space-2); margin: 0 0 var(--space-3); }
+.search-input { flex: 1; min-width: 0; height: 32px; background: var(--panel-2); border: 1px solid var(--hairline); color: var(--ink);
+  border-radius: var(--r-sm); padding: 0 10px; font: inherit; font-size: 13px;
   transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease); }
-.search-btn { background: var(--accent); color: var(--accent-ink); border: none; border-radius: var(--r-md);
-  padding: 10px 20px; font: inherit; font-weight: 650; transition: filter var(--dur) var(--ease); }
+.search-btn { height: 32px; background: var(--accent); color: var(--accent-ink); border: none; border-radius: var(--r-sm);
+  padding: 0 14px; font: inherit; font-size: 13px; font-weight: 600; transition: filter var(--dur) var(--ease); }
 .search-btn:hover { filter: brightness(1.08); }
 
 /* No '.search-results' / '.result-*' rules any more: the box filters the thread
@@ -1885,24 +1915,35 @@ body.home-page .mode-toggle:disabled { opacity: 0.5; cursor: default; }
 .empty-state { color: var(--muted); font-size: 13px; background: var(--panel); border: 1px dashed var(--hairline);
   border-radius: var(--r-md); padding: var(--space-5); text-align: center; }
 
-.thread-list { display: flex; flex-direction: column; gap: var(--space-3); }
-.thread-item { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4);
-  background: var(--panel); border: 1px solid var(--hairline); border-radius: var(--r-lg);
-  padding: var(--space-4) var(--space-5); text-decoration: none; color: var(--ink); box-shadow: var(--shadow-1);
-  transition: border-color var(--dur) var(--ease), transform var(--dur) var(--ease), box-shadow var(--dur) var(--ease); }
-.thread-item:hover { border-color: var(--hairline-2); transform: translateY(-1px); box-shadow: var(--shadow-2); }
-/* a thread with an open round is the one thing on this page asking for something */
-.thread-item.live { border-color: var(--warning-line); background:
-  linear-gradient(to right, var(--warning-soft), transparent 45%), var(--panel); }
-.thread-item.live:hover { border-color: var(--warning); }
-.thread-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-/* headline: the board title (or, title-less, the project folder name) — was .thread-cwd,
-   which held the full path as the bold headline; the path is now demoted to .thread-path */
-.thread-title { display: flex; align-items: center; gap: var(--space-2); font-size: 14.5px; font-weight: 600; letter-spacing: -0.01em; }
-.thread-path { color: var(--muted); font-size: 12.5px; }
-.thread-meta { color: var(--muted); font-size: 12px; }
-.thread-status { display: flex; align-items: center; gap: var(--space-3); flex: none; }
-.live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warning); display: inline-block;
+/* The Boards view at every width: one panel, a group header and then one 38px line per
+   board (src/indexpage.mjs renderThreadRows), boards with a round waiting on the reader
+   under "Waiting on you" first, the rest under "Earlier". A line is its dot, the
+   headline cut to one line, the rounds-left chip where any, then fixed columns for the
+   folder, round count, last update and thread id; the whole line is the link. */
+.thread-list { background: var(--panel); border: 1px solid var(--hairline); border-radius: var(--r-md);
+  overflow: hidden; box-shadow: var(--shadow-1); }
+.thread-list > .empty-state { border: 0; border-radius: 0; background: none; }
+.thread-group-head { display: flex; align-items: center; gap: var(--space-2); height: 32px; margin: 0; padding: 0 14px;
+  background: var(--panel-2); border-bottom: 1px solid var(--hairline); font-size: 13px; font-weight: 600; color: var(--ink); }
+.thread-group-count { color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
+.thread-group-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--warning); }
+.thread-group[data-group="earlier"] .thread-group-dot { background: none; border: 1.5px solid var(--muted); opacity: 0.6; }
+.thread-item { display: flex; align-items: center; gap: var(--space-3); height: 38px; padding: 0 14px;
+  border-bottom: 1px solid var(--hairline); font-size: 13px; text-decoration: none; color: var(--ink);
+  transition: background-color var(--dur) var(--ease); }
+.thread-group:last-child .thread-item:last-child { border-bottom: 0; }
+.thread-item:hover { background: color-mix(in srgb, var(--panel-2), var(--panel-3)); }
+.thread-item:focus-visible { outline: none; box-shadow: inset var(--ring); }
+/* headline: the board title (or, title-less, the project folder name), cut to one line */
+.thread-title { flex: 1; min-width: 0; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.thread-path { flex: none; width: 110px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.thread-rounds { flex: none; width: 70px; text-align: right; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.thread-updated { flex: none; width: 104px; text-align: right; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.thread-id { flex: none; width: 96px; color: var(--muted); font-size: 12px; white-space: nowrap;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+.thread-status { display: flex; align-items: center; flex: none; }
+.settled-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; border: 1.5px solid var(--muted); opacity: 0.6; }
+.live-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--warning); display: inline-block;
   box-shadow: 0 0 0 0 var(--warning-ring); animation: cb-pulse 2.4s var(--ease) infinite; }
 @keyframes cb-pulse {
   70% { box-shadow: 0 0 0 7px var(--warning-fade); }
@@ -1910,18 +1951,13 @@ body.home-page .mode-toggle:disabled { opacity: 0.5; cursor: default; }
 }
 /* Only ever rendered when count > 0 -- there is no zero state
    to style, so the amber "waiting on you" treatment is the whole rule. */
-.rounds-left-badge { font-size: 11.5px; font-weight: 600; font-variant-numeric: tabular-nums;
+.rounds-left-badge { display: inline-flex; align-items: center; height: 20px; font-size: 11.5px; font-weight: 600;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
   color: var(--warning); background: var(--warning-soft); border: 1px solid var(--warning-border-strong);
-  border-radius: var(--r-pill); padding: 4px 12px; }
-
-/* The Boards view on a wide window: boards as a grid of cards filling the bar's
-   content width, at least 400px each (three across at 1440, six at 2560), each card
-   its row's height with its rounds-left chip at the top right. Under 1440 the list
-   stays one card a line. */
-@media (min-width: 1440px) {
-  .thread-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(400px, 1fr)); }
-  .thread-list > .empty-state { grid-column: 1 / -1; }
-  .thread-item { align-items: flex-start; }
+  border-radius: var(--r-pill); padding: 0 8px; }
+/* a window too narrow for every column keeps the headline and drops the folder and id */
+@media (max-width: 760px) {
+  .thread-path, .thread-id { display: none; }
 }
 
 /* the Missions view (src/indexpage.mjs missionsParts): five columns by derived state,
@@ -1936,7 +1972,7 @@ body.home-page .mode-toggle:disabled { opacity: 0.5; cursor: default; }
 .mission-col[data-col="needs-you"] { border-color: var(--warning-border); }
 .mission-col-head { display: flex; align-items: center; justify-content: space-between; font-size: 13px; margin: 2px 4px 10px; font-weight: 600; }
 .mission-col-count { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; color: var(--muted); }
-.mission-col-list { display: flex; flex-direction: column; gap: 8px; }
+.mission-col-list { display: flex; flex-direction: column; gap: 6px; }
 .mission-col-list:empty::after { content: "None"; color: var(--muted); font-size: 12.5px; padding: 2px 4px; }
 .mission-badge { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; padding: 1px 9px;
   border-radius: var(--r-pill); border: 1px solid var(--hairline-2); white-space: nowrap; color: var(--muted); background: var(--panel-2); }
@@ -1945,61 +1981,67 @@ body.home-page .mode-toggle:disabled { opacity: 0.5; cursor: default; }
 .mission-badge[data-col="working"] { color: var(--accent); background: var(--accent-soft); border-color: transparent; }
 .mission-badge[data-col="stalled"] { color: var(--critical); background: var(--critical-soft); border-color: var(--critical-border); }
 .mission-badge[data-col="released"] { color: var(--good); background: var(--panel); }
-/* A mission card has the board's titled-card look ('.block': panel, hairline, 14px
-   corners, a bold title, its age at the right edge), and every card is one height
-   whatever its text. The title and summary stop at two lines, waiting on at two, next
-   at one, each ending in an ellipsis, and the card's least height is that whole stack
-   at full length plus one line of PRs and one of buttons, so a card with less text
-   is as tall as one with more and the columns' cards line up row by row. The text
-   takes the spare height, holding the PRs and buttons to the card's foot. One fold
-   per card ('.mission-more') shows every field whole; opening it may grow that card. */
-.mission-card { --mc-pad: 14px; --mc-title-lh: 20px; --mc-mono-lh: 18px; --mc-text-lh: 19px; --mc-label-lh: 17px;
-  --mc-fact-lh: 18px; --mc-chip: 22px; --mc-btn: 32px;
-  display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--hairline); border-radius: var(--r-lg);
-  padding: var(--mc-pad) 16px; box-shadow: var(--shadow-1); min-width: 0; overflow-wrap: anywhere;
-  min-height: calc(2 * var(--mc-pad) + 2px + 2 * var(--mc-title-lh) + 2px + var(--mc-mono-lh) + 8px + 2 * var(--mc-text-lh)
-    + 8px + var(--mc-label-lh) + 2 * var(--mc-fact-lh) + 6px + var(--mc-label-lh) + var(--mc-fact-lh)
-    + 8px + var(--mc-mono-lh) + 8px + var(--mc-chip) + 10px + var(--mc-btn)); }
-.mission-text { flex: 1 0 auto; min-width: 0; }
-.mission-card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
-.mission-title { flex: 1 1 auto; min-width: 0; font-size: 14px; line-height: var(--mc-title-lh); font-weight: 650; letter-spacing: -0.01em; color: var(--ink); }
-.mission-age, .mission-key { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; line-height: var(--mc-mono-lh); color: var(--muted); white-space: nowrap; }
-.mission-age { line-height: var(--mc-title-lh); }
-.mission-ident { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 2px; line-height: var(--mc-mono-lh); }
-.mission-key { white-space: normal; }
-.mission-tag { flex: none; white-space: nowrap; font-size: 11px; line-height: 16px; padding: 0 7px; border-radius: var(--r-pill); color: var(--muted); border: 1px solid var(--hairline-2); }
-.mission-summary { margin: 8px 0 0; color: var(--ink-2); font-size: 13px; line-height: var(--mc-text-lh); }
-.mission-facts { font-size: 12.5px; color: var(--ink-2); margin: 8px 0 0; }
-.mission-facts dt { color: var(--muted); font-size: 12px; line-height: var(--mc-label-lh); font-weight: 600; }
-.mission-facts dd { margin: 0; line-height: var(--mc-fact-lh); }
-.mission-facts dd + dt { margin-top: 6px; }
+/* A mission card is as tall as its text, in a list's density: a grey line with its key
+   and phase and its age at the right, the title (13px medium), then the summary, waiting
+   on and next. The title, summary and waiting on stop at two lines, next at one, each
+   ending in an ellipsis, and one fold per card ('.mission-more') shows every field whole;
+   it takes no room while nothing is cut. The foot holds small chips (queued, tab, your
+   turn, PRs) and any Fire or Merge button. The whole card opens its board, so it carries
+   no Open board button: the title is a real link ('.mission-link') whose box stretches over
+   the card, and the chips, buttons, fold and forms sit above it. Stop sits where the age
+   does and shows only on the card's hover or focus, while its question is open, right
+   after Keep or Escape hands it the focus, and always on a screen with no hover; the age
+   hides under it. */
+.mission-card { --mc-pad: 10px; --mc-title-lh: 18px; --mc-mono-lh: 16px; --mc-text-lh: 17px; --mc-label-lh: 17px;
+  --mc-fact-lh: 17px; --mc-chip: 20px; --mc-btn: 24px;
+  position: relative; background: var(--panel); border: 1px solid var(--hairline); border-radius: 8px;
+  padding: var(--mc-pad) 12px; min-width: 0; overflow-wrap: anywhere;
+  transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease); }
+.mission-card:hover { border-color: var(--hairline-2); background: color-mix(in srgb, var(--panel) 94%, var(--ink)); }
+.mission-card:focus-visible, .mission-card:has(.mission-link:focus-visible) { outline: none; border-color: var(--accent); box-shadow: var(--ring); }
+.mission-link { color: inherit; text-decoration: none; outline: none; }
+.mission-link::after { content: ""; position: absolute; inset: 0; border-radius: inherit; }
+/* lifted over the link's box: what a press must reach. The key line stays under it, its
+   facts in full on the link's tooltip. */
+.mission-foot > *, .mission-more > summary, .mission-confirm, .mission-comment { position: relative; }
+.mission-text { min-width: 0; }
+.mission-ident { display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  font-size: 12px; line-height: var(--mc-mono-lh); color: var(--muted); }
+.mission-key { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mission-age { flex: none; white-space: nowrap; }
+.mission-ident + .mission-title { margin-top: 3px; }
+.mission-title { font-size: 13px; line-height: var(--mc-title-lh); font-weight: 500; color: var(--ink); }
+.mission-summary { margin: 4px 0 0; color: var(--ink-2); font-size: 12px; line-height: var(--mc-text-lh); }
+.mission-fact { margin: 5px 0 0; color: var(--ink-2); font-size: 12px; line-height: var(--mc-fact-lh); }
+.mission-label { color: var(--muted); margin-right: 5px; line-height: var(--mc-label-lh); }
 .mission-title, .mission-summary, .mission-waiting, .mission-next { display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; }
 .mission-title, .mission-summary, .mission-waiting { -webkit-line-clamp: 2; }
 .mission-next { -webkit-line-clamp: 1; }
 .mission-text:has(> .mission-more[open]) :is(.mission-title, .mission-summary, .mission-waiting, .mission-next) { display: block; -webkit-line-clamp: none; overflow: visible; }
-.mission-more { margin-top: 8px; font-size: 12px; line-height: var(--mc-mono-lh); }
-.mission-more > summary { display: inline-block; cursor: pointer; color: var(--muted); font-weight: 600; list-style: none; border-radius: var(--r-sm); }
+.mission-more { margin-top: 5px; font-size: 11.5px; line-height: var(--mc-mono-lh); }
+.mission-more > summary { display: inline-block; cursor: pointer; color: var(--muted); list-style: none; border-radius: var(--r-sm); }
 .mission-more > summary::-webkit-details-marker { display: none; }
 .mission-more > summary::before { content: "\\25B8"; display: inline-block; margin-right: 5px; transition: transform var(--dur) var(--ease); }
 .mission-more[open] > summary::before { transform: rotate(90deg); }
 .mission-more > summary:hover { color: var(--ink); }
 .mission-more > summary:focus-visible { outline: none; box-shadow: var(--ring); }
-.mission-more[data-fits] { visibility: hidden; }
-.mission-prs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.mission-card > .mission-btns { margin-top: 10px; }
-.mission-pr { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; line-height: 18px; padding: 1px 8px; border-radius: var(--r-sm);
-  border: 1px solid var(--hairline-2); color: var(--ink-2); background: var(--panel-2); white-space: nowrap; text-decoration: none; }
+.mission-more[data-fits] { display: none; }
+.mission-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 8px; }
+.mission-tag, .mission-pr { display: inline-flex; align-items: center; gap: 4px; height: var(--mc-chip); box-sizing: border-box; padding: 0 7px;
+  border-radius: var(--r-pill); border: 1px solid var(--hairline-2); font-size: 11.5px; line-height: 1; white-space: nowrap;
+  color: var(--ink-2); text-decoration: none; }
 .mission-pr:hover { border-color: var(--accent); color: var(--ink); }
 .mission-pr i { font-style: normal; font-weight: 700; color: var(--muted); }
 .mission-pr[data-state="green"] i { color: var(--good); }
 .mission-pr[data-state="merged"] i { color: var(--accent); }
-.mission-order { margin: 8px 0 0; font-size: 12.5px; color: var(--ink-2); }
-.mission-error { margin: 8px 0 0; font-size: 12.5px; color: var(--critical); }
+.mission-order { margin: 6px 0 0; font-size: 12px; line-height: 17px; color: var(--ink-2); }
+.mission-error { margin: 6px 0 0; font-size: 12px; line-height: 17px; color: var(--critical); }
 .mission-btns { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
 .mission-btn { display: inline-flex; align-items: center; min-height: 30px; padding: 3px 12px; border-radius: var(--r-sm);
   font: inherit; font-size: 12.5px; font-weight: 600; text-decoration: none; white-space: nowrap; cursor: pointer;
   border: 1px solid var(--hairline-2); color: var(--ink-2); background: var(--panel);
   transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease), background var(--dur) var(--ease); }
+.mission-foot .mission-btn { min-height: var(--mc-btn); padding: 0 10px; font-size: 12px; }
 .mission-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--ink); }
 .mission-btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 .mission-btn.primary:hover:not(:disabled) { color: var(--accent-ink); background: var(--accent-hi); }
@@ -2008,23 +2050,34 @@ body.home-page .mode-toggle:disabled { opacity: 0.5; cursor: default; }
 .mission-btn.danger { background: var(--critical-soft); color: var(--critical); border-color: var(--critical-border); }
 .mission-btn.danger:hover:not(:disabled) { color: var(--critical); border-color: var(--critical); }
 .mission-btn:disabled { opacity: 0.6; cursor: default; }
-/* Stop: the circle-slash icon at the card's right, at a 32px target */
-.mission-stop { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; margin-left: auto;
-  padding: 0; border: 0; border-radius: var(--r-sm); background: transparent; color: var(--critical); opacity: 0.85; cursor: pointer; }
-.mission-stop:hover:not(:disabled), .mission-stop[aria-expanded="true"] { opacity: 1; background: var(--critical-soft); }
+/* Stop: the circle-slash icon in the card's top-right corner, over the age */
+.mission-stop { position: absolute; top: 7px; right: 8px; display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; padding: 0; border: 0; border-radius: 5px; background: var(--panel-2); color: var(--critical);
+  cursor: pointer; visibility: hidden; }
+.mission-card:is(:hover, :focus-within) > .mission-stop, .mission-stop:is([aria-expanded="true"], .mission-stop-held) { visibility: visible; }
+.mission-card:is(:hover, :focus-within):has(> .mission-stop) .mission-age,
+.mission-card:has(> .mission-stop:is([aria-expanded="true"], .mission-stop-held)) .mission-age { visibility: hidden; }
+@media (hover: none) {
+  .mission-stop { visibility: visible; }
+  .mission-card:has(> .mission-stop) .mission-age { visibility: hidden; }
+}
+.mission-stop:hover:not(:disabled), .mission-stop[aria-expanded="true"] { background: var(--critical-soft); }
+.mission-stop:focus-visible { outline: none; box-shadow: var(--ring); }
+/* a tab card has no age for Stop to sit over: its key line, or its title where it has
+   none, keeps clear of Stop */
+.mission-card:has(> .mission-stop) .mission-text > :is(.mission-ident:not(:has(.mission-age)), .mission-title:first-child) { padding-right: 24px; }
 .mission-stop:disabled { opacity: 0.4; cursor: default; }
-.mission-stop svg { display: block; }
+.mission-stop svg { display: block; width: 14px; height: 14px; }
 .mission-confirm { margin-top: 8px; padding: 8px 10px; border-radius: var(--r-sm); border: 1px solid var(--critical-border);
-  background: var(--critical-soft); }
+  background: var(--critical-soft); cursor: default; }
 .mission-confirm-text { margin: 0; font-size: 12.5px; color: var(--ink); }
 .mission-confirm .mission-btns { flex-wrap: nowrap; }
-.mission-comment { margin-top: 8px; }
+.mission-comment { margin-top: 8px; cursor: default; }
 .mission-comment-text { display: block; width: 100%; box-sizing: border-box; resize: vertical; min-height: 64px;
   font: inherit; font-size: 13px; color: var(--ink); background: var(--panel-2); border: 1px solid var(--hairline-2);
   border-radius: var(--r-sm); padding: 6px 10px; }
 .mission-comment-text:focus { border-color: var(--accent); outline: none; box-shadow: var(--ring); }
 /* a tab card: a session no mission launched (ADR 131), the mission card tagged as one */
-.tab-tags { display: inline-flex; flex: none; align-items: center; gap: 4px; }
 .tab-tag { color: var(--accent); background: var(--accent-soft); border-color: transparent; }
 .tab-turn { color: var(--warning); background: var(--warning-soft); border-color: var(--warning-border); }
 .missions-notice { margin: 0 0 var(--space-4); padding: 8px 12px; font-size: 13px; color: var(--ink-2);
@@ -2606,33 +2659,26 @@ body.page-board .back-to-top.visible {
   transform: translateY(calc((1 - var(--stage-p)) * var(--space-2))); }
 .back-to-top:hover:not(:disabled) { border-color: var(--hairline-2); color: var(--ink); }
 
-/* --- width: a round's rendered blocks take the column, its prose keeps a measure ---
-   '.board-shell' runs as wide as the window (up to 2560px), and the cards in
-   it as wide as the column up to 1700px (the 1440px block below), every
-   rendered block with them: a stage, a diagram, a compare, a rendered-variant
-   card, at top level and in a question's context. Prose does not: each element a reader reads as
-   lines carries 'max-width: var(--prose)', resolved in its OWN font, so a 16px
-   prompt and a 14px paragraph each hold their own measure. That is why an
-   option's label and description carry it themselves rather than inheriting
-   their card's: a 12.5px description in a card held to 72ch of 14px runs to
-   81ch of its own. The option card and a variant's label row carry it too:
-   a pick is then not a window-wide button with its words at one end (a card
-   carrying a preview is the one exception, below), and a
-   variant's label, an inline span on which 'max-width' does nothing, wraps at
-   its row's measure. A table or a code fence
-   inside markdown is not prose here and keeps the full width.
+/* --- width: one centred column for a round's cards, its title and meta line ---
+   '.board-shell' runs as wide as the window (up to 2560px). Under 1440px the
+   cards take the shell's width, every rendered block with them (a stage, a
+   diagram, a compare, a rendered-variant card, at top level and in a
+   question's context), and prose keeps a measure: each element a reader reads
+   as lines carries 'max-width: var(--prose)', resolved in its OWN font, so a
+   prompt and a paragraph each hold their own. That is why an option's label
+   and description carry it themselves rather than inheriting their card's.
+   The option card and a variant's label row carry it too: a pick is then not
+   a window-wide button with its words at one end (a card carrying a preview
+   is the one exception, below), and a variant's label, an inline span on
+   which 'max-width' does nothing, wraps at its row's measure. A table or a
+   code fence inside markdown is not prose here and keeps the full width.
 
-   '--prose' has two values. Up to 1440px it is '--column-1120', the widest
-   line the old 1120px column gave a block's prose (the column less its
-   gutters, the card's padding and its border: 1022px). A line set straight in
-   a block, a paragraph or a prompt, so keeps its old length while a window
-   between 1120 and 1440 widens the rendered blocks. A line in a box that
-   splits a block's width, a question's options or context panel or a compare
-   side, still widens with its box: the options column runs from 523px in the
-   old column to about 680px just under 1440. From 1440px '--prose' is 72ch,
-   the longest comfortable line, and the jump happens once, at the width where
-   a stage has gained a third over the old column. Below 1120px neither value
-   binds and the board is as it always was.
+   Under 1440px '--prose' is '--column-1120', the widest line the old 1120px
+   column gave a block's prose (the column less its gutters, the card's
+   padding and its border), so a line set straight in a block keeps its old
+   length while a window between 1120 and 1440 widens the rendered blocks.
+   From 1440px the column is 1100px and '--prose' binds nothing: text fills
+   its card, and long text splits into two columns instead.
 
    The comment list and form are held only on an ordinary board's own blocks:
    a page board's Tray already sets its own width (640px, '.page-comments'),
@@ -2646,56 +2692,73 @@ body:not(.page-board) .blocks .comment-list, body:not(.page-board) .blocks .comm
 /* An option's preview image or code is rendered content, not prose, so a
    choice carrying one is held to the old column's width rather than the
    reading measure; its label and description still hold their own measure.
-   From 1440px the options column, a third of the card and never under 523px
-   (ADR 136), is narrower than that and bounds the preview first. */
+   From 1440px the options column, half the card, is narrower than that and
+   bounds the preview first. */
 .card-choice:has(.opt-preview) { max-width: var(--column-1120); }
 @media (min-width: 1440px) {
-  :root { --prose: 72ch; }
-  /* One card width. From 1440px every card on a board page, a picture's
-     included, is the column's width up to 1700px, on the title's left edge;
-     the window beyond it, up to the shell's 2560px, is plain page. Widths
-     that varied card by card read as a ragged page, and a card the window's
-     full width left short text and narrow tables half empty. '.blocks' is the
-     column every top-level card stretches across, and the send bar under it
-     keeps the same right edge. The header stays the shell's width: its wash
-     and its condensed pill centre on the window (see '.board-head::after'). A
-     page board is one artifact filling the window and keeps no column. Below
-     1440px the column is narrower than the cap, so nothing changes there. */
-  body:not(.page-board) .blocks, body:not(.page-board) .send-bar { max-width: 1700px; }
-  /* A question's options take a third of the card, never under 523px (the
-     options column the old 1120px column gave a question beside a panel),
-     its note and the Defer row on the note's label sit under them at exactly
-     their width, and its context panel takes the other two thirds beside both.
-     The note row is the flexible one: a context panel taller than options and
-     note together grows that row, and the note, aligned to its top, stays
-     right under the options instead of drifting down the card. A question
-     with no panel takes the same columns with the second left empty, so every
-     question's options read at one width. A rendered-variant question, and
-     one carrying a stage in its context, keeps the one full-width column
-     (ADR.md entry 26) and its note at reading width: its options are the
-     rendered variants themselves. src/render.mjs marks a question that takes
-     the columns '.question-split', kept beside '.question-block' so these
-     rules outrank the one-column '.question-block:not(:has(...))' above. */
-  .question-block.question-split {
-    grid-template-columns: minmax(523px, 1fr) minmax(0, 2fr); grid-template-rows: auto auto 1fr auto; }
+  :root { --prose: none; --round-column: 1100px; }
+  /* One column, centred. From 1440px every card on a board page (text,
+     question, compare, stage, diagram, evidence) is 1100px wide, centred on
+     the window, and the space either side of it is plain page. One width for
+     every card keeps the page from reading ragged; centring it puts the page
+     where the eye already is on a wide screen. Long lines are the price, and
+     long text splitting into two columns (below) keeps most of them short.
+     '.blocks' is the column every top-level card stretches across, and the
+     send bar under it keeps the same edges. A page board is one artifact
+     filling the window and keeps no column. */
+  body:not(.page-board) .blocks, body:not(.page-board) .send-bar { max-width: var(--round-column); margin-inline: auto; }
+  /* The board's title and meta line sit in the same column. The header stays
+     the shell's width, so its mark, its controls, its wash and its condensed
+     pill keep their places; the title's block alone moves, by a margin that
+     carries it from the mark to the column's left edge. '100cqw' is the
+     header's width, so the margin needs no measuring script; the 30px is the
+     mark's own width (.back-to-index), and an archive, which hides the mark
+     and so the gap after it, takes the margin without either. Both the
+     margin and the width ride '--stage-p' down to nothing as the header
+     condenses, so the pill holds the mark and the controls alone. Neither is a
+     height, so the header's box never moves (test/check-header-condense.mjs).
+     The home page's top bar shares the header's classes and holds no round,
+     so its title stays beside the mark with the view tabs after it. */
+  body:not(.page-board):not(.home-page) .board-head { container-type: inline-size; }
+  body:not(.page-board):not(.home-page) .board-head-ident {
+    width: var(--round-column); max-width: calc((1 - var(--stage-p)) * var(--round-column));
+    margin-left: calc((1 - var(--stage-p)) * ((100cqw - var(--round-column)) / 2 - 30px - var(--space-3))); }
+  body.readonly:not(.page-board) .board-head-ident {
+    margin-left: calc((1 - var(--stage-p)) * (100cqw - var(--round-column)) / 2); }
+  /* A question's options take the card's left half, never under 523px (the
+     options column the old 1120px column gave a question beside a panel: the
+     1100px card's half, with this 20px gap), its note and the Defer row on the
+     note's label sit under them at exactly their width, and its context panel
+     takes the right half beside both. The note row is the flexible one: a
+     context panel taller than options and note together grows that row, and
+     the note, aligned to its top, stays right under the options instead of
+     drifting down the card. A question with no panel takes the same columns
+     with the second left empty, so every question's options read at one
+     width. A rendered-variant question, and one carrying a stage in its
+     context, keeps one full-width column with its context over its options
+     (ADR.md entry 26). src/render.mjs marks a question that takes the columns
+     '.question-split', kept beside '.question-block' so these rules outrank
+     the one-column '.question-block:not(:has(...))' above. */
+  .question-block.question-split { column-gap: 20px;
+    grid-template-columns: minmax(523px, 1fr) minmax(0, 1fr); grid-template-rows: auto auto 1fr auto; }
   .question-block.question-split > .question-main { grid-column: 1; grid-row: 2; }
   .question-block.question-split > .question-context { grid-column: 2; grid-row: 2 / 4; }
   .question-block.question-split > .note-field { grid-column: 1; grid-row: 3; }
   .question-block.question-split > .card-details { grid-row: 4; }
-  /* The panel's tables at their natural width: stretched across two thirds of
-     a 1700px card, a two-column table's cells sat far apart. */
+  /* The panel's tables at their natural width: stretched across half the
+     card, a two-column table's cells sat far apart. */
   .question-context .md-content table { width: auto; }
-  /* Long text flows into columns of reading width, two at most (three need
-     more than the 1700px card holds). Long means the fold marked it and it
-     overflowed its clip of about ten lines (src/ui.mjs drops the fold, and its
-     control, from text that fits), and it is open: a folded preview, and
-     short text, stay one column. Text holding a table, code or a diagram
-     stays one column too, as each of those takes the card's width, and so
-     does the card's summary, a '.md-content' of its own. One ':not()'
-     each, never a comma list inside one: test/check-pure.mjs's cascade resolver
-     splits a selector at every comma. A heading never ends a column. */
+  /* Long text flows into two columns, each half the card. Long means the
+     fold marked it and it overflowed its clip of about ten lines (src/ui.mjs
+     drops the fold, and its control, from text that fits), and it is open: a
+     folded preview, and short text, stay one column. Text holding a table,
+     code or a diagram stays one column too, as each of those takes the card's
+     width, and so does the card's summary, a '.md-content' of its own. One
+     ':not()' each, never a comma list inside one: test/check-pure.mjs's
+     cascade resolver splits a selector at every comma. A heading never ends a
+     column. */
   .markdown-block:not(.folded):has(> .fold-toggle) > .md-content:not(.card-summary):not(:has(table)):not(:has(pre)):not(:has(.mermaid)) {
-    columns: 2 var(--prose); column-gap: var(--space-6); max-width: calc(2 * var(--prose) + var(--space-6)); }
+    columns: 2; column-gap: var(--space-6); }
   .md-content h1, .md-content h2, .md-content h3, .md-content h4, .md-content h5, .md-content h6 { break-after: avoid; }
   /* A diagram narrower than its panel sits in the panel's middle rather than
      against its left edge. */
@@ -2715,7 +2778,6 @@ body:not(.page-board) .blocks .comment-list, body:not(.page-board) .blocks .comm
   :root { --head-clear: 124px; }
   .board-shell { padding-left: var(--space-4); padding-right: var(--space-4); }
   .board-head { flex-direction: column; align-items: flex-start; gap: var(--space-2); }
-  .block { padding: var(--space-4); border-radius: var(--r-md); }
   .send-bar { flex-wrap: wrap; }
   .send-status { width: 100%; margin-bottom: var(--space-2); }
   .btn-send, .btn-discuss { flex: 1; }

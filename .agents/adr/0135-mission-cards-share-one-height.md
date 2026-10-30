@@ -1,5 +1,0 @@
-# 135. Mission cards share one height, and Boards is a card grid from 1440px
-
-2026-10-29, amends 124; relates to 123, 133
-
-**Context:** a mission card grew with its text, so one mission's long "waiting on" and "next" stretched its card far past its neighbours, and a row of the Boards list stretched across a wide window. Rejected: relying on the agents that write a mission to keep those fields short, which no card can enforce. **Decision:** a mission card wears the board's titled-card look (133) and clamps its title and summary to 2 lines, waiting on to 2 and next to 1, each ending in an ellipsis; its least height is that whole stack at full length plus one line of PRs and one of buttons, so the cards in a row match; one "Show the rest" fold per card shows every field whole, hidden while nothing is cut and kept open across repaints. From a 1440px window the Boards view lays its boards out as a grid of cards at least 400px wide (three across at 1440px, six at 2560px); under 1440px it stays a list. **Consequences:** a card opened by its fold may stand taller than its row; a field past its clamp takes a click to read whole on the card.

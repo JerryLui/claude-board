@@ -21,7 +21,7 @@ Tooling traps in this repo. Read before fighting something; append when somethin
 - [No external assets — not even mermaid, now three bare sibling filenames](#no-external-assets-not-even-mermaid-now-three-bare-sibling-filenames)
 - [Two stylesheets, one palette](#two-stylesheets-one-palette)
 - [A diagram lens holds a clone, and a theme change replaces what it cloned](#a-diagram-lens-holds-a-clone-and-a-theme-change-replaces-what-it-cloned)
-- [A CSS *comment* is shipped on the index page too, and one check reads its words](#a-css-comment-is-shipped-on-the-index-page-too-and-one-check-reads-its-words)
+- [A CSS *comment* is shipped text, in the stylesheet asset every page links](#a-css-comment-is-shipped-text-in-the-stylesheet-asset-every-page-links)
 - [A backtick inside a template-literal payload ends the whole file](#a-backtick-inside-a-template-literal-payload-ends-the-whole-file)
 - [Readonly is locked twice — CSS and JS — and reusing chrome inherits both](#readonly-is-locked-twice--css-and-js--and-reusing-chrome-inherits-both)
 - [`100vw` is wider than the page whenever the page actually scrolls](#100vw-is-wider-than-the-page-whenever-the-page-actually-scrolls)
@@ -48,8 +48,19 @@ prefer that shape for any new rule whose whole job is to select something.
 
 ### No external assets — not even mermaid, now three bare sibling filenames
 
-`renderBoardPage` output must open from Finder with the network off. So: no web fonts
-(system stack only), no icon fonts, no CDN CSS. Icons are inline SVG. Mermaid used to be
+`renderBoardPage` output must open from Finder with the network off. So: no fetched
+fonts, no icon fonts, no CDN CSS. Icons are inline SVG. The one web font, Inter, rides
+inside the stylesheet: its Latin woff2 faces (`src/vendor/inter/`, digest-pinned, OFL
+licence beside them) are inlined as `data:font/woff2;base64,` URLs, which the pages'
+`font-src data:` already admits, so a served page and a saved copy load it from the
+stylesheet's own bytes. The rule this used to state, "no web fonts", narrowed to "no
+external assets": a face whose `src` points at a host, a path or a sibling file is still
+a failure (`test/check-pure.mjs`'s "the stylesheet pulls nothing off the page" row), and
+so is a face past 120 KB raw, which every page and saved copy pays. Inter heads the
+`body` stack with the system stack after it, so a face that fails to load reads like the
+page did before Inter. `document.fonts.check('13px Inter')` answers true when no face
+named Inter exists at all, so a check reads the `FontFace` set and measures a text run
+instead (`test/browser-check-font.mjs`). Mermaid used to be
 the one exception here — imported at runtime from a CDN, degrading to raw source when it
 could not be reached — until it was vendored (`src/vendor/mermaid/`, digest-pinned like
 every other vendored engine): it is now a THIRD bare sibling asset, loaded and degrading
@@ -153,16 +164,16 @@ chrome). Only reachable through `src/theme.mjs`'s `matchMedia` listener, since a
 open while macOS switches at sunset. `lensRetheme` re-clones from the fresh svg and
 `test/check-mermaid-theme.mjs` fails when the call is removed.
 
-### A CSS *comment* is shipped on the index page too, and one check reads its words
+### A CSS *comment* is shipped text, in the stylesheet asset every page links
 
-`src/styles.mjs` is one stylesheet, embedded whole by both `renderBoardPage` and
-`renderIndexPage`. `test/check-pure.mjs`'s index-row check asserts the rendered index page
-contains no ordinal wording — `assert.doesNotMatch(html, /\bround \d/i)` — over the WHOLE
-page, comments included. So a CSS comment reading "a control that vanishes at round 1"
-fails an index check that has nothing to do with the rule it sits above, and the failure
-names the index row, not the stylesheet (reproduced; the rule was the round pager's
-chevrons). Two consequences: prose in `src/styles.mjs` is shipped text, not a private
-note, and a check that greps a whole rendered page will read your comments.
+`src/styles.mjs` is one stylesheet, served whole as the content-addressed `styles-<hash>.css`
+that a board page links as a sibling and the home page links at `/b/` (ADR 70, 139). Its
+comments ride in those bytes to every reader, so prose in it is shipped text, not a private
+note. The home page used to inline it, and then `test/check-pure.mjs`'s index-row check
+(`assert.doesNotMatch(html, /\bround \d/i)`, over the whole page) failed on a CSS comment
+reading "a control that vanishes at round 1", naming the index row, not the stylesheet. A
+check that greps the asset's bytes, or a page that inlines the stylesheet again, reads your
+comments the same way.
 
 ### A backtick inside a template-literal payload ends the whole file
 
@@ -2276,6 +2287,25 @@ chrome band; if that ever surfaces, the fix is this same resend, not a broadcast
 
 Traps that have bitten once. A second bite moves the entry up into the section it belongs to.
 
+- **Chrome's media emulation ignores a 'hover' feature.** Chrome 154 headless:
+  `Emulation.setEmulatedMedia` with `{ name: 'hover', value: 'none' }` returns no error and
+  `matchMedia('(hover: none)')` stays false. `Emulation.setTouchEmulationEnabled` with
+  `maxTouchPoints: 1` turns it true (`test/browser-check-missions.mjs`'s no-hover Stop row).
+  Assert the `matchMedia` answer as setup before believing a no-hover row.
+
+- **Deleting the last rule that reads a palette token fails the contrast suite, not the pure one.**
+  `test/check-contrast.mjs` ("every palette token is referenced somewhere in the stylesheet, or
+  by another token") fails on a token left in `DARK`/`LIGHT` with no reader; the Boards grid's
+  `.thread-item.live` was `--warning-line`'s only one. Drop the token from both palettes, and
+  from any palette comment listing it, in the same change.
+
+- **Chrome's offline emulation refuses loopback too.** `Network.emulateNetworkConditions` with
+  `offline: true` fails a navigation to the scratch daemon at `127.0.0.1` with
+  `ERR_INTERNET_DISCONNECTED`, so no served page can load "with the network off". A check that
+  wants a served page to load with no outside network cuts it with `Fetch.enable` instead,
+  continuing the daemon's own origin and failing the rest (`networkWitness` in
+  `test/browser-check-font.mjs`); a `file://` copy loads under the real offline emulation.
+
 - **A Ctrl press in headless Chrome on a Mac is a right-click: `contextmenu`, and no `click`.**
   `Input.dispatchMouseEvent` with `button: 'left', modifiers: 2` fires `pointerdown`,
   `mousedown`, `contextmenu`, `mouseup` and never `click`, as a real Ctrl-click does on macOS;
@@ -2473,3 +2503,9 @@ Traps that have bitten once. A second bite moves the entry up into the section i
   board looked empty although it rendered once scrolled into view (2026-10-29). Before a
   full-page shot, raise the viewport to the page's full height, or scroll each stage into view
   first.
+- **A click or key that navigates can fail its own DevTools call.** A `mouseReleased` that
+  clicks a link-like card, or a `keyDown` Enter on one, may answer
+  `{"code":-32000,"message":"Not attached to an active page"}` because the page is already
+  leaving, and so may a `Page.getNavigationHistory` read in the gap. Send Enter as its key-down
+  alone, and tolerate that one error on the press and on the read
+  (`test/browser-check-missions.mjs`'s `landedAt`, `pressKey` and its card-click row).

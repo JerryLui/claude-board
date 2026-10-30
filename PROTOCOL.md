@@ -1827,19 +1827,18 @@ for.
 
 No stage reports a width: a frame is as wide as the box it sits in. The board's shell runs as
 wide as the window, up to 2560px (`.board-shell`, `src/styles.mjs`), and from a 1440px window
-every card under its header is one width, the column's up to 1700px on the header's left edge,
-the window beyond it plain page (ADR 136); below 1440px the column is narrower than that cap and
-every card takes it. A top-level stage, diagram or compare spans its card less the card's padding,
-and so does a stage in a question's context, since a question carrying one lays out in one column
-(ADR 26). From 1440px a question's options take a third of the card, never under 523px, with its
-note and Defer row under them at that width, and a diagram or compare in its context panel gets
-the other two thirds. A compare side gets half; an `html` variant option takes a whole row, other
-variant kinds share one. Prose does not widen with the card: below a 1440px window a line set
-straight in a block keeps the 1022px the old 1120px column gave it (a line in the options, the
-context panel or a compare side still widens with its box), and from 1440px every line holds 72ch
-of its own font (`--prose`), long open text flowing into up to two such columns. An option's
-`preview` image or code is not prose: its card keeps the old column's width, so a preview is never
-drawn narrower than it was.
+every card under its header sits in one 1100px column centred on the window, the window either
+side plain page (ADR 138); below 1440px every card takes the shell's width. A top-level stage,
+diagram or compare spans its card less the card's padding, and so does a stage in a question's
+context, since a question carrying one lays out in one column (ADR 26). From 1440px a question's
+options take the card's left half, never under 523px, with its note and Defer row under them at
+that width, and a diagram or compare in its context panel gets the right half. A compare side gets
+half; an `html` variant option takes a whole row, other variant kinds share one. Below a 1440px
+window prose does not widen with the card: a line set straight in a block keeps the 1022px the old
+1120px column gave it (a line in the options, the context panel or a compare side still widens
+with its box). From 1440px prose carries no cap and runs its card's width, long open text flowing
+into two columns. An option's `preview` image or code is not prose: its card keeps the old
+column's width, so a preview is never drawn narrower than it was.
 A page board's stage fills the window, as before (ADR 33).
 
 `scroll` exists because ADR 40's page-board header condenses on the reader's scroll, but on a page

@@ -1,8 +1,9 @@
 // Real-browser check for the one top bar Missions (`/`) and Boards (`/boards`) share:
 // every box in it (the bar, the mark, the title, each tab, the timer, Comment, theme)
 // lands on the same pixels on both views, at 1440 and 2560 wide, light and dark; the
-// boards list and its filter run the bar's whole content width; and an ordinary board
-// page's own header sits on the same edges. Layout, which the DOM stand-in has none of
+// bar's title and view tabs hold the places they have at 1280, where the round page's
+// wide column is not in force; the boards list and its filter run the bar's whole content
+// width; and an ordinary board page's own header sits on the same edges. Layout, which the DOM stand-in has none of
 // (QUIRKS.md "The DOM stand-in's ceilings"): test/check-topbar.mjs holds the markup.
 //
 // NOT wired into test/run.mjs's `checks` array, on purpose: that suite has to pass on a
@@ -29,6 +30,7 @@ import { CHROME, guardRun, measureTab, postJson, row, startScratchDaemon, withCh
 if (!existsSync(CHROME)) skipFile('browser-check-topbar', `browser-check-topbar: no Chrome at ${CHROME} (set CLAUDE_BOARD_CHROME_BIN to override)`);
 
 const WIDTHS = [1440, 2560];
+const NARROW = 1280; // under the round page's wide layout (ADR 138)
 const HEIGHT = 900;
 const THEMES = ['light', 'dark'];
 const BOARDS = 60; // enough that the boards scroll at HEIGHT, six a row at 2560, with Missions empty
@@ -52,6 +54,7 @@ const MEASURE_EXPR = `(function () {
     bar: box('header.board-head'),
     mark: box('header.board-head a.back-to-index'),
     title: box('header.board-head h1'),
+    'title box': box('header.board-head div.board-head-ident'),
     'timer': box('header.board-head div#pomodoro-widget'),
     'Comment': box('header.board-head button#comment-mode-toggle'),
     'theme': box('header.board-head button#theme-toggle'),
@@ -95,6 +98,8 @@ async function main() {
     await withChrome({ tag: 'cb-topbar', classicScrollbars }, async ({ send, onEvent }) => {
       const cookie = sessionToken(daemon.secret);
       const at = {};
+      const narrow = {};
+      for (const theme of THEMES) narrow[theme] = await measureTab(send, onEvent, `${origin}/`, cookie, tabAt(NARROW, theme));
       for (const width of WIDTHS) {
         for (const theme of THEMES) {
           at[`${width} ${theme}`] = {
@@ -133,6 +138,16 @@ async function main() {
           }
           assert.deepEqual(Object.keys(m.boards.parts).sort(), Object.keys(m.missions.parts).sort());
           assert.deepEqual(wrong, []);
+        });
+
+        await row(`${mode}, at ${key}: the bar's title box starts where it does at ${NARROW}px, and the view tabs follow it as they do there`, note => {
+          const base = narrow[key.split(' ')[1]].parts;
+          const here = m.missions.parts;
+          const gap = p => p['tab Missions'].left - (p['title box'].left + p['title box'].width);
+          note(`title box ${px(here['title box'].left)} + ${px(here['title box'].width)}, tabs ${px(gap(here))} after it; at ${NARROW}px ${px(base['title box'].left)} + ${px(base['title box'].width)}, tabs ${px(gap(base))} after it`);
+          assert.ok(Math.abs(here['title box'].left - base['title box'].left) <= 0.5, 'the title box starts where it does at the narrow width');
+          assert.ok(Math.abs(here['title box'].width - base['title box'].width) <= 0.5, 'and is as wide');
+          assert.ok(Math.abs(gap(here) - gap(base)) <= 0.5, 'the view tabs follow it at the same distance');
         });
 
         await row(`${mode}, at ${key}: the boards list and its filter run the bar's whole content width`, note => {
