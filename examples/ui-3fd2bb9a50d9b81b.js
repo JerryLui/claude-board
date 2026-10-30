@@ -5800,6 +5800,37 @@
   }
   window.addEventListener('hashchange', maybeJumpToStrandedRound);
 
+  // '#question:<round>:<question id>': a mission card's Merge (src/indexpage.mjs, ADR
+  // 142) opens the landing brief at its merge question rather than answering it. A
+  // sentinel resolved here for the reason '#open-round' is: no id this page emits is safe
+  // to navigate by, and no heading slug holds a colon. The round is flipped to without
+  // its own scroll, then the question's top is put on screen and given the focus, the
+  // questions-left pill's landing. Run after load and one frame, as '#open-round' is, and
+  // on 'hashchange' for a tab already on this board. Inert on a round or question this
+  // page does not hold.
+  function fragmentQuestion() {
+    var m = location && /^#question:([0-9]+):([a-z]+[0-9]+)$/.exec(location.hash || '');
+    return m ? { round: Number(m[1]), id: m[2] } : null;
+  }
+  function jumpToFragmentQuestion() {
+    var target = fragmentQuestion();
+    var section = target && roundSectionEl(target.round);
+    if (!section) return;
+    var block = section.querySelector('.question-block[data-block-id="' + target.id + '"]');
+    if (!block) return;
+    if (target.round !== currentRound) goToRound(target.round, false);
+    goToQuestion(block);
+  }
+  function jumpToFragmentQuestionAfterPaint() {
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(jumpToFragmentQuestion);
+    else jumpToFragmentQuestion();
+  }
+  if (fragmentQuestion()) {
+    if (document.readyState === 'complete') jumpToFragmentQuestionAfterPaint();
+    else window.addEventListener('load', jumpToFragmentQuestionAfterPaint);
+  }
+  window.addEventListener('hashchange', jumpToFragmentQuestionAfterPaint);
+
   /** Enable/disable BOTH send-bar buttons together. They live in .send-bar,
    * outside any round section, so markRoundHistory (which disables everything
    * inside the round it collapses) never reaches them -- that is precisely how a
