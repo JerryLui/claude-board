@@ -130,13 +130,15 @@ function prNumber(value, what) {
 }
 
 /** A PR a session lists names it, `{ repo, number, url }`. A `state` from a writer older
- * than the PR facts is still taken, checked, and dropped: the view's state is a fact. */
+ * than the PR facts is still taken, checked, and dropped: the view's state is a fact. So
+ * are the `head` and `checkedAt` a view adds, and its `checking`, so a list read from a
+ * view writes back as it was read. */
 function validatePr(pr, i) {
   const what = `prs[${i}]`;
   assertObject(pr, what);
-  assertOnly(pr, ['repo', 'number', 'url', 'state', 'order'], what);
+  assertOnly(pr, ['repo', 'number', 'url', 'state', 'order', 'head', 'checkedAt'], what);
   if (pr.order !== undefined && !Number.isFinite(pr.order)) throw refuse(`${what}.order must be a number`);
-  if (pr.state !== undefined) oneOf(pr.state, PR_STATES, `${what}.state`);
+  if (pr.state !== undefined) oneOf(pr.state, [...PR_STATES, PR_CHECKING], `${what}.state`);
   return {
     repo: str(pr.repo, `${what}.repo`, MAX_NAME_CHARS),
     number: prNumber(pr.number, what),
@@ -421,8 +423,7 @@ function goneOf(m, now, isAlive, listed) {
 /** `{ reason, since, id }` while the snapshot lists `m`'s bound session needing `/mission`
  * again (`listingOf`'s `reason`, `clear` or `resume`) and no beat has come from it since
  * `since`, the time a snapshot first listed it so, `id` being the id it is listed under (the
- * one to message); else null, as for a mission that recorded its
- * end. A beat or join from the session itself rebinds its id or process, which clears it. */
+ * one to message); else null, as for a mission that recorded its end. A beat or join from the session itself rebinds its id or process, which clears it. */
 function rejoinOf(m, listed) {
   const s = currentSession(m);
   const listing = listingOf(s, listed);
@@ -432,14 +433,34 @@ function rejoinOf(m, listed) {
   return { reason: listing.reason, since: iso(since), id: listing.entry.id };
 }
 
-/** The PRs `m` lists, each with the `state`, `head` and `checkedAt` of its latest fact,
- * or `checking` and nulls before the first. */
+/** The PRs `m` lists, each with the `state`, `head` and `checkedAt` of its latest fact.
+ * Before the first, `checking` and nulls, or the `state` a PR was stored with before facts
+ * existed (ADR 140): a write since then stores none, so that state is never a live
+ * session's word. */
 function prsOf(m) {
   const facts = new Map((m.prFacts || []).map(f => [prKey(f), f]));
-  return (m.prs || []).map(({ state: _said, ...pr }) => {
+  return (m.prs || []).map(({ state: stored, ...pr }) => {
     const fact = facts.get(prKey(pr));
-    return { ...pr, state: fact ? fact.state : PR_CHECKING, head: fact ? fact.head : null, checkedAt: fact ? fact.checkedAt : null };
+    if (fact) return { ...pr, state: fact.state, head: fact.head, checkedAt: fact.checkedAt };
+    return { ...pr, state: stored ?? PR_CHECKING, head: null, checkedAt: null };
   });
+}
+
+/** `prs` as a write lists them, each keeping the `state` its namesake in `stored` was
+ * stored with before facts existed, so a list read and written back reads the same. */
+function keepStoredStates(prs, stored = []) {
+  const states = new Map(stored.filter(p => p.state !== undefined).map(p => [prKey(p), p.state]));
+  return prs.map(pr => (states.has(prKey(pr)) ? { ...pr, state: states.get(prKey(pr)) } : pr));
+}
+
+/** `isAlive` asked once per pid: one view reads its session's process once, so its
+ * `view`, `gone` and `live` cannot disagree. */
+function aliveOnce(isAlive) {
+  const answers = new Map();
+  return pid => {
+    if (!answers.has(pid)) answers.set(pid, isAlive(pid));
+    return answers.get(pid);
+  };
 }
 
 /** The column `m` shows in: released stays released; then a board's round waiting on the
@@ -456,13 +477,14 @@ export function deriveState(m, { home = boardHome(), now = Date.now(), isAlive =
  * snapshot, null while it reads down: then only heartbeats count, as before it. */
 export function missionView(m, { home = boardHome(), now = Date.now(), isAlive = pidAlive, listed = null } = {}) {
   const linked = linkedBoards(m, home);
+  const alive = aliveOnce(isAlive);
   const listing = listingOf(currentSession(m), listed);
   return {
     ...m,
     prs: prsOf(m),
-    view: viewState(m, () => linked, now, isAlive, listed),
-    gone: goneOf(m, now, isAlive, listed),
-    live: hasLiveSession(m, now, isAlive, listed),
+    view: viewState(m, () => linked, now, alive, listed),
+    gone: goneOf(m, now, alive, listed),
+    live: hasLiveSession(m, now, alive, listed),
     listedAt: listing ? iso(listing.at) : null,
     rejoin: rejoinOf(m, listed),
     actions: actionsOf(linked),
@@ -519,6 +541,7 @@ export function upsertMission(key, patch, { home = boardHome(), now = Date.now()
     state: fields.state || 'waiting',
   });
   const { phase, state, ...rest } = fields;
+  if (rest.prs) rest.prs = keepStoredStates(rest.prs, m.prs);
   // The move first, so a `waitingOn` the same patch sets outlives the one the move drops.
   moveTo(m, { phase, state }, now);
   for (const [field, value] of Object.entries(rest)) {
@@ -953,10 +976,13 @@ export function recordFire(board, round, by, { home = boardHome(), now = Date.no
 
 /** A board posted with `mission: <key>`: appends `{ id, url, at }` to the mission's `boards`
  * (a board already listed moves to the end, so the last entry is the latest board), making
- * a stub mission when there is none. Answers the stored record. */
-export function linkBoard(key, { id, url }, { home = boardHome(), now = Date.now() } = {}) {
+ * a stub mission when there is none. With `create: false`, the link of a board that only
+ * carries its mission from an earlier round, a mission no longer stored (pruned) is left
+ * gone and the answer is null. Answers the stored record. */
+export function linkBoard(key, { id, url }, { home = boardHome(), now = Date.now(), create = true } = {}) {
   assertMissionKey(key);
-  const m = readMission(key, home) || newMission(key, now);
+  const m = readMission(key, home) || (create ? newMission(key, now) : null);
+  if (!m) return null;
   m.boards = [...(m.boards || []).filter(b => b.id !== id), { id, url, at: iso(now) }].slice(-MAX_BOARDS);
   touch(m, now);
   return writeMission(m, home);

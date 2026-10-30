@@ -4967,6 +4967,8 @@ async function main() {
       mkdirSync(documents);
       writeFileSync(path.join(documents, 'notes.md'), '# private\n');
       assert.deepEqual(await ask(), { ok: true }, 'a file it may open');
+      chmodSync(path.join(documents, 'notes.md'), 0o000);
+      assert.deepEqual(await ask(), { ok: true }, 'a listed folder whose first file is mode 000: that file\'s own mode, not a refused folder');
       chmodSync(documents, 0o000);
       assert.deepEqual(await ask(), { ok: false, code: 'EACCES' }, 'a folder it may not read, and never a file name');
     } finally {

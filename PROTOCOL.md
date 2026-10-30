@@ -1496,7 +1496,9 @@ session to message. The session's own join or heartbeat
 rebinds the new `id` or process, which clears it; the card says "Session needs /mission again", and
 the Master Chief asks that session to run `/mission <key>`. Each of `prs` carries `state`, `head` and `checkedAt` from the
 latest fact for its repo and number: `state` one of `'draft' | 'open' | 'green' | 'red' |
-'merged'`, or `'checking'` with `head` and `checkedAt` null before the first. `live` is whether a session
+'merged'`, or `'checking'` with `head` and `checkedAt` null before the first (a PR stored with a
+`state` before facts existed reads that one instead). A `prs` read here writes back as read: the
+write drops `state`, `head` and `checkedAt`. `live` is whether a session
 holds the mission (ADR 129): bound or reserved, not gone, and the mission has not recorded its end
 (stored `released`, or phase `grill` with `fire` set); silence frees only a session with no `pid`.
 `actions` lists the card's buttons (ADR 125):

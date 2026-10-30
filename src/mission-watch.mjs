@@ -10,7 +10,8 @@
 //    status item and any agent watching the stream re-read;
 //  - a mission turning needs-you, stalled or released joins a batch that speaks once,
 //    BATCH_WINDOW_MS after its first entry, as one notification naming the work or
-//    counting it ("2 missions need you, FRONT_AGENT released").
+//    counting it ("2 missions need you, FRONT_AGENT released"). A needs-you mission whose
+//    session goes (`gone` set) joins it as stalled, though its view stays needs-you.
 //
 // The first read after start is the baseline and says nothing, so a restart never floods
 // the screen with every mission already waiting. A mission that moves on before its batch
@@ -145,7 +146,7 @@ export function createMissionWatch({
       if (closing) flush();
       return;
     }
-    const next = new Map(views.map(v => [v.key, { view: v.view, updatedAt: v.updatedAt }]));
+    const next = new Map(views.map(v => [v.key, { view: v.view, gone: !!v.gone, updatedAt: v.updatedAt }]));
     if (seen === null) {
       seen = next;
       return;
@@ -153,9 +154,18 @@ export function createMissionWatch({
     const joining = [];
     for (const v of views) {
       const prev = seen.get(v.key);
-      if (prev && prev.view === v.view) continue;
+      const gone = !!v.gone;
+      if (prev && prev.view === v.view && prev.gone === gone) continue;
       if (prev && prev.updatedAt === v.updatedAt) {
         try { broadcast(v.key); } catch (err) { warnOnce('publish a change', err); }
+      }
+      if (prev && prev.view === v.view) {
+        // Needs-you reads ahead of stalled, so a session dying under its open round moves
+        // no view: its going is spoken as stalled, since nothing else will answer the round.
+        if (v.view !== 'needs-you') continue;
+        if (gone) joining.push({ ...v, view: 'stalled' });
+        else if (batch.get(v.key)?.state === 'stalled') batch.delete(v.key);
+        continue;
       }
       if (SPOKEN_STATES.includes(v.view)) joining.push(v);
       else batch.delete(v.key);

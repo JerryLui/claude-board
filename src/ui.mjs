@@ -5610,14 +5610,26 @@ export const ui = `
   // positioning pass. Both fallbacks matter for the DOM stand-in, which has
   // neither requestAnimationFrame nor a load event: there, the jump simply
   // happens straight away.
+  function afterPaint(fn) {
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(fn);
+    else fn();
+  }
+
+  /** The scaffold every fragment sentinel below shares: jump runs once the page has
+   * loaded when it opens on the sentinel (opensOn() true), at once when it already has,
+   * and, with onHashchange, on every 'hashchange' for a tab already open on this board. */
+  function onFragmentSentinel(opensOn, jump, onHashchange) {
+    if (opensOn()) {
+      if (document.readyState === 'complete') jump();
+      else window.addEventListener('load', jump);
+    }
+    if (onHashchange) window.addEventListener('hashchange', jump);
+  }
+
   function jumpToOpenRoundAfterPaint() {
-    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(jumpToOpenRound);
-    else jumpToOpenRound();
+    afterPaint(jumpToOpenRound);
   }
-  if (location && location.hash === '#open-round') {
-    if (document.readyState === 'complete') jumpToOpenRoundAfterPaint();
-    else window.addEventListener('load', jumpToOpenRoundAfterPaint);
-  }
+  onFragmentSentinel(function () { return !!location && location.hash === '#open-round'; }, jumpToOpenRoundAfterPaint, false);
 
   /** The banner's own click target -- by design it resolves to the oldest
    * round still waiting at the moment it is clicked. Deliberately NOT openRoundNumber() -- that names the LATEST
@@ -5658,11 +5670,6 @@ export const ui = `
     goToRound(target);
   }
 
-  function jumpToStrandedRoundAfterPaint() {
-    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(jumpToStrandedRound);
-    else jumpToStrandedRound();
-  }
-
   // '#stranded-round': the daemon's banner click, distinct from '#open-round'
   // (src/indexpage.mjs's live rows, above) so that sentinel's own "latest
   // unsent round" meaning is untouched -- src/notify.mjs and bin/notify.m
@@ -5683,20 +5690,19 @@ export const ui = `
   // cleared, a genuine follow-up click reusing the same literal hash value is
   // once again a real change from the browser's point of view, so it is
   // detected the same way the first one was.
+  function onStrandedRound() {
+    return !!location && location.hash === '#stranded-round';
+  }
   function maybeJumpToStrandedRound() {
-    if (!location || location.hash !== '#stranded-round') return;
+    if (!onStrandedRound()) return;
     if (window.history && typeof window.history.replaceState === 'function') {
       window.history.replaceState(null, '', location.pathname + location.search);
     } else {
       location.hash = '';
     }
-    jumpToStrandedRoundAfterPaint();
+    afterPaint(jumpToStrandedRound);
   }
-  if (location && location.hash === '#stranded-round') {
-    if (document.readyState === 'complete') maybeJumpToStrandedRound();
-    else window.addEventListener('load', maybeJumpToStrandedRound);
-  }
-  window.addEventListener('hashchange', maybeJumpToStrandedRound);
+  onFragmentSentinel(onStrandedRound, maybeJumpToStrandedRound, true);
 
   // '#question:<round>:<question id>': a mission card's Merge (src/indexpage.mjs, ADR
   // 142) opens the landing brief at its merge question rather than answering it. A
@@ -5719,15 +5725,7 @@ export const ui = `
     if (target.round !== currentRound) goToRound(target.round, false);
     goToQuestion(block);
   }
-  function jumpToFragmentQuestionAfterPaint() {
-    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(jumpToFragmentQuestion);
-    else jumpToFragmentQuestion();
-  }
-  if (fragmentQuestion()) {
-    if (document.readyState === 'complete') jumpToFragmentQuestionAfterPaint();
-    else window.addEventListener('load', jumpToFragmentQuestionAfterPaint);
-  }
-  window.addEventListener('hashchange', jumpToFragmentQuestionAfterPaint);
+  onFragmentSentinel(fragmentQuestion, function () { afterPaint(jumpToFragmentQuestion); }, true);
 
   /** Enable/disable BOTH send-bar buttons together. They live in .send-bar,
    * outside any round section, so markRoundHistory (which disables everything

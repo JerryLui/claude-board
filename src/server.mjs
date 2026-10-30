@@ -1279,7 +1279,8 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, s
       return sendJson(res, 400, { error: `board ${board.id} belongs to mission ${board.mission}, and the posting session ${moved}: ask with fresh for a board of its own` });
     }
   }
-  if (!namedMission && board.mission) mission = board.mission;
+  const inherited = !namedMission && !!board.mission;
+  if (inherited) mission = board.mission;
   if (mission && board.mission && board.mission !== mission) {
     return sendJson(res, 400, { error: `board ${board.id} belongs to mission ${board.mission}, not ${mission}` });
   }
@@ -1298,7 +1299,9 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, s
   // never run for this round.
   if (mission) {
     try {
-      linkBoard(mission, { id: board.id, url: boardUrl(req, board.id) }, { home });
+      // A mission the board only carries from an earlier round may since have been pruned:
+      // that link remakes nothing.
+      linkBoard(mission, { id: board.id, url: boardUrl(req, board.id) }, { home, create: !inherited });
     } catch (err) {
       console.error(`claude-board: board ${board.id} was not linked to mission ${mission}: ${(err && err.message) || err}`);
     }
