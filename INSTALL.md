@@ -23,10 +23,9 @@ preserving it, and `test/check-install.mjs` asserts the two are byte-identical.
 
 ## Routing existing skills to the board — optional, ask first
 
-The manual's description fires on the situation now — more than one question to put, a mock
-to hand over for a reaction — so a skill that says nothing about the board still reaches it.
-This section is for the stronger claim: a skill that should *always* ask on the board, and
-whose own prose still routes it to the terminal.
+The manual's description fires on a mock to hand over for a reaction, and on questions only
+where a session's own rules send them to the board. This section is for a skill that should
+*always* ask on the board, and whose own prose still routes it to the terminal.
 
 **Everything below is read by an agent, and the first write happens after step 2's answers
 come back.**
@@ -45,9 +44,8 @@ Four exclusions, each of which makes an edit worse than no edit:
   and the reader did not author the file.
 - A caller that runs unattended (a cron line, `claude -p`, CI). The board refuses a headless
   session by design, so routing one there converts a working run into a fallback path.
-- A caller whose whole interview is a lone follow-up or a yes/no. The manual's "Every
-  question goes to the board" section already sends those to the board without an edit,
-  so routing one changes nothing but adds a copy to drift.
+- A caller whose whole interview is a lone follow-up or a yes/no. One question gains
+  nothing from a board's widgets, and the edit adds a copy to drift.
 
 Report the survivors as a list — path, what each asks, how many questions in a run — and
 stop.

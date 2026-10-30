@@ -78,9 +78,9 @@ process.exit(0);
 const claudeStub = writeStub(binDir, 'claude-stub.mjs', STUB_CLAUDE);
 const launchctlStub = writeStub(binDir, 'launchctl-stub.mjs', STUB_LAUNCHCTL);
 
-// install.sh refuses to report success until the daemon answers /api/health, and
-// launchctl is stubbed (starts nothing) -- so this stands in for it, exactly like
-// test/check-install.mjs's own healthStub.
+// install.sh refuses to report success until the daemon answers /api/health (and
+// /api/probe/documents after it), and launchctl is stubbed (starts nothing) -- so this
+// stands in for it, exactly like test/check-install.mjs's own healthStub.
 //
 // The gate checks WHICH daemon answered, not just that one did (src/server.mjs's DAEMON_ID,
 // a digest of the daemon's own program path), so the stub has to name the identity every
@@ -93,6 +93,8 @@ import crypto from 'node:crypto';
 const identities = process.argv.slice(3).map(p => crypto.createHash('sha256').update(p, 'utf8').digest('hex'));
 http.createServer((req, res) => {
   if (req.url === '/api/health') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ ok: true, daemon: identities, pid: process.pid })); return; }
+  // The read under ~/Documents install.sh asks for after health, granted here.
+  if (req.url === '/api/probe/documents') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ ok: true })); return; }
   res.writeHead(404); res.end();
 }).listen(Number(process.argv[2]), '127.0.0.1');
 `);

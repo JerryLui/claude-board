@@ -1542,7 +1542,49 @@ if [ "$HEALTHY" -ne 1 ]; then
   exit 1
 fi
 HEALTH_ELAPSED_SECONDS=$((SECONDS - HEALTH_START_SECONDS))
-cbs_step_ok "health" "responding" "${HEALTH_ELAPSED_SECONDS}s"
+
+# A READ UNDER ~/Documents, ASKED OF THE DAEMON. Health alone passed a release whose
+# rebuilt bundle (a new code signature) had lost its Documents grant: every board reference
+# there failed `cannot read <path>: EPERM`, and kickstarts alone did not bring it back. So
+# the daemon is asked to open a file under ~/Documents the way a reference is opened
+# (src/resolve.mjs probeFolderRead). A refusal still registers the clients below, the
+# board being up for everything else, but fails the verdict. The degraded install skips
+# it: it runs as node, has no bundle to grant, and its launcher step already said so.
+#
+# 120s because a reset grant prompts on this very open and holds it until somebody
+# answers; an open that is not waiting on a person answers at once.
+DOCUMENTS_REFUSED=""
+if [ "$USE_LAUNCHER" -eq 1 ]; then
+  DOCUMENTS_RC=0
+  # The secret goes in on stdin (curl -K -), never on argv, where ps shows it.
+  DOCUMENTS_BODY="$(printf 'header = "x-claude-board-secret: %s"\n' "$(cat "$SECRET_FILE")" \
+    | curl -fsS --noproxy '*' --max-time 120 -K - "http://127.0.0.1:${PORT}/api/probe/documents" 2>/dev/null)" \
+    || DOCUMENTS_RC=$?
+  case "$DOCUMENTS_BODY" in
+    *'"ok":true'*|*'"code":"ENOENT"'*) ;;
+    *'"code":"EPERM"'*|*'"code":"EACCES"'*)
+      DOCUMENTS_REFUSED="~/Documents refused ($(printf '%s' "$DOCUMENTS_BODY" | sed -n 's/.*"code":"\([A-Z]*\)".*/\1/p'))" ;;
+    *)
+      if [ "$DOCUMENTS_RC" -eq 28 ]; then
+        DOCUMENTS_REFUSED="a read under ~/Documents did not answer in 120s"
+      else
+        DOCUMENTS_REFUSED="could not ask for a read under ~/Documents"
+      fi ;;
+  esac
+fi
+if [ -n "$DOCUMENTS_REFUSED" ]; then
+  cbs_step_fail "health" "responding, but $DOCUMENTS_REFUSED" "${HEALTH_ELAPSED_SECONDS}s"
+  cbs_detail "every board reference into ~/Documents will fail: cannot read <path>: EPERM"
+  cbs_detail "a rebuilt $LABEL.app loses its grant; to grant it again, run"
+  cbs_detail "  tccutil reset SystemPolicyDocumentsFolder $BUNDLE_ID"
+  cbs_detail "  launchctl kickstart -k gui/\$(id -u)/$LABEL"
+  cbs_detail "then the next post referencing a ~/Documents file prompts (re-running ./install.sh is one): click Allow"
+  cbs_detail "logs: $(display_path "$ERR_LOG")"
+elif [ "$USE_LAUNCHER" -eq 1 ]; then
+  cbs_step_ok "health" "responding, ~/Documents ok" "${HEALTH_ELAPSED_SECONDS}s"
+else
+  cbs_step_ok "health" "responding" "${HEALTH_ELAPSED_SECONDS}s"
+fi
 
 # --- 5. MCP registration ---------------------------------------------------
 # Each client owns its config, not this repo. Remove-then-add unconditionally: the remove
@@ -1726,7 +1768,12 @@ fi
 # two footer entries, verify and logs -- authorize and revive are conveyed elsewhere (see
 # above). No blank line between the banner and the footer, so the two read as one group
 # and the bounded (already-current, nothing-new) case stays inside the line budget.
-cbs_success "claude-board installed and running"
+if [ -n "$DOCUMENTS_REFUSED" ]; then
+  # Not cbs_success: the health step above failed, and its steps are the fix.
+  printf '  %s●  claude-board installed and running, but %s%s\n' "$CBS_ERR" "$DOCUMENTS_REFUSED" "$CBS_RESET"
+else
+  cbs_success "claude-board installed and running"
+fi
 cbs_footer_entry "verify" "$VERIFY_CMD"
 cbs_footer_entry "logs" "$(display_path "$LOG_DIR")/daemon.{out,err}.log"
 # The collapsed form of the three standing paragraphs above: whenever none of them printed
@@ -1734,3 +1781,4 @@ cbs_footer_entry "logs" "$(display_path "$LOG_DIR")/daemon.{out,err}.log"
 if [ "$USE_LAUNCHER" -eq 1 ] && [ "$LAUNCHER_IS_NEW" -eq 0 ] && [ "$CLAUDE_BOARD_VERBOSE" != "1" ]; then
   printf '     %smacOS file access and notifications: README → "Install"%s\n' "$CBS_DIM" "$CBS_RESET"
 fi
+[ -z "$DOCUMENTS_REFUSED" ] || exit 1

@@ -124,3 +124,4 @@ link where it is worth reading.
 | 137 | [Mission cards are as tall as their text, and Boards is one grouped list](.agents/adr/0137-mission-cards-as-tall-as-their-text-and-boards-one-grouped-list.md) | 2026-10-29 | replaces 135; amends 124; relates to 123, 125, 133 |
 | 138 | [Round pages are one centred 1100px column, in Linear's card density](.agents/adr/0138-round-pages-one-centred-1100px-column-in-linear-card-density.md) | 2026-10-29 | replaces 136; narrows 121, 122; relates to 26, 110, 120, 133, 137 |
 | 139 | [Inter is bundled, and "no web fonts and no external assets" narrows to "no external assets"](.agents/adr/0139-inter-is-bundled-no-external-assets-only.md) | 2026-10-29 | relates to 62, 70, 95, 137, 138 |
+| 143 | [A reinstall fails on a refused read under ~/Documents, after registering](.agents/adr/0143-a-reinstall-fails-on-a-refused-read-under-documents.md) | 2026-10-30 | relates to 15, 100 |
