@@ -137,7 +137,7 @@ review history), `~/.config/claude-board/secret` (the local auth secret),
 `~/Library/Logs/claude-board/` (logs), and each client's own MCP registration
 (`claude mcp add`, `codex mcp add`, one key in `~/.config/opencode/opencode.json`). With
 Codex found, one more: `~/.agents/skills/claude-board/`, its copy of the manual. No sudo,
-no network beyond a loopback health check.
+no network beyond the loopback checks of the daemon it started.
 
 A plugin install adds an eighth: `~/Library/Application Support/claude-board-checkout`,
 a code copy `install.sh` makes and re-runs from. Claude Code sweeps old plugin versions
@@ -163,6 +163,19 @@ radius ([SECURITY.md](SECURITY.md#defended)).
 Refusing is a real option: everything works except references into those three folders,
 which render as `cannot read <path>: EPERM`. Reversible either way under
 **System Settings → Privacy & Security → Files and Folders**.
+
+Every install asks the daemon to open a file under `~/Documents` after its health check,
+because a rebuilt launcher is new code to macOS and can lose the grant while the board
+answers health. Refused, the install still registers the board but fails (`✗ health`,
+exit 1) with the steps that grant it again:
+
+```sh
+tccutil reset SystemPolicyDocumentsFolder io.github.jerrylui.claude-board
+launchctl kickstart -k gui/$(id -u)/claude-board
+```
+
+Then the next post referencing a `~/Documents` file prompts (re-running `install.sh` is
+one): click Allow. A refusal you chose fails each reinstall the same way.
 
 ### The second click: notifications
 

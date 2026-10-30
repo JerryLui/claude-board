@@ -44,6 +44,7 @@
 
 import http from 'node:http';
 import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
@@ -62,7 +63,7 @@ import { isPageRound, roundIsAwaited, roundIsAwaitedOpen, roundWaitLapsed, close
 import { createPomodoro, readDoc as readPomodoroDoc } from './pomodoro.mjs';
 import { notifyBoundary, notifyTest } from './notify.mjs';
 import { isCue, cuePath } from './cues.mjs';
-import { resolveRefRoots } from './resolve.mjs';
+import { resolveRefRoots, probeFolderRead } from './resolve.mjs';
 import { createStrandedWatch } from './stranded.mjs';
 import { createMissionWatch } from './mission-watch.mjs';
 import { createMissionsCache } from './missions-cache.mjs';
@@ -3200,6 +3201,12 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
 
       if (req.method === 'POST' && url.pathname === '/api/store/prune') {
         return await handlePrune(req, res, home, waitingCache);
+      }
+
+      // install.sh's check that macOS lets this daemon read under ~/Documents, after its
+      // health gate (src/resolve.mjs probeFolderRead says why health alone is not enough).
+      if (req.method === 'GET' && url.pathname === '/api/probe/documents') {
+        return sendJson(res, 200, await probeFolderRead(path.join(homedir(), 'Documents')));
       }
 
       // The missions ledger (src/missions.mjs). The list is a plain read, so a browser

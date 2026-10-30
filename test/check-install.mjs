@@ -248,6 +248,20 @@ http.createServer((req, res) => {
     res.end(JSON.stringify({ ok: true, version: 'stub', daemon: identities, pid: process.pid }));
     return;
   }
+  // The read under ~/Documents install.sh asks for after health. Credentialed like the
+  // daemon's own route: a run that stopped sending the secret gets the 401 the daemon
+  // would give. Granted unless argv names the error code the read is refused with.
+  if (req.url === '/api/probe/documents') {
+    if (!/^[0-9a-f]{64}$/.test(String(req.headers['x-claude-board-secret'] || ''))) {
+      res.writeHead(401);
+      res.end();
+      return;
+    }
+    const refusedWith = process.argv[5];
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(refusedWith ? { ok: false, code: refusedWith } : { ok: true }));
+    return;
+  }
   res.writeHead(404);
   res.end();
 }).listen(Number(process.argv[2]), '127.0.0.1');
@@ -2352,6 +2366,49 @@ http.createServer((req, res) => {
     assert.doesNotMatch(r.stderr, /not the daemon/, 'and must not be mistaken for a foreign listener');
   });
 
+  await check('a reinstall whose daemon is refused a read under ~/Documents fails its health verdict with the steps to grant it again', async () => {
+    // A rebuilt bundle is a new code signature, which macOS can hold to a Documents
+    // refusal while /api/health answers: a release passed its health check with every
+    // board reference under ~/Documents failing EPERM. Here the daemon answers health as
+    // this install's job and refuses the read. Removing the read from install.sh turns
+    // this red at the exit status.
+    const refusedPort = await freePort();
+    const refused = spawn(process.execPath, [healthStub, String(refusedPort), workDir, repoRoot, 'EPERM'], { stdio: 'ignore' });
+    try {
+      assert.ok(await waitForHealthy(refusedPort, 5000), 'setup: the refusing daemon must be answering health');
+      const root = path.join(workDir, 'documents-refused-run');
+      const registrations = path.join(root, 'claude-registrations.json');
+      const r = spawnSync('bash', [installScript], {
+        env: {
+          ...env,
+          ...quietStubs('documents-refused'),
+          CLAUDE_BOARD_PORT: String(refusedPort),
+          CLAUDE_BOARD_LAUNCH_AGENTS_DIR: path.join(root, 'LaunchAgents'),
+          CLAUDE_BOARD_LOG_DIR: path.join(root, 'Logs'),
+          CLAUDE_BOARD_SKILLS_DIR: path.join(root, 'skills'),
+          STUB_CLAUDE_STATE: registrations,
+          STUB_LAUNCHCTL_PRINT_PID: String(refused.pid),
+        },
+        encoding: 'utf8',
+      });
+      assert.equal(r.status, 1, `a refused read must fail the install\nstdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
+      assert.match(r.stderr, /✗ {2}health {5}responding, but ~\/Documents refused \(EPERM\)/, 'the health step must name the refusal');
+      const steps = [
+        'tccutil reset SystemPolicyDocumentsFolder io.github.jerrylui.claude-board',
+        'launchctl kickstart -k gui/$(id -u)/claude-board',
+        'then the next post referencing a ~/Documents file prompts (re-running ./install.sh is one): click Allow',
+      ];
+      const at = steps.map(step => r.stderr.indexOf(step));
+      assert.ok(at.every(i => i >= 0), `every step to grant it again must be printed:\n${r.stderr}`);
+      assert.deepEqual([...at].sort((a, b) => a - b), at, 'and in the order they are run');
+      assert.doesNotMatch(r.stdout, /● {2}claude-board installed and running\n/, 'no clean pass on health alone');
+      assert.match(r.stdout, /claude-board installed and running, but ~\/Documents refused \(EPERM\)/);
+      assert.ok(JSON.parse(readFileSync(registrations, 'utf8'))['claude-board'], 'the board is up for everything else, so the client is still registered');
+    } finally {
+      refused.kill();
+    }
+  });
+
   // --- carry-forward: the port is a choice, like the roots and the store ------------
 
   await check('a custom CLAUDE_BOARD_PORT survives a reinstall that never mentions it', async () => {
@@ -3344,7 +3401,7 @@ http.createServer((req, res) => {
     // colour wrapped around the token survives normalization intact -- load-bearing
     // for the setup-sanity assertions just below, which still need a real difference
     // to prove colour was carried.
-    const normalizeTiming = s => s.replace(/(responding\s+(?:\x1b\[\d+m)?)\d+s/g, '$1Ns');
+    const normalizeTiming = s => s.replace(/(responding[^\n]*?\s+(?:\x1b\[\d+m)?)\d+s/g, '$1Ns');
     // Setup sanity first: if the coloured run carried no escapes at all, the equality
     // checks below would be proving nothing.
     assert.notEqual(normalizeTiming(coloured.stdout), normalizeTiming(plain.stdout), 'setup sanity: the coloured run must actually carry colour on stdout');

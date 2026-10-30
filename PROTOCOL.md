@@ -723,6 +723,9 @@ GET  /b/<asset>                     the shared script or stylesheet a page names
                                     is a sandboxed stage, which holds no credential);
                                     `ui-`/`styles-` are gated like every other read
 GET  /api/health                    { ok: true, version, daemon, pid }  (open: install.sh polls it)
+GET  /api/probe/documents           { ok: true } or { ok: false, code } -- whether macOS lets
+                                    the daemon open a file under ~/Documents (install.sh asks
+                                    it after the health gate). A code, never a name
 GET  /auth/:token                   consume a handoff -> 302 + Set-Cookie  (open by necessity)
 POST /api/handoff                   { boardId? } -> { token, expiresAt, ttlMs }
 POST /api/board                     post a board or a round into a live thread

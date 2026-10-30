@@ -4,7 +4,7 @@
 // the loopback Host refusal. No browser, no real network beyond 127.0.0.1.
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync, unlinkSync, statSync, realpathSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync, unlinkSync, statSync, realpathSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
@@ -4945,6 +4945,35 @@ async function main() {
     // a path is refused before anything is read.
     const unsafe = await rawFetch(`${base}/api/board/..%2F..%2Fsecret/read`, { headers: { [SECRET_HEADER]: SECRET } });
     assert.ok(unsafe.status === 400 || unsafe.status === 404, `an unsafe id must be refused, got ${unsafe.status}`);
+  });
+
+  // --- GET /api/probe/documents: install.sh's read under ~/Documents ----------
+
+  await check('GET /api/probe/documents answers whether the daemon can open a file under $HOME/Documents, by error code, to a credentialed caller only', async () => {
+    // install.sh fails its health verdict on this answer, so the codes are its contract:
+    // EPERM is what macOS TCC returns; EACCES, a folder this user cannot list, is the
+    // refusal a check can stage. `os.homedir()` reads $HOME on every call, which is how
+    // the daemon's home is moved here.
+    const probeHome = mkdtempSync(path.join(tmpdir(), 'claude-board-probe-home-'));
+    const documents = path.join(probeHome, 'Documents');
+    const savedHome = process.env.HOME;
+    process.env.HOME = probeHome;
+    try {
+      const none = await rawRequest(port, 'GET', '/api/probe/documents');
+      assert.equal(none.status, 401, 'a caller holding nothing is refused');
+      const ask = async () => (await fetch(`${base}/api/probe/documents`)).json();
+
+      assert.deepEqual(await ask(), { ok: false, code: 'ENOENT' }, 'no Documents folder at all');
+      mkdirSync(documents);
+      writeFileSync(path.join(documents, 'notes.md'), '# private\n');
+      assert.deepEqual(await ask(), { ok: true }, 'a file it may open');
+      chmodSync(documents, 0o000);
+      assert.deepEqual(await ask(), { ok: false, code: 'EACCES' }, 'a folder it may not read, and never a file name');
+    } finally {
+      process.env.HOME = savedHome;
+      if (existsSync(documents)) chmodSync(documents, 0o700);
+      rmSync(probeHome, { recursive: true, force: true });
+    }
   });
 
   // --- GET /api/waiting: the boards waiting for an answer ---------------

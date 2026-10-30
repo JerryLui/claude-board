@@ -127,3 +127,4 @@ link where it is worth reading.
 | 140 | [A mission card reads from facts: an open round ahead of stalled, PR states from GitHub, a gone session said](.agents/adr/0140-a-mission-card-reads-from-facts.md) | 2026-10-30 | amends 123, 129; relates to 125, 128, 134 |
 | 141 | [A session joins its mission by its own id, one at a time, and takes the PM's orders](.agents/adr/0141-a-session-joins-its-mission-by-its-own-id.md) | 2026-10-30 | amends 123, 129, 131; relates to 125, 126 |
 | 142 | [A card's Merge opens the brief at its merge question, and answers nothing](.agents/adr/0142-a-cards-merge-opens-the-brief-at-its-merge-question.md) | 2026-10-30 | narrows 125, 137; relates to 134 |
+| 143 | [A reinstall fails on a refused read under ~/Documents, after registering](.agents/adr/0143-a-reinstall-fails-on-a-refused-read-under-documents.md) | 2026-10-30 | relates to 15, 100 |
