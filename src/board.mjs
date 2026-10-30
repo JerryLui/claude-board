@@ -1658,8 +1658,8 @@ export function buildPacket(board, round, url) {
 //   board.strandedBanner = { at, until, round, returned, pid } | null
 //
 //   at        when the banner went up, an ISO stamp like `sentAt`/`postedAt` beside it.
-//             Also what bounds `pid` below: a process that started before this did is not
-//             the one this record names, whatever it is called.
+//             Also what bounds src/stranded.mjs's `pid`: a process that started before this
+//             did is not the one this record names, whatever it is called.
 //   until     when the process serving the banner will exit and withdraw it -- the round's
 //             own deadline, or the launcher's hard ceiling, whichever comes first. Used for
 //             ONE thing: deciding whether `pid` is still worth signalling. Deliberately NOT
