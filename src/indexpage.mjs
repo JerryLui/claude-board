@@ -1970,9 +1970,11 @@ function missionsParts(overview, ui) {
     var lines = [];
     var stop = null;
     var comments = 0;
+    var pm = null;
     for (var i = 0; i < orders.length; i++) {
       if (orders[i].kind === 'stop') stop = orders[i];
       else if (orders[i].kind === 'comment' && !orders[i].relayedAt) comments += 1;
+      else if (orders[i].kind === 'pm') pm = orders[i];
     }
     if (!stop && sent) stop = {};
     if (stop && live) {
@@ -1981,6 +1983,8 @@ function missionsParts(overview, ui) {
         : 'Stop asked: waiting for the Master Chief to relay it');
     }
     if (comments) lines.push(comments === 1 ? 'Comment waiting for the Master Chief' : comments + ' comments waiting for the Master Chief');
+    // The PM's newest order, and whether the session has marked it seen (ADR 141).
+    if (pm && live) lines.push(pm.ackedAt ? 'PM’s order seen' : 'PM’s order sent, not seen yet');
     return { lines: lines, stopPending: !!(stop && live) };
   }
 

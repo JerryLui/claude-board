@@ -28,7 +28,11 @@ export const STORED_STATES = ['needs-you', 'working', 'waiting', 'queued', 'rele
 export const PR_STATES = ['draft', 'open', 'green', 'red', 'merged'];
 /** A listed PR's state in the view before the first fact for it arrives. */
 export const PR_CHECKING = 'checking';
-export const ORDER_KINDS = ['stop', 'comment'];
+/** What an order asks: a card's Stop or comment (`CARD_ORDER_KINDS`, the only kinds a card or
+ * a tab's card may post), or `pm`, the PM's own words the Master Chief carries to the bound
+ * session word for word. */
+export const ORDER_KINDS = ['stop', 'comment', 'pm'];
+export const CARD_ORDER_KINDS = ['stop', 'comment'];
 
 /** The fields `POST /api/mission/:key` may write; anything else in its body is a 400. */
 export const MISSION_FIELDS = ['title', 'cwd', 'phase', 'state', 'summary', 'waitingOn', 'next', 'prs', 'handoff', 'fire', 'queue', 'retiredAt'];
@@ -514,7 +518,9 @@ export function launchMission(key, body, { home = boardHome(), now = Date.now(),
   // The session this launch replaces is over, finished or gone or silent, yet its process
   // may still run: its pid and id never bind the next one. A record that is only `ended`
   // passes its own on.
-  const ended = m.session ? endedSession(m.session) ?? m.session.ended ?? null : null;
+  // A session that left (`leaveMission`) went back to being a tab: its own `ended` is not
+  // carried, so it never reads as this mission's again.
+  const ended = m.session ? endedSession(m.session) ?? (m.session.leftAt ? null : m.session.ended) ?? null : null;
   const others = listMissions(home).filter(o => o.key !== key).map(o => missionView(o, { home, now, isAlive }));
   const live = liveCounts(others);
   const at = iso(now);
@@ -552,12 +558,13 @@ function endedSession(s) {
 export function bindSession(key, body, { home = boardHome(), now = Date.now(), isAlive = pidAlive } = {}) {
   assertMissionKey(key);
   assertObject(body, 'the body');
-  assertOnly(body, ['pid', 'id', 'name', 'login'], 'the body');
-  if (body.pid !== undefined && (!Number.isInteger(body.pid) || body.pid <= 0)) throw refuse('pid must be a positive integer');
-  const given = { ...(body.pid !== undefined ? { pid: body.pid } : {}) };
-  for (const f of ['id', 'name', 'login']) {
+  assertOnly(body, ['pid', 'procStart', 'id', 'name', 'login', 'typed'], 'the body');
+  if (body.typed !== undefined && typeof body.typed !== 'boolean') throw refuse('typed must be a boolean');
+  const given = sessionRef(body, { needId: false });
+  for (const f of ['name', 'login']) {
     if (body[f] !== undefined) given[f] = str(body[f], f, MAX_NAME_CHARS);
   }
+  if (body.typed) given.typedAt = iso(now);
   const m = readMission(key, home);
   if (!m) throw notFound(key);
   const at = iso(now);
@@ -579,38 +586,217 @@ export function bindSession(key, body, { home = boardHome(), now = Date.now(), i
   return writeMission(m, home);
 }
 
-/** `POST /api/mission/:key/order`: appends a stop or comment order from the mission's card,
- * and answers it. A comment needs its `text`. */
+// --- binding by session id (ADR 141) ---------------------------------------------------
+
+/** A session as a caller names itself: `id` (its agent session id, which a `/clear`
+ * changes), and its process as `pid` and `procStart` (which a `/clear` keeps). */
+function sessionRef(body, { needId }) {
+  const ref = {};
+  if (body.id !== undefined || needId) ref.id = str(body.id, 'id', MAX_NAME_CHARS);
+  if (needId && !ref.id) throw refuse('id must not be empty');
+  if (body.pid !== undefined) {
+    if (!Number.isInteger(body.pid) || body.pid <= 0) throw refuse('pid must be a positive integer');
+    ref.pid = body.pid;
+  }
+  if (body.procStart !== undefined) ref.procStart = timestamp(body.procStart, 'procStart');
+  return ref;
+}
+
+/** Two process starts name one second: a watcher's reading and a shim's may differ in their
+ * milliseconds (src/sessions.mjs reads them the same way). */
+function sameStart(a, b) {
+  return Math.floor(Date.parse(a) / 1000) === Math.floor(Date.parse(b) / 1000);
+}
+
+/** `ref` names the session `s`: by its id, or by its process, the same pid with no process
+ * start telling them apart (a pid the OS reused has another start). */
+export function sessionMatches(s, ref) {
+  if (!s || !ref) return false;
+  if (s.id != null && ref.id != null && s.id === ref.id) return true;
+  if (s.pid == null || ref.pid == null || s.pid !== ref.pid) return false;
+  return s.procStart == null || ref.procStart == null || sameStart(s.procStart, ref.procStart);
+}
+
+/** A reservation `launchMission` made that no process has bound yet. */
+const isReservation = s => s.pid == null && s.id == null;
+
+function boundFrom(ref, at, previous) {
+  const ended = previous ? endedSession(previous) ?? (previous.leftAt ? null : previous.ended) ?? null : null;
+  return { ...ref, startedAt: at, seenAt: at, ...(ended ? { ended } : {}) };
+}
+
+/** A join or leave refused: 409 with its own answer. */
+function conflict(answer) {
+  return Object.assign(refuse(answer.error, 409), { answer });
+}
+
+/** `POST /api/mission/:key/join`: a session names itself (`id`, its process as `pid` and
+ * `procStart`) the one working the mission, creating the mission when it is new. It binds,
+ * answering `{ status: 200, bound: true, session }`, when no session holds the mission
+ * (`hasLiveSession`), when the bound one is this session (its id, or its process under a new
+ * id after a `/clear`, which takes the id), or when the mission holds only a launch's
+ * reservation. Another live session bound is a 409 `{ error: 'live', session }`; with
+ * `takeover: true` it is recorded as `takeover: { by, at }` and answers
+ * `{ status: 202, takeover: 'pending', session }`, the bound session told through
+ * `bindingFor` to finish its step and leave. A fresh bind moves the mission to working, in
+ * `phase` when given, and clears any takeover. */
+export function joinMission(key, body, { home = boardHome(), now = Date.now(), isAlive = pidAlive } = {}) {
+  assertMissionKey(key);
+  assertObject(body, 'the body');
+  assertOnly(body, ['id', 'pid', 'procStart', 'phase', 'takeover'], 'the body');
+  const ref = sessionRef(body, { needId: true });
+  const phase = body.phase === undefined ? undefined : oneOf(body.phase, PHASES, 'phase');
+  if (body.takeover !== undefined && typeof body.takeover !== 'boolean') throw refuse('takeover must be a boolean');
+  const m = readMission(key, home) || newMission(key, now, { phase: phase || 'grill', state: 'working' });
+  const at = iso(now);
+  const bound = currentSession(m);
+  let answer;
+  if (bound && !isReservation(bound) && sessionMatches(bound, ref)) {
+    m.session = { ...bound, ...ref, seenAt: at };
+    if (phase && phase !== m.phase) moveTo(m, { phase }, now);
+    answer = { status: 200, bound: true, session: m.session };
+  } else if (bound && isReservation(bound) && hasLiveSession(m, now, isAlive)) {
+    m.session = { ...bound, ...ref, seenAt: at };
+    delete m.takeover;
+    moveTo(m, { phase: phase || m.phase, state: 'working' }, now);
+    answer = { status: 200, bound: true, session: m.session };
+  } else if (bound && hasLiveSession(m, now, isAlive)) {
+    if (!body.takeover) throw conflict({ error: 'live', session: m.session });
+    // The latest asker is the one bound at the leave; one asking again keeps its first `at`.
+    const since = m.takeover?.by === ref.id ? m.takeover.at : at;
+    m.takeover = { by: ref.id, ...(ref.pid !== undefined ? { pid: ref.pid } : {}), ...(ref.procStart !== undefined ? { procStart: ref.procStart } : {}), at: since };
+    answer = { status: 202, takeover: 'pending', session: m.session };
+  } else {
+    m.session = boundFrom(ref, at, m.session);
+    delete m.takeover;
+    delete m.queue;
+    moveTo(m, { phase: phase || m.phase, state: 'working' }, now);
+    answer = { status: 200, bound: true, session: m.session };
+  }
+  touch(m, now);
+  writeMission(m, home);
+  return answer;
+}
+
+/** `POST /api/mission/:key/leave`: the bound session lets the mission go. With a takeover
+ * pending, the session that asked for it is bound in its place and `takeover` cleared,
+ * answering `{ left: true, session }` with the new session; else the mission holds
+ * `session: { ended, leftAt }` and, stored working, moves to waiting, answering
+ * `{ left: true, session: null }`. A session that left is no longer the mission's: it reads
+ * as a tab again (src/sessions.mjs `deriveTabs`). Any other session is a 409
+ * `{ error: 'not bound', session }`. */
+export function leaveMission(key, body, { home = boardHome(), now = Date.now() } = {}) {
+  assertMissionKey(key);
+  assertObject(body, 'the body');
+  assertOnly(body, ['id', 'pid', 'procStart'], 'the body');
+  const ref = sessionRef(body, { needId: true });
+  const m = readMission(key, home);
+  if (!m) throw notFound(key);
+  const bound = currentSession(m);
+  if (!bound || isReservation(bound) || !sessionMatches(bound, ref)) throw conflict({ error: 'not bound', session: m.session ?? null });
+  const at = iso(now);
+  const t = m.takeover;
+  if (t) {
+    const next = { id: t.by, ...(t.pid !== undefined ? { pid: t.pid } : {}), ...(t.procStart !== undefined ? { procStart: t.procStart } : {}) };
+    m.session = boundFrom(next, at, bound);
+    delete m.takeover;
+    moveTo(m, { state: 'working' }, now);
+  } else {
+    m.session = { ended: endedSession(bound), leftAt: at };
+    if (m.state === 'working') moveTo(m, { state: 'waiting' }, now);
+  }
+  touch(m, now);
+  writeMission(m, home);
+  return { left: true, session: t ? m.session : null };
+}
+
+/** The pm orders on `m` its session has not marked seen, oldest first. */
+const unseenOrders = m => (m.orders || []).filter(o => o.kind === 'pm' && !o.ackedAt);
+
+/** `GET /api/binding`: the mission `ref` (`{ id, pid?, procStart? }`) is bound to among the
+ * stored `records`, with its pending `takeover` (`{ by, at }`), its pm orders not yet seen and
+ * its `handoff`; all null and empty when it is bound to none. A released mission, a launch's
+ * bare reservation and a session that left bind no one. A plain scan of the records, nothing
+ * derived: a hook asks it every minute (src/bindings.mjs keeps the records). */
+export function bindingFor(records, ref) {
+  let hit = null;
+  for (const m of records) {
+    const s = currentSession(m);
+    if (!s || isReservation(s) || m.state === 'released' || !sessionMatches(s, ref)) continue;
+    if (!hit || String(s.seenAt) > String(currentSession(hit).seenAt)) hit = m;
+  }
+  if (!hit) return { key: null, takeover: null, orders: [], handoff: null };
+  return {
+    key: hit.key,
+    takeover: hit.takeover ? { by: hit.takeover.by, at: hit.takeover.at } : null,
+    orders: unseenOrders(hit),
+    handoff: hit.handoff ?? null,
+  };
+}
+
+/** `POST /api/mission/:key/order`: appends an order and answers it. A card posts a stop or
+ * a comment (`by: 'card'`); the Master Chief posts `pm`, the PM's words for the session
+ * (`by: 'master-chief'`). A comment and a pm order need their `text`. */
 export function addOrder(key, body, { home = boardHome(), now = Date.now() } = {}) {
   assertMissionKey(key);
   assertObject(body, 'the body');
   assertOnly(body, ['kind', 'text'], 'the body');
   const kind = oneOf(body.kind, ORDER_KINDS, 'kind');
   const text = body.text === undefined ? undefined : bytes(body.text, 'text', MAX_TEXT_BYTES);
-  if (kind === 'comment' && !(text && text.trim())) throw refuse('a comment order needs its text');
+  if (kind !== 'stop' && !(text && text.trim())) throw refuse(`a ${kind} order needs its text`);
   const m = readMission(key, home);
   if (!m) throw notFound(key);
-  const order = { id: `o_${randomBytes(8).toString('hex')}`, kind, ...(text !== undefined ? { text } : {}), at: iso(now), by: 'card' };
+  const by = kind === 'pm' ? 'master-chief' : 'card';
+  const order = { id: `o_${randomBytes(8).toString('hex')}`, kind, ...(text !== undefined ? { text } : {}), at: iso(now), by };
   m.orders = [...(m.orders || []), order].slice(-MAX_ORDERS);
   touch(m, now);
   writeMission(m, home);
   return order;
 }
 
-/** `POST /api/mission/:key/order/:id/ack`: marks an order relayed, once; a repeat keeps the
- * first `relayedAt`. Answers the order. */
-export function ackOrder(key, id, { home = boardHome(), now = Date.now() } = {}) {
+/** Sets `field` on order `id` of mission `key` to now, once; a repeat keeps the first. `check`
+ * runs on the record before the write. Answers the order. */
+function markOrder(key, id, field, { home, now, check = () => {} }) {
   assertMissionKey(key);
   const m = readMission(key, home);
   if (!m) throw notFound(key);
   const order = (m.orders || []).find(o => o.id === id);
   if (!order) throw refuse(`order not found: ${id}`, 404);
-  if (!order.relayedAt) {
-    order.relayedAt = iso(now);
+  check(m);
+  if (!order[field]) {
+    order[field] = iso(now);
     touch(m, now);
     writeMission(m, home);
   }
   return order;
+}
+
+/** `POST /api/mission/:key/order/:id/ack`: the Master Chief relayed the order; sets
+ * `relayedAt` once. Answers the order. */
+export function ackOrder(key, id, { home = boardHome(), now = Date.now() } = {}) {
+  return markOrder(key, id, 'relayedAt', { home, now });
+}
+
+/** `POST /api/mission/:key/order/:id/seen`: the bound session acknowledges the order, by its
+ * id or its process; sets `ackedAt` once, the mark the card shows. Another session is a 409
+ * `{ error: 'not bound', session }`. Answers the order. */
+export function seenOrder(key, id, body, { home = boardHome(), now = Date.now() } = {}) {
+  assertObject(body, 'the body');
+  assertOnly(body, ['id', 'pid', 'procStart'], 'the body');
+  const ref = sessionRef(body, { needId: true });
+  return markOrder(key, id, 'ackedAt', {
+    home, now,
+    check: m => {
+      const s = currentSession(m);
+      if (!s || isReservation(s) || !sessionMatches(s, ref)) throw conflict({ error: 'not bound', session: m.session ?? null });
+    },
+  });
+}
+
+/** `POST /api/mission/:key/order/:id/resent`: the Master Chief sent an unseen order once
+ * more; sets `resentAt` once, so it is never sent a third time. Answers the order. */
+export function resentOrder(key, id, { home = boardHome(), now = Date.now() } = {}) {
+  return markOrder(key, id, 'resentAt', { home, now });
 }
 
 /** True when `round` of `board`, as just submitted, answered a `single` question carrying

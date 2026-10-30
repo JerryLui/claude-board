@@ -26,7 +26,7 @@
 // start time, so it never inherits a round or revives a card.
 
 import { randomBytes } from 'node:crypto';
-import { ORDER_KINDS, roundWantsAnswer } from './missions.mjs';
+import { CARD_ORDER_KINDS, roundWantsAnswer } from './missions.mjs';
 import { questionBlocks } from './badge.mjs';
 import { folderName } from './indexpage.mjs';
 
@@ -306,7 +306,7 @@ export function createSessionList({ now = Date.now, onChange = () => {} } = {}) 
       for (const k of Object.keys(body)) {
         if (k !== 'kind' && k !== 'text') throw refuse('the body has an unknown field');
       }
-      if (!ORDER_KINDS.includes(body.kind)) throw refuse(`kind must be one of ${ORDER_KINDS.join(', ')}`);
+      if (!CARD_ORDER_KINDS.includes(body.kind)) throw refuse(`kind must be one of ${CARD_ORDER_KINDS.join(', ')}`);
       let text;
       if (body.text !== undefined) {
         if (typeof body.text !== 'string') throw refuse('text must be a string');
@@ -346,7 +346,8 @@ export function createSessionList({ now = Date.now, onChange = () => {} } = {}) 
 /** The sessions a mission holds or held, by id and by pid: its bound session's and the one
  * its last launch ended. A session a mission launched is that mission's card, never a tab,
  * even once the mission has moved on while its process lingers; the pid covers it under a
- * new id before its next beat binds that (a `/clear`). */
+ * new id before its next beat binds that (a `/clear`). A session that left its mission
+ * (`session: { ended, leftAt }`, src/missions.mjs `leaveMission`) is a tab again (ADR 141). */
 function missionSessions(missions) {
   const ids = new Set();
   const pids = new Set();
@@ -358,7 +359,7 @@ function missionSessions(missions) {
     const s = m && m.session;
     if (!isObject(s)) continue;
     add(s);
-    if (isObject(s.ended)) add(s.ended);
+    if (isObject(s.ended) && !s.leftAt) add(s.ended);
   }
   return { ids, pids };
 }
@@ -395,8 +396,9 @@ export function commandOf(name) {
 /** The tab cards for `sessions` (the list's `entries()`): every listed session but a
  * mission's. A session is a mission's when a mission record holds or held it, by its id,
  * its pid, or its job id being a held id's first 8 characters (a background job's id is
- * its session's short form); or when it posted a board that belongs to a mission (a
- * launch reserves a session before it knows its pid or id). `missions` are the stored
+ * its session's short form); or when it posted a board that belongs to a mission holding
+ * only a launch's reservation (a launch reserves a session before it knows its pid or id).
+ * A board of a mission bound by id holds no one: the session that posted it may have left. `missions` are the stored
  * records, every one, retired or not; `boards` are `boardLink`s of every board in the
  * store. A card reads:
  *
@@ -414,8 +416,11 @@ export function deriveTabs({ sessions, missions = [], boards = [] }) {
   const links = boards.filter(Boolean);
   const ownerOf = bs => (bs.id != null && sessions.find(s => s.id === bs.id)) || sessions.find(s => sameProcess(s, bs)) || null;
   const held = missionSessions(missions);
+  const reserved = new Set(missions
+    .filter(m => m && isObject(m.session) && m.session.startedAt && m.session.pid == null && m.session.id == null)
+    .map(m => m.key));
   for (const link of links) {
-    if (link.mission == null) continue;
+    if (link.mission == null || !reserved.has(link.mission)) continue;
     const owner = ownerOf(link.session);
     if (owner) held.ids.add(owner.id);
   }

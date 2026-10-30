@@ -362,6 +362,23 @@ async function main() {
       }
     });
 
+    await check('the PM\'s newest order shows on its card as sent, then as seen once the bound session marks it', async () => {
+      await liveMission('PM_SEEN');
+      const first = (await post('/api/mission/PM_SEEN/order', { kind: 'pm', text: 'Wait for the review.' })).body.order;
+      const tab = await openMissionsTab();
+      const wire = openWireStream();
+      try {
+        await wire.connected();
+        assert.deepEqual(cardFor(tab.document, 'PM_SEEN').querySelectorAll('p.mission-order').map(p => p.textContent), ['PM\u2019s order sent, not seen yet']);
+        assert.equal((await post(`/api/mission/PM_SEEN/order/${first.id}/seen`, { id: 'sess-PM_SEEN' })).status, 200);
+        await tab.push('missions', (await wire.next('missions')).data);
+        assert.deepEqual(cardFor(tab.document, 'PM_SEEN').querySelectorAll('p.mission-order').map(p => p.textContent), ['PM\u2019s order seen']);
+      } finally {
+        wire.close();
+        tab.restoreFetch();
+      }
+    });
+
     await check('a Cmd-click on Stop posts one stop order at once, with no question, and leaves no Stop to click while the order is out', async () => {
       await liveMission('STOP_AT_ONCE');
       const tab = await openMissionsTab();
