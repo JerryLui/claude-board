@@ -608,12 +608,14 @@ import fs from 'node:fs';
 const argv = process.argv.slice(2);
 const log = process.env.STUB_OSASCRIPT_LOG;
 const say = what => fs.appendFileSync(log, JSON.stringify([what, ...argv]) + '\\n');
-say('spawn');
 const linger = Number(process.env.STUB_OSASCRIPT_LINGER_MS || '0');
 if (linger > 0) {
   const bye = sig => { say(sig); process.exit(0); };
   process.on('SIGTERM', () => bye('SIGTERM'));
   process.on('SIGINT', () => bye('SIGINT'));
+}
+say('spawn');
+if (linger > 0) {
   setTimeout(() => { say('deadline'); process.exit(0); }, linger);
 }
 `;
