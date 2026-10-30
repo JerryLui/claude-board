@@ -14,7 +14,7 @@ import { readBoard, readMission, writeBoard, writeMission, pruneStore, MISSION_R
 import { createBoard } from '../src/board.mjs';
 import { createSessionList } from '../src/sessions.mjs';
 import {
-  missionsOverview, launchMission, bindSession, upsertMission, deriveState, MAX_WORKING, MAX_ALIVE, STALL_SILENCE_MS, UNBOUND_GRACE_MS, RELEASED_VISIBLE_MS,
+  missionsOverview, missionView, launchMission, bindSession, upsertMission, deriveState, MAX_WORKING, MAX_ALIVE, STALL_SILENCE_MS, UNBOUND_GRACE_MS, RELEASED_VISIBLE_MS,
 } from '../src/missions.mjs';
 import { createMissionsCache, MISSIONS_CACHE_MS } from '../src/missions-cache.mjs';
 import { check, deadPid, openSseClient, rawRequest, runMain, secretFetch, secretHome, sessionCookieHeader, waitFor, writeHeaders } from './support.mjs';
@@ -512,10 +512,12 @@ async function main() {
     // Bound while the stand-in is alive, then gone.
     const session = liveProcess();
     await post('/api/mission/DEAD_PID/session', { pid: session.pid });
-    assert.equal((await getJson('/api/mission/DEAD_PID')).body.view, 'working');
+    const alive = (await getJson('/api/mission/DEAD_PID')).body;
+    assert.deepEqual([alive.view, alive.gone], ['working', null]);
     await endProcess(session);
     const view = (await getJson('/api/mission/DEAD_PID')).body;
     assert.equal(view.view, 'stalled');
+    assert.deepEqual(view.gone, { lastSeenAt: readMission('DEAD_PID', home).session.seenAt }, 'gone, with its last heartbeat');
     assert.equal(view.live, false);
     assert.equal(view.state, 'working', 'stalled is derived, never stored');
     // And the same through the module, for a waiting mission: a gone process stalls any state.
@@ -531,6 +533,95 @@ async function main() {
     assert.equal(deriveState(at(STALL_SILENCE_MS - 1000), { home, now, isAlive: alive }), 'working');
     assert.equal(deriveState({ ...at(minutes(600)), state: 'waiting' }, { home, now, isAlive: alive }), 'waiting');
     assert.equal(deriveState({ ...at(minutes(600)), state: 'released' }, { home, now, isAlive: () => false }), 'released', 'a released mission stays released after its session ends');
+  });
+
+  await check('a round asking for the PM reads needs-you ahead of stalled, whether the session is gone, silent or still there', () => {
+    const dir = scratchHome('ahead-of-stalled');
+    const now = Date.parse('2026-10-28T12:00:00Z');
+    const boardId = 'b_aheadofstalled';
+    mkdirSync(path.join(dir, 'boards'), { recursive: true });
+    writeFileSync(path.join(dir, 'boards', `${boardId}.json`), JSON.stringify({
+      id: boardId, thread: 't', title: 'q', cwd: null, createdAt: iso(now), updatedAt: iso(now), state: 'open',
+      // No wait on it: the session that asked has stopped waiting, and the round still asks.
+      rounds: [{ n: 1, postedAt: iso(now - minutes(90)), status: 'open', sentAt: null, title: 'q' }],
+      blocks: [{ id: 'q1', kind: 'question', round: 1, prompt: 'Merge?', widget: 'single', options: [{ label: 'Merge' }] }],
+      answers: {}, comments: [],
+    }));
+    const linked = [{ id: boardId, url: 'http://x/b/' + boardId, at: iso(now) }];
+    for (const [what, seenAgo, isAlive, unlinked] of [
+      ['its process gone', minutes(1), () => false, 'stalled'],
+      ['silent past the stall', STALL_SILENCE_MS + minutes(1), () => true, 'stalled'],
+      ['still heard from', minutes(1), () => true, 'working'],
+    ]) {
+      const m = { key: 'K', state: 'working', boards: linked, session: { pid: 4242, startedAt: iso(now - minutes(120)), seenAt: iso(now - seenAgo) } };
+      assert.equal(deriveState(m, { home: dir, now, isAlive }), 'needs-you', `${what}, with the round open`);
+      assert.equal(deriveState({ ...m, boards: [] }, { home: dir, now, isAlive }), unlinked, `${what}, with no round`);
+    }
+  });
+
+  await check('a view carries gone with its last heartbeat while its bound process is gone or its reservation lapsed, and none once the mission recorded its end', () => {
+    const now = Date.parse('2026-10-28T12:00:00Z');
+    const seenAt = iso(now - minutes(42));
+    const bound = { pid: 4343, id: 's', startedAt: iso(now - minutes(60)), seenAt };
+    const viewOf = (fields, isAlive) => missionView({ key: 'K', state: 'working', phase: 'direct', boards: [], ...fields }, { home, now, isAlive });
+    assert.deepEqual(viewOf({ session: bound }, () => false).gone, { lastSeenAt: seenAt });
+    assert.equal(viewOf({ session: bound }, () => true).gone, null);
+    const reserved = { startedAt: iso(now - UNBOUND_GRACE_MS - 1000), seenAt: iso(now - UNBOUND_GRACE_MS - 1000) };
+    assert.deepEqual(viewOf({ session: reserved }, () => true).gone, { lastSeenAt: reserved.seenAt }, 'a start no process bound');
+    assert.equal(viewOf({ session: bound, state: 'released' }, () => false).gone, null, 'a released mission\'s session is expected to end');
+    assert.equal(viewOf({ session: bound, phase: 'grill', fire: { at: seenAt, by: 'round' } }, () => false).gone, null, 'a fired grill too');
+    assert.equal(viewOf({ session: null }, () => false).gone, null);
+  });
+
+  await check('POST /api/mission/:key/facts sets each listed PR\'s state and head in the view, replacing by repo and number, and drops a fact for a PR not listed', async () => {
+    const pr = (repo, number) => ({ repo, number, url: `https://github.com/o/${repo}/pull/${number}` });
+    await post('/api/mission/FACTS', { title: 'Facts', prs: [{ ...pr('service', 12), state: 'merged' }, pr('admin', 7)] });
+    const first = await post('/api/mission/FACTS/facts', { prs: [
+      { repo: 'service', number: 12, state: 'red', head: 'abc123', checkedAt: '2026-10-30T10:00:00.000Z' },
+      { repo: 'client', number: 3, state: 'green', head: 'fff000', checkedAt: '2026-10-30T10:00:00.000Z' },
+    ] });
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    assert.deepEqual(first.body.prs.map(p => [p.repo, p.number, p.state, p.head, p.checkedAt]), [
+      ['service', 12, 'red', 'abc123', '2026-10-30T10:00:00.000Z'],
+      ['admin', 7, 'checking', null, null],
+    ], 'the session\'s merged is not the view\'s; a PR with no fact yet is checking; client #3 is not listed');
+    const updatedAt = readMission('FACTS', home).updatedAt;
+
+    await post('/api/mission/FACTS/facts', { prs: [{ repo: 'service', number: 12, state: 'green', head: 'def456', checkedAt: '2026-10-30T10:02:00.000Z' }] });
+    const view = (await getJson('/api/mission/FACTS')).body;
+    assert.deepEqual(view.prs.map(p => [p.repo, p.state, p.head]), [['service', 'green', 'def456'], ['admin', 'checking', null]]);
+    const record = readMission('FACTS', home);
+    assert.deepEqual(record.prFacts, [{ repo: 'service', number: 12, state: 'green', head: 'def456', checkedAt: '2026-10-30T10:02:00.000Z' }]);
+    assert.equal(record.updatedAt, updatedAt, 'a reading is not a change the mission made');
+
+    for (const body of [
+      { prs: [{ repo: 'service', number: 12, state: 'passing', head: 'x' }] },
+      { prs: [{ repo: 'service', number: 12, state: 'green' }] },
+      { prs: [{ repo: 'service', number: 12, state: 'green', head: 'x', checkedAt: 'soon' }] },
+      { prs: [{ repo: 'service', number: 12, state: 'green', head: 'x', url: 'u' }] },
+      { prs: {} }, { facts: [] },
+    ]) {
+      assert.equal((await post('/api/mission/FACTS/facts', body)).status, 400, `${JSON.stringify(body)} is refused`);
+    }
+    assert.deepEqual(readMission('FACTS', home).prFacts, record.prFacts, 'a refused post writes nothing');
+    assert.equal((await post('/api/mission/NO_SUCH_MISSION/facts', { prs: [] })).status, 404);
+  });
+
+  await check('a card\'s recheck, by the cookie, drops the cached overview and answers the fresh view, so a gone session shows at once', async () => {
+    await post('/api/mission/RECHECK/launch', { phase: 'direct' });
+    const session = liveProcess();
+    await post('/api/mission/RECHECK/session', { pid: session.pid });
+    const viewIn = async () => (await getJson('/api/missions')).body.missions.find(m => m.key === 'RECHECK');
+    assert.deepEqual([(await viewIn()).view, (await viewIn()).gone], ['working', null], 'setup: the cached overview holds it working');
+    await endProcess(session);
+    const cookie = sessionCookieHeader(SECRET);
+    const r = await rawRequest(port, 'POST', '/api/mission/RECHECK/recheck', { headers: { 'content-type': 'application/json', cookie }, body: '{}' });
+    assert.equal(r.status, 200, r.body);
+    const answer = JSON.parse(r.body);
+    assert.deepEqual([answer.view, answer.gone], ['stalled', { lastSeenAt: readMission('RECHECK', home).session.seenAt }]);
+    const listed = await viewIn();
+    assert.deepEqual([listed.view, listed.gone], [answer.view, answer.gone], 'the list reads it fresh, not from the cache');
+    assert.equal((await post('/api/mission/NO_SUCH_MISSION/recheck', {})).status, 404);
   });
 
   await check('a mission leaving needs-you drops its waitingOn, unless the same write sets one; staying in needs-you keeps it', () => {
@@ -659,7 +750,7 @@ async function main() {
 
   // --- the record -----------------------------------------------------------------
 
-  await check('POST /api/mission/:key writes the whitelisted fields and answers the view, with history on a phase or state change only', async () => {
+  await check('POST /api/mission/:key writes the whitelisted fields and answers the view, with history on a phase or state change only; a PR\'s state the session sends is dropped', async () => {
     const fields = {
       title: 'Front agent', cwd: '/tmp/x', phase: 'grill', state: 'working', summary: 'The Master Chief fronts sessions.',
       waitingOn: 'nothing', next: 'direct', prs: [{ repo: 'claude-board', number: 7, url: 'https://github.com/x/y/pull/7', state: 'open' }],
@@ -668,10 +759,14 @@ async function main() {
     const r = await post('/api/mission/WHITELIST', fields);
     assert.equal(r.status, 200, JSON.stringify(r.body));
     for (const [k, v] of Object.entries(fields)) {
-      if (k === 'fire') continue;
+      if (k === 'fire' || k === 'prs') continue;
       assert.deepEqual(r.body[k], v, `${k} is stored as written`);
     }
     assert.equal(r.body.fire.by, 'card');
+    assert.deepEqual(readMission('WHITELIST', home).prs, [{ repo: 'claude-board', number: 7, url: 'https://github.com/x/y/pull/7' }],
+      'a PR is stored by its name alone');
+    assert.deepEqual(r.body.prs, [{ repo: 'claude-board', number: 7, url: 'https://github.com/x/y/pull/7', state: 'checking', head: null, checkedAt: null }],
+      'the view says checking until a fact arrives, whatever the session said');
     assert.equal(r.body.view, 'working');
     assert.equal((await post('/api/mission/WHITELIST', { summary: 'reworded' })).status, 200);
     assert.equal(readMission('WHITELIST', home).history.length, 1, 'a summary change appends no history');
@@ -686,7 +781,7 @@ async function main() {
     for (const body of [
       { title: 'x', boards: [] }, { session: { pid: 1 } }, { orders: [] }, { caseText: 'x' },
       { summary: 'x'.repeat(281) }, { handoff: 'é'.repeat(2049) }, { phase: 'deploy' }, { state: 'stalled' },
-      { prs: [{ repo: 'r', number: 1, url: 'u', state: 'open', body: 'x' }] }, { title: null },
+      { prs: [{ repo: 'r', number: 1, url: 'u', state: 'open', body: 'x' }] }, { prs: [{ repo: 'r', number: 1, url: 'u', state: 'passing' }] }, { title: null },
     ]) {
       const r = await post('/api/mission/REFUSED', body);
       assert.equal(r.status, 400, `${JSON.stringify(body).slice(0, 60)} is refused`);
@@ -925,7 +1020,7 @@ async function main() {
 
   // --- the gates --------------------------------------------------------------------
 
-  await check('the cookie may read the list and post an order, and may not write, launch, bind, ack or read one mission', async () => {
+  await check('the cookie may read the list and post an order, and may not write, launch, bind, ack, post PR facts or read one mission', async () => {
     await post('/api/mission/COOKIE', { title: 'Cookie' });
     const cookie = sessionCookieHeader(SECRET);
     const asCookie = { 'content-type': 'application/json', cookie };
@@ -940,6 +1035,7 @@ async function main() {
       ['POST', '/api/mission/COOKIE/launch', { phase: 'direct' }],
       ['POST', '/api/mission/COOKIE/session', { pid: 1 }],
       ['POST', `/api/mission/COOKIE/order/${orderId}/ack`, {}],
+      ['POST', '/api/mission/COOKIE/facts', { prs: [] }],
       ['GET', '/api/mission/COOKIE', null],
     ]) {
       const r = await rawRequest(port, method, route, { headers: asCookie, body: body && JSON.stringify(body) });
