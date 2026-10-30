@@ -217,6 +217,20 @@ async function main() {
     });
     assert.deepEqual(tabs.map(t => [t.id, t.rounds]), [['hand-tab', [{ board: handBoard.id, round: 1 }]]]);
   });
+
+  await check('a session that joined a mission and left it is a tab again, though a board it posted while bound still belongs to the mission', () => {
+    const leftStart = '2026-10-29T09:30:00Z';
+    const boundBoard = questionBoard({ pid: 5005, procStart: leftStart, id: 'left-tab' }, { mission: 'E' });
+    const tabs = deriveTabs({
+      sessions: [session({ id: 'left-tab', pid: 5005, procStart: leftStart }), session({ id: 'joined-tab', pid: 6006 })],
+      missions: [
+        { key: 'E', session: { ended: { pid: 5005, id: 'left-tab' }, leftAt: '2026-10-29T11:00:00Z' } },
+        { key: 'F', session: { id: 'joined-tab', pid: 6006, procStart: leftStart, startedAt: leftStart, seenAt: leftStart } },
+      ],
+      boards: [boundBoard].map(boardLink),
+    });
+    assert.deepEqual(tabs.map(t => [t.id, t.rounds]), [['left-tab', []]], 'the joined tab is its mission\'s card, and the mission\'s round stays on that card');
+  });
 }
 
 runMain('sessions', main);

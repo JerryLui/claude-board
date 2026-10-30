@@ -90,13 +90,11 @@ const SECRET = readSecret();
 // tab, since nobody is sitting at it; the board's own notification announces its rounds.
 const BACKGROUND = process.env.CLAUDE_BOARD_CLIENT === 'background';
 
-// The mission this session works for, carried on every board post so the daemon links the
-// board to it. A value that is not a mission key is ignored, never a failed post. The key
-// rule is the store's `SAFE_MISSION_KEY` (src/store.mjs), spelled again here because
-// importing the store pulls the page assets, the mermaid engine among them, into every shim.
+// The mission tool's key rule: the store's `SAFE_MISSION_KEY` (src/store.mjs), spelled again
+// here because importing the store pulls the page assets, the mermaid engine among them, into
+// every shim. No environment names a mission: a board post names its session (below), and
+// the daemon links the board to the mission that session joined (ADR 140).
 const MISSION_KEY_RE = /^[A-Za-z0-9_-]{1,80}$/;
-const MISSION = MISSION_KEY_RE.test(process.env.CLAUDE_MISSION || '') ? process.env.CLAUDE_MISSION : null;
-const MISSION_FIELD = MISSION ? { mission: MISSION } : {};
 
 // The agent session this shim runs under, carried on every board post so the daemon links
 // the board's open round to that session's tab card (ADR 131). Claude Code spawns the shim
@@ -256,7 +254,7 @@ function httpJson(method, urlStr, body, { timeoutMs, signal } = {}) {
           return reject(new Error(`invalid JSON response from daemon: ${err.message}`));
         }
         if (res.statusCode >= 400) {
-          return reject(Object.assign(new Error(json.error || `daemon responded ${res.statusCode}`), { statusCode: res.statusCode }));
+          return reject(Object.assign(new Error(json.error || `daemon responded ${res.statusCode}`), { statusCode: res.statusCode, body: json }));
         }
         resolve(json);
       });
@@ -704,19 +702,35 @@ const READ_TOOL = {
  * Any agent writes its own work's status here and the missions page and the Master Chief
  * read the same records. `relay` sits here rather than on `ask` because it is the Master
  * Chief's write onto ANOTHER session's board, answering that session's round on the PM's
- * words. */
+ * words.
+ *
+ * A session binds to a mission by its own session id (ADR 140), which the CALLER passes as
+ * `session` on every call that binds or acks: a `/clear` gives the session a new id, which
+ * the agent reads fresh (Claude Code's `CLAUDE_CODE_SESSION_ID`) while this process keeps
+ * the one it was spawned under, so the shim never supplies an id of its own. It adds its
+ * parent process (`sessionField`), which a `/clear` keeps, so the daemon rebinds the new id. */
+const MISSION_ACTIONS = ['list', 'read', 'write', 'join', 'leave', 'binding', 'seen', 'order', 'resent', 'relay', 'ack'];
 const MISSION_TOOL = {
   name: 'mission',
   description:
     'The claude-board missions ledger: one record per piece of work. Any agent (Claude, Codex, ' +
     'OpenCode) writes its work\'s status here: phase, state, summary, PRs, handoff. Never case ' +
-    'content. Actions: list, read, write (fields), relay (answer a session\'s open board round ' +
-    'on the PM\'s own words), ack (an order relayed).',
+    'content. Actions: list, read, write (fields; with session, also that session\'s heartbeat), ' +
+    'join (bind this session to the mission; takeover to take it from a live one), leave, ' +
+    'binding (the mission this session is bound to, its pending takeover, unseen PM orders and ' +
+    'handoff), seen (this session acknowledges an order), order (the Master Chief posts the ' +
+    'PM\'s words as a pm order), resent (the Master Chief sent an order again), relay (answer a ' +
+    'session\'s open board round on the PM\'s own words), ack (an order relayed). "session" is ' +
+    'always the caller\'s own current session id (CLAUDE_CODE_SESSION_ID), read fresh.',
   inputSchema: {
     type: 'object',
     properties: {
-      action: { type: 'string', enum: ['list', 'read', 'write', 'relay', 'ack'] },
-      key: { type: 'string', description: 'The mission key (letters, digits, - and _), e.g. a spec\'s descriptor. read, write, ack.' },
+      action: { type: 'string', enum: MISSION_ACTIONS },
+      key: { type: 'string', description: 'The mission key (letters, digits, - and _), e.g. a spec\'s descriptor. read, write, join, leave, seen, order, resent, ack.' },
+      session: { type: 'string', description: 'join, leave, binding, seen: required; write: optional. The caller\'s current session id (CLAUDE_CODE_SESSION_ID, read now: a /clear changes it).' },
+      phase: { type: 'string', enum: ['grill', 'direct', 'landing'], description: 'join: the phase the session works in.' },
+      takeover: { type: 'boolean', description: 'join: take the mission over from the live session bound to it, which finishes its step and leaves.' },
+      text: { type: 'string', description: 'order: the PM\'s words, verbatim, at most 4 KB.' },
       all: { type: 'boolean', description: 'list: keep missions released more than 24 hours ago.' },
       fields: {
         type: 'object',
@@ -726,7 +740,7 @@ const MISSION_TOOL = {
       round: { type: 'integer', description: 'relay: the round being answered.' },
       answers: { type: 'array', items: { type: 'object' }, description: 'relay: [{ id, status, choice, note }], as a submit carries them.' },
       words: { type: 'string', description: 'relay: the PM\'s words, verbatim, at most 1 KB.' },
-      order: { type: 'string', description: 'ack: the order id.' },
+      order: { type: 'string', description: 'seen, resent, ack: the order id.' },
     },
     required: ['action'],
   },
@@ -1094,7 +1108,7 @@ async function postThisRound(session, title, blocks, wait, fresh) {
     const creating = (async () => {
       const posted = await httpJson(
         'POST', `${BASE_URL}/api/board`,
-        { title, blocks, wait: Boolean(wait), noWait, cwd: process.cwd(), thread: session.thread ?? null, requestId: createRequestId, ...MISSION_FIELD, ...sessionField() },
+        { title, blocks, wait: Boolean(wait), noWait, cwd: process.cwd(), thread: session.thread ?? null, requestId: createRequestId, ...sessionField() },
         { timeoutMs: CREATE_TIMEOUT_MS }
       );
       session.boardId = posted.boardId;
@@ -1154,7 +1168,7 @@ async function postThisRound(session, title, blocks, wait, fresh) {
   try {
     posted = await httpJson(
       'POST', `${BASE_URL}/api/board`,
-      { boardId: session.boardId, blocks, title, wait: Boolean(wait), noWait, requestId, ...MISSION_FIELD, ...sessionField() },
+      { boardId: session.boardId, blocks, title, wait: Boolean(wait), noWait, requestId, ...sessionField() },
       { timeoutMs: POST_TIMEOUT_MS }
     );
   } catch (err) {
@@ -1516,9 +1530,25 @@ async function missionTool(args) {
     }
     return key;
   };
+  const needOrder = () => {
+    const order = args.order;
+    if (typeof order !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(order)) throw new ToolError(`mission ${action} requires "order": the order id, not ${JSON.stringify(order ?? null)}`);
+    return order;
+  };
+  // The caller's session as the daemon matches it: the id the agent passed, and this shim's
+  // parent process, which a /clear keeps under the new id.
+  const sessionOf = ({ required }) => {
+    const id = args.session;
+    if (id === undefined && !required) return null;
+    if (typeof id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(id)) {
+      throw new ToolError(`mission ${action} ${required ? 'requires' : 'takes'} "session": the caller's own session id (CLAUDE_CODE_SESSION_ID), not ${JSON.stringify(id ?? null)}`);
+    }
+    return { id, ...(sessionField().session || {}) };
+  };
   let method;
   let route;
   let body = null;
+  let heartbeat = null;
   if (action === 'list') {
     method = 'GET';
     if (args.all != null && typeof args.all !== 'boolean') throw new ToolError(`mission list takes "all" as a boolean, not ${JSON.stringify(args.all)}`);
@@ -1532,6 +1562,34 @@ async function missionTool(args) {
     method = 'POST';
     route = `/api/mission/${needKey()}`;
     body = fields;
+    heartbeat = sessionOf({ required: false });
+  } else if (action === 'join') {
+    if (args.phase !== undefined && !['grill', 'direct', 'landing'].includes(args.phase)) throw new ToolError(`mission join takes "phase" as grill, direct or landing, not ${JSON.stringify(args.phase)}`);
+    if (args.takeover !== undefined && typeof args.takeover !== 'boolean') throw new ToolError(`mission join takes "takeover" as a boolean, not ${JSON.stringify(args.takeover)}`);
+    method = 'POST';
+    route = `/api/mission/${needKey()}/join`;
+    body = { ...sessionOf({ required: true }), ...(args.phase !== undefined ? { phase: args.phase } : {}), ...(args.takeover !== undefined ? { takeover: args.takeover } : {}) };
+  } else if (action === 'leave') {
+    method = 'POST';
+    route = `/api/mission/${needKey()}/leave`;
+    body = sessionOf({ required: true });
+  } else if (action === 'binding') {
+    const ref = sessionOf({ required: true });
+    method = 'GET';
+    route = `/api/binding?${new URLSearchParams(Object.entries(ref).map(([k, v]) => [k, String(v)]))}`;
+  } else if (action === 'seen') {
+    method = 'POST';
+    route = `/api/mission/${needKey()}/order/${needOrder()}/seen`;
+    body = sessionOf({ required: true });
+  } else if (action === 'order') {
+    if (typeof args.text !== 'string' || !args.text.trim()) throw new ToolError(`mission order requires "text": the PM's words, verbatim, not ${JSON.stringify(args.text ?? null)}`);
+    method = 'POST';
+    route = `/api/mission/${needKey()}/order`;
+    body = { kind: 'pm', text: args.text };
+  } else if (action === 'resent') {
+    method = 'POST';
+    route = `/api/mission/${needKey()}/order/${needOrder()}/resent`;
+    body = {};
   } else if (action === 'relay') {
     const boardId = boardIdFrom(args.board);
     if (!boardId) throw new ToolError(`mission relay requires "board": a board URL or bare board id, not ${JSON.stringify(args.board ?? null)}`);
@@ -1539,23 +1597,29 @@ async function missionTool(args) {
     route = `/api/board/${boardId}/relay`;
     body = { round: args.round, answers: args.answers ?? [], words: args.words };
   } else if (action === 'ack') {
-    const order = args.order;
-    if (typeof order !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(order)) throw new ToolError(`mission ack requires "order": the order id, not ${JSON.stringify(order ?? null)}`);
     method = 'POST';
-    route = `/api/mission/${needKey()}/order/${order}/ack`;
+    route = `/api/mission/${needKey()}/order/${needOrder()}/ack`;
     body = {};
   } else {
-    throw new ToolError(`mission requires "action": one of list, read, write, relay, ack, not ${JSON.stringify(action ?? null)}`);
+    throw new ToolError(`mission requires "action": one of ${MISSION_ACTIONS.join(', ')}, not ${JSON.stringify(action ?? null)}`);
   }
-  let answer;
-  try {
-    answer = await httpJson(method, `${BASE_URL}${route}`, body, { timeoutMs: POST_TIMEOUT_MS });
-  } catch (err) {
-    if (typeof err?.statusCode === 'number' && err.statusCode !== 401) {
-      throw new ToolError(`mission ${action} refused by the daemon (HTTP ${err.statusCode}): ${err.message}`);
+  const call = async (m, r, b, { absentOk = false } = {}) => {
+    try {
+      return await httpJson(m, `${BASE_URL}${r}`, b, { timeoutMs: POST_TIMEOUT_MS });
+    } catch (err) {
+      if (absentOk && err?.statusCode === 404) return null;
+      if (typeof err?.statusCode === 'number' && err.statusCode !== 401) {
+        const held = err.statusCode === 409 && err.body?.session ? ` (bound: ${JSON.stringify(err.body.session)})` : '';
+        throw new ToolError(`mission ${action} refused by the daemon (HTTP ${err.statusCode}): ${err.message}${held}`);
+      }
+      throw toolErrorFor(err, null, 'mission');
     }
-    throw toolErrorFor(err, null, 'mission');
-  }
+  };
+  // A write naming its session is that session's heartbeat first: a session the mission is
+  // not bound to (another holds it, or this one left) writes nothing. A mission not yet on
+  // the board has no session to beat, and the write creates it.
+  if (heartbeat) await call('POST', `/api/mission/${key}/session`, heartbeat, { absentOk: true });
+  const answer = await call(method, route, body);
   return { content: [{ type: 'text', text: JSON.stringify(answer) }], isError: false, structuredContent: answer };
 }
 

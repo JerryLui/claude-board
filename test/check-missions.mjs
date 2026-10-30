@@ -14,7 +14,7 @@ import { readBoard, readMission, writeBoard, writeMission, pruneStore, MISSION_R
 import { createBoard } from '../src/board.mjs';
 import { createSessionList } from '../src/sessions.mjs';
 import {
-  missionsOverview, launchMission, bindSession, upsertMission, deriveState, MAX_WORKING, MAX_ALIVE, STALL_SILENCE_MS, UNBOUND_GRACE_MS, RELEASED_VISIBLE_MS,
+  missionsOverview, launchMission, bindSession, joinMission, leaveMission, upsertMission, deriveState, MAX_WORKING, MAX_ALIVE, STALL_SILENCE_MS, UNBOUND_GRACE_MS, RELEASED_VISIBLE_MS,
 } from '../src/missions.mjs';
 import { createMissionsCache, MISSIONS_CACHE_MS } from '../src/missions-cache.mjs';
 import { check, deadPid, openSseClient, rawRequest, runMain, secretFetch, secretHome, sessionCookieHeader, waitFor, writeHeaders } from './support.mjs';
@@ -382,6 +382,105 @@ async function main() {
     assert.equal(readMission('CLEARED', dir).session.pid, 7272);
   });
 
+  // --- binding by session id (ADR 140) ---------------------------------------------
+
+  await check('a join by a second live session is refused 409; with takeover it is pending, told to the bound session, until that one leaves, and then it is bound', async () => {
+    const a = liveProcess();
+    const b = liveProcess();
+    const start = '2026-10-30T08:00:00Z';
+    try {
+      const first = await post('/api/mission/JOIN_TWO/join', { id: 'sess-a', pid: a.pid, procStart: start, phase: 'direct' });
+      assert.equal(first.status, 200, JSON.stringify(first.body));
+      assert.equal(first.body.bound, true);
+      assert.deepEqual([first.body.session.id, first.body.session.pid], ['sess-a', a.pid]);
+      const created = readMission('JOIN_TWO', home);
+      assert.deepEqual([created.phase, created.state], ['direct', 'working'], 'a join creates the mission it names, working');
+
+      const second = await post('/api/mission/JOIN_TWO/join', { id: 'sess-b', pid: b.pid, procStart: start });
+      assert.equal(second.status, 409);
+      assert.equal(second.body.error, 'live');
+      assert.equal(second.body.session.id, 'sess-a', 'the refusal names the bound session');
+      assert.equal(readMission('JOIN_TWO', home).takeover, undefined, 'a plain join records no takeover');
+
+      const asked = await post('/api/mission/JOIN_TWO/join', { id: 'sess-b', pid: b.pid, procStart: start, takeover: true });
+      assert.equal(asked.status, 202);
+      assert.equal(asked.body.takeover, 'pending');
+      assert.equal(asked.body.session.id, 'sess-a');
+      const pending = readMission('JOIN_TWO', home);
+      assert.equal(pending.session.id, 'sess-a', 'the bound session keeps the mission while the takeover is pending');
+      assert.equal(pending.takeover.by, 'sess-b');
+      const told = (await getJson('/api/binding?id=sess-a')).body;
+      assert.deepEqual([told.key, told.takeover], ['JOIN_TWO', { by: 'sess-b', at: pending.takeover.at }]);
+      assert.equal((await getJson('/api/binding?id=sess-b')).body.key, null, 'the asking session is bound to nothing yet');
+
+      assert.equal((await post('/api/mission/JOIN_TWO/leave', { id: 'sess-b' })).status, 409, 'only the bound session leaves');
+      const left = await post('/api/mission/JOIN_TWO/leave', { id: 'sess-a' });
+      assert.equal(left.status, 200, JSON.stringify(left.body));
+      const after = readMission('JOIN_TWO', home);
+      assert.deepEqual([after.session.id, after.session.pid], ['sess-b', b.pid], 'the leave binds the session that asked');
+      assert.deepEqual(after.session.ended, { pid: a.pid, id: 'sess-a' });
+      assert.equal(after.takeover, undefined);
+      assert.equal((await getJson('/api/binding?id=sess-b')).body.key, 'JOIN_TWO');
+      assert.equal((await getJson('/api/binding?id=sess-a')).body.key, null);
+      assert.equal((await post('/api/mission/JOIN_TWO/join', { id: 'sess-b', pid: b.pid, procStart: start })).status, 200, 'its next join is its own');
+    } finally {
+      await endProcess(a);
+      await endProcess(b);
+    }
+  });
+
+  await check('a join from the bound process under a new id (a /clear) rebinds the id; a launch\'s reservation is bound by the first join; a session gone with a takeover pending is replaced by the next join', () => {
+    const dir = scratchHome('join-rules');
+    const t0 = Date.parse('2026-10-30T09:00:00Z');
+    const alive = new Set([5151, 5252]);
+    const isAlive = pid => alive.has(pid);
+    const start = '2026-10-30T08:59:00Z';
+
+    launchMission('JOINED', { phase: 'direct', login: '/Users/pm/.claude-a' }, { home: dir, now: t0 });
+    const reserved = joinMission('JOINED', { id: 'sess-a', pid: 5151, procStart: start }, { home: dir, now: t0 + 1000, isAlive });
+    assert.equal(reserved.status, 200);
+    assert.deepEqual([reserved.session.id, reserved.session.login, reserved.session.startedAt], ['sess-a', '/Users/pm/.claude-a', iso(t0)],
+      'the reservation is bound in place, its launch\'s login and start kept');
+
+    const cleared = joinMission('JOINED', { id: 'sess-a2', pid: 5151, procStart: start }, { home: dir, now: t0 + 2000, isAlive });
+    assert.equal(cleared.status, 200);
+    assert.deepEqual([cleared.session.id, cleared.session.startedAt], ['sess-a2', iso(t0)], 'the same process under a new id is the same session');
+    assert.throws(() => joinMission('JOINED', { id: 'sess-x', pid: 5151, procStart: '2026-10-30T08:00:00Z' }, { home: dir, now: t0 + 3000, isAlive }),
+      { status: 409 }, 'the same pid with another process start is another process');
+
+    assert.equal(joinMission('JOINED', { id: 'sess-b', pid: 5252, procStart: start, takeover: true }, { home: dir, now: t0 + 4000, isAlive }).status, 202);
+    alive.delete(5151);
+    const c = joinMission('JOINED', { id: 'sess-c', pid: 5252, procStart: start }, { home: dir, now: t0 + 5000, isAlive });
+    assert.deepEqual([c.status, c.session.id], [200, 'sess-c'], 'with the bound process gone, the next join binds');
+    assert.equal(readMission('JOINED', dir).takeover, undefined, 'and the takeover is over');
+  });
+
+  await check('a leave with no takeover pending lets the mission go: session { ended, leftAt }, working moves to waiting, and the left session\'s heartbeat is refused while its join binds again', () => {
+    const dir = scratchHome('leave');
+    const t0 = Date.parse('2026-10-30T10:00:00Z');
+    const isAlive = () => true;
+    joinMission('LEFT', { id: 'sess-a', pid: 6161 }, { home: dir, now: t0, isAlive });
+    assert.throws(() => leaveMission('LEFT', { id: 'sess-z', pid: 6262 }, { home: dir, now: t0 + 1000 }), { status: 409, message: 'not bound' });
+    assert.deepEqual(leaveMission('LEFT', { id: 'sess-a' }, { home: dir, now: t0 + 2000 }), { left: true, session: null });
+    const m = readMission('LEFT', dir);
+    assert.deepEqual(m.session, { ended: { pid: 6161, id: 'sess-a' }, leftAt: iso(t0 + 2000) });
+    assert.equal(m.state, 'waiting');
+    assert.throws(() => bindSession('LEFT', { id: 'sess-a', pid: 6161 }, { home: dir, now: t0 + 3000, isAlive }), { status: 409 },
+      'a hook of the session that left cannot bind it back');
+    assert.equal(joinMission('LEFT', { id: 'sess-a', pid: 6161 }, { home: dir, now: t0 + 4000, isAlive }).status, 200, '/mission run again joins');
+    assert.equal(readMission('LEFT', dir).state, 'working');
+  });
+
+  await check('a heartbeat with typed: true records when the PM typed in the session', () => {
+    const dir = scratchHome('typed');
+    const t0 = Date.parse('2026-10-30T11:00:00Z');
+    joinMission('TYPED', { id: 'sess-a', pid: 7171 }, { home: dir, now: t0, isAlive: () => true });
+    const beat = bindSession('TYPED', { id: 'sess-a', pid: 7171 }, { home: dir, now: t0 + 1000, isAlive: () => true });
+    assert.equal(beat.session.typedAt, undefined);
+    const typed = bindSession('TYPED', { id: 'sess-a', pid: 7171, typed: true }, { home: dir, now: t0 + 2000, isAlive: () => true });
+    assert.deepEqual([typed.session.typedAt, typed.session.seenAt], [iso(t0 + 2000), iso(t0 + 2000)]);
+  });
+
   await check('a mission waiting on the PM is alive but not working, so it holds no working slot', () => {
     const dir = scratchHome('waiting-on-pm');
     const now = Date.now();
@@ -721,6 +820,35 @@ async function main() {
     assert.equal((await post('/api/mission/ORDERS/order/o_nope/ack', {})).status, 404);
   });
 
+  await check('a pm order is the Master Chief\'s, listed on the bound session\'s binding until that session marks it seen; seen by another session is a 409, and seen and resent each set once', async () => {
+    assert.equal((await post('/api/mission/PM_ORDERS/join', { id: 'pm-sess', pid: 9191 })).status, 200);
+    assert.equal((await post('/api/mission/PM_ORDERS/order', { kind: 'pm' })).status, 400, 'a pm order needs its text');
+    const words = 'Hold the merge until the dashboard is green.';
+    const order = (await post('/api/mission/PM_ORDERS/order', { kind: 'pm', text: words })).body.order;
+    assert.deepEqual([order.kind, order.text, order.by], ['pm', words, 'master-chief']);
+    assert.match(order.id, /^o_[0-9a-f]{16}$/);
+    const stop = (await post('/api/mission/PM_ORDERS/order', { kind: 'stop' })).body.order;
+    const binding = (await getJson('/api/binding?id=pm-sess')).body;
+    assert.deepEqual(binding.orders.map(o => [o.id, o.text]), [[order.id, words]], 'the binding lists the pm orders, not a card\'s');
+    assert.equal(binding.handoff, null);
+
+    const other = await post(`/api/mission/PM_ORDERS/order/${order.id}/seen`, { id: 'not-bound', pid: 9292 });
+    assert.equal(other.status, 409);
+    assert.equal(other.body.error, 'not bound');
+    const seen = await post(`/api/mission/PM_ORDERS/order/${order.id}/seen`, { id: 'pm-sess' });
+    assert.equal(seen.status, 200, JSON.stringify(seen.body));
+    assert.ok(seen.body.order.ackedAt);
+    assert.equal((await post(`/api/mission/PM_ORDERS/order/${order.id}/seen`, { id: 'pm-sess' })).body.order.ackedAt, seen.body.order.ackedAt);
+    assert.deepEqual((await getJson('/api/binding?id=pm-sess')).body.orders, [], 'a seen order leaves the binding');
+    assert.equal((await getJson('/api/binding?pid=9191')).body.key, 'PM_ORDERS', 'the process alone names the session too');
+
+    const resent = await post(`/api/mission/PM_ORDERS/order/${stop.id}/resent`, {});
+    assert.ok(resent.body.order.resentAt);
+    assert.equal((await post(`/api/mission/PM_ORDERS/order/${stop.id}/resent`, {})).body.order.resentAt, resent.body.order.resentAt);
+    assert.equal((await post('/api/mission/PM_ORDERS/order/o_nope/seen', { id: 'pm-sess' })).status, 404);
+    assert.equal((await getJson('/api/binding')).status, 400, 'a binding names its session');
+  });
+
   // --- boards -----------------------------------------------------------------------
 
   await check('a board posted with mission: <key> is linked to that mission, which reads needs-you until the round is answered', async () => {
@@ -739,6 +867,26 @@ async function main() {
     });
     assert.equal(sent.status, 200, JSON.stringify(sent.body));
     assert.equal((await getJson('/api/mission/LINKED')).body.view, 'waiting', 'answered, it reads its stored state again');
+  });
+
+  await check('a board posted by a session bound to a mission, naming none, links to that mission; once the session leaves, its next board links to none', async () => {
+    const tab = liveProcess();
+    const start = '2026-10-30T07:00:00Z';
+    try {
+      assert.equal((await post('/api/mission/BOUND_POSTS/join', { id: 'poster', pid: tab.pid, procStart: start })).status, 200);
+      const ask = { blocks: [{ kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }] }], session: { pid: tab.pid, procStart: start } };
+      const linked = await post('/api/board', { title: 'Bound round', ...ask });
+      assert.equal(linked.status, 200, JSON.stringify(linked.body));
+      assert.equal(readBoard(linked.body.boardId, home).mission, 'BOUND_POSTS');
+      assert.deepEqual(readMission('BOUND_POSTS', home).boards.map(b => b.id), [linked.body.boardId]);
+
+      assert.equal((await post('/api/mission/BOUND_POSTS/leave', { id: 'poster' })).status, 200);
+      const loose = await post('/api/board', { title: 'Hand tab round', ...ask });
+      assert.equal(readBoard(loose.body.boardId, home).mission ?? null, null);
+      assert.deepEqual(readMission('BOUND_POSTS', home).boards.map(b => b.id), [linked.body.boardId]);
+    } finally {
+      await endProcess(tab);
+    }
   });
 
   await check('a board post with a bad mission key is a 400 that writes no board', async () => {
@@ -925,7 +1073,7 @@ async function main() {
 
   // --- the gates --------------------------------------------------------------------
 
-  await check('the cookie may read the list and post an order, and may not write, launch, bind, ack or read one mission', async () => {
+  await check('the cookie may read the list and post a card\'s order, and may not write, launch, join, leave, bind, post a pm order, ack, mark seen or resent, or read one mission or a binding', async () => {
     await post('/api/mission/COOKIE', { title: 'Cookie' });
     const cookie = sessionCookieHeader(SECRET);
     const asCookie = { 'content-type': 'application/json', cookie };
@@ -939,13 +1087,22 @@ async function main() {
       ['POST', '/api/mission/COOKIE', { summary: 'forged' }],
       ['POST', '/api/mission/COOKIE/launch', { phase: 'direct' }],
       ['POST', '/api/mission/COOKIE/session', { pid: 1 }],
+      ['POST', '/api/mission/COOKIE/join', { id: 'forged' }],
+      ['POST', '/api/mission/COOKIE/leave', { id: 'forged' }],
+      ['POST', '/api/mission/COOKIE/order', { kind: 'pm', text: 'forged words' }],
       ['POST', `/api/mission/COOKIE/order/${orderId}/ack`, {}],
+      ['POST', `/api/mission/COOKIE/order/${orderId}/seen`, { id: 'forged' }],
+      ['POST', `/api/mission/COOKIE/order/${orderId}/resent`, {}],
       ['GET', '/api/mission/COOKIE', null],
+      ['GET', '/api/binding?id=forged', null],
     ]) {
       const r = await rawRequest(port, method, route, { headers: asCookie, body: body && JSON.stringify(body) });
       assert.equal(r.status, 401, `${method} ${route} with the cookie alone is refused`);
     }
-    assert.equal(readMission('COOKIE', home).summary, undefined);
+    const cookieRecord = readMission('COOKIE', home);
+    assert.equal(cookieRecord.summary, undefined);
+    assert.equal(cookieRecord.session, null);
+    assert.deepEqual(cookieRecord.orders.map(o => o.kind), ['comment'], 'no pm order was stored');
     for (const route of ['/api/missions', '/api/mission/COOKIE']) {
       assert.equal((await rawRequest(port, 'GET', route)).status, 401, `${route} with no credential is refused`);
     }
