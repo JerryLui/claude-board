@@ -13,7 +13,7 @@
 // `UNBOUND_GRACE_MS`, or a working one silent past `STALL_SILENCE_MS`, reads stalled, and a
 // gone one also carries `gone: { lastSeenAt }`. A session the session watcher's latest
 // snapshot lists counts as heard from at the snapshot's time (ADR 36), and one it lists after
-// a `/clear` or a resume no launch made carries `rejoin: { reason, since }`. A PR's state
+// a `/clear` or a resume no launch made carries `rejoin: { reason, since, id }`. A PR's state
 // and head commit are the facts the session watcher read from GitHub (`recordPrFacts`),
 // never the session's own words. The derivation needs the board store, a process table and
 // that snapshot, which is why it is computed here and not written by whoever last touched
@@ -418,9 +418,10 @@ function goneOf(m, now, isAlive, listed) {
   return { lastSeenAt: s.seenAt ?? s.startedAt ?? null };
 }
 
-/** `{ reason, since }` while the snapshot lists `m`'s bound session needing `/mission` again
- * (`listingOf`'s `reason`, `clear` or `resume`) and no beat has come from it since `since`,
- * the time a snapshot first listed it so; else null, as for a mission that recorded its
+/** `{ reason, since, id }` while the snapshot lists `m`'s bound session needing `/mission`
+ * again (`listingOf`'s `reason`, `clear` or `resume`) and no beat has come from it since
+ * `since`, the time a snapshot first listed it so, `id` being the id it is listed under (the
+ * one to message); else null, as for a mission that recorded its
  * end. A beat or join from the session itself rebinds its id or process, which clears it. */
 function rejoinOf(m, listed) {
   const s = currentSession(m);
@@ -428,7 +429,7 @@ function rejoinOf(m, listed) {
   if (!listing?.reason || sessionFinished(m)) return null;
   const since = listing.entry.since ?? listing.at;
   if (Date.parse(s.seenAt) >= since) return null;
-  return { reason: listing.reason, since: iso(since) };
+  return { reason: listing.reason, since: iso(since), id: listing.entry.id };
 }
 
 /** The PRs `m` lists, each with the `state`, `head` and `checkedAt` of its latest fact,

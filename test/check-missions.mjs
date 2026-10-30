@@ -277,16 +277,16 @@ async function main() {
     const resumed = listed([{ id: 'sess-r', pid: 5353, procStart: resumedStart, since: clearedAt }]);
 
     const clearView = missionView(readMission('CLEARED', dir), { home: dir, now: late, isAlive: alive, listed: cleared });
-    assert.deepEqual([clearView.rejoin, clearView.view, clearView.gone], [{ reason: 'clear', since: iso(clearedAt) }, 'working', null]);
+    assert.deepEqual([clearView.rejoin, clearView.view, clearView.gone], [{ reason: 'clear', since: iso(clearedAt), id: 'sess-a2' }, 'working', null]);
     const resumeView = missionView(readMission('RESUMED', dir), { home: dir, now: late, isAlive: oldGone, listed: resumed });
-    assert.deepEqual([resumeView.rejoin, resumeView.view, resumeView.gone, resumeView.live], [{ reason: 'resume', since: iso(clearedAt) }, 'working', null, true],
+    assert.deepEqual([resumeView.rejoin, resumeView.view, resumeView.gone, resumeView.live], [{ reason: 'resume', since: iso(clearedAt), id: 'sess-r' }, 'working', null, true],
       'a session resumed in a live process is not gone, though its bound process is');
     assert.throws(() => launchMission('RESUMED', { phase: 'direct' }, { home: dir, now: late, isAlive: oldGone, listed: resumed }), { status: 409, message: 'live' },
       'its mission still has a live session, so no second one launches beside it');
     assert.equal(missionView(readMission('RESUMED', dir), { home: dir, now: late, isAlive: oldGone, listed: null }).gone.lastSeenAt, iso(t0),
       'with no snapshot, the gone process is all there is to read');
     assert.deepEqual(bindingFor([readMission('CLEARED', dir)], { id: 'sess-a2', pid: 5151, procStart: start }, { listed: cleared }).rejoin,
-      { reason: 'clear', since: iso(clearedAt) }, 'the bound process reads it on its binding');
+      { reason: 'clear', since: iso(clearedAt), id: 'sess-a2' }, 'the bound process reads it on its binding');
     assert.equal(bindingFor([readMission('CLEARED', dir)], { id: 'sess-a2', pid: 5151, procStart: start }).rejoin, null, 'no snapshot, no rejoin');
 
     // A beat from the cleared process takes the new id; a join from the resumed session takes
@@ -458,7 +458,7 @@ async function main() {
       assert.equal((await post('/api/mission/CLEARED_HTTP/join', { id: 'before-clear', pid: proc.pid, procStart: start, phase: 'direct' })).status, 200);
       assert.equal((await listedAs('after-clear')).status, 200);
       const view = await viewOf();
-      assert.equal(view.rejoin.reason, 'clear', JSON.stringify(view.rejoin));
+      assert.deepEqual([view.rejoin.reason, view.rejoin.id], ['clear', 'after-clear'], JSON.stringify(view.rejoin));
       assert.ok(Number.isFinite(Date.parse(view.rejoin.since)));
       assert.notEqual(view.listedAt, null, 'the snapshot that lists it is its heard-from time');
       assert.deepEqual([(await bindingOf()).key, (await bindingOf()).rejoin], ['CLEARED_HTTP', view.rejoin]);

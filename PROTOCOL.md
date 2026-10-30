@@ -1487,11 +1487,12 @@ the daemon started) heartbeats alone count. A bound `pid` that no longer exists 
 lists the session's `id` in another live process is not gone: the session runs on there (a resume
 no launch made). `listedAt` is that snapshot's time while it lists the bound session, else `null`.
 `gone` is `{ lastSeenAt }`, the session's `seenAt`, while that session is gone and the mission has
-not recorded its end, else `null`. `rejoin` is `{ reason, since }` while the snapshot lists the bound
+not recorded its end, else `null`. `rejoin` is `{ reason, since, id }` while the snapshot lists the bound
 session needing `/mission` again and no heartbeat has come from it since `since`, else `null`:
 `reason` is `'clear'` when its process is listed under another `id` (a `/clear`, which drops the
 skill's hooks), `'resume'` when its `id` is listed in another process (a resume or respawn no launch
-made), and `since` is when a snapshot first listed it so. The session's own join or heartbeat
+made), `since` is when a snapshot first listed it so, and `id` the id it is listed under, the
+session to message. The session's own join or heartbeat
 rebinds the new `id` or process, which clears it; the card says "Session needs /mission again", and
 the Master Chief asks that session to run `/mission <key>`. Each of `prs` carries `state`, `head` and `checkedAt` from the
 latest fact for its repo and number: `state` one of `'draft' | 'open' | 'green' | 'red' |
@@ -1560,7 +1561,7 @@ POST /api/mission/:key/leave        { id, pid?, procStart? } -> { left: true, se
        -> 409 { error: 'not bound', session }
 GET  /api/binding?id=<session id>[&pid=&procStart=]
        -> { key | null, takeover: { by, at } | null, orders: [Order], handoff | null,
-            rejoin: { reason, since } | null }
+            rejoin: { reason, since, id } | null }
 ```
 
 **A session is bound to a mission by its own session id** (ADR 141), which the agent reads fresh
