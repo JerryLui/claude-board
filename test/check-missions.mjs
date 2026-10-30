@@ -14,9 +14,10 @@ import { readBoard, readMission, writeBoard, writeMission, pruneStore, MISSION_R
 import { createBoard } from '../src/board.mjs';
 import { createSessionList } from '../src/sessions.mjs';
 import {
-  missionsOverview, launchMission, bindSession, upsertMission, deriveState, MAX_WORKING, MAX_ALIVE, STALL_SILENCE_MS, UNBOUND_GRACE_MS, RELEASED_VISIBLE_MS,
+  missionsOverview, missionView, launchMission, bindSession, joinMission, leaveMission, upsertMission, bindingFor, deriveState, pidAlive, MAX_WORKING, MAX_ALIVE, STALL_SILENCE_MS, UNBOUND_GRACE_MS, RELEASED_VISIBLE_MS,
 } from '../src/missions.mjs';
 import { createMissionsCache, MISSIONS_CACHE_MS } from '../src/missions-cache.mjs';
+import { processStartUtc } from '../src/proc-start.mjs';
 import { check, deadPid, openSseClient, rawRequest, runMain, secretFetch, secretHome, sessionCookieHeader, waitFor, writeHeaders } from './support.mjs';
 
 const { home, secret: SECRET } = secretHome('claude-board-missions-');
@@ -233,6 +234,70 @@ async function main() {
       'a silent session whose process is gone frees its mission');
   });
 
+  await check('a working session silent past fifteen minutes that the latest snapshot lists, by its id or its process, never reads stalled, nor silent to a launch; unlisted, or with no snapshot, it does (ADR 36)', () => {
+    const dir = scratchHome('listed-silent');
+    const t0 = Date.parse('2026-10-30T12:00:00Z');
+    const alive = () => true;
+    const start = '2026-10-30T11:00:00Z';
+    joinMission('LISTED_SILENT', { id: 'director', pid: 5151, procStart: start }, { home: dir, now: t0, isAlive: alive });
+    const late = t0 + minutes(40);
+    const snapshot = entries => ({ at: late - 20_000, sessions: entries.map(e => ({ since: t0, ...e })) });
+    const viewWith = listed => missionsOverview({ home: dir, now: late, isAlive: alive, listed }).missions[0];
+    for (const [label, listed, view] of [
+      ['listed by its id', snapshot([{ id: 'director', pid: 9999, procStart: '2026-10-30T11:30:00Z' }]), 'working'],
+      ['listed by its process', snapshot([{ id: 'director', pid: 5151, procStart: '2026-10-30T11:00:00.400Z' }]), 'working'],
+      ['listed by its process under a new id', snapshot([{ id: 'after-clear', pid: 5151, procStart: start }]), 'working'],
+      ['its pid listed under another start', snapshot([{ id: 'stranger', pid: 5151, procStart: '2026-10-30T11:59:00Z' }]), 'stalled'],
+      ['not listed', snapshot([{ id: 'stranger', pid: 6262, procStart: start }]), 'stalled'],
+      ['no snapshot (the watcher reads down)', null, 'stalled'],
+    ]) {
+      const v = viewWith(listed);
+      assert.equal(v.view, view, label);
+      assert.equal(v.listedAt, view === 'working' ? iso(late - 20_000) : null, `${label}: listedAt`);
+    }
+    // A snapshot older than the stall leaves the session silent again.
+    assert.equal(missionsOverview({ home: dir, now: late, isAlive: alive, listed: { at: late - STALL_SILENCE_MS - 1000, sessions: [{ id: 'director', pid: 5151, procStart: start, since: t0 }] } }).missions[0].view, 'stalled');
+    assert.throws(() => launchMission('LISTED_SILENT', { phase: 'direct' }, { home: dir, now: late, isAlive: alive, listed: snapshot([{ id: 'director', pid: 5151, procStart: start }]) }),
+      err => err.status === 409 && err.message === 'live' && err.silent === undefined, 'a listed session is no silent one to a launch');
+  });
+
+  await check('a session the snapshot lists under a new id in its process (a /clear), or under its id in another live process (a resume no launch made), carries rejoin with its reason and since, on its view and its binding, until it beats or joins (ADR 36)', () => {
+    const dir = scratchHome('rejoin');
+    const t0 = Date.parse('2026-10-30T12:00:00Z');
+    const start = '2026-10-30T11:00:00Z';
+    const resumedStart = '2026-10-30T12:10:00Z';
+    const clearedAt = t0 + minutes(5);
+    const late = t0 + minutes(30);
+    const listed = entries => ({ at: late, sessions: entries });
+    const alive = () => true;
+    const oldGone = pid => pid !== 5252;
+
+    joinMission('CLEARED', { id: 'sess-a', pid: 5151, procStart: start }, { home: dir, now: t0, isAlive: alive });
+    joinMission('RESUMED', { id: 'sess-r', pid: 5252, procStart: start }, { home: dir, now: t0, isAlive: alive });
+    const cleared = listed([{ id: 'sess-a2', pid: 5151, procStart: start, since: clearedAt }]);
+    const resumed = listed([{ id: 'sess-r', pid: 5353, procStart: resumedStart, since: clearedAt }]);
+
+    const clearView = missionView(readMission('CLEARED', dir), { home: dir, now: late, isAlive: alive, listed: cleared });
+    assert.deepEqual([clearView.rejoin, clearView.view, clearView.gone], [{ reason: 'clear', since: iso(clearedAt), id: 'sess-a2' }, 'working', null]);
+    const resumeView = missionView(readMission('RESUMED', dir), { home: dir, now: late, isAlive: oldGone, listed: resumed });
+    assert.deepEqual([resumeView.rejoin, resumeView.view, resumeView.gone, resumeView.live], [{ reason: 'resume', since: iso(clearedAt), id: 'sess-r' }, 'working', null, true],
+      'a session resumed in a live process is not gone, though its bound process is');
+    assert.throws(() => launchMission('RESUMED', { phase: 'direct' }, { home: dir, now: late, isAlive: oldGone, listed: resumed }), { status: 409, message: 'live' },
+      'its mission still has a live session, so no second one launches beside it');
+    assert.equal(missionView(readMission('RESUMED', dir), { home: dir, now: late, isAlive: oldGone, listed: null }).gone.lastSeenAt, iso(t0),
+      'with no snapshot, the gone process is all there is to read');
+    assert.deepEqual(bindingFor([readMission('CLEARED', dir)], { id: 'sess-a2', pid: 5151, procStart: start }, { listed: cleared }).rejoin,
+      { reason: 'clear', since: iso(clearedAt), id: 'sess-a2' }, 'the bound process reads it on its binding');
+    assert.equal(bindingFor([readMission('CLEARED', dir)], { id: 'sess-a2', pid: 5151, procStart: start }).rejoin, null, 'no snapshot, no rejoin');
+
+    // A beat from the cleared process takes the new id; a join from the resumed session takes
+    // the new process. Either clears the flag.
+    bindSession('CLEARED', { id: 'sess-a2', pid: 5151, procStart: start, beat: true }, { home: dir, now: late, isAlive: alive });
+    assert.equal(missionView(readMission('CLEARED', dir), { home: dir, now: late, isAlive: alive, listed: cleared }).rejoin, null);
+    joinMission('RESUMED', { id: 'sess-r', pid: 5353, procStart: resumedStart }, { home: dir, now: late, isAlive: oldGone });
+    assert.equal(missionView(readMission('RESUMED', dir), { home: dir, now: late, isAlive: oldGone, listed: resumed }).rejoin, null);
+  });
+
   await check('a session whose mission recorded its end (a grill answered Fire, or released) holds neither the mission nor a slot, and its pid cannot take the next session', () => {
     const dir = scratchHome('finished');
     const t0 = Date.parse('2026-10-28T12:00:00Z');
@@ -382,6 +447,284 @@ async function main() {
     assert.equal(readMission('CLEARED', dir).session.pid, 7272);
   });
 
+  // --- binding by session id (ADR 141) ---------------------------------------------
+
+  await check('a snapshot listing a bound process under a new id puts rejoin on GET /api/missions and on that process\'s GET /api/binding, and its join under the new id clears both', async () => {
+    const proc = liveProcess();
+    const start = '2026-10-30T09:00:00Z';
+    const listedAs = id => post('/api/sessions', { intervalMs: 30_000, sessions: [{ id, pid: proc.pid, procStart: start, kind: 'interactive', jobId: null, cwd: '/Users/pm/work', login: null, name: null, status: 'idle', reason: null }] });
+    const viewOf = async () => (await getJson('/api/missions')).body.missions.find(m => m.key === 'CLEARED_HTTP');
+    const bindingOf = async () => (await getJson(`/api/binding?pid=${proc.pid}&procStart=${start}`)).body;
+    try {
+      assert.equal((await post('/api/mission/CLEARED_HTTP/join', { id: 'before-clear', pid: proc.pid, procStart: start, phase: 'direct' })).status, 200);
+      assert.equal((await listedAs('after-clear')).status, 200);
+      const view = await viewOf();
+      assert.deepEqual([view.rejoin.reason, view.rejoin.id], ['clear', 'after-clear'], JSON.stringify(view.rejoin));
+      assert.ok(Number.isFinite(Date.parse(view.rejoin.since)));
+      assert.notEqual(view.listedAt, null, 'the snapshot that lists it is its heard-from time');
+      assert.deepEqual([(await bindingOf()).key, (await bindingOf()).rejoin], ['CLEARED_HTTP', view.rejoin]);
+
+      assert.equal((await post('/api/mission/CLEARED_HTTP/join', { id: 'after-clear', pid: proc.pid, procStart: start })).status, 200);
+      assert.equal((await viewOf()).rejoin, null);
+      assert.equal((await bindingOf()).rejoin, null);
+    } finally {
+      await post('/api/sessions', { intervalMs: 30_000, sessions: [] });
+      await endProcess(proc);
+    }
+  });
+
+  await check('a join by a second live session is refused 409; with takeover it is pending, told to the bound session, until that one leaves, and then it is bound', async () => {
+    const a = liveProcess();
+    const b = liveProcess();
+    const start = '2026-10-30T08:00:00Z';
+    try {
+      const first = await post('/api/mission/JOIN_TWO/join', { id: 'sess-a', pid: a.pid, procStart: start, phase: 'direct' });
+      assert.equal(first.status, 200, JSON.stringify(first.body));
+      assert.equal(first.body.bound, true);
+      assert.deepEqual([first.body.session.id, first.body.session.pid], ['sess-a', a.pid]);
+      const created = readMission('JOIN_TWO', home);
+      assert.deepEqual([created.phase, created.state], ['direct', 'working'], 'a join creates the mission it names, working');
+
+      const second = await post('/api/mission/JOIN_TWO/join', { id: 'sess-b', pid: b.pid, procStart: start });
+      assert.equal(second.status, 409);
+      assert.equal(second.body.error, 'live');
+      assert.equal(second.body.session.id, 'sess-a', 'the refusal names the bound session');
+      assert.equal(readMission('JOIN_TWO', home).takeover, undefined, 'a plain join records no takeover');
+
+      const asked = await post('/api/mission/JOIN_TWO/join', { id: 'sess-b', pid: b.pid, procStart: start, takeover: true });
+      assert.equal(asked.status, 202);
+      assert.equal(asked.body.takeover, 'pending');
+      assert.equal(asked.body.session.id, 'sess-a');
+      const pending = readMission('JOIN_TWO', home);
+      assert.equal(pending.session.id, 'sess-a', 'the bound session keeps the mission while the takeover is pending');
+      assert.equal(pending.takeover.by, 'sess-b');
+      const told = (await getJson('/api/binding?id=sess-a')).body;
+      assert.deepEqual([told.key, told.takeover], ['JOIN_TWO', { by: 'sess-b', at: pending.takeover.at }]);
+      assert.equal((await getJson('/api/binding?id=sess-b')).body.key, null, 'the asking session is bound to nothing yet');
+
+      assert.equal((await post('/api/mission/JOIN_TWO/leave', { id: 'sess-b' })).status, 409, 'only the bound session leaves');
+      const left = await post('/api/mission/JOIN_TWO/leave', { id: 'sess-a' });
+      assert.equal(left.status, 200, JSON.stringify(left.body));
+      const after = readMission('JOIN_TWO', home);
+      assert.deepEqual([after.session.id, after.session.pid], ['sess-b', b.pid], 'the leave binds the session that asked');
+      assert.deepEqual(after.session.ended, { pid: a.pid, procStart: start, id: 'sess-a' });
+      assert.equal(after.takeover, undefined);
+      assert.equal((await getJson('/api/binding?id=sess-b')).body.key, 'JOIN_TWO');
+      assert.equal((await getJson('/api/binding?id=sess-a')).body.key, null);
+      assert.equal((await post('/api/mission/JOIN_TWO/join', { id: 'sess-b', pid: b.pid, procStart: start })).status, 200, 'its next join is its own');
+    } finally {
+      await endProcess(a);
+      await endProcess(b);
+    }
+  });
+
+  await check('a join from the bound process under a new id (a /clear) rebinds the id; a launch\'s reservation is bound by the first join; a session gone with a takeover pending is replaced by the next join', () => {
+    const dir = scratchHome('join-rules');
+    const t0 = Date.parse('2026-10-30T09:00:00Z');
+    const alive = new Set([5151, 5252]);
+    const isAlive = pid => alive.has(pid);
+    const start = '2026-10-30T08:59:00Z';
+
+    launchMission('JOINED', { phase: 'direct', login: '/Users/pm/.claude-a' }, { home: dir, now: t0 });
+    const reserved = joinMission('JOINED', { id: 'sess-a', pid: 5151, procStart: start }, { home: dir, now: t0 + 1000, isAlive });
+    assert.equal(reserved.status, 200);
+    assert.deepEqual([reserved.session.id, reserved.session.login, reserved.session.startedAt], ['sess-a', '/Users/pm/.claude-a', iso(t0)],
+      'the reservation is bound in place, its launch\'s login and start kept');
+
+    const cleared = joinMission('JOINED', { id: 'sess-a2', pid: 5151, procStart: start }, { home: dir, now: t0 + 2000, isAlive });
+    assert.equal(cleared.status, 200);
+    assert.deepEqual([cleared.session.id, cleared.session.startedAt], ['sess-a2', iso(t0)], 'the same process under a new id is the same session');
+    assert.throws(() => joinMission('JOINED', { id: 'sess-x', pid: 5151, procStart: '2026-10-30T08:00:00Z' }, { home: dir, now: t0 + 3000, isAlive }),
+      { status: 409 }, 'the same pid with another process start is another process');
+
+    assert.equal(joinMission('JOINED', { id: 'sess-b', pid: 5252, procStart: start, takeover: true }, { home: dir, now: t0 + 4000, isAlive }).status, 202);
+    alive.delete(5151);
+    const c = joinMission('JOINED', { id: 'sess-c', pid: 5252, procStart: start }, { home: dir, now: t0 + 5000, isAlive });
+    assert.deepEqual([c.status, c.session.id], [200, 'sess-c'], 'with the bound process gone, the next join binds');
+    assert.equal(readMission('JOINED', dir).takeover, undefined, 'and the takeover is over');
+  });
+
+  await check('a leave with no takeover pending lets the mission go: session { ended, leftAt }, working moves to waiting, and the left session\'s heartbeat is refused while its join binds again', () => {
+    const dir = scratchHome('leave');
+    const t0 = Date.parse('2026-10-30T10:00:00Z');
+    const isAlive = () => true;
+    joinMission('LEFT', { id: 'sess-a', pid: 6161 }, { home: dir, now: t0, isAlive });
+    assert.throws(() => leaveMission('LEFT', { id: 'sess-z', pid: 6262 }, { home: dir, now: t0 + 1000 }), { status: 409, message: 'not bound' });
+    assert.deepEqual(leaveMission('LEFT', { id: 'sess-a' }, { home: dir, now: t0 + 2000 }), { left: true, session: null });
+    const m = readMission('LEFT', dir);
+    assert.deepEqual(m.session, { ended: { pid: 6161, id: 'sess-a' }, leftAt: iso(t0 + 2000) });
+    assert.equal(m.state, 'waiting');
+    assert.throws(() => bindSession('LEFT', { id: 'sess-a', pid: 6161 }, { home: dir, now: t0 + 3000, isAlive }), { status: 409 },
+      'a hook of the session that left cannot bind it back');
+    assert.equal(joinMission('LEFT', { id: 'sess-a', pid: 6161 }, { home: dir, now: t0 + 4000, isAlive }).status, 200, '/mission run again joins');
+    assert.equal(readMission('LEFT', dir).state, 'working');
+  });
+
+  await check('a heartbeat with typed: true records when the PM typed in the session', () => {
+    const dir = scratchHome('typed');
+    const t0 = Date.parse('2026-10-30T11:00:00Z');
+    joinMission('TYPED', { id: 'sess-a', pid: 7171 }, { home: dir, now: t0, isAlive: () => true });
+    const beat = bindSession('TYPED', { id: 'sess-a', pid: 7171 }, { home: dir, now: t0 + 1000, isAlive: () => true });
+    assert.equal(beat.session.typedAt, undefined);
+    const typed = bindSession('TYPED', { id: 'sess-a', pid: 7171, typed: true }, { home: dir, now: t0 + 2000, isAlive: () => true });
+    assert.deepEqual([typed.session.typedAt, typed.session.seenAt], [iso(t0 + 2000), iso(t0 + 2000)]);
+  });
+
+  await check('a heartbeat-only beat (beat: true) is the bound session\'s alone: one that left, a bare reservation and another session are a 409 not bound that writes nothing', () => {
+    const dir = scratchHome('beat-only');
+    const t0 = Date.parse('2026-10-30T11:30:00Z');
+    const isAlive = () => true;
+    const start = '2026-10-30T11:00:00Z';
+    joinMission('BEATEN', { id: 'sess-a', pid: 7272, procStart: start }, { home: dir, now: t0, isAlive });
+    const beat = bindSession('BEATEN', { id: 'sess-a', pid: 7272, procStart: start, beat: true }, { home: dir, now: t0 + 1000, isAlive });
+    assert.equal(beat.session.seenAt, iso(t0 + 1000), 'the bound session beats');
+    assert.throws(() => bindSession('BEATEN', { id: 'sess-b', pid: 7373, procStart: start, beat: true }, { home: dir, now: t0 + 2000, isAlive }),
+      { status: 409, message: 'not bound' }, 'another session beats nothing');
+    leaveMission('BEATEN', { id: 'sess-a' }, { home: dir, now: t0 + 3000 });
+    const left = readMission('BEATEN', dir);
+    assert.throws(() => bindSession('BEATEN', { id: 'sess-c', pid: 7474, procStart: start, beat: true }, { home: dir, now: t0 + 4000, isAlive }),
+      { status: 409, message: 'not bound' }, 'a session that never joined is not bound by its beat');
+    assert.deepEqual(readMission('BEATEN', dir), left, 'a refused beat writes nothing');
+
+    launchMission('RESERVED_BEAT', { phase: 'direct' }, { home: dir, now: t0 });
+    assert.throws(() => bindSession('RESERVED_BEAT', { id: 'sess-d', pid: 7575, procStart: start, beat: true }, { home: dir, now: t0 + 1000, isAlive }),
+      { status: 409, message: 'not bound' }, 'a launch\'s bare reservation binds no beat');
+    assert.equal(readMission('RESERVED_BEAT', dir).session.id, undefined);
+  });
+
+  await check('a bind or beat from the bound id carrying a process start fills the start of a record bound without one, so its process names it after', () => {
+    const dir = scratchHome('fill-start');
+    const t0 = Date.parse('2026-10-30T11:35:00Z');
+    const start = '2026-10-30T11:00:00Z';
+    const isAlive = () => true;
+    for (const [key, beat] of [['FILLED_BY_BIND', false], ['FILLED_BY_BEAT', true]]) {
+      joinMission(key, { id: `sess-${key}`, pid: 7313 }, { home: dir, now: t0, isAlive });
+      assert.equal(bindingFor([readMission(key, dir)], { pid: 7313, procStart: start }).key, null, `${key}: a pid alone names no one`);
+      const filled = bindSession(key, { id: `sess-${key}`, pid: 7313, procStart: start, ...(beat ? { beat } : {}) }, { home: dir, now: t0 + 1000, isAlive });
+      assert.equal(filled.session.procStart, start, key);
+      assert.equal(bindingFor([readMission(key, dir)], { pid: 7313, procStart: start }).key, key, `${key}: its process names it`);
+    }
+  });
+
+  await check('the bound id resumed in a new process once the bound one is gone binds and beats as the bound session, taking the new process; while the bound one lives it is a 409 live', () => {
+    const dir = scratchHome('resume-bind');
+    const t0 = Date.parse('2026-10-30T11:45:00Z');
+    const start = '2026-10-30T11:00:00Z';
+    const resumedStart = '2026-10-30T11:44:00Z';
+    const listed = { at: t0 + 1000, sessions: [{ id: 'sess-a', pid: 7402, procStart: resumedStart, since: t0 + 1000 }] };
+    joinMission('RESUMED_BIND', { id: 'sess-a', pid: 7401, procStart: start }, { home: dir, now: t0, isAlive: () => true });
+    assert.throws(() => bindSession('RESUMED_BIND', { id: 'sess-a', pid: 7402, procStart: resumedStart }, { home: dir, now: t0 + 1000, isAlive: () => true, listed }),
+      { status: 409, message: 'live' }, 'a second process under the id while the bound one runs');
+    const oldGone = pid => pid !== 7401;
+    for (const [label, beat] of [['its bind', false], ['its beat', true]]) {
+      const bound = bindSession('RESUMED_BIND', { id: 'sess-a', pid: 7402, procStart: resumedStart, ...(beat ? { beat } : {}) }, { home: dir, now: t0 + 2000, isAlive: oldGone, listed });
+      assert.deepEqual([bound.session.pid, bound.session.procStart, bound.session.startedAt, bound.session.seenAt], [7402, resumedStart, iso(t0), iso(t0 + 2000)], label);
+    }
+    assert.equal(missionView(readMission('RESUMED_BIND', dir), { home: dir, now: t0 + 3000, isAlive: oldGone, listed }).rejoin, null, 'bound to its new process, it needs no rejoin');
+  });
+
+  await check('pidAlive reads a pid running under another process start as gone', async () => {
+    const gone = await deadPid();
+    assert.deepEqual([pidAlive(process.pid), pidAlive(process.pid, processStartUtc(process.pid)), pidAlive(process.pid, '2001-01-01T00:00:00Z'), pidAlive(gone)],
+      [true, true, false, false]);
+  });
+
+  await check('a session that left is not carried as ended by the session bound after it, so it stays a tab', () => {
+    const dir = scratchHome('left-not-ended');
+    const t0 = Date.parse('2026-10-30T11:40:00Z');
+    const isAlive = () => true;
+    joinMission('LEFT_THEN_BOUND', { id: 'sess-a', pid: 7676 }, { home: dir, now: t0, isAlive });
+    leaveMission('LEFT_THEN_BOUND', { id: 'sess-a' }, { home: dir, now: t0 + 1000 });
+    const bound = bindSession('LEFT_THEN_BOUND', { id: 'sess-b', pid: 7777 }, { home: dir, now: t0 + 2000, isAlive });
+    assert.deepEqual([bound.session.id, bound.session.ended], ['sess-b', undefined]);
+  });
+
+  await check('a join by the session a launch replaced is a 409 ended, under its id or its process after a /clear, and the successor binds', () => {
+    const dir = scratchHome('ended-join');
+    const t0 = Date.parse('2026-10-30T11:50:00Z');
+    const isAlive = () => true;
+    const start = '2026-10-30T11:00:00Z';
+    joinMission('REPLACED', { id: 'grill-a', pid: 7878, procStart: start }, { home: dir, now: t0, isAlive });
+    upsertMission('REPLACED', { fire: { by: 'round' } }, { home: dir, now: t0 + 1000 });
+    assert.deepEqual(launchMission('REPLACED', { phase: 'direct' }, { home: dir, now: t0 + 2000, isAlive }), { launch: true });
+    for (const ref of [{ id: 'grill-a', pid: 7878, procStart: start }, { id: 'grill-a2', pid: 7878, procStart: start }]) {
+      assert.throws(() => joinMission('REPLACED', ref, { home: dir, now: t0 + 3000, isAlive }),
+        e => e.status === 409 && e.answer.error === 'ended', `${ref.id} is the session the launch replaced`);
+    }
+    // Past the reservation's grace, the join would bind fresh: still refused.
+    assert.throws(() => joinMission('REPLACED', { id: 'grill-a' }, { home: dir, now: t0 + 2000 + UNBOUND_GRACE_MS + 1000, isAlive }),
+      e => e.status === 409 && e.answer.error === 'ended');
+    const next = joinMission('REPLACED', { id: 'direct-b', pid: 7979, procStart: start }, { home: dir, now: t0 + 4000, isAlive });
+    assert.deepEqual([next.status, next.session.id], [200, 'direct-b'], 'the successor binds the reservation');
+  });
+
+  await check('the session a launch replaced, resumed under its id in a new process once its old one is gone, joins the launch and beats; its old process, or a new one while the old lives, stays a 409 ended', () => {
+    const dir = scratchHome('resume-join');
+    const t0 = Date.parse('2026-10-30T12:00:00Z');
+    const start = '2026-10-30T11:00:00Z';
+    const newStart = '2026-10-30T12:00:01Z';
+    const ended = e => e.status === 409 && e.answer.error === 'ended';
+    // The old pid alive again under another start: the OS reused it, so the old process is gone.
+    const oldPidReused = (pid, procStart) => pid !== 7101 || procStart !== start;
+    for (const [label, key, resumedPid, resumedStart, aliveAfter] of [
+      ['another pid', 'RESUME_NEW_PID', 7102, newStart, pid => pid !== 7101],
+      ['the same pid, reused under another start', 'RESUME_REUSED_PID', 7101, newStart, () => true],
+      ['another pid, the old pid reused by a process started later', 'RESUME_OLD_PID_REUSED', 7103, newStart, oldPidReused],
+    ]) {
+      const id = `sess-${key}`;
+      joinMission(key, { id, pid: 7101, procStart: start }, { home: dir, now: t0, isAlive: () => true });
+      assert.deepEqual(launchMission(key, { phase: 'direct' }, { home: dir, now: t0 + 1000, isAlive: pid => pid !== 7101 }), { launch: true });
+      assert.throws(() => joinMission(key, { id, pid: 7101, procStart: start }, { home: dir, now: t0 + 2000, isAlive: () => true }), ended,
+        `${label}: the old process itself`);
+      if (resumedPid !== 7101) {
+        assert.throws(() => joinMission(key, { id, pid: resumedPid, procStart: resumedStart }, { home: dir, now: t0 + 2000, isAlive: () => true }), ended,
+          `${label}: a new process while the old one still runs`);
+      }
+      const isAlive = aliveAfter;
+      const joined = joinMission(key, { id, pid: resumedPid, procStart: resumedStart }, { home: dir, now: t0 + 3000, isAlive });
+      assert.deepEqual([joined.status, joined.session.pid, joined.session.ended], [200, resumedPid, undefined], `${label}: the resume binds and drops ended`);
+      const beat = bindSession(key, { id, pid: resumedPid, procStart: resumedStart, beat: true }, { home: dir, now: t0 + 4000, isAlive });
+      assert.equal(beat.session.seenAt, iso(t0 + 4000), `${label}: its beat lands`);
+    }
+  });
+
+  await check('a join by a session bound to another mission is a 409 bound elsewhere naming it; once it leaves that one, it binds', () => {
+    const dir = scratchHome('bound-elsewhere');
+    const t0 = Date.parse('2026-10-30T12:00:00Z');
+    const isAlive = () => true;
+    joinMission('FIRST_HELD', { id: 'sess-a', pid: 8080 }, { home: dir, now: t0, isAlive });
+    assert.throws(() => joinMission('SECOND_WANTED', { id: 'sess-a', pid: 8080 }, { home: dir, now: t0 + 1000, isAlive }),
+      e => e.status === 409 && e.answer.error === 'bound elsewhere' && e.answer.mission === 'FIRST_HELD');
+    assert.throws(() => joinMission('SECOND_WANTED', { id: 'sess-a', takeover: true }, { home: dir, now: t0 + 1000, isAlive }),
+      e => e.status === 409 && e.answer.mission === 'FIRST_HELD', 'a takeover asked from another mission too');
+    assert.equal(readMission('SECOND_WANTED', dir), null, 'the refused join writes nothing');
+    leaveMission('FIRST_HELD', { id: 'sess-a' }, { home: dir, now: t0 + 2000 });
+    assert.equal(joinMission('SECOND_WANTED', { id: 'sess-a', pid: 8080 }, { home: dir, now: t0 + 3000, isAlive }).status, 200);
+    assert.equal(bindingFor([readMission('FIRST_HELD', dir), readMission('SECOND_WANTED', dir)], { id: 'sess-a' }).key, 'SECOND_WANTED');
+
+    // Still bound to its released mission, the session joins another, then rejoins the released one.
+    joinMission('RELEASED_FIRST', { id: 'sess-r', pid: 8282 }, { home: dir, now: t0, isAlive });
+    upsertMission('RELEASED_FIRST', { state: 'released' }, { home: dir, now: t0 + 1000 });
+    assert.equal(joinMission('JOINED_AFTER', { id: 'sess-r', pid: 8282 }, { home: dir, now: t0 + 2000, isAlive }).status, 200);
+    assert.throws(() => joinMission('RELEASED_FIRST', { id: 'sess-r', pid: 8282 }, { home: dir, now: t0 + 3000, isAlive }),
+      e => e.status === 409 && e.answer.error === 'bound elsewhere' && e.answer.mission === 'JOINED_AFTER', 'its released mission\'s rejoin too');
+    assert.equal(readMission('RELEASED_FIRST', dir).state, 'released', 'and the released mission stays released');
+  });
+
+  await check('the bound session joining its released mission again moves it to working, and its binding names the mission', () => {
+    const dir = scratchHome('rejoin-released');
+    const t0 = Date.parse('2026-10-30T12:10:00Z');
+    const isAlive = () => true;
+    joinMission('RELEASED_AGAIN', { id: 'sess-a', pid: 8181 }, { home: dir, now: t0, isAlive });
+    upsertMission('RELEASED_AGAIN', { state: 'released' }, { home: dir, now: t0 + 1000 });
+    assert.equal(bindingFor([readMission('RELEASED_AGAIN', dir)], { id: 'sess-a' }).key, null);
+    const again = joinMission('RELEASED_AGAIN', { id: 'sess-a', pid: 8181, phase: 'landing' }, { home: dir, now: t0 + 2000, isAlive });
+    assert.equal(again.bound, true);
+    const m = readMission('RELEASED_AGAIN', dir);
+    assert.deepEqual([m.phase, m.state, m.releasedAt], ['landing', 'working', undefined]);
+    assert.equal(bindingFor([m], { id: 'sess-a' }).key, 'RELEASED_AGAIN');
+  });
+
   await check('a mission waiting on the PM is alive but not working, so it holds no working slot', () => {
     const dir = scratchHome('waiting-on-pm');
     const now = Date.now();
@@ -512,10 +855,12 @@ async function main() {
     // Bound while the stand-in is alive, then gone.
     const session = liveProcess();
     await post('/api/mission/DEAD_PID/session', { pid: session.pid });
-    assert.equal((await getJson('/api/mission/DEAD_PID')).body.view, 'working');
+    const alive = (await getJson('/api/mission/DEAD_PID')).body;
+    assert.deepEqual([alive.view, alive.gone], ['working', null]);
     await endProcess(session);
     const view = (await getJson('/api/mission/DEAD_PID')).body;
     assert.equal(view.view, 'stalled');
+    assert.deepEqual(view.gone, { lastSeenAt: readMission('DEAD_PID', home).session.seenAt }, 'gone, with its last heartbeat');
     assert.equal(view.live, false);
     assert.equal(view.state, 'working', 'stalled is derived, never stored');
     // And the same through the module, for a waiting mission: a gone process stalls any state.
@@ -531,6 +876,137 @@ async function main() {
     assert.equal(deriveState(at(STALL_SILENCE_MS - 1000), { home, now, isAlive: alive }), 'working');
     assert.equal(deriveState({ ...at(minutes(600)), state: 'waiting' }, { home, now, isAlive: alive }), 'waiting');
     assert.equal(deriveState({ ...at(minutes(600)), state: 'released' }, { home, now, isAlive: () => false }), 'released', 'a released mission stays released after its session ends');
+  });
+
+  await check('a round asking for the PM reads needs-you ahead of stalled, whether the session is gone, silent or still there', () => {
+    const dir = scratchHome('ahead-of-stalled');
+    const now = Date.parse('2026-10-28T12:00:00Z');
+    const boardId = 'b_aheadofstalled';
+    mkdirSync(path.join(dir, 'boards'), { recursive: true });
+    writeFileSync(path.join(dir, 'boards', `${boardId}.json`), JSON.stringify({
+      id: boardId, thread: 't', title: 'q', cwd: null, createdAt: iso(now), updatedAt: iso(now), state: 'open',
+      // No wait on it: the session that asked has stopped waiting, and the round still asks.
+      rounds: [{ n: 1, postedAt: iso(now - minutes(90)), status: 'open', sentAt: null, title: 'q' }],
+      blocks: [{ id: 'q1', kind: 'question', round: 1, prompt: 'Merge?', widget: 'single', options: [{ label: 'Merge' }] }],
+      answers: {}, comments: [],
+    }));
+    const linked = [{ id: boardId, url: 'http://x/b/' + boardId, at: iso(now) }];
+    for (const [what, seenAgo, isAlive, unlinked] of [
+      ['its process gone', minutes(1), () => false, 'stalled'],
+      ['silent past the stall', STALL_SILENCE_MS + minutes(1), () => true, 'stalled'],
+      ['still heard from', minutes(1), () => true, 'working'],
+    ]) {
+      const m = { key: 'K', state: 'working', boards: linked, session: { pid: 4242, startedAt: iso(now - minutes(120)), seenAt: iso(now - seenAgo) } };
+      assert.equal(deriveState(m, { home: dir, now, isAlive }), 'needs-you', `${what}, with the round open`);
+      assert.equal(deriveState({ ...m, boards: [] }, { home: dir, now, isAlive }), unlinked, `${what}, with no round`);
+    }
+  });
+
+  await check('a view carries gone with its last heartbeat while its bound process is gone or its reservation lapsed, and none once the mission recorded its end', () => {
+    const now = Date.parse('2026-10-28T12:00:00Z');
+    const seenAt = iso(now - minutes(42));
+    const bound = { pid: 4343, id: 's', startedAt: iso(now - minutes(60)), seenAt };
+    const viewOf = (fields, isAlive) => missionView({ key: 'K', state: 'working', phase: 'direct', boards: [], ...fields }, { home, now, isAlive });
+    assert.deepEqual(viewOf({ session: bound }, () => false).gone, { lastSeenAt: seenAt });
+    assert.equal(viewOf({ session: bound }, () => true).gone, null);
+    const reserved = { startedAt: iso(now - UNBOUND_GRACE_MS - 1000), seenAt: iso(now - UNBOUND_GRACE_MS - 1000) };
+    assert.deepEqual(viewOf({ session: reserved }, () => true).gone, { lastSeenAt: reserved.seenAt }, 'a start no process bound');
+    assert.equal(viewOf({ session: bound, state: 'released' }, () => false).gone, null, 'a released mission\'s session is expected to end');
+    assert.equal(viewOf({ session: bound, phase: 'grill', fire: { at: seenAt, by: 'round' } }, () => false).gone, null, 'a fired grill too');
+    assert.equal(viewOf({ session: null }, () => false).gone, null);
+  });
+
+  await check('a view reads its session\'s process once, so its view, gone and live agree when the process dies while it is read', () => {
+    const now = Date.parse('2026-10-28T12:00:00Z');
+    const session = { pid: 4444, id: 's', startedAt: iso(now - minutes(60)), seenAt: iso(now - minutes(1)) };
+    for (const diesAfter of [0, 1, 2]) {
+      let asked = 0;
+      const dying = () => asked++ < diesAfter;
+      const v = missionView({ key: 'K', state: 'working', phase: 'direct', boards: [], session }, { home, now, isAlive: dying });
+      const alive = diesAfter > 0;
+      assert.deepEqual([v.view, v.gone, v.live], alive ? ['working', null, true] : ['stalled', { lastSeenAt: session.seenAt }, false],
+        `the process answering alive ${diesAfter} time(s), then dead`);
+    }
+  });
+
+  await check('POST /api/mission/:key/facts sets each listed PR\'s state and head in the view, replacing by repo and number, and drops a fact for a PR not listed', async () => {
+    const pr = (repo, number) => ({ repo, number, url: `https://github.com/o/${repo}/pull/${number}` });
+    await post('/api/mission/FACTS', { title: 'Facts', prs: [{ ...pr('service', 12), state: 'merged' }, pr('admin', 7)] });
+    const first = await post('/api/mission/FACTS/facts', { prs: [
+      { repo: 'service', number: 12, state: 'red', head: 'abc123', checkedAt: '2026-10-30T10:00:00.000Z' },
+      { repo: 'client', number: 3, state: 'green', head: 'fff000', checkedAt: '2026-10-30T10:00:00.000Z' },
+    ] });
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    assert.deepEqual(first.body.prs.map(p => [p.repo, p.number, p.state, p.head, p.checkedAt]), [
+      ['service', 12, 'red', 'abc123', '2026-10-30T10:00:00.000Z'],
+      ['admin', 7, 'checking', null, null],
+    ], 'the session\'s merged is not the view\'s; a PR with no fact yet is checking; client #3 is not listed');
+    const updatedAt = readMission('FACTS', home).updatedAt;
+
+    await post('/api/mission/FACTS/facts', { prs: [{ repo: 'service', number: 12, state: 'green', head: 'def456', checkedAt: '2026-10-30T10:02:00.000Z' }] });
+    const view = (await getJson('/api/mission/FACTS')).body;
+    assert.deepEqual(view.prs.map(p => [p.repo, p.state, p.head]), [['service', 'green', 'def456'], ['admin', 'checking', null]]);
+    const record = readMission('FACTS', home);
+    assert.deepEqual(record.prFacts, [{ repo: 'service', number: 12, state: 'green', head: 'def456', checkedAt: '2026-10-30T10:02:00.000Z' }]);
+    assert.equal(record.updatedAt, updatedAt, 'a reading is not a change the mission made');
+
+    for (const body of [
+      { prs: [{ repo: 'service', number: 12, state: 'passing', head: 'x' }] },
+      { prs: [{ repo: 'service', number: 12, state: 'green' }] },
+      { prs: [{ repo: 'service', number: 12, state: 'green', head: 'x', checkedAt: 'soon' }] },
+      { prs: [{ repo: 'service', number: 12, state: 'green', head: 'x', url: 'u' }] },
+      { prs: {} }, { facts: [] },
+    ]) {
+      assert.equal((await post('/api/mission/FACTS/facts', body)).status, 400, `${JSON.stringify(body)} is refused`);
+    }
+    assert.deepEqual(readMission('FACTS', home).prFacts, record.prFacts, 'a refused post writes nothing');
+    assert.equal((await post('/api/mission/NO_SUCH_MISSION/facts', { prs: [] })).status, 404);
+  });
+
+  await check('a PR list read from a view, a PR appended, writes back: the view\'s state, head and checkedAt are dropped, checking included, and so is the write\'s own answer', async () => {
+    const pr = (repo, number) => ({ repo, number, url: `https://github.com/o/${repo}/pull/${number}` });
+    await post('/api/mission/ROUND_TRIP', { title: 'Round trip', prs: [pr('service', 4), pr('admin', 9)] });
+    await post('/api/mission/ROUND_TRIP/facts', { prs: [{ repo: 'service', number: 4, state: 'green', head: 'abc123', checkedAt: '2026-10-30T11:00:00.000Z' }] });
+    const read = (await getJson('/api/mission/ROUND_TRIP')).body;
+    assert.deepEqual(read.prs.map(p => [p.state, p.head]), [['green', 'abc123'], ['checking', null]], 'setup: one PR with a fact, one checking');
+
+    const written = await post('/api/mission/ROUND_TRIP', { prs: [...read.prs, pr('client', 2)] });
+    assert.equal(written.status, 200, JSON.stringify(written.body));
+    assert.deepEqual(readMission('ROUND_TRIP', home).prs, [pr('service', 4), pr('admin', 9), pr('client', 2)], 'stored by name alone');
+    assert.deepEqual(written.body.prs, [...read.prs, { ...pr('client', 2), state: 'checking', head: null, checkedAt: null }], 'the view reads as before, the new PR checking');
+    const again = await post('/api/mission/ROUND_TRIP', { prs: written.body.prs });
+    assert.equal(again.status, 200, JSON.stringify(again.body));
+    assert.deepEqual(again.body.prs, written.body.prs);
+  });
+
+  await check('a PR stored with a state before PR facts existed reads that state until its first fact, and keeps it when the list is read and written back', () => {
+    const dir = scratchHome('stored-states');
+    const now = Date.parse('2026-10-30T12:00:00Z');
+    const pr = (repo, number) => ({ repo, number, url: `https://github.com/o/${repo}/pull/${number}` });
+    seed(dir, 'OLD_RECORD', { state: 'released', now, prs: [{ ...pr('service', 5), state: 'merged' }, { ...pr('admin', 8), state: 'green' }, pr('client', 1)] });
+    writeMission({ ...readMission('OLD_RECORD', dir), prFacts: [{ repo: 'admin', number: 8, state: 'red', head: 'aaa111', checkedAt: iso(now) }] }, dir);
+    const viewed = missionView(readMission('OLD_RECORD', dir), { home: dir, now });
+    assert.deepEqual(viewed.prs.map(p => [p.repo, p.state, p.head]), [['service', 'merged', null], ['admin', 'red', 'aaa111'], ['client', 'checking', null]],
+      'the stored state with no fact, a fact over a stored state, checking with neither');
+    const rewritten = upsertMission('OLD_RECORD', { prs: viewed.prs }, { home: dir, now: now + 1000 });
+    assert.deepEqual(missionView(rewritten, { home: dir, now }).prs, viewed.prs, 'read and written back, it reads the same');
+  });
+
+  await check('a card\'s recheck, by the cookie, drops the cached overview and answers the fresh view, so a gone session shows at once', async () => {
+    await post('/api/mission/RECHECK/launch', { phase: 'direct' });
+    const session = liveProcess();
+    await post('/api/mission/RECHECK/session', { pid: session.pid });
+    const viewIn = async () => (await getJson('/api/missions')).body.missions.find(m => m.key === 'RECHECK');
+    assert.deepEqual([(await viewIn()).view, (await viewIn()).gone], ['working', null], 'setup: the cached overview holds it working');
+    await endProcess(session);
+    const cookie = sessionCookieHeader(SECRET);
+    const r = await rawRequest(port, 'POST', '/api/mission/RECHECK/recheck', { headers: { 'content-type': 'application/json', cookie }, body: '{}' });
+    assert.equal(r.status, 200, r.body);
+    const answer = JSON.parse(r.body);
+    assert.deepEqual([answer.view, answer.gone], ['stalled', { lastSeenAt: readMission('RECHECK', home).session.seenAt }]);
+    const listed = await viewIn();
+    assert.deepEqual([listed.view, listed.gone], [answer.view, answer.gone], 'the list reads it fresh, not from the cache');
+    assert.equal((await post('/api/mission/NO_SUCH_MISSION/recheck', {})).status, 404);
   });
 
   await check('a mission leaving needs-you drops its waitingOn, unless the same write sets one; staying in needs-you keeps it', () => {
@@ -659,7 +1135,7 @@ async function main() {
 
   // --- the record -----------------------------------------------------------------
 
-  await check('POST /api/mission/:key writes the whitelisted fields and answers the view, with history on a phase or state change only', async () => {
+  await check('POST /api/mission/:key writes the whitelisted fields and answers the view, with history on a phase or state change only; a PR\'s state the session sends is dropped', async () => {
     const fields = {
       title: 'Front agent', cwd: '/tmp/x', phase: 'grill', state: 'working', summary: 'The Master Chief fronts sessions.',
       waitingOn: 'nothing', next: 'direct', prs: [{ repo: 'claude-board', number: 7, url: 'https://github.com/x/y/pull/7', state: 'open' }],
@@ -668,10 +1144,14 @@ async function main() {
     const r = await post('/api/mission/WHITELIST', fields);
     assert.equal(r.status, 200, JSON.stringify(r.body));
     for (const [k, v] of Object.entries(fields)) {
-      if (k === 'fire') continue;
+      if (k === 'fire' || k === 'prs') continue;
       assert.deepEqual(r.body[k], v, `${k} is stored as written`);
     }
     assert.equal(r.body.fire.by, 'card');
+    assert.deepEqual(readMission('WHITELIST', home).prs, [{ repo: 'claude-board', number: 7, url: 'https://github.com/x/y/pull/7' }],
+      'a PR is stored by its name alone');
+    assert.deepEqual(r.body.prs, [{ repo: 'claude-board', number: 7, url: 'https://github.com/x/y/pull/7', state: 'checking', head: null, checkedAt: null }],
+      'the view says checking until a fact arrives, whatever the session said');
     assert.equal(r.body.view, 'working');
     assert.equal((await post('/api/mission/WHITELIST', { summary: 'reworded' })).status, 200);
     assert.equal(readMission('WHITELIST', home).history.length, 1, 'a summary change appends no history');
@@ -686,7 +1166,7 @@ async function main() {
     for (const body of [
       { title: 'x', boards: [] }, { session: { pid: 1 } }, { orders: [] }, { caseText: 'x' },
       { summary: 'x'.repeat(281) }, { handoff: 'é'.repeat(2049) }, { phase: 'deploy' }, { state: 'stalled' },
-      { prs: [{ repo: 'r', number: 1, url: 'u', state: 'open', body: 'x' }] }, { title: null },
+      { prs: [{ repo: 'r', number: 1, url: 'u', state: 'open', body: 'x' }] }, { prs: [{ repo: 'r', number: 1, url: 'u', state: 'passing' }] }, { title: null },
     ]) {
       const r = await post('/api/mission/REFUSED', body);
       assert.equal(r.status, 400, `${JSON.stringify(body).slice(0, 60)} is refused`);
@@ -721,6 +1201,36 @@ async function main() {
     assert.equal((await post('/api/mission/ORDERS/order/o_nope/ack', {})).status, 404);
   });
 
+  await check('a pm order is the Master Chief\'s, listed on the bound session\'s binding until that session marks it seen; seen by another session is a 409, and seen and resent each set once', async () => {
+    assert.equal((await post('/api/mission/PM_ORDERS/join', { id: 'pm-sess', pid: 9191, procStart: '2026-10-30T07:30:00Z' })).status, 200);
+    assert.equal((await post('/api/mission/PM_ORDERS/order', { kind: 'pm' })).status, 400, 'a pm order needs its text');
+    const words = 'Hold the merge until the dashboard is green.';
+    const order = (await post('/api/mission/PM_ORDERS/order', { kind: 'pm', text: words })).body.order;
+    assert.deepEqual([order.kind, order.text, order.by], ['pm', words, 'master-chief']);
+    assert.match(order.id, /^o_[0-9a-f]{16}$/);
+    const stop = (await post('/api/mission/PM_ORDERS/order', { kind: 'stop' })).body.order;
+    const binding = (await getJson('/api/binding?id=pm-sess')).body;
+    assert.deepEqual(binding.orders.map(o => [o.id, o.text]), [[order.id, words]], 'the binding lists the pm orders, not a card\'s');
+    assert.equal(binding.handoff, null);
+
+    const other = await post(`/api/mission/PM_ORDERS/order/${order.id}/seen`, { id: 'not-bound', pid: 9292 });
+    assert.equal(other.status, 409);
+    assert.equal(other.body.error, 'not bound');
+    const seen = await post(`/api/mission/PM_ORDERS/order/${order.id}/seen`, { id: 'pm-sess' });
+    assert.equal(seen.status, 200, JSON.stringify(seen.body));
+    assert.ok(seen.body.order.ackedAt);
+    assert.equal((await post(`/api/mission/PM_ORDERS/order/${order.id}/seen`, { id: 'pm-sess' })).body.order.ackedAt, seen.body.order.ackedAt);
+    assert.deepEqual((await getJson('/api/binding?id=pm-sess')).body.orders, [], 'a seen order leaves the binding');
+    assert.equal((await getJson('/api/binding?pid=9191&procStart=2026-10-30T07:30:00Z')).body.key, 'PM_ORDERS', 'the process alone names the session too');
+    assert.equal((await getJson('/api/binding?pid=9191')).body.key, null, 'a pid without its start names no one: the OS reuses a dead session\'s pid');
+
+    const resent = await post(`/api/mission/PM_ORDERS/order/${stop.id}/resent`, {});
+    assert.ok(resent.body.order.resentAt);
+    assert.equal((await post(`/api/mission/PM_ORDERS/order/${stop.id}/resent`, {})).body.order.resentAt, resent.body.order.resentAt);
+    assert.equal((await post('/api/mission/PM_ORDERS/order/o_nope/seen', { id: 'pm-sess' })).status, 404);
+    assert.equal((await getJson('/api/binding')).status, 400, 'a binding names its session');
+  });
+
   // --- boards -----------------------------------------------------------------------
 
   await check('a board posted with mission: <key> is linked to that mission, which reads needs-you until the round is answered', async () => {
@@ -739,6 +1249,54 @@ async function main() {
     });
     assert.equal(sent.status, 200, JSON.stringify(sent.body));
     assert.equal((await getJson('/api/mission/LINKED')).body.view, 'waiting', 'answered, it reads its stored state again');
+  });
+
+  await check('a later round on a board whose mission was pruned links nothing and remakes no mission; naming the mission again makes it', async () => {
+    const blocks = [{ kind: 'question', prompt: 'Next?', widget: 'single', options: [{ label: 'Yes' }] }];
+    const first = await post('/api/board', { title: 'Before the prune', mission: 'PRUNED_LINK', blocks });
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    rmSync(path.join(home, 'missions', 'PRUNED_LINK.json'));
+    const later = await post('/api/board', { boardId: first.body.boardId, blocks });
+    assert.equal(later.status, 200, JSON.stringify(later.body));
+    assert.equal(readMission('PRUNED_LINK', home), null, 'the board\'s own mission field remakes no record');
+    const named = await post('/api/board', { boardId: first.body.boardId, mission: 'PRUNED_LINK', blocks });
+    assert.equal(named.status, 200, JSON.stringify(named.body));
+    assert.deepEqual(readMission('PRUNED_LINK', home).boards.map(b => b.id), [first.body.boardId]);
+  });
+
+  await check('a board posted by a session bound to a mission, naming none, links to that mission; once the session leaves or joins another, its next board links to none or the other, and a later round on the first board is a 400 that writes nothing', async () => {
+    const tab = liveProcess();
+    const start = '2026-10-30T07:00:00Z';
+    try {
+      assert.equal((await post('/api/mission/BOUND_POSTS/join', { id: 'poster', pid: tab.pid, procStart: start })).status, 200);
+      const ask = { blocks: [{ kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }] }], session: { pid: tab.pid, procStart: start } };
+      const linked = await post('/api/board', { title: 'Bound round', ...ask });
+      assert.equal(linked.status, 200, JSON.stringify(linked.body));
+      assert.equal(readBoard(linked.body.boardId, home).mission, 'BOUND_POSTS');
+      assert.deepEqual(readMission('BOUND_POSTS', home).boards.map(b => b.id), [linked.body.boardId]);
+      const followUp = { boardId: linked.body.boardId, ...ask };
+      assert.equal((await post('/api/board', { ...followUp, requestId: 'bound-2' })).status, 200, 'its own session\'s later round lands');
+      const landed = readBoard(linked.body.boardId, home);
+
+      assert.equal((await post('/api/mission/BOUND_POSTS/leave', { id: 'poster' })).status, 200);
+      const loose = await post('/api/board', { title: 'Hand tab round', ...ask });
+      assert.equal(readBoard(loose.body.boardId, home).mission ?? null, null);
+      assert.deepEqual(readMission('BOUND_POSTS', home).boards.map(b => b.id), [linked.body.boardId]);
+      const afterLeave = await post('/api/board', { ...followUp, requestId: 'bound-3' });
+      assert.deepEqual([afterLeave.status, afterLeave.body.error], [400,
+        `board ${linked.body.boardId} belongs to mission BOUND_POSTS, and the posting session has left it: ask with fresh for a board of its own`]);
+
+      assert.equal((await post('/api/mission/BOUND_POSTS_NEXT/join', { id: 'poster', pid: tab.pid, procStart: start })).status, 200);
+      const elsewhere = await post('/api/board', { ...followUp, requestId: 'bound-4' });
+      assert.deepEqual([elsewhere.status, elsewhere.body.error], [400,
+        `board ${linked.body.boardId} belongs to mission BOUND_POSTS, and the posting session is bound to mission BOUND_POSTS_NEXT: ask with fresh for a board of its own`]);
+      assert.deepEqual(readBoard(linked.body.boardId, home), landed, 'a refused round writes nothing');
+      const next = await post('/api/board', { title: 'Next mission round', ...ask });
+      assert.equal(readBoard(next.body.boardId, home).mission, 'BOUND_POSTS_NEXT');
+      assert.equal((await post('/api/mission/BOUND_POSTS_NEXT/leave', { id: 'poster' })).status, 200);
+    } finally {
+      await endProcess(tab);
+    }
   });
 
   await check('a board post with a bad mission key is a 400 that writes no board', async () => {
@@ -925,7 +1483,7 @@ async function main() {
 
   // --- the gates --------------------------------------------------------------------
 
-  await check('the cookie may read the list and post an order, and may not write, launch, bind, ack or read one mission', async () => {
+  await check('the cookie may read the list and post a card\'s order, and may not write, launch, join, leave, bind, post a pm order, ack, mark seen or resent, post PR facts, or read one mission or a binding', async () => {
     await post('/api/mission/COOKIE', { title: 'Cookie' });
     const cookie = sessionCookieHeader(SECRET);
     const asCookie = { 'content-type': 'application/json', cookie };
@@ -939,13 +1497,23 @@ async function main() {
       ['POST', '/api/mission/COOKIE', { summary: 'forged' }],
       ['POST', '/api/mission/COOKIE/launch', { phase: 'direct' }],
       ['POST', '/api/mission/COOKIE/session', { pid: 1 }],
+      ['POST', '/api/mission/COOKIE/join', { id: 'forged' }],
+      ['POST', '/api/mission/COOKIE/leave', { id: 'forged' }],
+      ['POST', '/api/mission/COOKIE/order', { kind: 'pm', text: 'forged words' }],
       ['POST', `/api/mission/COOKIE/order/${orderId}/ack`, {}],
+      ['POST', `/api/mission/COOKIE/order/${orderId}/seen`, { id: 'forged' }],
+      ['POST', `/api/mission/COOKIE/order/${orderId}/resent`, {}],
+      ['POST', '/api/mission/COOKIE/facts', { prs: [] }],
       ['GET', '/api/mission/COOKIE', null],
+      ['GET', '/api/binding?id=forged', null],
     ]) {
       const r = await rawRequest(port, method, route, { headers: asCookie, body: body && JSON.stringify(body) });
       assert.equal(r.status, 401, `${method} ${route} with the cookie alone is refused`);
     }
-    assert.equal(readMission('COOKIE', home).summary, undefined);
+    const cookieRecord = readMission('COOKIE', home);
+    assert.equal(cookieRecord.summary, undefined);
+    assert.equal(cookieRecord.session, null);
+    assert.deepEqual(cookieRecord.orders.map(o => o.kind), ['comment'], 'no pm order was stored');
     for (const route of ['/api/missions', '/api/mission/COOKIE']) {
       assert.equal((await rawRequest(port, 'GET', route)).status, 401, `${route} with no credential is refused`);
     }

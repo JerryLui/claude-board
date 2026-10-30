@@ -72,6 +72,36 @@ async function main() {
     }
   });
 
+  await check('listed() answers the latest snapshot\'s time and each session\'s id and process with when a snapshot first listed it so, a /clear or a resume listed afresh; null before any snapshot and while the watcher reads down', () => {
+    const { clock, list } = rig();
+    const first = session();
+    try {
+      assert.equal(list.listed(), null, 'no snapshot yet: the missions read heartbeats alone');
+      list.replace({ intervalMs: 5_000, sessions: [first] });
+      clock.t = T0 + 4_000;
+      const cleared = session({ id: 'a1b2c3d4-0000-4000-8000-000000000002' });
+      const resumed = session({ id: 'a1b2c3d4-0000-4000-8000-000000000003', pid: 4343 });
+      list.replace({ intervalMs: 5_000, sessions: [first, resumed] });
+      clock.t = T0 + 8_000;
+      list.replace({ intervalMs: 5_000, sessions: [cleared, { ...resumed, pid: 4444, procStart: '2026-10-29T12:00:07Z' }] });
+      assert.deepEqual(list.listed(), {
+        at: T0 + 8_000,
+        sessions: [
+          { id: cleared.id, pid: 4242, procStart: first.procStart, since: T0 + 8_000 },
+          { id: resumed.id, pid: 4444, procStart: '2026-10-29T12:00:07Z', since: T0 + 8_000 },
+        ],
+      });
+      list.replace({ intervalMs: 5_000, sessions: [cleared] });
+      clock.t = T0 + 12_000;
+      list.replace({ intervalMs: 5_000, sessions: [cleared, first] });
+      assert.deepEqual(list.listed().sessions.map(s => s.since), [T0 + 8_000, T0 + 12_000], 'a session still listed keeps its first time; one listed again starts over');
+      clock.t = T0 + 22_000;
+      assert.equal(list.listed(), null, 'a watcher read down lists nothing');
+    } finally {
+      list.close();
+    }
+  });
+
   await check('a malformed snapshot is refused whole with a 400 naming the field, never a value, and the list stays as it was', () => {
     const { list } = rig();
     try {
@@ -216,6 +246,20 @@ async function main() {
       boards: [reservedBoard, handBoard].map(boardLink),
     });
     assert.deepEqual(tabs.map(t => [t.id, t.rounds]), [['hand-tab', [{ board: handBoard.id, round: 1 }]]]);
+  });
+
+  await check('a session that joined a mission and left it is a tab again, though a board it posted while bound still belongs to the mission', () => {
+    const leftStart = '2026-10-29T09:30:00Z';
+    const boundBoard = questionBoard({ pid: 5005, procStart: leftStart, id: 'left-tab' }, { mission: 'E' });
+    const tabs = deriveTabs({
+      sessions: [session({ id: 'left-tab', pid: 5005, procStart: leftStart }), session({ id: 'joined-tab', pid: 6006 })],
+      missions: [
+        { key: 'E', session: { ended: { pid: 5005, id: 'left-tab' }, leftAt: '2026-10-29T11:00:00Z' } },
+        { key: 'F', session: { id: 'joined-tab', pid: 6006, procStart: leftStart, startedAt: leftStart, seenAt: leftStart } },
+      ],
+      boards: [boundBoard].map(boardLink),
+    });
+    assert.deepEqual(tabs.map(t => [t.id, t.rounds]), [['left-tab', []]], 'the joined tab is its mission\'s card, and the mission\'s round stays on that card');
   });
 }
 

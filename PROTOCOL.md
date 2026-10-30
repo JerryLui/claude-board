@@ -318,9 +318,11 @@ An amend into the open round stores them the same way.
 
 **`action`** is `'fire'` or `'merge'`, on a `single` question only, and absent on one that carries
 none: the question's yes is option 0, and while its round, its board's newest, waits on an
-answer, the card of the mission whose board it is offers that yes as a Fire or Merge button. A click answers the round
+answer, the card of the mission whose board it is offers that yes as a Fire or Merge button. A Fire click answers the round
 through `POST /api/board/:id/submit`, that question set to option 0's label and the body marked
-`via: 'card'`, exactly as a Send with that pick would. A `fire` question answered yes, from the
+`via: 'card'`, exactly as a Send with that pick would. Merge answers nothing: it is a link to
+`/b/<id>#question:<round>:<question id>`, which the round page resolves by flipping to that
+round and putting that question on screen with the focus, so the merge is answered on the brief. A `fire` question answered yes, from the
 card, the page or a relay, records `fire` on the mission (the submit route below). Any other
 value, or an `action` on another widget, is a 400.
 
@@ -721,6 +723,9 @@ GET  /b/<asset>                     the shared script or stylesheet a page names
                                     is a sandboxed stage, which holds no credential);
                                     `ui-`/`styles-` are gated like every other read
 GET  /api/health                    { ok: true, version, daemon, pid }  (open: install.sh polls it)
+GET  /api/probe/documents           { ok: true } or { ok: false, code } -- whether macOS lets
+                                    the daemon open a file under ~/Documents (install.sh asks
+                                    it after the health gate). A code, never a name
 GET  /auth/:token                   consume a handoff -> 302 + Set-Cookie  (open by necessity)
 POST /api/handoff                   { boardId? } -> { token, expiresAt, ttlMs }
 POST /api/board                     post a board or a round into a live thread
@@ -967,7 +972,15 @@ appends `{ id, url, at }` to the mission's `boards`, `url` the one this post's r
 making a stub mission (titled by its key, phase `grill`, state `waiting`) when there is none, and
 stores `mission` on the board. A later round naming a mission links a board that had none; a
 board never moves from one mission to another, so naming a second is a **400**, and so is a key
-off the pattern, both before anything is written. The shim sends it from `CLAUDE_MISSION`.
+off the pattern, both before anything is written. **A post naming no mission links to the one
+its session is bound to** (ADR 141, "The missions routes"): the post's `session` (below), or the
+id the session watcher lists for that process, matched against each mission's bound session; a
+board that already belongs to a mission stays with it. A later round naming no mission on a board
+whose session has moved on, now bound to another mission or the session the board's mission
+records as `ended` (it left, was taken over, or a launch replaced it), is a **400** before anything
+is written, `board <id> belongs to mission <key>, and the posting session is bound to mission
+<other>` (or `has left it`) `: ask with fresh for a board of its own`: its round would put the
+old mission's card in Needs you. The shim names no mission itself.
 
 **`session: { pid, procStart }` (either form) names the agent session posting** (ADR 131): the
 process id of the agent session the shim runs under, and that process's start, UTC ISO-8601 to the
@@ -1442,24 +1455,50 @@ Mission = {
   state,                     // stored: 'needs-you' | 'working' | 'waiting' | 'queued' | 'released'
   summary?,                  // at most 280 characters
   waitingOn?, next?,         // short phrases, at most 280 characters each
-  prs: [ { repo, number, url, state, order? } ],   // state: 'draft'|'open'|'green'|'merged'
+  prs: [ { repo, number, url, order? } ],          // the session names its PRs (a `state` is dropped)
+  prFacts?: [ { repo, number, state, head, checkedAt } ],   // the watcher's, from GitHub (ADR 140)
   boards: [ { id, url, at } ],                     // linked by a post; the last is the latest
-  session: { id?, pid?, name?, login?, startedAt, seenAt, ended? } | null,
+  session: { id?, pid?, procStart?, name?, login?, startedAt, seenAt, typedAt?, ended? }
+         | { ended, leftAt }  // the session left (`leave`)
+         | null,
+  takeover?: { by, pid?, procStart?, at },         // a join asking for the mission (`join`)
   handoff?,                  // a Handoff block, at most 4 KB
   fire?: { at, by },         // by: 'round' | 'card'; written by a Fire round's submit too
-  orders: [ { id, kind, text?, at, by: 'card', relayedAt? } ],   // kind: 'stop' | 'comment'
+  orders: [ { id, kind, text?, at, by, relayedAt?, ackedAt?, resentAt? } ],
+                             // kind: 'stop' | 'comment' (by: 'card') | 'pm' (by: 'master-chief')
   queue?: { phase, prompt, login?, at },
   history: [ { at, phase, state } ],               // one entry per phase or state change
   createdAt, updatedAt, releasedAt?, retiredAt?,
 }
 ```
 
-**A view is what every read answers**: the stored record plus three fields derived on each read
-and never stored. `view` is the column the mission shows in: `released` while stored released;
-else `stalled` when its session is gone (a bound `pid` that no longer exists, or a reservation no
-`pid` or `id` bound within 5 minutes) or it is stored `working` and `session.seenAt` is over 15
-minutes old; else `needs-you` when a linked board's newest round is open and asks a question or was
-minted awaited (a lapsed wait still counts; an older round left open does not, ADR 134); else the stored `state`. `live` is whether a session
+**A view is what every read answers**: the stored record, its `prs` read through the facts, plus
+fields derived on each read and never stored. `view` is the column the mission shows in:
+`released` while stored released; else `needs-you` when a linked board's newest round is open and
+asks a question or was minted awaited (a lapsed wait still counts; an older round left open does
+not, ADR 134), whatever its session is doing (ADR 140); else `stalled` when its session is gone (a
+bound `pid` that no longer exists, or a reservation no `pid` or `id` bound within 5 minutes) or it
+is stored `working` and has not been heard from for 15 minutes; else the stored `state`. A session
+is heard from at its last heartbeat (`session.seenAt`) and at the time of the session watcher's
+latest snapshot that lists it, by its `id` or by its `pid` and `procStart` ("The session routes",
+ADR 36): a director idle while its owners work, or a session whose hooks a `/clear` dropped, never
+stalls by silence while Claude Code lists it. With no snapshot held (the watcher down, or none since
+the daemon started) heartbeats alone count. A bound `pid` that no longer exists while the snapshot
+lists the session's `id` in another live process is not gone: the session runs on there (a resume
+no launch made). `listedAt` is that snapshot's time while it lists the bound session, else `null`.
+`gone` is `{ lastSeenAt }`, the session's `seenAt`, while that session is gone and the mission has
+not recorded its end, else `null`. `rejoin` is `{ reason, since, id }` while the snapshot lists the bound
+session needing `/mission` again and no heartbeat has come from it since `since`, else `null`:
+`reason` is `'clear'` when its process is listed under another `id` (a `/clear`, which drops the
+skill's hooks), `'resume'` when its `id` is listed in another process (a resume or respawn no launch
+made), `since` is when a snapshot first listed it so, and `id` the id it is listed under, the
+session to message. The session's own join or heartbeat
+rebinds the new `id` or process, which clears it; the card says "Session needs /mission again", and
+the Master Chief asks that session to run `/mission <key>`. Each of `prs` carries `state`, `head` and `checkedAt` from the
+latest fact for its repo and number: `state` one of `'draft' | 'open' | 'green' | 'red' |
+'merged'`, or `'checking'` with `head` and `checkedAt` null before the first (a PR stored with a
+`state` before facts existed reads that one instead). A `prs` read here writes back as read: the
+write drops `state`, `head` and `checkedAt`. `live` is whether a session
 holds the mission (ADR 129): bound or reserved, not gone, and the mission has not recorded its end
 (stored `released`, or phase `grill` with `fire` set); silence frees only a session with no `pid`.
 `actions` lists the card's buttons (ADR 125):
@@ -1510,30 +1549,108 @@ POST /api/mission/:key/launch       { phase, login?, prompt? }
 The one check that keeps a mission to one live session. The 409 names the live `session`, and
 carries `silent: true` when that session reads stalled by silence while its process lives, which
 is how a launcher tells a hang from a busy session. A launch ends the session it replaces,
-finished, gone or silent, and that session's `pid` and `id` move to the new session's `ended`; a
+finished, gone or silent, and that session's `pid`, `procStart` and `id` move to the new session's `ended`; a
 queued launch keeps no session, only that `ended`, until it launches.
 
 ```
-POST /api/mission/:key/session      { pid?, id?, name?, login? } -> { session }
+POST /api/mission/:key/join         { id, pid?, procStart?, phase?, takeover? }
+       -> { bound: true, session }                 bound; the mission is created when new
+       -> 202 { takeover: 'pending', session }     with takeover: true, another live session bound
+       -> 409 { error: 'live', session }           another live session bound
+       -> 409 { error: 'ended', session }          this is the session a launch replaced, not resumed
+       -> 409 { error: 'bound elsewhere', mission, session }   this session holds another mission
+POST /api/mission/:key/leave        { id, pid?, procStart? } -> { left: true, session }
+       -> 409 { error: 'not bound', session }
+GET  /api/binding?id=<session id>[&pid=&procStart=]
+       -> { key | null, takeover: { by, at } | null, orders: [Order], handoff | null,
+            rejoin: { reason, since, id } | null }
+```
+
+**A session is bound to a mission by its own session id** (ADR 141), which the agent reads fresh
+(Claude Code's `CLAUDE_CODE_SESSION_ID`), and by its process, `pid` and `procStart` (UTC
+ISO-8601), which a `/clear` keeps while the id changes. No environment variable names a mission.
+A join binds when no session holds the mission (`live` above), when the bound session is this one
+(its id, or its `pid` and `procStart` both, which takes the new id; a `pid` alone names no one,
+since the OS reuses a dead session's pid), or when the mission holds only a launch's reservation,
+which it binds in place. A fresh bind moves the mission to `working`, in `phase` when given, and
+the previous session's `pid`, `procStart` and `id` go to `ended`; the bound session joining its
+released mission again moves it to `working` too. Two joins are refused whatever holds the
+mission: the session `ended` names (a launch replaced it, and it has not left), and a session
+bound to another mission that is not released, which is named, its own released mission's
+rejoin included, so one session is never two missions' (it leaves the one it holds first). The session `ended` names, resumed in a new process,
+is not refused: the same `id` with a process told apart from `ended`'s, its `pid` reused under
+another `procStart`, or another `pid` once `ended`'s process is gone (`mission-launch --resume`
+after stopping the old process). It binds, and `ended` is dropped, so its heartbeats land. The old
+process itself, the same `pid` and `procStart`, or a new one while the old still runs, stays a 409.
+Another live session bound is a 409 naming it; with `takeover: true` the join is recorded as
+`takeover` and answers 202, the bound session reads it on its binding, finishes its step, writes
+its handoff and leaves, and the leave binds the session that asked. A bound session whose process
+is gone holds nothing, so the next join binds whatever was pending. Never two sessions on one
+mission.
+
+A leave by the bound session, with no takeover pending, stores `session: { ended, leftAt }` and
+moves a `working` mission to `waiting`; the session is a tab card again ("The session routes").
+Any other session's leave is a 409. The binding is read off the stored records alone, nothing
+derived and no board read, for a hook that asks every minute: the mission the session is bound to
+(a released mission, a bare reservation and a session that left bind no one), its pending
+`takeover`, the `pm` orders it has not marked seen, its `handoff`, and its `rejoin` as the view
+reads it off the snapshot in memory. Either `id` or `pid` is
+needed, else a 400; a `pid` names the session only with its `procStart`. Secret only, the binding
+included: it carries the PM's words.
+
+```
+POST /api/mission/:key/session      { pid?, procStart?, id?, name?, login?, typed?, beat? } -> { session }
        -> 409 { error: 'live', session }
+       -> 409 { error: 'not bound', session }      with beat: true, not the bound session
 ```
 
-Binds a session, or heartbeats the one bound (`seenAt` now); a hook calls it at every turn's end.
-The bound `pid` under a new `id` (after a `/clear`) is a heartbeat that takes the `id`. A
-different `pid`, or a different `id` when the bound session has no `pid`, while the bound session
+Binds a session, or heartbeats the one bound (`seenAt` now); a hook calls it at every turn's end,
+and `typed: true` also sets `typedAt`, the PM having typed in the session.
+The bound `pid` under a new `id` (after a `/clear`) is a heartbeat that takes the `id`, and the
+bound `id` in a new process once the bound one is gone (a resume) is a heartbeat that takes the
+`pid` and `procStart`; a bind or beat from the bound session carrying a `procStart` fills one the
+record lacks. A gone process is one whose `pid` runs no longer or, its `procStart` known, runs a
+process started at another second (the OS reused the pid), here and wherever `ended`'s process is
+read. A different `pid`, or a different `id` when the bound session has no `pid`, while the bound session
 holds the mission is a 409, and so is the `pid` or `id` of the session that ended before this
-launch; a different `pid` or `id` once the bound session is gone, or silent with no `pid`, starts a
-fresh session. An absent mission is a 404.
+launch, unless it is that session resumed in a new process as a join reads it, which binds and
+drops `ended`; a different `pid` or `id` once the bound session is gone, or silent with no `pid`, starts a
+fresh session. With `beat: true` it is a heartbeat only: a caller that is not the bound session
+(matched as a join is), a bare reservation included, is a 409 `not bound` that writes nothing.
+An absent mission is a 404.
 
 ```
-POST /api/mission/:key/order          { kind: 'stop' | 'comment', text? } -> { order }
-POST /api/mission/:key/order/:id/ack  {} -> { order }
+POST /api/mission/:key/order             { kind: 'stop' | 'comment' | 'pm', text? } -> { order }
+POST /api/mission/:key/order/:id/ack     {} -> { order }
+POST /api/mission/:key/order/:id/seen    { id, pid?, procStart? } -> { order }
+       -> 409 { error: 'not bound', session }
+POST /api/mission/:key/order/:id/resent  {} -> { order }
 ```
 
-An order is a card's Stop or comment for the Master Chief to carry to the session (ADR 125); a
-comment needs non-empty `text`, at most 4 KB. It is the one mission write the browser's cookie may
-make. The ack, secret only, sets `relayedAt` once; a repeat keeps the first. An absent mission or
-order is a 404.
+An order is a card's Stop or comment for the Master Chief to carry to the session (ADR 125), or
+`pm`, the PM's own words the Master Chief carries to the bound session word for word (ADR 141),
+stored `by: 'master-chief'`. Its id is `o_` and 16 hex digits. A comment and a pm order need
+non-empty `text`, at most 4 KB. A card's order is the one mission write the browser's cookie may
+make; a pm order wants the secret. The ack, secret only, is the Master Chief's: it sets
+`relayedAt` once. `seen` is the bound session's own acknowledgement, matched by its id or its
+process as a join is: it sets `ackedAt` once, which the card shows on the PM's newest order, and
+another session is a 409. `resent` sets `resentAt` once, the Master Chief having sent an unseen
+order a second time. A repeat of any keeps the first time. An absent mission or order is a 404.
+
+```
+POST /api/mission/:key/facts    { prs: [ { repo, number, state, head, checkedAt? } ] } -> View
+POST /api/mission/:key/recheck  {} -> View
+```
+
+`facts` is the session watcher's reading of the mission's PRs on GitHub (ADR 140), secret only:
+`state` is the PR at its `head` commit, one of `'draft' | 'open' | 'green' | 'red' | 'merged'`,
+`head` the commit, at most 200 characters, and `checkedAt` an ISO time, now when absent. Each fact
+replaces the one held for its `repo` and `number`, a fact for a PR the mission does not list is
+dropped, and the facts leave `updatedAt` as it was. Any other field, a wrong type or over 50
+entries is a 400 that writes nothing. `recheck` is a card's Check again, by the secret or the
+cookie: it writes nothing, drops the daemon's cached missions overview so the next
+`GET /api/missions` reads afresh, and answers the view read now. An absent mission is a 404 on
+either.
 
 Every write publishes `missions` on the daemon-wide stream ("SSE events"). A refusal is
 `{ error }` with its status.
@@ -1569,6 +1686,10 @@ a **400** naming the field and the entry's index, never a value, and leaves the 
 snapshot for two intervals (counted from the last, or from the daemon's start, assuming 30 s, when
 none came) reads the watcher down and drops the list.
 
+The same snapshot is what a mission's liveness reads beside its heartbeats ("The missions routes":
+`listedAt`, `rejoin`, ADR 36): its ids, pids and process starts only, and when each session in its
+process was first listed, counted from the daemon's start.
+
 `GET /api/missions` (above) carries the list as `tabs`, and the watcher as `watcher`:
 
 ```js
@@ -1583,7 +1704,9 @@ watcher: { up, lastAt }  // lastAt: the last snapshot's time, or null since the 
 
 A session a mission holds or held is never a tab: its `id` or `pid` is a mission's `session`'s or
 `session.ended`'s, its `jobId` is the first 8 characters of such an id, or it posted a board that
-belongs to a mission (a launch reserves a session before it knows its pid or id). `folder` is the
+belongs to a mission holding only a launch's reservation (a launch reserves a session before it
+knows its pid or id). A session that left its mission (`session: { ended, leftAt }`) is a tab
+again, a board it posted while bound staying the mission's (ADR 141). `folder` is the
 cwd's last segment; `command` the name's leading `/word`, else null. `state` is `needs-you` while a
 round that wants its answer (open and asking, as a mission's needs-you reads a round, but any
 round of the board, not only its newest) sits on a board of no mission whose
@@ -2157,8 +2280,11 @@ call's post to actually land, because a refused post (ADR 112) must close nothin
 conversation's open round is still the reviewer's until something replaces it, and a re-post with
 the reference fixed is what closes it. The abandon itself is best-effort, its failure a stderr
 line. Every result text of a `fresh` call names the board it walked away from, in one fixed
-sentence: `Abandoned board: <url> (the previous conversation's board, closed by this fresh ask).
-Call read with that URL to collect any answer left on it.` That id does not survive the boundary
+sentence: `Abandoned board: <url> (the board this conversation left by a fresh ask or a mission join
+or leave, closed by this ask). Call read with that URL to collect any answer left on it.` A join
+or leave through the `mission` tool declares the same boundary, since the board a shim reuses
+keeps the mission it first linked to; joining again the mission the shim last joined keeps the
+board. That id does not survive the boundary
 any other way, and a reviewer answering after the abandon is exactly the case ADR 114 stopped
 throwing away, so the URL is what makes the answer reachable at all. `fresh` on a conversation
 that has posted no board is a
@@ -2207,8 +2333,8 @@ at ~/.config/claude-board/secret".
 ### The `mission` tool
 
 ```js
-{ action: 'list' | 'read' | 'write' | 'relay' | 'ack',
-  key?, all?, fields?, board?, round?, answers?, words?, order? }
+{ action: 'list' | 'read' | 'write' | 'join' | 'leave' | 'binding' | 'seen' | 'order' | 'resent' | 'relay' | 'ack',
+  key?, all?, fields?, session?, phase?, takeover?, text?, board?, round?, answers?, words?, order? }
 ```
 
 Any agent (Claude, Codex, OpenCode) writes its own work's status here, never case content
@@ -2218,14 +2344,30 @@ above:
 ```
 list    { all? }                              GET  /api/missions, `?all=1` when all is true
 read    { key }                               GET  /api/mission/:key
-write   { key, fields }                       POST /api/mission/:key, with fields as the body
+write   { key, fields, session? }             POST /api/mission/:key, with fields as the body;
+                                              with session, POST .../session first with
+                                              beat: true (a heartbeat only), and a 409
+                                              there writes nothing
+join    { key, session, phase?, takeover? }   POST /api/mission/:key/join
+leave   { key, session }                      POST /api/mission/:key/leave
+binding { session }                           GET  /api/binding
+seen    { key, order, session }               POST /api/mission/:key/order/:id/seen
+order   { key, text }                         POST /api/mission/:key/order, kind 'pm'
+resent  { key, order }                        POST /api/mission/:key/order/:id/resent
 relay   { board, round, answers?, words }     POST /api/board/:id/relay; board is a board URL
                                               or a bare id, as `read` takes it
 ack     { key, order }                        POST /api/mission/:key/order/:id/ack
 ```
 
-`key` matches the store's key pattern, `all` is a boolean, `fields` an object and `order` an
-order id; an argument off its shape, or an unknown `action`, is refused by the shim before any
+`session` is the caller's own current session id (Claude Code's `CLAUDE_CODE_SESSION_ID`, read at
+the call, since a `/clear` changes it), passed by the agent; the shim never supplies one, since
+the id it was spawned under goes stale at a `/clear`. It sends the session as `id` beside its
+parent process's `pid` and `procStart`, as a board post names its session, so the daemon follows
+the session under a new id. A write's heartbeat on a mission not yet stored is skipped, and the
+write creates it.
+
+`key` matches the store's key pattern, `all` and `takeover` are booleans, `fields` an object,
+`phase` a phase, `text` non-empty and `order` an order id; an argument off its shape, or an unknown `action`, is refused by the shim before any
 call, naming the argument. The daemon's answer comes back as JSON on the text channel and as
 `structuredContent`. A refusal is the tool's error (`isError: true`) with no packet fields: the
 daemon's own, as `mission <action> refused by the daemon (HTTP <status>): <message>`, and a daemon
@@ -2273,9 +2415,6 @@ CLAUDE_BOARD_CLIENT=background
                                the interactivity check as any declared client does, and `ask`
                                opens no tab; the board's own notification still fires.
                                CLAUDE_BOARD_HEADLESS=1 still wins over it
-CLAUDE_MISSION                the mission key this session works for: every board post carries
-                               `mission: <key>`, so the daemon links the board to it. A value
-                               that is not a mission key is ignored, never a failed post
 CLAUDE_BOARD_SECRET_FILE      where the local secret lives, default
                                ~/.config/claude-board/secret. Read by install.sh, the daemon
                                and the shim alike; a testing seam, not configuration

@@ -8,11 +8,11 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createMissionWatch } from '../src/mission-watch.mjs';
-import { upsertMission, launchMission, bindSession, STALL_SILENCE_MS } from '../src/missions.mjs';
+import { upsertMission, launchMission, bindSession, linkBoard, getMissionView, STALL_SILENCE_MS } from '../src/missions.mjs';
 import { notifyMissions } from '../src/notify.mjs';
 import { writeDoc, defaultDoc } from '../src/pomodoro.mjs';
 import { readMission } from '../src/store.mjs';
@@ -114,6 +114,42 @@ async function main() {
     r.at(STALL_SILENCE_MS + 63 * SECOND);
     assert.deepEqual(r.posted, ['DELTA stalled']);
     r.watch.close();
+  });
+
+  await check('a session that dies under its open round is spoken as "<key> stalled", its card still needs-you, with a missions event and no write', async () => {
+    const r = rig();
+    const session = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    try {
+      launchMission('LIMA', { phase: 'direct' }, { home: r.home, now: T0 });
+      bindSession('LIMA', { pid: session.pid }, { home: r.home, now: T0 });
+      const boardId = 'b_limamerge';
+      mkdirSync(path.join(r.home, 'boards'), { recursive: true });
+      writeFileSync(path.join(r.home, 'boards', `${boardId}.json`), JSON.stringify({
+        id: boardId, thread: 't', title: 'Merge?', cwd: null, createdAt: new Date(T0).toISOString(), updatedAt: new Date(T0).toISOString(), state: 'open',
+        rounds: [{ n: 1, postedAt: new Date(T0).toISOString(), status: 'open', sentAt: null, title: 'Merge?' }],
+        blocks: [{ id: 'q1', kind: 'question', round: 1, prompt: 'Merge?', widget: 'single', options: [{ label: 'Merge' }] }],
+        answers: {}, comments: [],
+      }));
+      linkBoard('LIMA', { id: boardId, url: `http://x/b/${boardId}` }, { home: r.home, now: T0 });
+      r.at(0);
+      r.at(10 * SECOND);
+      r.at(75 * SECOND);
+      assert.deepEqual([r.posted, r.broadcasts], [[], []], 'setup: needs-you from before the baseline, its session alive, says nothing');
+      const written = readMission('LIMA', r.home).updatedAt;
+      await new Promise(resolve => { session.once('exit', resolve); session.kill('SIGKILL'); });
+      r.at(80 * SECOND);
+      const view = getMissionView('LIMA', { home: r.home, now: r.clock.t });
+      assert.deepEqual([view.view, !!view.gone], ['needs-you', true], 'setup: the round keeps the card in needs-you');
+      assert.deepEqual(r.broadcasts, ['LIMA'], 'the card\'s gone line changed with no write behind it');
+      r.at(141 * SECOND);
+      assert.deepEqual(r.posted, ['LIMA stalled']);
+      assert.equal(readMission('LIMA', r.home).updatedAt, written, 'the watch wrote nothing');
+      r.at(300 * SECOND);
+      assert.deepEqual(r.posted, ['LIMA stalled'], 'said once');
+    } finally {
+      session.kill('SIGKILL');
+      r.watch.close();
+    }
   });
 
   await check('a stored change is not re-published by the watch: its route already published it', () => {

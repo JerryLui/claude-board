@@ -44,6 +44,7 @@
 
 import http from 'node:http';
 import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
@@ -62,12 +63,13 @@ import { isPageRound, roundIsAwaited, roundIsAwaitedOpen, roundWaitLapsed, close
 import { createPomodoro, readDoc as readPomodoroDoc } from './pomodoro.mjs';
 import { notifyBoundary, notifyTest } from './notify.mjs';
 import { isCue, cuePath } from './cues.mjs';
-import { resolveRefRoots } from './resolve.mjs';
+import { resolveRefRoots, probeFolderRead } from './resolve.mjs';
 import { createStrandedWatch } from './stranded.mjs';
 import { createMissionWatch } from './mission-watch.mjs';
 import { createMissionsCache } from './missions-cache.mjs';
 import { MAX_POST_BYTES, MAX_DRAINED_BYTES, postTooLargeMessage } from './post-limit.mjs';
-import { getMissionView, missionView, upsertMission, launchMission, bindSession, addOrder, ackOrder, linkBoard, recordFire, assertMissionKey } from './missions.mjs';
+import { getMissionView, missionView, upsertMission, launchMission, bindSession, joinMission, leaveMission, addOrder, ackOrder, seenOrder, resentOrder, linkBoard, recordFire, recordPrFacts, assertMissionKey } from './missions.mjs';
+import { createBindingIndex } from './bindings.mjs';
 import { createSessionList, validateSessionRef, bindBoardSession } from './sessions.mjs';
 
 // Declared in src/handoff.mjs (which this module imports, so it cannot import back) and
@@ -575,14 +577,17 @@ const BOARD_COOKIE_ACTIONS = new Set(['submit', 'attended']);
  * from — and the window that decides what dies is named in the request, never here. */
 const STORE_COOKIE_ACTIONS = new Set(['prune']);
 
-/** The mission writes a cookie-holding browser may perform: `order`, and nothing else. A
- * named closed set for the reason `POMODORO_COOKIE_ACTIONS` above states.
+/** The mission writes a cookie-holding browser may perform: `order` and `recheck`, and
+ * nothing else. A named closed set for the reason `POMODORO_COOKIE_ACTIONS` above states.
  *
  * `order` is the missions view's Stop and comment buttons: it appends a request for the
- * Master Chief to relay and changes nothing the mission's session reads as its own. Every
- * other mission write, the record itself, a launch, a session bind and an order's ack, is
- * a session's or the Master Chief's, and wants the secret. */
-const MISSION_COOKIE_ACTIONS = new Set(['order']);
+ * Master Chief to relay and changes nothing the mission's session reads as its own. A `pm`
+ * order, the PM's words the Master Chief carries, wants the secret even on this route
+ * (`handleMission`). `recheck` is a card's Check again: it writes nothing, only re-derives
+ * the view now. Every other mission write, the record itself, a launch, a join or leave, a
+ * session bind, an order's ack, seen or resend, and the PR facts, is a session's, its
+ * watcher's or the Master Chief's, and wants the secret. */
+const MISSION_COOKIE_ACTIONS = new Set(['order', 'recheck']);
 
 /** The session writes a cookie-holding browser may perform: a tab card's `order`, on the
  * footing `MISSION_COOKIE_ACTIONS` gives a mission card's (ADR 131). The snapshot itself
@@ -974,7 +979,7 @@ function boundCwdForThread(thread, boards) {
   return inThread.length ? inThread[0].cwd : null;
 }
 
-async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, sessions) {
+async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, sessions, bindings) {
   let body;
   try {
     body = await readJsonBody(req);
@@ -994,7 +999,7 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, s
       return sendJson(res, 400, { error: err.message });
     }
   }
-  const mission = body.mission ?? null;
+  const namedMission = body.mission ?? null;
   // `session` names the agent session posting (its pid and process start), so a round can
   // put that session's tab card in Needs you (ADR 131). Refused before anything is written
   // when it is not that shape; absent, the board records no session.
@@ -1004,6 +1009,22 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, s
       sessionRef = validateSessionRef(body.session);
     } catch (err) {
       return sendJson(res, 400, { error: err.message });
+    }
+  }
+  // A post naming no mission goes to the one its session is bound to (ADR 141): matched by
+  // the process it names, or by the id the watcher's list holds for that process. A lookup
+  // that fails links nothing, and the post goes on.
+  let mission = namedMission;
+  // The posting session as the bindings match it, kept only when its binding was read.
+  let postingSession = null;
+  if (!mission && sessionRef && bindings) {
+    try {
+      const id = sessions ? sessions.matchId(sessionRef.pid, sessionRef.procStart) : null;
+      const ref = { ...sessionRef, ...(id ? { id } : {}) };
+      mission = bindings.binding(ref).key;
+      postingSession = ref;
+    } catch (err) {
+      console.error(`claude-board: the posting session's mission could not be read: ${(err && err.message) || err}`);
     }
   }
   let board;
@@ -1239,6 +1260,27 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, s
   if (body.requestId) board.lastRequestId = body.requestId;
   // A later round naming a mission binds a board that had none; a board never moves
   // from one mission to another. Refused here, before the persist, so nothing is written.
+  // A board bound by its session's mission and not by name stays with the mission it has,
+  // unless its session has moved on: bound to another mission now, or the session the
+  // board's mission records as ended (it left, was taken over, or a launch replaced it).
+  // Its round would put that mission's card in Needs you, so it is refused and the agent
+  // asks with `fresh` for a board of its own (ADR 141).
+  if (!namedMission && board.mission && postingSession) {
+    let moved = null;
+    if (mission && mission !== board.mission) moved = `is bound to mission ${mission}`;
+    else if (!mission) {
+      try {
+        if (bindings.ended(board.mission, postingSession)) moved = 'has left it';
+      } catch (err) {
+        console.error(`claude-board: mission ${board.mission} could not be read: ${(err && err.message) || err}`);
+      }
+    }
+    if (moved) {
+      return sendJson(res, 400, { error: `board ${board.id} belongs to mission ${board.mission}, and the posting session ${moved}: ask with fresh for a board of its own` });
+    }
+  }
+  const inherited = !namedMission && !!board.mission;
+  if (inherited) mission = board.mission;
   if (mission && board.mission && board.mission !== mission) {
     return sendJson(res, 400, { error: `board ${board.id} belongs to mission ${board.mission}, not ${mission}` });
   }
@@ -1257,7 +1299,9 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, s
   // never run for this round.
   if (mission) {
     try {
-      linkBoard(mission, { id: board.id, url: boardUrl(req, board.id) }, { home });
+      // A mission the board only carries from an earlier round may since have been pruned:
+      // that link remakes nothing.
+      linkBoard(mission, { id: board.id, url: boardUrl(req, board.id) }, { home, create: !inherited });
     } catch (err) {
       console.error(`claude-board: board ${board.id} was not linked to mission ${mission}: ${(err && err.message) || err}`);
     }
@@ -2690,26 +2734,37 @@ async function handlePrune(req, res, home, waiting) {
  *   GET  /api/mission/:key                  the view, or 404
  *   POST /api/mission/:key                  upsert the whitelisted fields, answers the view
  *   POST /api/mission/:key/launch           { launch: true } | { queued: true } | 409 live
+ *   POST /api/mission/:key/join             { bound: true, session } | 202 { takeover: 'pending', session } | 409 live
+ *   POST /api/mission/:key/leave            { left: true, session } | 409 not bound
  *   POST /api/mission/:key/session          bind or heartbeat, answers { session } | 409 live
- *   POST /api/mission/:key/order            { order }
+ *   POST /api/mission/:key/order            { order }; a `pm` order wants the secret
  *   POST /api/mission/:key/order/:id/ack    { order }
+ *   POST /api/mission/:key/order/:id/seen   { order } | 409 not bound
+ *   POST /api/mission/:key/order/:id/resent { order }
+ *   POST /api/mission/:key/facts            the watcher's PR facts, answers the view
+ *   POST /api/mission/:key/recheck          drops the missions cache, answers the fresh view
  *
- * A refusal is `{ error }` with its status, and a 409 also carries the live `session`, plus
+ * A refusal is `{ error }` with its status, and a 409 also carries the bound `session`, plus
  * `silent: true` on a launch refused by a session that reads stalled by silence while its
- * process lives.
- * Every write publishes `missions` on the daemon-wide stream. */
-async function handleMission(req, res, parts, home, stream) {
+ * process lives. `heldSecret` is whether the request carried the secret, not the cookie.
+ * `listed` is the session watcher's latest snapshot (src/sessions.mjs `listed()`), which a
+ * bound session's liveness reads beside its heartbeats (ADR 36). Every write publishes
+ * `missions` on the daemon-wide stream. */
+async function handleMission(req, res, parts, home, stream, cache, heldSecret, listed) {
   const key = parts[2];
   const tail = parts.slice(3);
   try {
     assertMissionKey(key);
     if (req.method === 'GET' && tail.length === 0) {
-      return sendJson(res, 200, getMissionView(key, { home }));
+      return sendJson(res, 200, getMissionView(key, { home, listed }));
     }
     if (req.method !== 'POST') return sendText(res, 404, 'not found');
+    if (tail.length === 1 && (tail[0] === 'facts' || tail[0] === 'recheck')) {
+      return await handleMissionFacts(req, res, key, tail[0], home, stream, cache, listed);
+    }
     const route = tail.length === 0 ? 'upsert'
-      : tail.length === 1 && ['launch', 'session', 'order'].includes(tail[0]) ? tail[0]
-        : tail.length === 3 && tail[0] === 'order' && tail[2] === 'ack' ? 'ack'
+      : tail.length === 1 && ['launch', 'join', 'leave', 'session', 'order'].includes(tail[0]) ? tail[0]
+        : tail.length === 3 && tail[0] === 'order' && ['ack', 'seen', 'resent'].includes(tail[2]) ? tail[2]
           : null;
     if (!route) return sendText(res, 404, 'not found');
     let body;
@@ -2718,19 +2773,69 @@ async function handleMission(req, res, parts, home, stream) {
     } catch (err) {
       return sendJson(res, err.status || 400, { error: err.status ? err.message : 'invalid JSON body' });
     }
+    if (route === 'order' && body && body.kind === 'pm' && !heldSecret) {
+      res.writeHead(401);
+      res.end();
+      return;
+    }
     let answer;
-    if (route === 'upsert') answer = missionView(upsertMission(key, body, { home }), { home });
-    else if (route === 'launch') answer = launchMission(key, body, { home });
-    else if (route === 'session') answer = { session: bindSession(key, body, { home }).session };
+    let status = 200;
+    if (route === 'upsert') answer = missionView(upsertMission(key, body, { home }), { home, listed });
+    else if (route === 'launch') answer = launchMission(key, body, { home, listed });
+    else if (route === 'join') ({ status, ...answer } = joinMission(key, body, { home, listed }));
+    else if (route === 'leave') answer = leaveMission(key, body, { home });
+    else if (route === 'session') answer = { session: bindSession(key, body, { home, listed }).session };
     else if (route === 'order') answer = { order: addOrder(key, body, { home }) };
+    else if (route === 'seen') answer = { order: seenOrder(key, tail[1], body, { home }) };
+    else if (route === 'resent') answer = { order: resentOrder(key, tail[1], { home }) };
     else answer = { order: ackOrder(key, tail[1], { home }) };
     broadcastMissions(stream, key);
-    return sendJson(res, 200, answer);
+    return sendJson(res, status, answer);
   } catch (err) {
     const status = err && Number.isInteger(err.status) ? err.status : 500;
+    if (status === 409 && err.answer) return sendJson(res, 409, err.answer);
     if (status === 409) return sendJson(res, 409, { error: 'live', session: err.session, ...(err.silent ? { silent: true } : {}) });
     return sendJson(res, status, { error: String((err && err.message) || err) });
   }
+}
+
+/** `GET /api/binding?id=<session id>[&pid=&procStart=]`: the mission that session is bound
+ * to (src/missions.mjs `bindingFor`), as `{ key, takeover, orders, handoff, rejoin }`,
+ * `rejoin` read off `listed`, the session watcher's latest snapshot. A session names itself
+ * by `id`, its process by `pid` and `procStart`, or both; neither is a 400. */
+function handleBinding(res, url, bindings, listed) {
+  const q = url.searchParams;
+  const ref = {};
+  if (q.get('id')) ref.id = q.get('id');
+  if (q.get('pid')) {
+    const pid = Number(q.get('pid'));
+    if (!Number.isInteger(pid) || pid <= 0) return sendJson(res, 400, { error: 'pid must be a positive integer' });
+    ref.pid = pid;
+  }
+  if (q.get('procStart')) {
+    if (!Number.isFinite(Date.parse(q.get('procStart')))) return sendJson(res, 400, { error: 'procStart must be an ISO-8601 timestamp' });
+    ref.procStart = q.get('procStart');
+  }
+  if (ref.id === undefined && ref.pid === undefined) return sendJson(res, 400, { error: 'binding needs id, or pid and procStart' });
+  return sendJson(res, 200, bindings.binding(ref, listed));
+}
+
+/** `POST /api/mission/:key/facts` stores the session watcher's PR facts and
+ * `POST /api/mission/:key/recheck` drops the missions cache (src/missions-cache.mjs), so
+ * a gone session or a fresh fact shows now rather than up to a bound later. Each answers
+ * the view, read afresh, and publishes `missions`. */
+async function handleMissionFacts(req, res, key, route, home, stream, cache, listed) {
+  let body;
+  try {
+    body = await readJsonBody(req);
+  } catch (err) {
+    return sendJson(res, err.status || 400, { error: err.status ? err.message : 'invalid JSON body' });
+  }
+  if (route === 'facts') recordPrFacts(key, body, { home });
+  cache.drop();
+  const answer = getMissionView(key, { home, listed });
+  broadcastMissions(stream, key);
+  return sendJson(res, 200, answer);
 }
 
 /** `missions` on the daemon-wide stream: which mission changed and when, `key` null for a
@@ -2845,6 +2950,9 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
   // reason everything else here is. A change re-reads the Missions view's tab cards.
   const sessions = createSessionList({ onChange: () => broadcastMissions(streamHub, null) });
   const missionsCache = createMissionsCache({ home, sessions });
+  // Which mission each session is bound to, off the records alone (src/bindings.mjs): the
+  // binding route and a board post's link read it.
+  const bindings = createBindingIndex({ home });
   const missionWatch = createMissionWatch({
     home,
     read: () => missionsCache.overview({ all: true }).missions,
@@ -3044,7 +3152,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
       }
 
       if (req.method === 'POST' && url.pathname === '/api/board') {
-        return await handlePostBoard(req, res, home, sse, stranded, streamHub, waitingCache, sessions);
+        return await handlePostBoard(req, res, home, sse, stranded, streamHub, waitingCache, sessions, bindings);
       }
 
       if (req.method === 'GET' && parts[0] === 'b' && parts.length === 2) {
@@ -3123,6 +3231,12 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
         return await handlePrune(req, res, home, waitingCache);
       }
 
+      // install.sh's check that macOS lets this daemon read under ~/Documents, after its
+      // health gate (src/resolve.mjs probeFolderRead says why health alone is not enough).
+      if (req.method === 'GET' && url.pathname === '/api/probe/documents') {
+        return sendJson(res, 200, await probeFolderRead(path.join(homedir(), 'Documents')));
+      }
+
       // The missions ledger (src/missions.mjs). The list is a plain read, so a browser
       // holding the cookie reads it through gate 4 above.
       if (req.method === 'GET' && url.pathname === '/api/missions') {
@@ -3133,6 +3247,18 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
           // the columns it has on a failed read.
           return sendJson(res, 500, { error: `the missions could not be read: ${(err && err.message) || err}` });
         }
+      }
+
+      // The mission a session is bound to (ADR 141), asked by its hook every minute: off the
+      // records alone, never the derived overview. It carries the PM's orders, so it is read
+      // with the secret only, as one mission is below.
+      if (req.method === 'GET' && url.pathname === '/api/binding') {
+        if (!isAuthorizedWrite(req, parts, secret)) {
+          res.writeHead(401);
+          res.end();
+          return;
+        }
+        return handleBinding(res, url, bindings, sessions.listed());
       }
 
       // The watcher's snapshot and a tab card's orders (src/sessions.mjs). Every one is a
@@ -3151,7 +3277,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
           res.end();
           return;
         }
-        return await handleMission(req, res, parts, home, streamHub);
+        return await handleMission(req, res, parts, home, streamHub, missionsCache, secretMatches(req.headers[SECRET_HEADER], secret), sessions.listed());
       }
 
       return sendText(res, 404, 'not found');

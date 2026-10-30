@@ -26,7 +26,7 @@
 
 import http from 'node:http';
 import readline from 'node:readline';
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
@@ -34,6 +34,7 @@ import { fileURLToPath } from 'node:url';
 import { readSecret, secretPath, daemonPort, SECRET_HEADER } from '../src/secret.mjs';
 import { HANDOFF_TOKEN_RE, recoveryCommand } from '../src/handoff.mjs';
 import { MAX_DRAINED_BYTES, postTooLargeMessage } from '../src/post-limit.mjs';
+import { processStartUtc } from '../src/proc-start.mjs';
 import { STATUS_TONES } from '../src/card-status.mjs';
 
 // CLAUDE_BOARD_HOME/CLAUDE_BOARD_PORT are PROTOCOL.md's; the rest are additive env
@@ -90,13 +91,11 @@ const SECRET = readSecret();
 // tab, since nobody is sitting at it; the board's own notification announces its rounds.
 const BACKGROUND = process.env.CLAUDE_BOARD_CLIENT === 'background';
 
-// The mission this session works for, carried on every board post so the daemon links the
-// board to it. A value that is not a mission key is ignored, never a failed post. The key
-// rule is the store's `SAFE_MISSION_KEY` (src/store.mjs), spelled again here because
-// importing the store pulls the page assets, the mermaid engine among them, into every shim.
+// The mission tool's key rule: the store's `SAFE_MISSION_KEY` (src/store.mjs), spelled again
+// here because importing the store pulls the page assets, the mermaid engine among them, into
+// every shim. No environment names a mission: a board post names its session (below), and
+// the daemon links the board to the mission that session joined (ADR 141).
 const MISSION_KEY_RE = /^[A-Za-z0-9_-]{1,80}$/;
-const MISSION = MISSION_KEY_RE.test(process.env.CLAUDE_MISSION || '') ? process.env.CLAUDE_MISSION : null;
-const MISSION_FIELD = MISSION ? { mission: MISSION } : {};
 
 // The agent session this shim runs under, carried on every board post so the daemon links
 // the board's open round to that session's tab card (ADR 131). Claude Code spawns the shim
@@ -107,27 +106,10 @@ const MISSION_FIELD = MISSION ? { mission: MISSION } : {};
 let sessionFieldCache = null;
 function sessionField() {
   if (!sessionFieldCache) {
-    const procStart = parentStartUtc(process.ppid);
+    const procStart = processStartUtc(process.ppid);
     sessionFieldCache = procStart ? { session: { pid: process.ppid, procStart } } : {};
   }
   return sessionFieldCache;
-}
-
-function parentStartUtc(pid) {
-  if (!Number.isInteger(pid) || pid <= 1) return null;
-  let lstart;
-  try {
-    lstart = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
-      env: { ...process.env, TZ: 'UTC', LC_ALL: 'C' }, encoding: 'utf8', timeout: 2_000, stdio: ['ignore', 'pipe', 'ignore'],
-    });
-  } catch {
-    return null;
-  }
-  const m = /^\w{3} (\w{3}) (\d{1,2}) (\d\d):(\d\d):(\d\d) (\d{4})$/.exec(lstart.trim().replace(/\s+/g, ' '));
-  const month = m ? ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'].indexOf(m[1]) : -1;
-  if (month < 0) return null;
-  const ms = Date.UTC(Number(m[6]), month, Number(m[2]), Number(m[3]), Number(m[4]), Number(m[5]));
-  return new Date(ms).toISOString().replace('.000Z', 'Z');
 }
 
 function readPkgVersion() {
@@ -256,7 +238,7 @@ function httpJson(method, urlStr, body, { timeoutMs, signal } = {}) {
           return reject(new Error(`invalid JSON response from daemon: ${err.message}`));
         }
         if (res.statusCode >= 400) {
-          return reject(Object.assign(new Error(json.error || `daemon responded ${res.statusCode}`), { statusCode: res.statusCode }));
+          return reject(Object.assign(new Error(json.error || `daemon responded ${res.statusCode}`), { statusCode: res.statusCode, body: json }));
         }
         resolve(json);
       });
@@ -704,19 +686,35 @@ const READ_TOOL = {
  * Any agent writes its own work's status here and the missions page and the Master Chief
  * read the same records. `relay` sits here rather than on `ask` because it is the Master
  * Chief's write onto ANOTHER session's board, answering that session's round on the PM's
- * words. */
+ * words.
+ *
+ * A session binds to a mission by its own session id (ADR 141), which the CALLER passes as
+ * `session` on every call that binds or acks: a `/clear` gives the session a new id, which
+ * the agent reads fresh (Claude Code's `CLAUDE_CODE_SESSION_ID`) while this process keeps
+ * the one it was spawned under, so the shim never supplies an id of its own. It adds its
+ * parent process (`sessionField`), which a `/clear` keeps, so the daemon rebinds the new id. */
+const MISSION_ACTIONS = ['list', 'read', 'write', 'join', 'leave', 'binding', 'seen', 'order', 'resent', 'relay', 'ack'];
 const MISSION_TOOL = {
   name: 'mission',
   description:
     'The claude-board missions ledger: one record per piece of work. Any agent (Claude, Codex, ' +
     'OpenCode) writes its work\'s status here: phase, state, summary, PRs, handoff. Never case ' +
-    'content. Actions: list, read, write (fields), relay (answer a session\'s open board round ' +
-    'on the PM\'s own words), ack (an order relayed).',
+    'content. Actions: list, read, write (fields; with session, also that session\'s heartbeat, refused unless it is the bound one), ' +
+    'join (bind this session to the mission, leaving any other first; takeover to take it from a live one; the next ask starts a new board), leave, ' +
+    'binding (the mission this session is bound to, its pending takeover, unseen PM orders and ' +
+    'handoff), seen (this session acknowledges an order), order (the Master Chief posts the ' +
+    'PM\'s words as a pm order), resent (the Master Chief sent an order again), relay (answer a ' +
+    'session\'s open board round on the PM\'s own words), ack (an order relayed). "session" is ' +
+    'always the caller\'s own current session id (CLAUDE_CODE_SESSION_ID), read fresh.',
   inputSchema: {
     type: 'object',
     properties: {
-      action: { type: 'string', enum: ['list', 'read', 'write', 'relay', 'ack'] },
-      key: { type: 'string', description: 'The mission key (letters, digits, - and _), e.g. a spec\'s descriptor. read, write, ack.' },
+      action: { type: 'string', enum: MISSION_ACTIONS },
+      key: { type: 'string', description: 'The mission key (letters, digits, - and _), e.g. a spec\'s descriptor. read, write, join, leave, seen, order, resent, ack.' },
+      session: { type: 'string', description: 'join, leave, binding, seen: required; write: optional. The caller\'s current session id (CLAUDE_CODE_SESSION_ID, read now: a /clear changes it).' },
+      phase: { type: 'string', enum: ['grill', 'direct', 'landing'], description: 'join: the phase the session works in.' },
+      takeover: { type: 'boolean', description: 'join: take the mission over from the live session bound to it, which finishes its step and leaves.' },
+      text: { type: 'string', description: 'order: the PM\'s words, verbatim, at most 4 KB.' },
       all: { type: 'boolean', description: 'list: keep missions released more than 24 hours ago.' },
       fields: {
         type: 'object',
@@ -726,7 +724,7 @@ const MISSION_TOOL = {
       round: { type: 'integer', description: 'relay: the round being answered.' },
       answers: { type: 'array', items: { type: 'object' }, description: 'relay: [{ id, status, choice, note }], as a submit carries them.' },
       words: { type: 'string', description: 'relay: the PM\'s words, verbatim, at most 1 KB.' },
-      order: { type: 'string', description: 'ack: the order id.' },
+      order: { type: 'string', description: 'seen, resent, ack: the order id.' },
     },
     required: ['action'],
   },
@@ -1094,7 +1092,7 @@ async function postThisRound(session, title, blocks, wait, fresh) {
     const creating = (async () => {
       const posted = await httpJson(
         'POST', `${BASE_URL}/api/board`,
-        { title, blocks, wait: Boolean(wait), noWait, cwd: process.cwd(), thread: session.thread ?? null, requestId: createRequestId, ...MISSION_FIELD, ...sessionField() },
+        { title, blocks, wait: Boolean(wait), noWait, cwd: process.cwd(), thread: session.thread ?? null, requestId: createRequestId, ...sessionField() },
         { timeoutMs: CREATE_TIMEOUT_MS }
       );
       session.boardId = posted.boardId;
@@ -1154,7 +1152,7 @@ async function postThisRound(session, title, blocks, wait, fresh) {
   try {
     posted = await httpJson(
       'POST', `${BASE_URL}/api/board`,
-      { boardId: session.boardId, blocks, title, wait: Boolean(wait), noWait, requestId, ...MISSION_FIELD, ...sessionField() },
+      { boardId: session.boardId, blocks, title, wait: Boolean(wait), noWait, requestId, ...sessionField() },
       { timeoutMs: POST_TIMEOUT_MS }
     );
   } catch (err) {
@@ -1284,12 +1282,12 @@ async function askTool(args, session, { sendProgress, cancelled }) {
   // it is collected, and the agent has the one string it needs to make that call. Read
   // BEFORE flushBoundary, which is what clears it.
   //
-  // Only ever set by `fresh` (declareBoundary is its only caller), and only when there
-  // genuinely was a board: an ordinary ask, and a `fresh` ask in a conversation that had
-  // no board, add nothing to their result.
+  // Set only by declareBoundary, which a `fresh` ask and a mission join or leave call, and
+  // only when there genuinely was a board: an ordinary ask, and a boundary in a conversation
+  // that had no board, add nothing to their result.
   const abandonedUrl = safeBoardUrl(session.pendingAbandon);
   const abandonedNote = abandonedUrl
-    ? `Abandoned board: ${abandonedUrl} (the previous conversation's board, closed by this fresh ask). ` +
+    ? `Abandoned board: ${abandonedUrl} (the board this conversation left by a fresh ask or a mission join or leave, closed by this ask). ` +
       `Call read with that URL to collect any answer left on it.`
     : '';
   // Every branch below returns through here, so the note cannot be forgotten by one of
@@ -1516,9 +1514,25 @@ async function missionTool(args) {
     }
     return key;
   };
+  const needOrder = () => {
+    const order = args.order;
+    if (typeof order !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(order)) throw new ToolError(`mission ${action} requires "order": the order id, not ${JSON.stringify(order ?? null)}`);
+    return order;
+  };
+  // The caller's session as the daemon matches it: the id the agent passed, and this shim's
+  // parent process, which a /clear keeps under the new id.
+  const sessionOf = ({ required }) => {
+    const id = args.session;
+    if (id === undefined && !required) return null;
+    if (typeof id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(id)) {
+      throw new ToolError(`mission ${action} ${required ? 'requires' : 'takes'} "session": the caller's own session id (CLAUDE_CODE_SESSION_ID), not ${JSON.stringify(id ?? null)}`);
+    }
+    return { id, ...(sessionField().session || {}) };
+  };
   let method;
   let route;
   let body = null;
+  let heartbeat = null;
   if (action === 'list') {
     method = 'GET';
     if (args.all != null && typeof args.all !== 'boolean') throw new ToolError(`mission list takes "all" as a boolean, not ${JSON.stringify(args.all)}`);
@@ -1532,6 +1546,35 @@ async function missionTool(args) {
     method = 'POST';
     route = `/api/mission/${needKey()}`;
     body = fields;
+    const ref = sessionOf({ required: false });
+    heartbeat = ref && { ...ref, beat: true };
+  } else if (action === 'join') {
+    if (args.phase !== undefined && !['grill', 'direct', 'landing'].includes(args.phase)) throw new ToolError(`mission join takes "phase" as grill, direct or landing, not ${JSON.stringify(args.phase)}`);
+    if (args.takeover !== undefined && typeof args.takeover !== 'boolean') throw new ToolError(`mission join takes "takeover" as a boolean, not ${JSON.stringify(args.takeover)}`);
+    method = 'POST';
+    route = `/api/mission/${needKey()}/join`;
+    body = { ...sessionOf({ required: true }), ...(args.phase !== undefined ? { phase: args.phase } : {}), ...(args.takeover !== undefined ? { takeover: args.takeover } : {}) };
+  } else if (action === 'leave') {
+    method = 'POST';
+    route = `/api/mission/${needKey()}/leave`;
+    body = sessionOf({ required: true });
+  } else if (action === 'binding') {
+    const ref = sessionOf({ required: true });
+    method = 'GET';
+    route = `/api/binding?${new URLSearchParams(Object.entries(ref).map(([k, v]) => [k, String(v)]))}`;
+  } else if (action === 'seen') {
+    method = 'POST';
+    route = `/api/mission/${needKey()}/order/${needOrder()}/seen`;
+    body = sessionOf({ required: true });
+  } else if (action === 'order') {
+    if (typeof args.text !== 'string' || !args.text.trim()) throw new ToolError(`mission order requires "text": the PM's words, verbatim, not ${JSON.stringify(args.text ?? null)}`);
+    method = 'POST';
+    route = `/api/mission/${needKey()}/order`;
+    body = { kind: 'pm', text: args.text };
+  } else if (action === 'resent') {
+    method = 'POST';
+    route = `/api/mission/${needKey()}/order/${needOrder()}/resent`;
+    body = {};
   } else if (action === 'relay') {
     const boardId = boardIdFrom(args.board);
     if (!boardId) throw new ToolError(`mission relay requires "board": a board URL or bare board id, not ${JSON.stringify(args.board ?? null)}`);
@@ -1539,22 +1582,39 @@ async function missionTool(args) {
     route = `/api/board/${boardId}/relay`;
     body = { round: args.round, answers: args.answers ?? [], words: args.words };
   } else if (action === 'ack') {
-    const order = args.order;
-    if (typeof order !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(order)) throw new ToolError(`mission ack requires "order": the order id, not ${JSON.stringify(order ?? null)}`);
     method = 'POST';
-    route = `/api/mission/${needKey()}/order/${order}/ack`;
+    route = `/api/mission/${needKey()}/order/${needOrder()}/ack`;
     body = {};
   } else {
-    throw new ToolError(`mission requires "action": one of list, read, write, relay, ack, not ${JSON.stringify(action ?? null)}`);
+    throw new ToolError(`mission requires "action": one of ${MISSION_ACTIONS.join(', ')}, not ${JSON.stringify(action ?? null)}`);
   }
-  let answer;
-  try {
-    answer = await httpJson(method, `${BASE_URL}${route}`, body, { timeoutMs: POST_TIMEOUT_MS });
-  } catch (err) {
-    if (typeof err?.statusCode === 'number' && err.statusCode !== 401) {
-      throw new ToolError(`mission ${action} refused by the daemon (HTTP ${err.statusCode}): ${err.message}`);
+  const call = async (m, r, b, { absentOk = false } = {}) => {
+    try {
+      return await httpJson(m, `${BASE_URL}${r}`, b, { timeoutMs: POST_TIMEOUT_MS });
+    } catch (err) {
+      if (absentOk && err?.statusCode === 404) return null;
+      if (typeof err?.statusCode === 'number' && err.statusCode !== 401) {
+        const elsewhere = err.statusCode === 409 && typeof err.body?.mission === 'string' ? ` (this session holds mission ${err.body.mission}: leave it first)` : '';
+        const held = err.statusCode === 409 && err.body?.session ? ` (bound: ${JSON.stringify(err.body.session)})` : '';
+        throw new ToolError(`mission ${action} refused by the daemon (HTTP ${err.statusCode}): ${err.message}${elsewhere}${held}`);
+      }
+      throw toolErrorFor(err, null, 'mission');
     }
-    throw toolErrorFor(err, null, 'mission');
+  };
+  // A write naming its session is that session's heartbeat first, a heartbeat only
+  // (`beat`): a session the mission is not bound to (another holds it, this one left, or
+  // it holds only a launch's reservation) is a 409 and writes nothing. A mission not yet on
+  // the board has no session to beat, and the write creates it.
+  if (heartbeat) await call('POST', `/api/mission/${key}/session`, heartbeat, { absentOk: true });
+  const answer = await call(method, route, body);
+  // A join or leave changes the mission this conversation's boards link to, and the board
+  // this shim reuses keeps the mission it linked first (src/server.mjs): the next ask
+  // starts a board of its own, as `fresh` does. Joining again the mission this shim joined
+  // keeps the board, and so does a join that bound nothing (a takeover still pending).
+  if (action === 'leave' || (action === 'join' && answer?.bound === true)) {
+    const now = action === 'join' ? key : null;
+    if (!(now && now === session.missionKey)) declareBoundary(session);
+    session.missionKey = now;
   }
   return { content: [{ type: 'text', text: JSON.stringify(answer) }], isError: false, structuredContent: answer };
 }
@@ -1597,7 +1657,7 @@ function sendProgressNotification(token, elapsedMs, totalMs, boardUrl) {
 // that minted it is gone, which clears both and starts the next one over. This process
 // outlives `/clear`, so the flag is the only thing that can tell those two apart.
 // Nothing call-scoped lives here (see askTool's comment).
-const session = { boardId: null, thread: null, url: null, creatingThread: null, createRequestId: null, pendingAbandon: null };
+const session = { boardId: null, thread: null, url: null, creatingThread: null, createRequestId: null, pendingAbandon: null, missionKey: null };
 
 /** In-flight `tools/call` requests by JSON-RPC id, so `notifications/cancelled` has
  * something to cancel. Without it a cancelled call leaks three things: the progress

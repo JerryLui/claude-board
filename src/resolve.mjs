@@ -60,6 +60,7 @@
 import {
   closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, realpathSync, statSync,
 } from 'node:fs';
+import { open, readdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import path from 'node:path';
@@ -150,6 +151,40 @@ const O_NOFOLLOW_ANY = 0x20000000;
 const REF_OPEN_FLAGS = constants.O_RDONLY
   | constants.O_NONBLOCK
   | (process.platform === 'darwin' ? O_NOFOLLOW_ANY : constants.O_NOFOLLOW);
+
+/** Whether this process may open a file under `dir`, asked the way `resolveRef` opens a
+ * reference: list the folder, then open its first regular file with `REF_OPEN_FLAGS`.
+ * `{ ok: true }`, or `{ ok: false, code }` with the error code (`EPERM` when macOS TCC
+ * refuses the folder, `EACCES` when its mode does, `ENOENT` when there is none). A listed
+ * folder whose first file alone is closed to this user reads ok.
+ *
+ * The daemon asks it of `~/Documents` for install.sh (`GET /api/probe/documents`): a
+ * rebuilt launcher bundle is a new code signature, which can keep answering /api/health
+ * while every reference under `~/Documents` fails EPERM. Answers a code only, never a
+ * name. Opens without reading, since the open is where TCC decides and a read would pull
+ * an evicted iCloud file back down. Async, so a macOS prompt pending on the open holds
+ * this request and not the daemon's one thread. */
+export async function probeFolderRead(dir) {
+  let handle;
+  try {
+    const entries = await readdir(dir, { withFileTypes: true });
+    const file = entries.find(entry => entry.isFile());
+    if (file) {
+      try {
+        handle = await open(path.join(realpathSync(dir), file.name), REF_OPEN_FLAGS);
+      } catch (err) {
+        // The folder listed, so TCC let it through: an EACCES here is that one file's own
+        // mode or owner, which no grant changes.
+        if (err.code !== 'EACCES') throw err;
+      }
+    }
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, code: err.code || 'ERROR' };
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
 
 function sha256(text) {
   return createHash('sha256').update(text, 'utf8').digest('hex');

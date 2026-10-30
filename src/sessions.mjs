@@ -6,7 +6,9 @@
 // reads Claude's own session list) posts a full snapshot to `POST /api/sessions` every
 // `intervalMs`, and each snapshot replaces the last whole. That keeps the board
 // agent-neutral, as the missions ledger is: nothing here reads an agent's folder or knows
-// which agent a session runs, and any agent's watcher could post the same shape.
+// which agent a session runs, and any agent's watcher could post the same shape. The same
+// snapshot tells the missions a bound session still runs (`listed()`, ADR 36): ids, pids
+// and process starts only, never a name.
 //
 // Nothing here reaches disk. A session's `name` is its first prompt and may carry case
 // content, and a blocked job's `reason` may too, so both live only in this process: never
@@ -26,7 +28,7 @@
 // start time, so it never inherits a round or revives a card.
 
 import { randomBytes } from 'node:crypto';
-import { ORDER_KINDS, roundWantsAnswer } from './missions.mjs';
+import { CARD_ORDER_KINDS, roundWantsAnswer, sameStart } from './missions.mjs';
 import { questionBlocks } from './badge.mjs';
 import { folderName } from './indexpage.mjs';
 
@@ -63,6 +65,10 @@ const UTC_ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
 
 const iso = ms => new Date(ms).toISOString();
 
+/** One listed session in one process: a `/clear` (a new id) or a resume (a new process) is
+ * another, listed afresh. */
+const listKey = s => `${s.id}|${s.pid}|${s.procStart}`;
+
 function refuse(message, status = 400) {
   return Object.assign(new Error(message), { status });
 }
@@ -77,13 +83,6 @@ function validPid(value) {
 
 function validProcStart(value) {
   return typeof value === 'string' && UTC_ISO.test(value) && Number.isFinite(Date.parse(value));
-}
-
-/** Two process starts name one second (`...:15Z`, `...:15.000Z` and `...:15.400Z` alike):
- * the contract allows milliseconds, and the board tool's post sends whole seconds. */
-function sameStart(a, b) {
-  if (typeof a !== 'string' || typeof b !== 'string') return false;
-  return Math.floor(Date.parse(a) / 1000) === Math.floor(Date.parse(b) / 1000);
 }
 
 // --- validation -----------------------------------------------------------------------
@@ -212,6 +211,7 @@ export function createSessionList({ now = Date.now, onChange = () => {} } = {}) 
   let intervalMs = DEFAULT_INTERVAL_MS;
   let sessions = [];
   let orders = new Map(); // session id -> [order]
+  let firstListed = new Map(); // `listKey` -> when a snapshot first listed it (ms)
   let version = 0;
   let timer = null;
   let lastPrint = '[]';
@@ -231,6 +231,7 @@ export function createSessionList({ now = Date.now, onChange = () => {} } = {}) 
     downPublished = true;
     sessions = [];
     orders = new Map();
+    firstListed = new Map();
     lastPrint = '[]';
     changed();
   }
@@ -269,6 +270,7 @@ export function createSessionList({ now = Date.now, onChange = () => {} } = {}) 
       lastAt = now();
       intervalMs = snapshot.intervalMs;
       sessions = snapshot.sessions;
+      firstListed = new Map(sessions.map(s => [listKey(s), firstListed.get(listKey(s)) ?? lastAt]));
       const kept = new Map();
       for (const s of sessions) if (orders.has(s.id)) kept.set(s.id, orders.get(s.id));
       const dropped = kept.size !== orders.size;
@@ -293,6 +295,19 @@ export function createSessionList({ now = Date.now, onChange = () => {} } = {}) 
       return live().map(s => ({ ...s, orders: (orders.get(s.id) || []).map(o => ({ ...o })) }));
     },
 
+    /** The latest snapshot as the missions read a bound session's liveness from it
+     * (src/missions.mjs `missionView`, ADR 36): `{ at, sessions: [{ id, pid, procStart,
+     * since }] }`, `at` the snapshot's time and `since` when a snapshot first listed that
+     * session in that process, both in ms; null while the watcher reads down, or before its
+     * first snapshot since the daemon started. */
+    listed() {
+      if (!isUp() || lastAt === null) return null;
+      return {
+        at: lastAt,
+        sessions: sessions.map(s => ({ id: s.id, pid: s.pid, procStart: s.procStart, since: firstListed.get(listKey(s)) ?? lastAt })),
+      };
+    },
+
     /** The id of the one listed session with this pid and process start, else null. */
     matchId(pid, procStart) {
       const hits = live().filter(s => s.pid === pid && sameStart(s.procStart, procStart));
@@ -306,7 +321,7 @@ export function createSessionList({ now = Date.now, onChange = () => {} } = {}) 
       for (const k of Object.keys(body)) {
         if (k !== 'kind' && k !== 'text') throw refuse('the body has an unknown field');
       }
-      if (!ORDER_KINDS.includes(body.kind)) throw refuse(`kind must be one of ${ORDER_KINDS.join(', ')}`);
+      if (!CARD_ORDER_KINDS.includes(body.kind)) throw refuse(`kind must be one of ${CARD_ORDER_KINDS.join(', ')}`);
       let text;
       if (body.text !== undefined) {
         if (typeof body.text !== 'string') throw refuse('text must be a string');
@@ -346,7 +361,8 @@ export function createSessionList({ now = Date.now, onChange = () => {} } = {}) 
 /** The sessions a mission holds or held, by id and by pid: its bound session's and the one
  * its last launch ended. A session a mission launched is that mission's card, never a tab,
  * even once the mission has moved on while its process lingers; the pid covers it under a
- * new id before its next beat binds that (a `/clear`). */
+ * new id before its next beat binds that (a `/clear`). A session that left its mission
+ * (`session: { ended, leftAt }`, src/missions.mjs `leaveMission`) is a tab again (ADR 141). */
 function missionSessions(missions) {
   const ids = new Set();
   const pids = new Set();
@@ -358,7 +374,7 @@ function missionSessions(missions) {
     const s = m && m.session;
     if (!isObject(s)) continue;
     add(s);
-    if (isObject(s.ended)) add(s.ended);
+    if (isObject(s.ended) && !s.leftAt) add(s.ended);
   }
   return { ids, pids };
 }
@@ -395,8 +411,9 @@ export function commandOf(name) {
 /** The tab cards for `sessions` (the list's `entries()`): every listed session but a
  * mission's. A session is a mission's when a mission record holds or held it, by its id,
  * its pid, or its job id being a held id's first 8 characters (a background job's id is
- * its session's short form); or when it posted a board that belongs to a mission (a
- * launch reserves a session before it knows its pid or id). `missions` are the stored
+ * its session's short form); or when it posted a board that belongs to a mission holding
+ * only a launch's reservation (a launch reserves a session before it knows its pid or id).
+ * A board of a mission bound by id holds no one: the session that posted it may have left. `missions` are the stored
  * records, every one, retired or not; `boards` are `boardLink`s of every board in the
  * store. A card reads:
  *
@@ -414,8 +431,11 @@ export function deriveTabs({ sessions, missions = [], boards = [] }) {
   const links = boards.filter(Boolean);
   const ownerOf = bs => (bs.id != null && sessions.find(s => s.id === bs.id)) || sessions.find(s => sameProcess(s, bs)) || null;
   const held = missionSessions(missions);
+  const reserved = new Set(missions
+    .filter(m => m && isObject(m.session) && m.session.startedAt && m.session.pid == null && m.session.id == null)
+    .map(m => m.key));
   for (const link of links) {
-    if (link.mission == null) continue;
+    if (link.mission == null || !reserved.has(link.mission)) continue;
     const owner = ownerOf(link.session);
     if (owner) held.ids.add(owner.id);
   }
