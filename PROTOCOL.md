@@ -1473,14 +1473,27 @@ Mission = {
 ```
 
 **A view is what every read answers**: the stored record, its `prs` read through the facts, plus
-four fields derived on each read and never stored. `view` is the column the mission shows in:
+fields derived on each read and never stored. `view` is the column the mission shows in:
 `released` while stored released; else `needs-you` when a linked board's newest round is open and
 asks a question or was minted awaited (a lapsed wait still counts; an older round left open does
 not, ADR 134), whatever its session is doing (ADR 140); else `stalled` when its session is gone (a
 bound `pid` that no longer exists, or a reservation no `pid` or `id` bound within 5 minutes) or it
-is stored `working` and `session.seenAt` is over 15 minutes old; else the stored `state`. `gone` is
-`{ lastSeenAt }`, the session's `seenAt`, while that session is gone and the mission has not
-recorded its end, else `null`. Each of `prs` carries `state`, `head` and `checkedAt` from the
+is stored `working` and has not been heard from for 15 minutes; else the stored `state`. A session
+is heard from at its last heartbeat (`session.seenAt`) and at the time of the session watcher's
+latest snapshot that lists it, by its `id` or by its `pid` and `procStart` ("The session routes",
+ADR 36): a director idle while its owners work, or a session whose hooks a `/clear` dropped, never
+stalls by silence while Claude Code lists it. With no snapshot held (the watcher down, or none since
+the daemon started) heartbeats alone count. A bound `pid` that no longer exists while the snapshot
+lists the session's `id` in another live process is not gone: the session runs on there (a resume
+no launch made). `listedAt` is that snapshot's time while it lists the bound session, else `null`.
+`gone` is `{ lastSeenAt }`, the session's `seenAt`, while that session is gone and the mission has
+not recorded its end, else `null`. `rejoin` is `{ reason, since }` while the snapshot lists the bound
+session needing `/mission` again and no heartbeat has come from it since `since`, else `null`:
+`reason` is `'clear'` when its process is listed under another `id` (a `/clear`, which drops the
+skill's hooks), `'resume'` when its `id` is listed in another process (a resume or respawn no launch
+made), and `since` is when a snapshot first listed it so. The session's own join or heartbeat
+rebinds the new `id` or process, which clears it; the card says "Session needs /mission again", and
+the Master Chief asks that session to run `/mission <key>`. Each of `prs` carries `state`, `head` and `checkedAt` from the
 latest fact for its repo and number: `state` one of `'draft' | 'open' | 'green' | 'red' |
 'merged'`, or `'checking'` with `head` and `checkedAt` null before the first. `live` is whether a session
 holds the mission (ADR 129): bound or reserved, not gone, and the mission has not recorded its end
@@ -1541,12 +1554,13 @@ POST /api/mission/:key/join         { id, pid?, procStart?, phase?, takeover? }
        -> { bound: true, session }                 bound; the mission is created when new
        -> 202 { takeover: 'pending', session }     with takeover: true, another live session bound
        -> 409 { error: 'live', session }           another live session bound
-       -> 409 { error: 'ended', session }          this is the session a launch replaced
+       -> 409 { error: 'ended', session }          this is the session a launch replaced, not resumed
        -> 409 { error: 'bound elsewhere', mission, session }   this session holds another mission
 POST /api/mission/:key/leave        { id, pid?, procStart? } -> { left: true, session }
        -> 409 { error: 'not bound', session }
 GET  /api/binding?id=<session id>[&pid=&procStart=]
-       -> { key | null, takeover: { by, at } | null, orders: [Order], handoff | null }
+       -> { key | null, takeover: { by, at } | null, orders: [Order], handoff | null,
+            rejoin: { reason, since } | null }
 ```
 
 **A session is bound to a mission by its own session id** (ADR 141), which the agent reads fresh
@@ -1560,7 +1574,11 @@ the previous session's `pid`, `procStart` and `id` go to `ended`; the bound sess
 released mission again moves it to `working` too. Two joins are refused whatever holds the
 mission: the session `ended` names (a launch replaced it, and it has not left), and a session
 bound to another mission that is not released, which is named, so one session is never two
-missions' (it leaves the one it holds first).
+missions' (it leaves the one it holds first). The session `ended` names, resumed in a new process,
+is not refused: the same `id` with a process told apart from `ended`'s, its `pid` reused under
+another `procStart`, or another `pid` once `ended`'s process is gone (`mission-launch --resume`
+after stopping the old process). It binds, and `ended` is dropped, so its heartbeats land. The old
+process itself, the same `pid` and `procStart`, or a new one while the old still runs, stays a 409.
 Another live session bound is a 409 naming it; with `takeover: true` the join is recorded as
 `takeover` and answers 202, the bound session reads it on its binding, finishes its step, writes
 its handoff and leaves, and the leave binds the session that asked. A bound session whose process
@@ -1572,7 +1590,8 @@ moves a `working` mission to `waiting`; the session is a tab card again ("The se
 Any other session's leave is a 409. The binding is read off the stored records alone, nothing
 derived and no board read, for a hook that asks every minute: the mission the session is bound to
 (a released mission, a bare reservation and a session that left bind no one), its pending
-`takeover`, the `pm` orders it has not marked seen, and its `handoff`. Either `id` or `pid` is
+`takeover`, the `pm` orders it has not marked seen, its `handoff`, and its `rejoin` as the view
+reads it off the snapshot in memory. Either `id` or `pid` is
 needed, else a 400; a `pid` names the session only with its `procStart`. Secret only, the binding
 included: it carries the PM's words.
 
@@ -1587,7 +1606,8 @@ and `typed: true` also sets `typedAt`, the PM having typed in the session.
 The bound `pid` under a new `id` (after a `/clear`) is a heartbeat that takes the `id`. A
 different `pid`, or a different `id` when the bound session has no `pid`, while the bound session
 holds the mission is a 409, and so is the `pid` or `id` of the session that ended before this
-launch; a different `pid` or `id` once the bound session is gone, or silent with no `pid`, starts a
+launch, unless it is that session resumed in a new process as a join reads it, which binds and
+drops `ended`; a different `pid` or `id` once the bound session is gone, or silent with no `pid`, starts a
 fresh session. With `beat: true` it is a heartbeat only: a caller that is not the bound session
 (matched as a join is), a bare reservation included, is a 409 `not bound` that writes nothing.
 An absent mission is a 404.
@@ -1658,6 +1678,10 @@ A full snapshot, replacing the list whole; secret only, never the cookie. `inter
 a **400** naming the field and the entry's index, never a value, and leaves the list as it was. No
 snapshot for two intervals (counted from the last, or from the daemon's start, assuming 30 s, when
 none came) reads the watcher down and drops the list.
+
+The same snapshot is what a mission's liveness reads beside its heartbeats ("The missions routes":
+`listedAt`, `rejoin`, ADR 36): its ids, pids and process starts only, and when each session in its
+process was first listed, counted from the daemon's start.
 
 `GET /api/missions` (above) carries the list as `tabs`, and the watcher as `watcher`:
 

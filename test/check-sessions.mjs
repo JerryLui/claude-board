@@ -72,6 +72,36 @@ async function main() {
     }
   });
 
+  await check('listed() answers the latest snapshot\'s time and each session\'s id and process with when a snapshot first listed it so, a /clear or a resume listed afresh; null before any snapshot and while the watcher reads down', () => {
+    const { clock, list } = rig();
+    const first = session();
+    try {
+      assert.equal(list.listed(), null, 'no snapshot yet: the missions read heartbeats alone');
+      list.replace({ intervalMs: 5_000, sessions: [first] });
+      clock.t = T0 + 4_000;
+      const cleared = session({ id: 'a1b2c3d4-0000-4000-8000-000000000002' });
+      const resumed = session({ id: 'a1b2c3d4-0000-4000-8000-000000000003', pid: 4343 });
+      list.replace({ intervalMs: 5_000, sessions: [first, resumed] });
+      clock.t = T0 + 8_000;
+      list.replace({ intervalMs: 5_000, sessions: [cleared, { ...resumed, pid: 4444, procStart: '2026-10-29T12:00:07Z' }] });
+      assert.deepEqual(list.listed(), {
+        at: T0 + 8_000,
+        sessions: [
+          { id: cleared.id, pid: 4242, procStart: first.procStart, since: T0 + 8_000 },
+          { id: resumed.id, pid: 4444, procStart: '2026-10-29T12:00:07Z', since: T0 + 8_000 },
+        ],
+      });
+      list.replace({ intervalMs: 5_000, sessions: [cleared] });
+      clock.t = T0 + 12_000;
+      list.replace({ intervalMs: 5_000, sessions: [cleared, first] });
+      assert.deepEqual(list.listed().sessions.map(s => s.since), [T0 + 8_000, T0 + 12_000], 'a session still listed keeps its first time; one listed again starts over');
+      clock.t = T0 + 22_000;
+      assert.equal(list.listed(), null, 'a watcher read down lists nothing');
+    } finally {
+      list.close();
+    }
+  });
+
   await check('a malformed snapshot is refused whole with a 400 naming the field, never a value, and the list stays as it was', () => {
     const { list } = rig();
     try {

@@ -11,8 +11,9 @@ import path from 'node:path';
 import { boardHome, readMission } from './store.mjs';
 import { bindingFor, endedHere } from './missions.mjs';
 
-/** The index over `home`'s missions. `binding(ref)` answers `bindingFor` for `ref`
- * (`{ id?, pid?, procStart? }`); `ended(key, ref)` is true when mission `key` records `ref`
+/** The index over `home`'s missions. `binding(ref, listed)` answers `bindingFor` for `ref`
+ * (`{ id?, pid?, procStart? }`), `listed` being the session watcher's latest snapshot
+ * (src/sessions.mjs `listed()`) or null; `ended(key, ref)` is true when mission `key` records `ref`
  * as its ended session (`endedHere`). */
 export function createBindingIndex({ home = boardHome() } = {}) {
   const dir = path.join(home, 'missions');
@@ -51,8 +52,8 @@ export function createBindingIndex({ home = boardHome() } = {}) {
   }
 
   return {
-    binding(ref) {
-      return bindingFor(records(), ref);
+    binding(ref, listed = null) {
+      return bindingFor(records(), ref, { listed });
     },
     ended(key, ref) {
       return records().some(m => m.key === key && endedHere(m, ref));

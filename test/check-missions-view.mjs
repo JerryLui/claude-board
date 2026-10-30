@@ -615,6 +615,34 @@ async function main() {
         await snapshot([]);
       }
     });
+
+    await check('a card whose session the watcher lists under a new id in its process says it needs /mission again, the time in its tooltip, until the session joins under that id', async () => {
+      const start = '2026-10-30T08:00:00Z';
+      const snapshot = sessions => post('/api/sessions', { intervalMs: 30000, sessions });
+      const listed = { id: 'rejoin-after-clear', pid: process.pid, procStart: start, kind: 'interactive', jobId: null, cwd: '/Users/pm/Documents/arkivia', login: null, name: null, status: 'idle', reason: null };
+      assert.equal((await post('/api/mission/REJOIN_ONE/join', { id: 'rejoin-before-clear', pid: process.pid, procStart: start, phase: 'direct' })).status, 200);
+      assert.equal((await snapshot([listed])).status, 200);
+      try {
+        let tab = await openMissionsTab();
+        try {
+          const line = cardFor(tab.document, 'REJOIN_ONE').querySelector('p[data-rejoin]');
+          assert.deepEqual([line.textContent, line.getAttribute('title')],
+            ['Session needs /mission again, just now', `Since ${(await mission('REJOIN_ONE')).rejoin.since}`]);
+          assert.equal(cardFor(tab.document, 'REJOIN_ONE').querySelector('p[data-gone]'), null, 'its process lives: not gone');
+        } finally {
+          tab.restoreFetch();
+        }
+        assert.equal((await post('/api/mission/REJOIN_ONE/join', { id: listed.id, pid: process.pid, procStart: start })).status, 200);
+        tab = await openMissionsTab();
+        try {
+          assert.equal(cardFor(tab.document, 'REJOIN_ONE').querySelector('p[data-rejoin]'), null, 'joined under its new id, it needs nothing');
+        } finally {
+          tab.restoreFetch();
+        }
+      } finally {
+        await snapshot([]);
+      }
+    });
   } finally {
     server.close();
     server.closeIdleConnections?.();

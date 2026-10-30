@@ -17,6 +17,10 @@
 // answer outright, for a reader who asks to see a change no write makes now rather than
 // up to a bound later (a card's Check again, `POST /api/mission/:key/recheck`).
 //
+// A bound session's liveness reads the session list's latest snapshot beside its heartbeats
+// (src/missions.mjs `missionView`, ADR 36): the overview is given `listed()`, and the list's
+// `version` in the print below re-reads it on a snapshot that changed what it lists.
+//
 // The overview also carries the tab cards (src/sessions.mjs `deriveTabs`) when a session
 // list is given: `tabs`, and each tab counted in its column's `counts` entry as the
 // Missions view counts its cards (`live`, which the launch caps read, never counts one).
@@ -135,7 +139,7 @@ export function createMissionsCache({ home = boardHome(), now = Date.now, sessio
         read = { print, at: t, records, tabs, answers: new Map() };
       }
       if (read.answers.has(all)) return read.answers.get(all);
-      const plain = missionsOverview({ home, now: t, all, records: read.records });
+      const plain = missionsOverview({ home, now: t, all, records: read.records, listed: sessions ? sessions.listed() : null });
       const value = sessions ? withTabs(plain, read.tabs) : plain;
       read.answers.set(all, value);
       return value;

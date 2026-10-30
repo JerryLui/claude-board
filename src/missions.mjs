@@ -11,10 +11,13 @@
 // board's newest round still waits on an answer reads needs-you, ahead of everything but
 // released; else a session whose process is gone, a reservation no process bound within
 // `UNBOUND_GRACE_MS`, or a working one silent past `STALL_SILENCE_MS`, reads stalled, and a
-// gone one also carries `gone: { lastSeenAt }`. A PR's state and head commit are the facts
-// the session watcher read from GitHub (`recordPrFacts`), never the session's own words.
-// The derivation needs the board store and a process table, which is why it is computed
-// here and not written by whoever last touched the record.
+// gone one also carries `gone: { lastSeenAt }`. A session the session watcher's latest
+// snapshot lists counts as heard from at the snapshot's time (ADR 36), and one it lists after
+// a `/clear` or a resume no launch made carries `rejoin: { reason, since }`. A PR's state
+// and head commit are the facts the session watcher read from GitHub (`recordPrFacts`),
+// never the session's own words. The derivation needs the board store, a process table and
+// that snapshot, which is why it is computed here and not written by whoever last touched
+// the record.
 
 import { randomBytes } from 'node:crypto';
 import { readBoard, boardHome, readMission, writeMission, listMissions, assertMissionKey, SAFE_MISSION_KEY, MISSION_RETENTION_MS } from './store.mjs';
@@ -261,19 +264,48 @@ function currentSession(m) {
   return s && (s.pid != null || s.id != null || s.startedAt) ? s : null;
 }
 
+/** What the session watcher's latest snapshot (`listed`, src/sessions.mjs `listed()`) says of
+ * the bound session `s`, or null when the snapshot does not list it, no snapshot is held
+ * (the watcher reads down) or `s` is a bare reservation. It lists `s` under its process (the
+ * same pid and start) or under its id; `at` is the snapshot's time, `entry` the listed
+ * session, and `reason` why `s` needs `/mission` again: `clear` when its process runs under
+ * another id (a `/clear`, which drops the skill's hooks), `resume` when its id runs in
+ * another process (a resume or respawn no launch made), else null. */
+function listingOf(s, listed) {
+  if (!s || !listed || isReservation(s)) return null;
+  const entries = listed.sessions || [];
+  const byProcess = s.pid != null ? entries.find(e => e.pid === s.pid && sameStart(e.procStart, s.procStart)) : null;
+  const byId = s.id != null ? entries.find(e => e.id === s.id) : null;
+  const entry = byProcess || byId;
+  if (!entry) return null;
+  let reason = null;
+  if (byProcess && s.id != null && byProcess.id !== s.id) reason = 'clear';
+  else if (!byProcess && s.pid != null && byId.pid != null && (byId.pid !== s.pid || s.procStart != null)) reason = 'resume';
+  return { at: listed.at, entry, reason };
+}
+
 /** The bound process is gone, or a reservation no process bound within `UNBOUND_GRACE_MS`:
- * nothing holds the mission any more. */
-function sessionGone(s, now, isAlive) {
-  if (s.pid != null && !isAlive(s.pid)) return true;
+ * nothing holds the mission any more. A bound process gone while its session runs on in
+ * another live process the snapshot lists (`listing`'s `resume`) is not gone: the session
+ * lives, and needs only `/mission` again. */
+function sessionGone(s, now, isAlive, listing = null) {
+  if (s.pid != null && !isAlive(s.pid)) {
+    const resumed = listing?.reason === 'resume' && listing.entry.pid != null && isAlive(listing.entry.pid);
+    return !resumed;
+  }
   if (s.pid != null || s.id != null) return false;
   const reserved = Date.parse(s.startedAt);
   return !Number.isFinite(reserved) || now - reserved > UNBOUND_GRACE_MS;
 }
 
-/** A working session that has not heartbeat for `STALL_SILENCE_MS`. */
-function sessionSilent(m, now) {
+/** A working session not heard from for `STALL_SILENCE_MS`: no heartbeat, and no snapshot
+ * listing it (`listing`, ADR 36), in that time. A session the snapshot lists is heard from
+ * at the snapshot's time, so a director idle while its owners work, or a session whose
+ * hooks a `/clear` dropped, never stalls by silence while Claude Code lists it. */
+function sessionSilent(m, now, listing = null) {
   if (m.state !== 'working') return false;
-  const seen = Date.parse(m.session.seenAt);
+  const beat = Date.parse(m.session.seenAt);
+  const seen = Math.max(Number.isFinite(beat) ? beat : -Infinity, listing ? listing.at : -Infinity);
   return !Number.isFinite(seen) || now - seen > STALL_SILENCE_MS;
 }
 
@@ -286,17 +318,19 @@ function sessionFinished(m) {
 
 /** A session that should be running and is not heard from: gone, or silent while working.
  * A session whose mission recorded its end is expected to stop, so it never stalls. */
-function sessionStalled(m, now, isAlive) {
+function sessionStalled(m, now, isAlive, listed) {
   const s = currentSession(m);
   if (!s || sessionFinished(m)) return false;
-  return sessionGone(s, now, isAlive) || sessionSilent(m, now);
+  const listing = listingOf(s, listed);
+  return sessionGone(s, now, isAlive, listing) || sessionSilent(m, now, listing);
 }
 
 /** `s` still holds its mission, whatever the mission recorded: not gone, and bound by a pid
  * or heard from inside `STALL_SILENCE_MS`. */
-function sessionHolds(m, s, now, isAlive) {
-  if (sessionGone(s, now, isAlive)) return false;
-  return s.pid != null || !sessionSilent(m, now);
+function sessionHolds(m, s, now, isAlive, listed) {
+  const listing = listingOf(s, listed);
+  if (sessionGone(s, now, isAlive, listing)) return false;
+  return s.pid != null || !sessionSilent(m, now, listing);
 }
 
 /** True while a session holds `m`: bound or reserved, its mission has not recorded its end,
@@ -304,9 +338,9 @@ function sessionHolds(m, s, now, isAlive) {
  * `UNBOUND_GRACE_MS`. Silence alone frees the mission only when no pid is bound: a session
  * whose process lives still holds it while it reads stalled (a long turn, or a director idle
  * while its owners run), so a successor never runs beside it. */
-function hasLiveSession(m, now, isAlive) {
+function hasLiveSession(m, now, isAlive, listed) {
   const s = currentSession(m);
-  return !!s && !sessionFinished(m) && sessionHolds(m, s, now, isAlive);
+  return !!s && !sessionFinished(m) && sessionHolds(m, s, now, isAlive, listed);
 }
 
 /** Each linked board that reads, once, with its question blocks. */
@@ -369,19 +403,32 @@ export function missionActions(m, { home = boardHome() } = {}) {
   return actionsOf(linkedBoards(m, home));
 }
 
-function viewState(m, linked, now, isAlive) {
+function viewState(m, linked, now, isAlive, listed) {
   if (m.state === 'released') return 'released';
   if (boardsNeedYou(linked())) return 'needs-you';
-  if (sessionStalled(m, now, isAlive)) return 'stalled';
+  if (sessionStalled(m, now, isAlive, listed)) return 'stalled';
   return m.state;
 }
 
 /** `{ lastSeenAt }` while the session bound or reserved on `m` is gone (`sessionGone`) and
  * the mission has not recorded its end, `lastSeenAt` being its last heartbeat; else null. */
-function goneOf(m, now, isAlive) {
+function goneOf(m, now, isAlive, listed) {
   const s = currentSession(m);
-  if (!s || sessionFinished(m) || !sessionGone(s, now, isAlive)) return null;
+  if (!s || sessionFinished(m) || !sessionGone(s, now, isAlive, listingOf(s, listed))) return null;
   return { lastSeenAt: s.seenAt ?? s.startedAt ?? null };
+}
+
+/** `{ reason, since }` while the snapshot lists `m`'s bound session needing `/mission` again
+ * (`listingOf`'s `reason`, `clear` or `resume`) and no beat has come from it since `since`,
+ * the time a snapshot first listed it so; else null, as for a mission that recorded its
+ * end. A beat or join from the session itself rebinds its id or process, which clears it. */
+function rejoinOf(m, listed) {
+  const s = currentSession(m);
+  const listing = listingOf(s, listed);
+  if (!listing?.reason || sessionFinished(m)) return null;
+  const since = listing.entry.since ?? listing.at;
+  if (Date.parse(s.seenAt) >= since) return null;
+  return { reason: listing.reason, since: iso(since) };
 }
 
 /** The PRs `m` lists, each with the `state`, `head` and `checkedAt` of its latest fact,
@@ -396,21 +443,27 @@ function prsOf(m) {
 
 /** The column `m` shows in: released stays released; then a board's round waiting on the
  * PM, whatever its session is doing; then a stalled session; else the stored state. */
-export function deriveState(m, { home = boardHome(), now = Date.now(), isAlive = pidAlive } = {}) {
-  return viewState(m, () => linkedBoards(m, home), now, isAlive);
+export function deriveState(m, { home = boardHome(), now = Date.now(), isAlive = pidAlive, listed = null } = {}) {
+  return viewState(m, () => linkedBoards(m, home), now, isAlive, listed);
 }
 
 /** The record as a reader gets it: every stored field, `prs` with each PR's facts
  * (`prsOf`), plus `view` (the derived state), `gone` (`goneOf`), `live` (a session holds
- * the mission, `hasLiveSession`) and `actions` (`missionActions`). */
-export function missionView(m, { home = boardHome(), now = Date.now(), isAlive = pidAlive } = {}) {
+ * the mission, `hasLiveSession`), `listedAt` (the time of the snapshot that lists its bound
+ * session, the heard-from time beside its own `session.seenAt`, else null), `rejoin`
+ * (`rejoinOf`) and `actions` (`missionActions`). `listed` is the session watcher's latest
+ * snapshot, null while it reads down: then only heartbeats count, as before it. */
+export function missionView(m, { home = boardHome(), now = Date.now(), isAlive = pidAlive, listed = null } = {}) {
   const linked = linkedBoards(m, home);
+  const listing = listingOf(currentSession(m), listed);
   return {
     ...m,
     prs: prsOf(m),
-    view: viewState(m, () => linked, now, isAlive),
-    gone: goneOf(m, now, isAlive),
-    live: hasLiveSession(m, now, isAlive),
+    view: viewState(m, () => linked, now, isAlive, listed),
+    gone: goneOf(m, now, isAlive, listed),
+    live: hasLiveSession(m, now, isAlive, listed),
+    listedAt: listing ? iso(listing.at) : null,
+    rejoin: rejoinOf(m, listed),
     actions: actionsOf(linked),
   };
 }
@@ -436,8 +489,8 @@ function releasedLongAgo(m, now) {
  * missions listed and `live` counts over every mission. A released mission is listed until
  * `RELEASED_VISIBLE_MS` after it was released, or always with `all`. `records` are the
  * stored records when the caller has read them already (src/missions-cache.mjs). */
-export function missionsOverview({ home = boardHome(), now = Date.now(), all = false, isAlive = pidAlive, records = null } = {}) {
-  const views = (records ?? listMissions(home)).map(m => missionView(m, { home, now, isAlive }));
+export function missionsOverview({ home = boardHome(), now = Date.now(), all = false, isAlive = pidAlive, records = null, listed = null } = {}) {
+  const views = (records ?? listMissions(home)).map(m => missionView(m, { home, now, isAlive, listed }));
   const missions = (all ? views : views.filter(v => !releasedLongAgo(v, now)))
     .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
   const counts = { needsYou: 0, working: 0, waiting: 0, stalled: 0, released: 0, queued: 0 };
@@ -446,10 +499,10 @@ export function missionsOverview({ home = boardHome(), now = Date.now(), all = f
 }
 
 /** `GET /api/mission/:key`: the view, or a 404. */
-export function getMissionView(key, { home = boardHome(), now = Date.now(), isAlive = pidAlive } = {}) {
+export function getMissionView(key, { home = boardHome(), now = Date.now(), isAlive = pidAlive, listed = null } = {}) {
   const m = readMission(key, home);
   if (!m) throw notFound(key);
-  return missionView(m, { home, now, isAlive });
+  return missionView(m, { home, now, isAlive, listed });
 }
 
 // --- writes ---------------------------------------------------------------------------
@@ -502,7 +555,7 @@ export function recordPrFacts(key, body, { home = boardHome(), now = Date.now() 
  * `MAX_ALIVE` alive sessions across the other missions, the mission queues with its launch
  * recorded in `queue` and answers `{ queued: true }`; else a session is reserved, the
  * mission moves to working in `phase`, and it answers `{ launch: true }`. */
-export function launchMission(key, body, { home = boardHome(), now = Date.now(), isAlive = pidAlive } = {}) {
+export function launchMission(key, body, { home = boardHome(), now = Date.now(), isAlive = pidAlive, listed = null } = {}) {
   assertMissionKey(key);
   assertObject(body, 'the body');
   assertOnly(body, ['phase', 'login', 'prompt'], 'the body');
@@ -511,14 +564,14 @@ export function launchMission(key, body, { home = boardHome(), now = Date.now(),
   const prompt = body.prompt === undefined ? undefined : bytes(body.prompt, 'prompt', MAX_TEXT_BYTES);
 
   const m = readMission(key, home) || newMission(key, now, { phase });
-  if (hasLiveSession(m, now, isAlive)) {
-    const silent = sessionSilent(m, now);
+  if (hasLiveSession(m, now, isAlive, listed)) {
+    const silent = sessionSilent(m, now, listingOf(currentSession(m), listed));
     throw Object.assign(refuse('live', 409), { session: m.session, ...(silent ? { silent } : {}) });
   }
   // The session this launch replaces is over, finished or gone or silent, yet its process
   // may still run: its pid and id never bind the next one (`endedOf`).
   const ended = endedOf(m.session);
-  const others = listMissions(home).filter(o => o.key !== key).map(o => missionView(o, { home, now, isAlive }));
+  const others = listMissions(home).filter(o => o.key !== key).map(o => missionView(o, { home, now, isAlive, listed }));
   const live = liveCounts(others);
   const at = iso(now);
   let answer;
@@ -573,8 +626,9 @@ const endedOn = previous => (previous && !previous.leftAt && previous.ended) || 
  * carrying the bound one; once the bound one is gone, or silent with no pid, it starts a
  * fresh session, carrying `endedOf` the record it replaces. The pid or id of the session
  * that ended before this launch, or that left, is a 409 too: that process lingers, and must
- * not take its successor's place. Answers the stored record. */
-export function bindSession(key, body, { home = boardHome(), now = Date.now(), isAlive = pidAlive } = {}) {
+ * not take its successor's place; that session resumed in a new process (`resumedFrom`)
+ * binds, and `ended` is dropped. Answers the stored record. */
+export function bindSession(key, body, { home = boardHome(), now = Date.now(), isAlive = pidAlive, listed = null } = {}) {
   assertMissionKey(key);
   assertObject(body, 'the body');
   assertOnly(body, ['pid', 'procStart', 'id', 'name', 'login', 'typed', 'beat'], 'the body');
@@ -599,14 +653,15 @@ export function bindSession(key, body, { home = boardHome(), now = Date.now(), i
   // A session bound by pid is that process: its own bind under a new id (after a /clear)
   // is its heartbeat. Only a session bound by id alone is told apart by its id.
   const otherId = bound && bound.pid == null && bound.id != null && given.id !== undefined && given.id !== bound.id;
-  const endedOne = ended
+  const endedOne = ended && !resumedFrom(ended, given, isAlive)
     && ((given.pid !== undefined && given.pid === ended.pid) || (given.id !== undefined && given.id === ended.id));
-  if (endedOne || ((otherPid || otherId) && sessionHolds(m, bound, now, isAlive))) {
+  if (endedOne || ((otherPid || otherId) && sessionHolds(m, bound, now, isAlive, listed))) {
     throw Object.assign(refuse('live', 409), { session: m.session });
   }
   m.session = !bound || otherPid || otherId
     ? boundFrom(given, at, m.session)
     : { ...bound, ...given, seenAt: at };
+  dropResumed(m.session, given, isAlive);
   touch(m, now);
   return writeMission(m, home);
 }
@@ -657,6 +712,25 @@ export function boundTo(m, ref) {
   return !!s && !isReservation(s) && sessionMatches(s, ref);
 }
 
+/** `ref` is the session `ended` names resumed in a new process, not that process lingering:
+ * the same id, a process told apart from `ended`'s, and `ended`'s gone. A pid the OS reused
+ * (the same pid, another start) is a new process whose predecessor is gone; another pid
+ * counts once `ended`'s process is gone. Without both pids, or with the same pid and no
+ * start to tell them apart, it is the ended process. `mission-launch --resume` resumes a
+ * session this way after stopping its old process. */
+function resumedFrom(ended, ref, isAlive) {
+  if (!ended || ended.id == null || ref.id !== ended.id || ended.pid == null || ref.pid == null) return false;
+  if (ref.pid === ended.pid) return ended.procStart != null && ref.procStart != null && !sameStart(ended.procStart, ref.procStart);
+  return !isAlive(ended.pid);
+}
+
+/** Drops `session.ended` once `ref`, now bound there, is that session resumed
+ * (`resumedFrom`): it is the mission's session again, and an `ended` naming its id would
+ * refuse its every beat. */
+function dropResumed(session, ref, isAlive) {
+  if (session.ended && resumedFrom(session.ended, ref, isAlive)) delete session.ended;
+}
+
 /** A reservation `launchMission` made that no process has bound yet. */
 const isReservation = s => s.pid == null && s.id == null;
 
@@ -681,10 +755,11 @@ function conflict(answer) {
  * `bindingFor` to finish its step and leave. A fresh bind moves the mission to working, in
  * `phase` when given, and clears any takeover; so does the bound session joining its
  * released mission again. Two joins are refused whatever holds the mission: the session a
- * launch replaced (`ended`, not left), a 409 `{ error: 'ended', session }`, and a session
+ * launch replaced (`ended`, not left), a 409 `{ error: 'ended', session }`, unless it is
+ * that session resumed in a new process (`resumedFrom`), which binds and drops `ended`; and a session
  * bound to another mission (`bindingFor`'s rule), a 409 `{ error: 'bound elsewhere',
  * mission, session }` naming it, so one session is never two missions'. */
-export function joinMission(key, body, { home = boardHome(), now = Date.now(), isAlive = pidAlive } = {}) {
+export function joinMission(key, body, { home = boardHome(), now = Date.now(), isAlive = pidAlive, listed = null } = {}) {
   assertMissionKey(key);
   assertObject(body, 'the body');
   assertOnly(body, ['id', 'pid', 'procStart', 'phase', 'takeover'], 'the body');
@@ -696,7 +771,8 @@ export function joinMission(key, body, { home = boardHome(), now = Date.now(), i
   const bound = currentSession(m);
   const rejoin = bound && !isReservation(bound) && sessionMatches(bound, ref);
   if (!rejoin) {
-    if (sessionMatches(endedOn(m.session), ref)) throw conflict({ error: 'ended', session: m.session });
+    const ended = endedOn(m.session);
+    if (sessionMatches(ended, ref) && !resumedFrom(ended, ref, isAlive)) throw conflict({ error: 'ended', session: m.session });
     const held = listMissions(home).find(o => o.key !== key && o.state !== 'released' && boundTo(o, ref));
     if (held) throw conflict({ error: 'bound elsewhere', mission: held.key, session: held.session });
   }
@@ -706,12 +782,13 @@ export function joinMission(key, body, { home = boardHome(), now = Date.now(), i
     if (m.state === 'released') moveTo(m, { phase: phase || m.phase, state: 'working' }, now);
     else if (phase && phase !== m.phase) moveTo(m, { phase }, now);
     answer = { status: 200, bound: true, session: m.session };
-  } else if (bound && isReservation(bound) && hasLiveSession(m, now, isAlive)) {
+  } else if (bound && isReservation(bound) && hasLiveSession(m, now, isAlive, listed)) {
     m.session = { ...bound, ...ref, seenAt: at };
+    dropResumed(m.session, ref, isAlive);
     delete m.takeover;
     moveTo(m, { phase: phase || m.phase, state: 'working' }, now);
     answer = { status: 200, bound: true, session: m.session };
-  } else if (bound && hasLiveSession(m, now, isAlive)) {
+  } else if (bound && hasLiveSession(m, now, isAlive, listed)) {
     if (!body.takeover) throw conflict({ error: 'live', session: m.session });
     // The latest asker is the one bound at the leave; one asking again keeps its first `at`.
     const since = m.takeover?.by === ref.id ? m.takeover.at : at;
@@ -719,6 +796,7 @@ export function joinMission(key, body, { home = boardHome(), now = Date.now(), i
     answer = { status: 202, takeover: 'pending', session: m.session };
   } else {
     m.session = boundFrom(ref, at, m.session);
+    dropResumed(m.session, ref, isAlive);
     delete m.takeover;
     delete m.queue;
     moveTo(m, { phase: phase || m.phase, state: 'working' }, now);
@@ -765,22 +843,25 @@ export function leaveMission(key, body, { home = boardHome(), now = Date.now() }
 const unseenOrders = m => (m.orders || []).filter(o => o.kind === 'pm' && !o.ackedAt);
 
 /** `GET /api/binding`: the mission `ref` (`{ id, pid?, procStart? }`) is bound to among the
- * stored `records`, with its pending `takeover` (`{ by, at }`), its pm orders not yet seen and
- * its `handoff`; all null and empty when it is bound to none. A released mission, a launch's
- * bare reservation and a session that left bind no one. A plain scan of the records, nothing
- * derived: a hook asks it every minute (src/bindings.mjs keeps the records). */
-export function bindingFor(records, ref) {
+ * stored `records`, with its pending `takeover` (`{ by, at }`), its pm orders not yet seen,
+ * its `handoff` and its `rejoin` (`rejoinOf`, read off `listed`, the watcher's latest
+ * snapshot); all null and empty when it is bound to none. A released mission, a launch's
+ * bare reservation and a session that left bind no one. A plain scan of the records and the
+ * snapshot in memory, no board or process read: a hook asks it every minute
+ * (src/bindings.mjs keeps the records). */
+export function bindingFor(records, ref, { listed = null } = {}) {
   let hit = null;
   for (const m of records) {
     if (m.state === 'released' || !boundTo(m, ref)) continue;
     if (!hit || String(m.session.seenAt) > String(hit.session.seenAt)) hit = m;
   }
-  if (!hit) return { key: null, takeover: null, orders: [], handoff: null };
+  if (!hit) return { key: null, takeover: null, orders: [], handoff: null, rejoin: null };
   return {
     key: hit.key,
     takeover: hit.takeover ? { by: hit.takeover.by, at: hit.takeover.at } : null,
     orders: unseenOrders(hit),
     handoff: hit.handoff ?? null,
+    rejoin: rejoinOf(hit, listed),
   };
 }
 

@@ -6,7 +6,9 @@
 // reads Claude's own session list) posts a full snapshot to `POST /api/sessions` every
 // `intervalMs`, and each snapshot replaces the last whole. That keeps the board
 // agent-neutral, as the missions ledger is: nothing here reads an agent's folder or knows
-// which agent a session runs, and any agent's watcher could post the same shape.
+// which agent a session runs, and any agent's watcher could post the same shape. The same
+// snapshot tells the missions a bound session still runs (`listed()`, ADR 36): ids, pids
+// and process starts only, never a name.
 //
 // Nothing here reaches disk. A session's `name` is its first prompt and may carry case
 // content, and a blocked job's `reason` may too, so both live only in this process: never
@@ -62,6 +64,10 @@ const SAFE_JOB_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const UTC_ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
 
 const iso = ms => new Date(ms).toISOString();
+
+/** One listed session in one process: a `/clear` (a new id) or a resume (a new process) is
+ * another, listed afresh. */
+const listKey = s => `${s.id}|${s.pid}|${s.procStart}`;
 
 function refuse(message, status = 400) {
   return Object.assign(new Error(message), { status });
@@ -205,6 +211,7 @@ export function createSessionList({ now = Date.now, onChange = () => {} } = {}) 
   let intervalMs = DEFAULT_INTERVAL_MS;
   let sessions = [];
   let orders = new Map(); // session id -> [order]
+  let firstListed = new Map(); // `listKey` -> when a snapshot first listed it (ms)
   let version = 0;
   let timer = null;
   let lastPrint = '[]';
@@ -224,6 +231,7 @@ export function createSessionList({ now = Date.now, onChange = () => {} } = {}) 
     downPublished = true;
     sessions = [];
     orders = new Map();
+    firstListed = new Map();
     lastPrint = '[]';
     changed();
   }
@@ -262,6 +270,7 @@ export function createSessionList({ now = Date.now, onChange = () => {} } = {}) 
       lastAt = now();
       intervalMs = snapshot.intervalMs;
       sessions = snapshot.sessions;
+      firstListed = new Map(sessions.map(s => [listKey(s), firstListed.get(listKey(s)) ?? lastAt]));
       const kept = new Map();
       for (const s of sessions) if (orders.has(s.id)) kept.set(s.id, orders.get(s.id));
       const dropped = kept.size !== orders.size;
@@ -284,6 +293,19 @@ export function createSessionList({ now = Date.now, onChange = () => {} } = {}) 
     /** The listed sessions, each with its orders; none while the watcher reads down. */
     entries() {
       return live().map(s => ({ ...s, orders: (orders.get(s.id) || []).map(o => ({ ...o })) }));
+    },
+
+    /** The latest snapshot as the missions read a bound session's liveness from it
+     * (src/missions.mjs `missionView`, ADR 36): `{ at, sessions: [{ id, pid, procStart,
+     * since }] }`, `at` the snapshot's time and `since` when a snapshot first listed that
+     * session in that process, both in ms; null while the watcher reads down, or before its
+     * first snapshot since the daemon started. */
+    listed() {
+      if (!isUp() || lastAt === null) return null;
+      return {
+        at: lastAt,
+        sessions: sessions.map(s => ({ id: s.id, pid: s.pid, procStart: s.procStart, since: firstListed.get(listKey(s)) ?? lastAt })),
+      };
     },
 
     /** The id of the one listed session with this pid and process start, else null. */

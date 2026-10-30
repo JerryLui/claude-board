@@ -233,6 +233,70 @@ async function main() {
       'a silent session whose process is gone frees its mission');
   });
 
+  await check('a working session silent past fifteen minutes that the latest snapshot lists, by its id or its process, never reads stalled, nor silent to a launch; unlisted, or with no snapshot, it does (ADR 36)', () => {
+    const dir = scratchHome('listed-silent');
+    const t0 = Date.parse('2026-10-30T12:00:00Z');
+    const alive = () => true;
+    const start = '2026-10-30T11:00:00Z';
+    joinMission('LISTED_SILENT', { id: 'director', pid: 5151, procStart: start }, { home: dir, now: t0, isAlive: alive });
+    const late = t0 + minutes(40);
+    const snapshot = entries => ({ at: late - 20_000, sessions: entries.map(e => ({ since: t0, ...e })) });
+    const viewWith = listed => missionsOverview({ home: dir, now: late, isAlive: alive, listed }).missions[0];
+    for (const [label, listed, view] of [
+      ['listed by its id', snapshot([{ id: 'director', pid: 9999, procStart: '2026-10-30T11:30:00Z' }]), 'working'],
+      ['listed by its process', snapshot([{ id: 'director', pid: 5151, procStart: '2026-10-30T11:00:00.400Z' }]), 'working'],
+      ['listed by its process under a new id', snapshot([{ id: 'after-clear', pid: 5151, procStart: start }]), 'working'],
+      ['its pid listed under another start', snapshot([{ id: 'stranger', pid: 5151, procStart: '2026-10-30T11:59:00Z' }]), 'stalled'],
+      ['not listed', snapshot([{ id: 'stranger', pid: 6262, procStart: start }]), 'stalled'],
+      ['no snapshot (the watcher reads down)', null, 'stalled'],
+    ]) {
+      const v = viewWith(listed);
+      assert.equal(v.view, view, label);
+      assert.equal(v.listedAt, view === 'working' ? iso(late - 20_000) : null, `${label}: listedAt`);
+    }
+    // A snapshot older than the stall leaves the session silent again.
+    assert.equal(missionsOverview({ home: dir, now: late, isAlive: alive, listed: { at: late - STALL_SILENCE_MS - 1000, sessions: [{ id: 'director', pid: 5151, procStart: start, since: t0 }] } }).missions[0].view, 'stalled');
+    assert.throws(() => launchMission('LISTED_SILENT', { phase: 'direct' }, { home: dir, now: late, isAlive: alive, listed: snapshot([{ id: 'director', pid: 5151, procStart: start }]) }),
+      err => err.status === 409 && err.message === 'live' && err.silent === undefined, 'a listed session is no silent one to a launch');
+  });
+
+  await check('a session the snapshot lists under a new id in its process (a /clear), or under its id in another live process (a resume no launch made), carries rejoin with its reason and since, on its view and its binding, until it beats or joins (ADR 36)', () => {
+    const dir = scratchHome('rejoin');
+    const t0 = Date.parse('2026-10-30T12:00:00Z');
+    const start = '2026-10-30T11:00:00Z';
+    const resumedStart = '2026-10-30T12:10:00Z';
+    const clearedAt = t0 + minutes(5);
+    const late = t0 + minutes(30);
+    const listed = entries => ({ at: late, sessions: entries });
+    const alive = () => true;
+    const oldGone = pid => pid !== 5252;
+
+    joinMission('CLEARED', { id: 'sess-a', pid: 5151, procStart: start }, { home: dir, now: t0, isAlive: alive });
+    joinMission('RESUMED', { id: 'sess-r', pid: 5252, procStart: start }, { home: dir, now: t0, isAlive: alive });
+    const cleared = listed([{ id: 'sess-a2', pid: 5151, procStart: start, since: clearedAt }]);
+    const resumed = listed([{ id: 'sess-r', pid: 5353, procStart: resumedStart, since: clearedAt }]);
+
+    const clearView = missionView(readMission('CLEARED', dir), { home: dir, now: late, isAlive: alive, listed: cleared });
+    assert.deepEqual([clearView.rejoin, clearView.view, clearView.gone], [{ reason: 'clear', since: iso(clearedAt) }, 'working', null]);
+    const resumeView = missionView(readMission('RESUMED', dir), { home: dir, now: late, isAlive: oldGone, listed: resumed });
+    assert.deepEqual([resumeView.rejoin, resumeView.view, resumeView.gone, resumeView.live], [{ reason: 'resume', since: iso(clearedAt) }, 'working', null, true],
+      'a session resumed in a live process is not gone, though its bound process is');
+    assert.throws(() => launchMission('RESUMED', { phase: 'direct' }, { home: dir, now: late, isAlive: oldGone, listed: resumed }), { status: 409, message: 'live' },
+      'its mission still has a live session, so no second one launches beside it');
+    assert.equal(missionView(readMission('RESUMED', dir), { home: dir, now: late, isAlive: oldGone, listed: null }).gone.lastSeenAt, iso(t0),
+      'with no snapshot, the gone process is all there is to read');
+    assert.deepEqual(bindingFor([readMission('CLEARED', dir)], { id: 'sess-a2', pid: 5151, procStart: start }, { listed: cleared }).rejoin,
+      { reason: 'clear', since: iso(clearedAt) }, 'the bound process reads it on its binding');
+    assert.equal(bindingFor([readMission('CLEARED', dir)], { id: 'sess-a2', pid: 5151, procStart: start }).rejoin, null, 'no snapshot, no rejoin');
+
+    // A beat from the cleared process takes the new id; a join from the resumed session takes
+    // the new process. Either clears the flag.
+    bindSession('CLEARED', { id: 'sess-a2', pid: 5151, procStart: start, beat: true }, { home: dir, now: late, isAlive: alive });
+    assert.equal(missionView(readMission('CLEARED', dir), { home: dir, now: late, isAlive: alive, listed: cleared }).rejoin, null);
+    joinMission('RESUMED', { id: 'sess-r', pid: 5353, procStart: resumedStart }, { home: dir, now: late, isAlive: oldGone });
+    assert.equal(missionView(readMission('RESUMED', dir), { home: dir, now: late, isAlive: oldGone, listed: resumed }).rejoin, null);
+  });
+
   await check('a session whose mission recorded its end (a grill answered Fire, or released) holds neither the mission nor a slot, and its pid cannot take the next session', () => {
     const dir = scratchHome('finished');
     const t0 = Date.parse('2026-10-28T12:00:00Z');
@@ -384,6 +448,30 @@ async function main() {
 
   // --- binding by session id (ADR 141) ---------------------------------------------
 
+  await check('a snapshot listing a bound process under a new id puts rejoin on GET /api/missions and on that process\'s GET /api/binding, and its join under the new id clears both', async () => {
+    const proc = liveProcess();
+    const start = '2026-10-30T09:00:00Z';
+    const listedAs = id => post('/api/sessions', { intervalMs: 30_000, sessions: [{ id, pid: proc.pid, procStart: start, kind: 'interactive', jobId: null, cwd: '/Users/pm/work', login: null, name: null, status: 'idle', reason: null }] });
+    const viewOf = async () => (await getJson('/api/missions')).body.missions.find(m => m.key === 'CLEARED_HTTP');
+    const bindingOf = async () => (await getJson(`/api/binding?pid=${proc.pid}&procStart=${start}`)).body;
+    try {
+      assert.equal((await post('/api/mission/CLEARED_HTTP/join', { id: 'before-clear', pid: proc.pid, procStart: start, phase: 'direct' })).status, 200);
+      assert.equal((await listedAs('after-clear')).status, 200);
+      const view = await viewOf();
+      assert.equal(view.rejoin.reason, 'clear', JSON.stringify(view.rejoin));
+      assert.ok(Number.isFinite(Date.parse(view.rejoin.since)));
+      assert.notEqual(view.listedAt, null, 'the snapshot that lists it is its heard-from time');
+      assert.deepEqual([(await bindingOf()).key, (await bindingOf()).rejoin], ['CLEARED_HTTP', view.rejoin]);
+
+      assert.equal((await post('/api/mission/CLEARED_HTTP/join', { id: 'after-clear', pid: proc.pid, procStart: start })).status, 200);
+      assert.equal((await viewOf()).rejoin, null);
+      assert.equal((await bindingOf()).rejoin, null);
+    } finally {
+      await post('/api/sessions', { intervalMs: 30_000, sessions: [] });
+      await endProcess(proc);
+    }
+  });
+
   await check('a join by a second live session is refused 409; with takeover it is pending, told to the bound session, until that one leaves, and then it is bound', async () => {
     const a = liveProcess();
     const b = liveProcess();
@@ -530,6 +618,32 @@ async function main() {
       e => e.status === 409 && e.answer.error === 'ended');
     const next = joinMission('REPLACED', { id: 'direct-b', pid: 7979, procStart: start }, { home: dir, now: t0 + 4000, isAlive });
     assert.deepEqual([next.status, next.session.id], [200, 'direct-b'], 'the successor binds the reservation');
+  });
+
+  await check('the session a launch replaced, resumed under its id in a new process once its old one is gone, joins the launch and beats; its old process, or a new one while the old lives, stays a 409 ended', () => {
+    const dir = scratchHome('resume-join');
+    const t0 = Date.parse('2026-10-30T12:00:00Z');
+    const start = '2026-10-30T11:00:00Z';
+    const newStart = '2026-10-30T12:00:01Z';
+    const ended = e => e.status === 409 && e.answer.error === 'ended';
+    for (const [label, resumedPid, resumedStart] of [['another pid', 7102, newStart], ['the same pid, reused under another start', 7101, newStart]]) {
+      const key = resumedPid === 7101 ? 'RESUME_REUSED_PID' : 'RESUME_NEW_PID';
+      const id = `sess-${key}`;
+      joinMission(key, { id, pid: 7101, procStart: start }, { home: dir, now: t0, isAlive: () => true });
+      assert.deepEqual(launchMission(key, { phase: 'direct' }, { home: dir, now: t0 + 1000, isAlive: pid => pid !== 7101 }), { launch: true });
+      assert.throws(() => joinMission(key, { id, pid: 7101, procStart: start }, { home: dir, now: t0 + 2000, isAlive: () => true }), ended,
+        `${label}: the old process itself`);
+      if (resumedPid !== 7101) {
+        assert.throws(() => joinMission(key, { id, pid: resumedPid, procStart: resumedStart }, { home: dir, now: t0 + 2000, isAlive: () => true }), ended,
+          `${label}: a new process while the old one still runs`);
+      }
+      // A reused pid is the new process, alive; another pid leaves the old one gone.
+      const isAlive = resumedPid === 7101 ? () => true : pid => pid !== 7101;
+      const joined = joinMission(key, { id, pid: resumedPid, procStart: resumedStart }, { home: dir, now: t0 + 3000, isAlive });
+      assert.deepEqual([joined.status, joined.session.pid, joined.session.ended], [200, resumedPid, undefined], `${label}: the resume binds and drops ended`);
+      const beat = bindSession(key, { id, pid: resumedPid, procStart: resumedStart, beat: true }, { home: dir, now: t0 + 4000, isAlive });
+      assert.equal(beat.session.seenAt, iso(t0 + 4000), `${label}: its beat lands`);
+    }
   });
 
   await check('a join by a session bound to another mission is a 409 bound elsewhere naming it; once it leaves that one, it binds', () => {

@@ -2074,6 +2074,13 @@ function missionsParts(overview, ui) {
       out += '<p class="mission-fact" data-gone title="' + esc('Last seen ' + (m.gone.lastSeenAt || 'never')) + '">Session gone, last seen '
         + esc(seen === 'now' ? 'just now' : seen ? seen + ' ago' : 'never') + '</p>';
     }
+    // A session Claude Code lists after a /clear or a resume no launch made has lost its
+    // mission hooks: it says so with how long, the whole time in its tooltip.
+    if (m.rejoin) {
+      var since = age(m.rejoin.since);
+      out += '<p class="mission-fact" data-rejoin title="' + esc('Since ' + m.rejoin.since) + '">Session needs /mission again, '
+        + esc(since === 'now' || !since ? 'just now' : 'for ' + since) + '</p>';
+    }
     // The title, summary, waiting on and next each stop at a few lines, and this one fold
     // shows them whole. It is hidden on screen while nothing is cut (missionsMarkFits).
     out += moreFold(key, m.summary || m.waitingOn || m.next || String(title).length > FOLD_TITLE_CHARS);

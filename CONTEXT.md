@@ -303,8 +303,8 @@ not recorded its end, and its process is not gone. Only one session is Live per 
 a Live one has a Stop. _Avoid_: alive, running, active, open.
 
 **Stalled**: of a Mission, that its session's process is gone, no process bound its launch
-within five minutes, or it has been working and silent fifteen minutes. A silent session whose process
-lives is Stalled and still Live. _Avoid_: dead, hung, crashed, stale.
+within five minutes, or it has been working and silent fifteen minutes: no heartbeat, and no session
+watcher snapshot listing it. A silent session whose process lives is Stalled and still Live. _Avoid_: dead, hung, crashed, stale.
 
 **Queued**: of a Mission, that its launch waits for a slot, past six sessions working or twelve
 alive; shown under waiting with its tag, launched by the Master Chief when one frees. _Avoid_:

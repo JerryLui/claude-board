@@ -2744,18 +2744,20 @@ async function handlePrune(req, res, home, waiting) {
  * A refusal is `{ error }` with its status, and a 409 also carries the bound `session`, plus
  * `silent: true` on a launch refused by a session that reads stalled by silence while its
  * process lives. `heldSecret` is whether the request carried the secret, not the cookie.
- * Every write publishes `missions` on the daemon-wide stream. */
-async function handleMission(req, res, parts, home, stream, cache, heldSecret) {
+ * `listed` is the session watcher's latest snapshot (src/sessions.mjs `listed()`), which a
+ * bound session's liveness reads beside its heartbeats (ADR 36). Every write publishes
+ * `missions` on the daemon-wide stream. */
+async function handleMission(req, res, parts, home, stream, cache, heldSecret, listed) {
   const key = parts[2];
   const tail = parts.slice(3);
   try {
     assertMissionKey(key);
     if (req.method === 'GET' && tail.length === 0) {
-      return sendJson(res, 200, getMissionView(key, { home }));
+      return sendJson(res, 200, getMissionView(key, { home, listed }));
     }
     if (req.method !== 'POST') return sendText(res, 404, 'not found');
     if (tail.length === 1 && (tail[0] === 'facts' || tail[0] === 'recheck')) {
-      return await handleMissionFacts(req, res, key, tail[0], home, stream, cache);
+      return await handleMissionFacts(req, res, key, tail[0], home, stream, cache, listed);
     }
     const route = tail.length === 0 ? 'upsert'
       : tail.length === 1 && ['launch', 'join', 'leave', 'session', 'order'].includes(tail[0]) ? tail[0]
@@ -2775,11 +2777,11 @@ async function handleMission(req, res, parts, home, stream, cache, heldSecret) {
     }
     let answer;
     let status = 200;
-    if (route === 'upsert') answer = missionView(upsertMission(key, body, { home }), { home });
-    else if (route === 'launch') answer = launchMission(key, body, { home });
-    else if (route === 'join') ({ status, ...answer } = joinMission(key, body, { home }));
+    if (route === 'upsert') answer = missionView(upsertMission(key, body, { home }), { home, listed });
+    else if (route === 'launch') answer = launchMission(key, body, { home, listed });
+    else if (route === 'join') ({ status, ...answer } = joinMission(key, body, { home, listed }));
     else if (route === 'leave') answer = leaveMission(key, body, { home });
-    else if (route === 'session') answer = { session: bindSession(key, body, { home }).session };
+    else if (route === 'session') answer = { session: bindSession(key, body, { home, listed }).session };
     else if (route === 'order') answer = { order: addOrder(key, body, { home }) };
     else if (route === 'seen') answer = { order: seenOrder(key, tail[1], body, { home }) };
     else if (route === 'resent') answer = { order: resentOrder(key, tail[1], { home }) };
@@ -2795,9 +2797,10 @@ async function handleMission(req, res, parts, home, stream, cache, heldSecret) {
 }
 
 /** `GET /api/binding?id=<session id>[&pid=&procStart=]`: the mission that session is bound
- * to (src/missions.mjs `bindingFor`), as `{ key, takeover, orders, handoff }`. A session
- * names itself by `id`, its process by `pid` and `procStart`, or both; neither is a 400. */
-function handleBinding(res, url, bindings) {
+ * to (src/missions.mjs `bindingFor`), as `{ key, takeover, orders, handoff, rejoin }`,
+ * `rejoin` read off `listed`, the session watcher's latest snapshot. A session names itself
+ * by `id`, its process by `pid` and `procStart`, or both; neither is a 400. */
+function handleBinding(res, url, bindings, listed) {
   const q = url.searchParams;
   const ref = {};
   if (q.get('id')) ref.id = q.get('id');
@@ -2811,14 +2814,14 @@ function handleBinding(res, url, bindings) {
     ref.procStart = q.get('procStart');
   }
   if (ref.id === undefined && ref.pid === undefined) return sendJson(res, 400, { error: 'binding needs id, or pid and procStart' });
-  return sendJson(res, 200, bindings.binding(ref));
+  return sendJson(res, 200, bindings.binding(ref, listed));
 }
 
 /** `POST /api/mission/:key/facts` stores the session watcher's PR facts and
  * `POST /api/mission/:key/recheck` drops the missions cache (src/missions-cache.mjs), so
  * a gone session or a fresh fact shows now rather than up to a bound later. Each answers
  * the view, read afresh, and publishes `missions`. */
-async function handleMissionFacts(req, res, key, route, home, stream, cache) {
+async function handleMissionFacts(req, res, key, route, home, stream, cache, listed) {
   let body;
   try {
     body = await readJsonBody(req);
@@ -2827,7 +2830,7 @@ async function handleMissionFacts(req, res, key, route, home, stream, cache) {
   }
   if (route === 'facts') recordPrFacts(key, body, { home });
   cache.drop();
-  const answer = getMissionView(key, { home });
+  const answer = getMissionView(key, { home, listed });
   broadcastMissions(stream, key);
   return sendJson(res, 200, answer);
 }
@@ -3252,7 +3255,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
           res.end();
           return;
         }
-        return handleBinding(res, url, bindings);
+        return handleBinding(res, url, bindings, sessions.listed());
       }
 
       // The watcher's snapshot and a tab card's orders (src/sessions.mjs). Every one is a
@@ -3271,7 +3274,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
           res.end();
           return;
         }
-        return await handleMission(req, res, parts, home, streamHub, missionsCache, secretMatches(req.headers[SECRET_HEADER], secret));
+        return await handleMission(req, res, parts, home, streamHub, missionsCache, secretMatches(req.headers[SECRET_HEADER], secret), sessions.listed());
       }
 
       return sendText(res, 404, 'not found');
