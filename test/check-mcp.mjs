@@ -2566,7 +2566,7 @@ async function main() {
       const left = await missionCall(shim, { action: 'leave', key: 'MCP_JOINED', session: 'mcp-sess-2' });
       assert.equal(left.isError, false, left.content[0].text);
       assert.equal((await missionCall(shim, { action: 'binding', session: 'mcp-sess-2' })).structuredContent.key, null);
-      // A shim of its own, since a shim's later asks go to the board it already holds.
+      // A shim that never joined: its first board, a new thread's.
       const fresh = spawnShim(baseEnv);
       try {
         const loose = (await fresh.request('tools/call', { name: 'ask', arguments: { title: 'Loose board', blocks: [NOTE] } })).result;
@@ -2581,6 +2581,57 @@ async function main() {
       assert.equal((await viewOf('MCP_JOINED')).summary, 'after a clear', 'a session that left writes nothing');
     } finally {
       await missionCall(shim, { action: 'leave', key: 'MCP_JOINED', session: 'mcp-sess-2' });
+      shim.close();
+    }
+  });
+
+  // ADR 141: the board a shim reuses keeps the mission it first linked to, so a join or
+  // leave through the tool starts the next ask on a board of its own.
+  await check('a join or leave through the mission tool starts the next ask on a board of its own, linked to the mission the session holds now; joining the same mission again keeps the board', async () => {
+    const shim = spawnShim(baseEnv);
+    const boardsOf = async key => (await (await fetch(`${base}/api/mission/${key}`, { headers: missionHeaders })).json()).boards.map(b => b.id);
+    const ask = async title => {
+      const r = (await shim.request('tools/call', { name: 'ask', arguments: { title, blocks: [NOTE] } })).result;
+      assert.equal(r.isError, false, r.content[0].text);
+      return r.board;
+    };
+    const join = async key => assert.equal((await missionCall(shim, { action: 'join', key, session: 'follow-sess' })).structuredContent?.bound, true);
+    try {
+      await join('FOLLOW_A');
+      const first = await ask('First mission round');
+      await join('FOLLOW_A');
+      assert.equal(await ask('Same mission round'), first, 'joining the mission it holds keeps the board');
+
+      assert.equal((await missionCall(shim, { action: 'leave', key: 'FOLLOW_A', session: 'follow-sess' })).isError, false);
+      await join('FOLLOW_B');
+      const second = await ask('Next mission round');
+      assert.notEqual(second, first);
+      assert.deepEqual([await boardsOf('FOLLOW_A'), await boardsOf('FOLLOW_B')], [[first], [second]], 'each round links to the mission its session held');
+
+      assert.equal((await missionCall(shim, { action: 'leave', key: 'FOLLOW_B', session: 'follow-sess' })).isError, false);
+      const loose = await ask('Unbound round');
+      assert.notEqual(loose, second);
+      assert.equal(JSON.parse(readFileSync(path.join(home, 'boards', `${loose}.json`), 'utf8')).mission ?? null, null, 'after a leave the next board links to no mission');
+      assert.deepEqual(await boardsOf('FOLLOW_B'), [second]);
+    } finally {
+      for (const key of ['FOLLOW_A', 'FOLLOW_B']) await missionCall(shim, { action: 'leave', key, session: 'follow-sess' });
+      shim.close();
+    }
+  });
+
+  await check('a write naming a session the mission is not bound to, its session having left, is a 409 that binds no one and writes nothing', async () => {
+    const shim = spawnShim(baseEnv);
+    try {
+      assert.equal((await missionCall(shim, { action: 'join', key: 'MCP_ORPHAN', session: 'orphan-sess' })).isError, false);
+      assert.equal((await missionCall(shim, { action: 'write', key: 'MCP_ORPHAN', session: 'orphan-sess', fields: { summary: 'its own' } })).isError, false);
+      assert.equal((await missionCall(shim, { action: 'leave', key: 'MCP_ORPHAN', session: 'orphan-sess' })).isError, false);
+      const before = await (await fetch(`${base}/api/mission/MCP_ORPHAN`, { headers: missionHeaders })).json();
+      const chief = await missionCall(shim, { action: 'write', key: 'MCP_ORPHAN', session: 'chief-sess', fields: { summary: 'the Master Chief\'s' } });
+      assert.equal(chief.isError, true);
+      assert.match(chief.content[0].text, /HTTP 409.*not bound/);
+      assert.deepEqual(await (await fetch(`${base}/api/mission/MCP_ORPHAN`, { headers: missionHeaders })).json(), before);
+      assert.equal((await missionCall(shim, { action: 'binding', session: 'chief-sess' })).structuredContent.key, null);
+    } finally {
       shim.close();
     }
   });

@@ -9,10 +9,11 @@
 import { readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { boardHome, readMission } from './store.mjs';
-import { bindingFor } from './missions.mjs';
+import { bindingFor, endedHere } from './missions.mjs';
 
 /** The index over `home`'s missions. `binding(ref)` answers `bindingFor` for `ref`
- * (`{ id?, pid?, procStart? }`). */
+ * (`{ id?, pid?, procStart? }`); `ended(key, ref)` is true when mission `key` records `ref`
+ * as its ended session (`endedHere`). */
 export function createBindingIndex({ home = boardHome() } = {}) {
   const dir = path.join(home, 'missions');
   const files = new Map(); // file name -> { stamp, record }
@@ -52,6 +53,9 @@ export function createBindingIndex({ home = boardHome() } = {}) {
   return {
     binding(ref) {
       return bindingFor(records(), ref);
+    },
+    ended(key, ref) {
+      return records().some(m => m.key === key && endedHere(m, ref));
     },
   };
 }

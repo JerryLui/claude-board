@@ -715,8 +715,8 @@ const MISSION_TOOL = {
   description:
     'The claude-board missions ledger: one record per piece of work. Any agent (Claude, Codex, ' +
     'OpenCode) writes its work\'s status here: phase, state, summary, PRs, handoff. Never case ' +
-    'content. Actions: list, read, write (fields; with session, also that session\'s heartbeat), ' +
-    'join (bind this session to the mission; takeover to take it from a live one), leave, ' +
+    'content. Actions: list, read, write (fields; with session, also that session\'s heartbeat, refused unless it is the bound one), ' +
+    'join (bind this session to the mission, leaving any other first; takeover to take it from a live one; the next ask starts a new board), leave, ' +
     'binding (the mission this session is bound to, its pending takeover, unseen PM orders and ' +
     'handoff), seen (this session acknowledges an order), order (the Master Chief posts the ' +
     'PM\'s words as a pm order), resent (the Master Chief sent an order again), relay (answer a ' +
@@ -1303,7 +1303,7 @@ async function askTool(args, session, { sendProgress, cancelled }) {
   // no board, add nothing to their result.
   const abandonedUrl = safeBoardUrl(session.pendingAbandon);
   const abandonedNote = abandonedUrl
-    ? `Abandoned board: ${abandonedUrl} (the previous conversation's board, closed by this fresh ask). ` +
+    ? `Abandoned board: ${abandonedUrl} (the board this conversation left by a fresh ask or a mission join or leave, closed by this ask). ` +
       `Call read with that URL to collect any answer left on it.`
     : '';
   // Every branch below returns through here, so the note cannot be forgotten by one of
@@ -1562,7 +1562,8 @@ async function missionTool(args) {
     method = 'POST';
     route = `/api/mission/${needKey()}`;
     body = fields;
-    heartbeat = sessionOf({ required: false });
+    const ref = sessionOf({ required: false });
+    heartbeat = ref && { ...ref, beat: true };
   } else if (action === 'join') {
     if (args.phase !== undefined && !['grill', 'direct', 'landing'].includes(args.phase)) throw new ToolError(`mission join takes "phase" as grill, direct or landing, not ${JSON.stringify(args.phase)}`);
     if (args.takeover !== undefined && typeof args.takeover !== 'boolean') throw new ToolError(`mission join takes "takeover" as a boolean, not ${JSON.stringify(args.takeover)}`);
@@ -1609,17 +1610,28 @@ async function missionTool(args) {
     } catch (err) {
       if (absentOk && err?.statusCode === 404) return null;
       if (typeof err?.statusCode === 'number' && err.statusCode !== 401) {
+        const elsewhere = err.statusCode === 409 && typeof err.body?.mission === 'string' ? ` (this session holds mission ${err.body.mission}: leave it first)` : '';
         const held = err.statusCode === 409 && err.body?.session ? ` (bound: ${JSON.stringify(err.body.session)})` : '';
-        throw new ToolError(`mission ${action} refused by the daemon (HTTP ${err.statusCode}): ${err.message}${held}`);
+        throw new ToolError(`mission ${action} refused by the daemon (HTTP ${err.statusCode}): ${err.message}${elsewhere}${held}`);
       }
       throw toolErrorFor(err, null, 'mission');
     }
   };
-  // A write naming its session is that session's heartbeat first: a session the mission is
-  // not bound to (another holds it, or this one left) writes nothing. A mission not yet on
+  // A write naming its session is that session's heartbeat first, a heartbeat only
+  // (`beat`): a session the mission is not bound to (another holds it, this one left, or
+  // it holds only a launch's reservation) is a 409 and writes nothing. A mission not yet on
   // the board has no session to beat, and the write creates it.
   if (heartbeat) await call('POST', `/api/mission/${key}/session`, heartbeat, { absentOk: true });
   const answer = await call(method, route, body);
+  // A join or leave changes the mission this conversation's boards link to, and the board
+  // this shim reuses keeps the mission it linked first (src/server.mjs): the next ask
+  // starts a board of its own, as `fresh` does. Joining again the mission this shim joined
+  // keeps the board.
+  if (action === 'join' || action === 'leave') {
+    const now = action === 'join' && answer && answer.bound === true ? key : null;
+    if (!(now && now === session.missionKey)) declareBoundary(session);
+    session.missionKey = now;
+  }
   return { content: [{ type: 'text', text: JSON.stringify(answer) }], isError: false, structuredContent: answer };
 }
 
@@ -1661,7 +1673,7 @@ function sendProgressNotification(token, elapsedMs, totalMs, boardUrl) {
 // that minted it is gone, which clears both and starts the next one over. This process
 // outlives `/clear`, so the flag is the only thing that can tell those two apart.
 // Nothing call-scoped lives here (see askTool's comment).
-const session = { boardId: null, thread: null, url: null, creatingThread: null, createRequestId: null, pendingAbandon: null };
+const session = { boardId: null, thread: null, url: null, creatingThread: null, createRequestId: null, pendingAbandon: null, missionKey: null };
 
 /** In-flight `tools/call` requests by JSON-RPC id, so `notifications/cancelled` has
  * something to cancel. Without it a cancelled call leaks three things: the progress
