@@ -26,7 +26,7 @@
 
 import http from 'node:http';
 import readline from 'node:readline';
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
@@ -34,6 +34,7 @@ import { fileURLToPath } from 'node:url';
 import { readSecret, secretPath, daemonPort, SECRET_HEADER } from '../src/secret.mjs';
 import { HANDOFF_TOKEN_RE, recoveryCommand } from '../src/handoff.mjs';
 import { MAX_DRAINED_BYTES, postTooLargeMessage } from '../src/post-limit.mjs';
+import { processStartUtc } from '../src/proc-start.mjs';
 import { STATUS_TONES } from '../src/card-status.mjs';
 
 // CLAUDE_BOARD_HOME/CLAUDE_BOARD_PORT are PROTOCOL.md's; the rest are additive env
@@ -105,27 +106,10 @@ const MISSION_KEY_RE = /^[A-Za-z0-9_-]{1,80}$/;
 let sessionFieldCache = null;
 function sessionField() {
   if (!sessionFieldCache) {
-    const procStart = parentStartUtc(process.ppid);
+    const procStart = processStartUtc(process.ppid);
     sessionFieldCache = procStart ? { session: { pid: process.ppid, procStart } } : {};
   }
   return sessionFieldCache;
-}
-
-function parentStartUtc(pid) {
-  if (!Number.isInteger(pid) || pid <= 1) return null;
-  let lstart;
-  try {
-    lstart = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
-      env: { ...process.env, TZ: 'UTC', LC_ALL: 'C' }, encoding: 'utf8', timeout: 2_000, stdio: ['ignore', 'pipe', 'ignore'],
-    });
-  } catch {
-    return null;
-  }
-  const m = /^\w{3} (\w{3}) (\d{1,2}) (\d\d):(\d\d):(\d\d) (\d{4})$/.exec(lstart.trim().replace(/\s+/g, ' '));
-  const month = m ? ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'].indexOf(m[1]) : -1;
-  if (month < 0) return null;
-  const ms = Date.UTC(Number(m[6]), month, Number(m[2]), Number(m[3]), Number(m[4]), Number(m[5]));
-  return new Date(ms).toISOString().replace('.000Z', 'Z');
 }
 
 function readPkgVersion() {
@@ -1298,9 +1282,9 @@ async function askTool(args, session, { sendProgress, cancelled }) {
   // it is collected, and the agent has the one string it needs to make that call. Read
   // BEFORE flushBoundary, which is what clears it.
   //
-  // Only ever set by `fresh` (declareBoundary is its only caller), and only when there
-  // genuinely was a board: an ordinary ask, and a `fresh` ask in a conversation that had
-  // no board, add nothing to their result.
+  // Set only by declareBoundary, which a `fresh` ask and a mission join or leave call, and
+  // only when there genuinely was a board: an ordinary ask, and a boundary in a conversation
+  // that had no board, add nothing to their result.
   const abandonedUrl = safeBoardUrl(session.pendingAbandon);
   const abandonedNote = abandonedUrl
     ? `Abandoned board: ${abandonedUrl} (the board this conversation left by a fresh ask or a mission join or leave, closed by this ask). ` +
@@ -1626,9 +1610,9 @@ async function missionTool(args) {
   // A join or leave changes the mission this conversation's boards link to, and the board
   // this shim reuses keeps the mission it linked first (src/server.mjs): the next ask
   // starts a board of its own, as `fresh` does. Joining again the mission this shim joined
-  // keeps the board.
-  if (action === 'join' || action === 'leave') {
-    const now = action === 'join' && answer && answer.bound === true ? key : null;
+  // keeps the board, and so does a join that bound nothing (a takeover still pending).
+  if (action === 'leave' || (action === 'join' && answer?.bound === true)) {
+    const now = action === 'join' ? key : null;
     if (!(now && now === session.missionKey)) declareBoundary(session);
     session.missionKey = now;
   }
