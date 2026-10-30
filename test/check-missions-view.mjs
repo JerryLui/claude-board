@@ -191,7 +191,12 @@ async function main() {
     // The fixtures the rest of the file shares: one mission per column, and queued.
     await liveMission('WORKING_ONE');
     await liveMission('WORKING_TWO', { summary: 'Wave 2 of 3', waitingOn: 'checks on #12', next: 'merge',
-      prs: [{ repo: 'service', number: 12, url: 'https://github.com/o/service/pull/12', state: 'green' }] });
+      prs: [{ repo: 'service', number: 12, url: 'https://github.com/o/service/pull/12' },
+        { repo: 'service', number: 13, url: 'https://github.com/o/service/pull/13', state: 'green' }] });
+    assert.equal((await post('/api/mission/WORKING_TWO/facts', { prs: [
+      { repo: 'service', number: 12, state: 'green', head: 'a1b2c3', checkedAt: new Date().toISOString() },
+      { repo: 'service', number: 13, state: 'red', head: 'd4e5f6', checkedAt: new Date().toISOString() },
+    ] })).status, 200);
     assert.equal((await post('/api/mission/WAITING_ONE', { title: 'Waiting one', state: 'waiting', phase: 'landing',
       prs: [{ repo: 'admin', number: 7, url: 'javascript:alert(1)', state: 'open' }] })).status, 200);
     assert.equal((await post('/api/mission/QUEUED_ONE', { title: 'Queued one', state: 'queued', phase: 'direct' })).status, 200);
@@ -228,18 +233,27 @@ async function main() {
         assert.equal(card.querySelector('p.mission-summary').textContent, 'Wave 2 of 3');
         assert.deepEqual(card.querySelectorAll('p.mission-fact').map(n => [n.querySelector('span.mission-label').textContent, n.textContent]),
           [['Waiting on', 'Waiting onchecks on #12'], ['Next', 'Nextmerge']]);
-        const pr = card.querySelector('a.mission-pr');
-        assert.equal(pr.getAttribute('href'), 'https://github.com/o/service/pull/12');
-        assert.equal(pr.textContent, '✓service #12');
+        const prs = card.querySelectorAll('a.mission-pr');
+        assert.equal(prs[0].getAttribute('href'), 'https://github.com/o/service/pull/12');
+        assert.deepEqual(prs.map(p => [p.textContent, p.getAttribute('data-state'), p.getAttribute('title')]), [
+          ['✓service #12', 'green', 'service #12: green'],
+          ['✕service #13', 'red', 'service #13: red'],
+        ], 'each PR shows its state from the facts, the session\'s green on #13 left unread');
         const odd = cardFor(tab.document, 'WAITING_ONE').querySelector('.mission-pr');
-        assert.deepEqual([odd.tagName, odd.getAttribute('href'), odd.textContent], ['SPAN', null, '○admin #7'],
-          'a url that is not a web address is shown, never linked');
+        assert.deepEqual([odd.tagName, odd.getAttribute('href'), odd.textContent, odd.getAttribute('data-state')], ['SPAN', null, '○admin #7', 'checking'],
+          'a url that is not a web address is shown, never linked, and with no fact yet the PR is checking');
         const needs = cardFor(tab.document, 'NEEDS_ONE');
         assert.deepEqual([needs.querySelector('b.mission-title a.mission-link').getAttribute('href'), needs.getAttribute('tabindex')],
           [`/b/${needsBoard.boardId}`, null], 'the card\'s title is the link to the latest board the mission posted, the one stop for Tab');
         assert.equal(needs.querySelector('a.mission-btn'), null, 'no Open board button');
         assert.ok(cardFor(tab.document, 'WORKING_ONE').querySelector('button.mission-stop'), 'a live session offers Stop');
         assert.equal(cardFor(tab.document, 'STALLED_ONE').querySelector('button.mission-stop'), null, 'a stalled one does not');
+        const gone = cardFor(tab.document, 'STALLED_ONE').querySelector('p[data-gone]');
+        assert.deepEqual([gone.textContent, gone.getAttribute('title')], ['Session gone, last seen just now', `Last seen ${(await mission('STALLED_ONE')).session.seenAt}`],
+          'a gone session says so, with the time it was last seen');
+        assert.equal(cardFor(tab.document, 'STALLED_ONE').querySelector('button[data-recheck]').textContent, 'Check again');
+        assert.equal(card.querySelector('p[data-gone]'), null, 'a live one does not');
+        assert.equal(card.querySelector('button[data-recheck]'), null);
         assert.equal(cardFor(tab.document, 'RELEASED_ONE').querySelector('button.mission-stop'), null);
       } finally {
         tab.restoreFetch();
@@ -272,6 +286,23 @@ async function main() {
         }
       });
     }
+
+    await check('Check again on a gone session\'s card posts its recheck and re-reads the columns', async () => {
+      const tab = await openMissionsTab();
+      const sent = [];
+      const pageFetch = globalThis.fetch;
+      globalThis.fetch = (url, opts) => { sent.push([(opts && opts.method) || 'GET', url]); return pageFetch(url, opts); };
+      try {
+        await tab.click(cardFor(tab.document, 'STALLED_ONE').querySelector('button[data-recheck]'));
+        assert.deepEqual(sent, [['POST', '/api/mission/STALLED_ONE/recheck'], ['GET', '/api/missions']]);
+        const card = cardFor(tab.document, 'STALLED_ONE');
+        assert.equal(card.querySelector('p.mission-error'), null, 'the daemon took the recheck from the page');
+        assert.ok(card.querySelector('p[data-gone]'), 'still gone, so still said');
+      } finally {
+        globalThis.fetch = pageFetch;
+        tab.restoreFetch();
+      }
+    });
 
     await check('a round sent from its board, or abandoned, takes the button off the card', async () => {
       await liveMission('SENT_ELSEWHERE');

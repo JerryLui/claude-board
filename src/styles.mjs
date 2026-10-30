@@ -2034,6 +2034,7 @@ body.home-page .mode-toggle:disabled { opacity: 0.5; cursor: default; }
 .mission-pr i { font-style: normal; font-weight: 700; color: var(--muted); }
 .mission-pr[data-state="green"] i { color: var(--good); }
 .mission-pr[data-state="merged"] i { color: var(--accent); }
+.mission-pr[data-state="red"] i { color: var(--critical); }
 .mission-order { margin: 6px 0 0; font-size: 12px; line-height: 17px; color: var(--ink-2); }
 .mission-error { margin: 6px 0 0; font-size: 12px; line-height: 17px; color: var(--critical); }
 .mission-btns { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
