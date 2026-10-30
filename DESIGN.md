@@ -804,7 +804,8 @@ and then five columns, Needs you, Working, Waiting, Stalled and Released, as a g
 least 250px wide that wraps on a narrow window. A card is a grey line with its key and phase and
 its age at the right, the title, the summary, what it waits on and what comes next, and a foot of
 small chips (Queued under Waiting, a tab card's tags, its PRs with a mark for their state) with
-Fire or Merge while asked. The whole card opens its board, the round asking or else the latest.
+Fire or Merge while asked, Merge a link to the brief at its merge question; while a merge waits
+the summary, the brief's digest, shows whole rather than clamped. The whole card opens its board, the round asking or else the latest.
 Stop sits over the age while a session is live, shown on the card's hover or keyboard focus,
 while its question is open, after Keep or Escape hands it the focus, and always on a screen with
 no hover, asking once before it sends, or sending at once on a Cmd-click.
@@ -830,7 +831,7 @@ tooltip (on the link, or on the card when it has no board) holds the whole title
 in full: a mission's exact update time, a tab's login path and folder. Lifting the key line's spans
 over the link was tried and dropped: Stop takes the age's place on hover, and a press re-sent from
 a span by script lost the browser's modifier and menu handling. It carries no Open
-board button; Fire and Merge stay shown, since they are calls rather than navigation, and Stop
+board button; Fire and Merge stay shown, since they are calls (Merge's a call to read the brief), and Stop
 waits for hover or focus. An earlier build made the article itself a `role="link"` around its
 buttons, which had none of a link's middle-click, menu or hover address. A tab
 card with several rounds waiting opens the first, the rest reached through Boards. Rejected:

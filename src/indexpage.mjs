@@ -1915,7 +1915,8 @@ export function filterThreads(threads, query) {
  *
  * Five columns by derived state (`view`), queued shown under waiting. A card's Fire or
  * Merge button exists only while `actions` holds that kind, which the daemon fills only
- * from a round still waiting on the PM; the button carries what a click submits. Stop
+ * from a round still waiting on the PM. Fire carries what a click submits; Merge is a
+ * link to the brief at its merge question, and the summary shows whole beside it. Stop
  * is offered while a session is live and no stop is already on its way. The whole card
  * opens its board, the round waiting on the PM where there is one.
  *
@@ -2061,7 +2062,10 @@ function missionsParts(overview, ui) {
     var out = '<div class="mission-text"><div class="mission-ident"><span class="mission-key">' + esc(ident) + '</span>'
       + '<span class="mission-age">' + esc(age(m.updatedAt)) + '</span></div>'
       + cardTitle(title, href, tip);
-    if (m.summary) out += '<p class="mission-summary">' + esc(m.summary) + '</p>';
+    // While a merge waits the summary is the landing brief's digest, read on the card
+    // before its Merge opens the brief, so it shows whole rather than cut at its clamp.
+    var merging = actions.some(function (a) { return a.kind === 'merge'; });
+    if (m.summary) out += '<p class="mission-summary"' + (merging ? ' data-digest' : '') + '>' + esc(m.summary) + '</p>';
     if (m.waitingOn) out += '<p class="mission-fact mission-waiting"><span class="mission-label">Waiting on</span>' + esc(m.waitingOn) + '</p>';
     if (m.next) out += '<p class="mission-fact mission-next"><span class="mission-label">Next</span>' + esc(m.next) + '</p>';
     // A gone session says so with its last heartbeat, the whole time in its tooltip.
@@ -2093,6 +2097,13 @@ function missionsParts(overview, ui) {
       var act = actions[a];
       if (!ACTION_LABELS[act.kind] || shown[act.kind]) continue;
       shown[act.kind] = true;
+      // Merge opens the brief at its merge question and answers nothing (ADR 142): the
+      // round page resolves '#question:<round>:<question id>' to that question.
+      if (act.kind === 'merge') {
+        foot += '<a class="mission-btn mission-act" data-action="merge" href="' + esc('/b/' + act.board + '#question:' + act.round + ':' + act.question)
+          + '">' + ACTION_LABELS[act.kind] + '</a>';
+        continue;
+      }
       foot += '<button type="button" class="mission-btn mission-act" data-action="' + esc(act.kind) + '" data-board="' + esc(act.board)
         + '" data-round="' + esc(act.round) + '" data-question="' + esc(act.question) + '" data-choice="' + esc(act.choice) + '"'
         + (busy ? ' disabled' : '') + '>' + ACTION_LABELS[act.kind] + '</button>';

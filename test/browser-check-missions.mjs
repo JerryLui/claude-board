@@ -12,7 +12,8 @@
 // "Earlier", the whole line a link (test/check-pure.mjs owns the filter); and Stop, pressed
 // with a real mouse, plain or with Ctrl, Shift or Alt held, asks once and then sends its
 // order, its Stop and Keep on one line, while a Cmd double-press sends one order with no
-// question. Layout and a real press, which the DOM stand-in has none of (QUIRKS.md "The DOM
+// question; a waiting merge's summary, the brief's digest, shows whole, and its Merge opens
+// the brief scrolled to its merge question with the round left waiting. Layout and a real press, which the DOM stand-in has none of (QUIRKS.md "The DOM
 // stand-in's ceilings"): test/check-missions-view.mjs holds the markup and the requests.
 //
 // NOT wired into test/run.mjs's `checks` array, on purpose: that suite has to pass on a
@@ -51,6 +52,10 @@ const ASKING_TAB = 'tab:tab-asking'; // a tab card with a round waiting, so a li
 const words = (n, seed) => Array.from({ length: n }, (_, i) => `${seed}${i}`).join(' ');
 const longText = (max, seed) => words(200, seed).slice(0, max);
 const LONG_BOARD = longText(400, 'boardtitle'); // a board title far wider than its line
+// A waiting merge's summary: the landing brief's digest, at the store's longest.
+const DIGEST = ('Adds the vendor column to the Models page and its dashboard. Criteria 1 to 6 met; proof: the service and admin '
+  + 'checks green on both heads, the dashboard read live at 1440 and 1920. The merge asks you to merge service #1874 and then admin #312, '
+  + 'with no release steps.').slice(0, 280);
 
 guardRun('browser-check-missions', { deadlineMs: 240000 });
 
@@ -114,6 +119,7 @@ const MEASURE_EXPR = `(function () {
       keyClear: stop && ident && !c.querySelector('.mission-age') ? stop.getBoundingClientRect().left - ident.getBoundingClientRect().right : null,
       openButtons: [].slice.call(c.querySelectorAll('a, button')).filter(function (b) { return /Open (board|round)/.test(b.textContent); }).length });
   });
+  var digest = document.querySelector('article.mission-card[data-mission-key="MODEL_MAP"] p.mission-summary');
   var long = document.querySelector('article.mission-card[data-mission-key=${JSON.stringify(LONG)}]');
   var longTab = document.querySelector('article.mission-card[data-mission-key=${JSON.stringify(LONG_TAB)}]');
   var tabCuts = {};
@@ -136,6 +142,7 @@ const MEASURE_EXPR = `(function () {
     cols: cols,
     cards: cards,
     cuts: cuts,
+    digest: digest ? { text: digest.textContent, lineHeight: parseFloat(getComputedStyle(digest).lineHeight), client: digest.clientHeight, scroll: digest.scrollHeight } : null,
     longFolds: long ? long.querySelectorAll('details.mission-more').length : 0,
     tabCuts: tabCuts,
     longTabFolds: longTab ? longTab.querySelectorAll('details.mission-more').length : 0,
@@ -204,6 +211,21 @@ async function landedAt(tab) {
   return path;
 }
 
+/** `expr` read on the tab's page, again every 50 ms until truthy or five seconds pass,
+ * through the page swap a navigation makes. */
+async function readUntil(tab, expr) {
+  let value = null;
+  for (let i = 0; i < 100 && !value; i++) {
+    try {
+      value = await tab.evalPage(expr);
+    } catch (err) {
+      if (!/Not attached to an active page|context was destroyed|Cannot find context/.test(err.message)) throw err;
+    }
+    if (!value) await new Promise(r => setTimeout(r, 50));
+  }
+  return value;
+}
+
 /** Presses `key` ('Enter', 'Tab' or 'Escape') on whatever has the tab's focus, as a keyboard does.
  * Enter is its key-down alone: the page may already be navigating away by its key-up. */
 async function pressKey(tab, key) {
@@ -240,11 +262,15 @@ async function main() {
     await post('/api/board', { title: 'Invoice reminders: grill', mission: 'INVOICE_REMINDERS', wait: true, blocks: [
       { kind: 'question', prompt: 'Fire /direct on the spec?', widget: 'single', action: 'fire', options: [{ label: 'Fire' }, { label: 'Not yet' }] },
     ] });
-    await live('MODEL_MAP', { title: 'Model vendors dashboard', phase: 'landing', waitingOn: 'your merge yes', prs: [
+    await live('MODEL_MAP', { title: 'Model vendors dashboard', phase: 'landing', summary: DIGEST, waitingOn: 'your merge yes', prs: [
       { repo: 'service', number: 1874, url: 'https://github.com/o/service/pull/1874', state: 'green' },
       { repo: 'admin', number: 312, url: 'https://github.com/o/admin/pull/312', state: 'green' },
     ] });
-    await post('/api/board', { title: 'Model vendors: merge', mission: 'MODEL_MAP', blocks: [
+    // The landing brief: a first round, then the round whose merge question sits under
+    // cards taller than the screen, so landing at the question is a scroll away from the top.
+    const brief = await post('/api/board', { title: 'Model vendors: merge', mission: 'MODEL_MAP', blocks: [{ kind: 'markdown', text: 'Build notes' }] });
+    await post('/api/board', { boardId: brief.boardId, blocks: [
+      ...[1, 2, 3].map(n => ({ kind: 'markdown', text: `## Criterion ${n}\n\n${words(400, `proof${n}-`)}` })),
       { kind: 'question', prompt: 'Merge both PRs?', widget: 'single', action: 'merge', options: [{ label: 'Merge' }, { label: 'Hold' }] },
     ] });
     // A board after the merge round: the card still opens the round waiting on the PM.
@@ -425,6 +451,16 @@ async function main() {
             assert.equal(cards.find(c => c.key === LONG).fold, 'block', 'the fold shows while text is cut');
             const short = cards.find(c => c.key === 'BANK_EXPORT');
             assert.equal(short.fold, 'none', 'a card whose text all fits shows no fold, and keeps no room for it');
+          });
+
+          await row(`${mode}, at ${key}: a waiting merge's card shows its summary, the brief's digest, whole, with no fold`, note => {
+            const { digest, cards } = m.missions;
+            assert.ok(digest, 'setup: the merge card shows its summary');
+            note(`digest: ${px(digest.client)} shown of ${px(digest.scroll)}, ${Math.round(digest.client / digest.lineHeight)} lines`);
+            assert.equal(digest.text, DIGEST);
+            assert.ok(digest.client > 2 * digest.lineHeight + 1, 'setup: the digest runs past the two lines a summary is cut at');
+            assert.ok(digest.scroll <= digest.client + 1, 'nothing of it is cut');
+            assert.equal(cards.find(c => c.key === 'MODEL_MAP').fold, 'none', 'nothing cut, so no fold');
           });
 
           await row(`${mode}, at ${key}: the long tab card cuts its name and blocked reason at two lines, with an ellipsis, under one fold`, note => {
@@ -774,6 +810,45 @@ async function main() {
           assert.equal(said, 'Stop asked: waiting for the Master Chief to relay it');
           const orders = (await getJson(`${origin}/api/mission/ANNOUNCEMENTS`, daemon.secret)).orders;
           assert.deepEqual(orders.map(o => o.kind), ['stop']);
+        } finally {
+          await tab.close();
+        }
+      });
+
+      // ADR 142: the card's Merge opens the brief at its merge question and never answers it.
+      await row('Merge, pressed with a mouse, opens the brief scrolled to its merge question, the question on screen with the focus, and the round still waits', async note => {
+        const tab = await openTab(send, onEvent, `${origin}/`, cookie, tabAt(1440, 'light'));
+        try {
+          const merge = byKey.MODEL_MAP.actions.find(a => a.kind === 'merge');
+          assert.ok(merge && merge.round > 1, 'setup: the merge question is in a later round of its brief');
+          await press(tab, 'article.mission-card[data-mission-key="MODEL_MAP"] a.mission-act[data-action="merge"]').catch(err => {
+            if (!/Not attached to an active page/.test(err.message)) throw err;
+          });
+          const at = await readUntil(tab, `(function () {
+            var q = document.activeElement;
+            if (!q || !q.matches || !q.matches('section.question-block')) return null;
+            var r = q.getBoundingClientRect();
+            var m = parseFloat(getComputedStyle(q).scrollMarginTop) || 0;
+            // Settled: its top at the header's edge, or the page scrolled to its end.
+            var end = window.scrollY + innerHeight >= document.documentElement.scrollHeight - 1;
+            if (Math.abs(r.top - m) > 2 && !end) return null;
+            return { path: location.pathname, hash: location.hash, round: q.closest('.round').getAttribute('data-round'),
+              current: q.closest('.round').classList.contains('round-current'), question: q.getAttribute('data-block-id'),
+              top: r.top, bottom: r.bottom, clear: m, height: innerHeight, scrollY: window.scrollY };
+          })()`);
+          const where = at || await tab.evalPage(`(function () {
+            var q = document.activeElement, b = document.querySelector('section.question-block');
+            return location.href + ', focus on ' + (q && q.tagName + '.' + q.className) + ', question top '
+              + (b && Math.round(b.getBoundingClientRect().top)) + ', scrolled ' + window.scrollY;
+          })()`).catch(err => err.message);
+          assert.ok(at, `the merge question took the focus and the page settled: ${where}`);
+          note(`landed on ${at.path}${at.hash}, round ${at.round}, ${at.question} from ${px(at.top)} to ${px(at.bottom)} of ${at.height}px, scrolled ${px(at.scrollY)}`);
+          assert.deepEqual([at.path, at.hash, at.round, at.current, at.question],
+            [`/b/${merge.board}`, `#question:${merge.round}:${merge.question}`, String(merge.round), true, merge.question]);
+          assert.ok(at.top >= at.clear - 2 && at.bottom <= at.height, 'the whole question is on screen, under the header');
+          assert.ok(at.scrollY > 0, 'the page scrolled down past the cards above the question');
+          const now = (await getJson(`${origin}/api/missions`, daemon.secret)).missions.find(m => m.key === 'MODEL_MAP');
+          assert.deepEqual(now.actions, byKey.MODEL_MAP.actions, 'the round still waits on the PM: nothing was answered');
         } finally {
           await tab.close();
         }

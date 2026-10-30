@@ -280,7 +280,8 @@ for each; switching tabs moves nothing in it. _Avoid_: nav bar, header (unqualif
 page has its own).
 
 **Mission card**: a Mission on the Missions view, as tall as its text: its long fields clamp to a
-line or two, whole behind one Show the rest fold. The whole card is the link to its board (its
+line or two, whole behind one Show the rest fold, save a waiting merge's summary, the landing
+brief's digest, shown whole. The whole card is the link to its board (its
 title's link covers it), the round waiting on the person or else the latest; its Stop shows on
 hover, keyboard focus or while its question is open, and always on a screen with no hover, while
 a Fire or Merge it offers stays shown. _Avoid_: tile, row.
@@ -311,7 +312,8 @@ pending, backlog, deferred.
 
 **Action**: the answer a `single` question names in its `action` field, `fire` or `merge`, its
 yes being option 0. While its round is its board's newest and waits on an answer, the Mission's
-card offers that yes as a button, and a click is that round's Send. _Avoid_: shortcut, quick answer, command.
+card offers it: Fire as a button whose click is that round's Send, Merge as a link to the brief
+at its merge question, which answers nothing. _Avoid_: shortcut, quick answer, command.
 
 **Order**: a Stop or a comment sent from a Mission's card, for the Master Chief to carry to the
 Live session and mark relayed. A request, never a signal: the board ends no process. _Avoid_:

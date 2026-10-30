@@ -318,9 +318,11 @@ An amend into the open round stores them the same way.
 
 **`action`** is `'fire'` or `'merge'`, on a `single` question only, and absent on one that carries
 none: the question's yes is option 0, and while its round, its board's newest, waits on an
-answer, the card of the mission whose board it is offers that yes as a Fire or Merge button. A click answers the round
+answer, the card of the mission whose board it is offers that yes as a Fire or Merge button. A Fire click answers the round
 through `POST /api/board/:id/submit`, that question set to option 0's label and the body marked
-`via: 'card'`, exactly as a Send with that pick would. A `fire` question answered yes, from the
+`via: 'card'`, exactly as a Send with that pick would. Merge answers nothing: it is a link to
+`/b/<id>#question:<round>:<question id>`, which the round page resolves by flipping to that
+round and putting that question on screen with the focus, so the merge is answered on the brief. A `fire` question answered yes, from the
 card, the page or a relay, records `fire` on the mission (the submit route below). Any other
 value, or an `action` on another widget, is a 400.
 

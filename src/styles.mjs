@@ -2018,6 +2018,8 @@ body.home-page .mode-toggle:disabled { opacity: 0.5; cursor: default; }
 .mission-title, .mission-summary, .mission-waiting { -webkit-line-clamp: 2; }
 .mission-next { -webkit-line-clamp: 1; }
 .mission-text:has(> .mission-more[open]) :is(.mission-title, .mission-summary, .mission-waiting, .mission-next) { display: block; -webkit-line-clamp: none; overflow: visible; }
+/* A merge's digest shows whole: the card's Merge opens the brief it sums up. */
+.mission-summary[data-digest] { display: block; -webkit-line-clamp: none; overflow: visible; }
 .mission-more { margin-top: 5px; font-size: 11.5px; line-height: var(--mc-mono-lh); }
 .mission-more > summary { display: inline-block; cursor: pointer; color: var(--muted); list-style: none; border-radius: var(--r-sm); }
 .mission-more > summary::-webkit-details-marker { display: none; }

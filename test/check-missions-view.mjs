@@ -1,7 +1,7 @@
 // The Missions view, the board's home page (`GET /`): a column per derived state with the
 // queued shown under waiting, a card's Fire and Merge buttons only while a round on the
-// mission's own board still asks for that answer, a click on one answering that round
-// with option 0, Stop asked once and then posted as an order (a Cmd-click posts it at
+// mission's own board still asks for that answer, a click on Fire answering that round
+// with option 0 and Merge a link to the round's merge question that answers nothing, Stop asked once and then posted as an order (a Cmd-click posts it at
 // once), a note on a card posted as a comment order, and the columns re-read when the
 // daemon-wide stream says a mission changed. Plus the question `action` field those buttons read, accepted and refused at
 // post time.
@@ -97,7 +97,7 @@ async function openMissionsTab() {
 }
 
 const cardFor = (doc, key) => doc.querySelectorAll('article.mission-card').find(c => c.getAttribute('data-mission-key') === key) || null;
-const actionButtons = card => card.querySelectorAll('button.mission-act').map(b => ({ kind: b.getAttribute('data-action'), label: b.textContent }));
+const actionButtons = card => card.querySelectorAll('.mission-act').map(b => ({ kind: b.getAttribute('data-action'), label: b.textContent }));
 
 /** Column name to the keys its cards carry, in order, for every column on the page. */
 function columns(doc) {
@@ -260,8 +260,8 @@ async function main() {
       }
     });
 
-    for (const [kind, label, labels] of [['fire', 'Fire', ['Fire /direct', 'Not yet']], ['merge', 'Merge', ['Merge both', 'Hold']]]) {
-      await check(`${label} shows while the round asks for it, and a click answers that round with option 0${kind === 'fire' ? ', recorded on the mission as a card\'s Fire' : ', recording no Fire'}`, async () => {
+    for (const [kind, label, labels] of [['fire', 'Fire', ['Fire /direct', 'Not yet']]]) {
+      await check(`${label} shows while the round asks for it, and a click answers that round with option 0, recorded on the mission as a card's Fire`, async () => {
         const key = `${kind.toUpperCase()}_CLICK`;
         await liveMission(key);
         const { boardId, round, questionId } = await actionRound(key, kind, labels);
@@ -277,8 +277,7 @@ async function main() {
           assert.equal(board.rounds.find(r => r.n === round).status, 'sent');
           assert.deepEqual(board.answers[questionId], { id: questionId, status: 'answered', choice: labels[0], note: '' });
           const { fire } = await mission(key);
-          if (kind === 'fire') assert.equal(fire?.by, 'card', `the click records a card's Fire: ${JSON.stringify(fire)}`);
-          else assert.equal(fire, undefined, 'a Merge records no Fire');
+          assert.equal(fire?.by, 'card', `the click records a card's Fire: ${JSON.stringify(fire)}`);
           assert.deepEqual(actionButtons(cardFor(tab.document, key)), [], 'the answered round offers the button no more');
           assert.equal(cardFor(tab.document, key).querySelector('p.mission-error'), null);
         } finally {
@@ -286,6 +285,33 @@ async function main() {
         }
       });
     }
+
+    // ADR 142: Merge opens the brief at its merge question and answers nothing.
+    await check('Merge shows while the round asks for it as a link to that round\'s merge question, and a click posts nothing', async () => {
+      await liveMission('MERGE_CLICK');
+      const { boardId, round, questionId } = await actionRound('MERGE_CLICK', 'merge', ['Merge both', 'Hold']);
+      const tab = await openMissionsTab();
+      const sent = [];
+      const pageFetch = globalThis.fetch;
+      globalThis.fetch = (url, opts) => { sent.push([(opts && opts.method) || 'GET', url]); return pageFetch(url, opts); };
+      try {
+        const card = cardFor(tab.document, 'MERGE_CLICK');
+        assert.deepEqual(actionButtons(card), [{ kind: 'merge', label: 'Merge' }]);
+        const merge = card.querySelector('.mission-act');
+        assert.deepEqual([merge.tagName, merge.getAttribute('href')], ['A', `/b/${boardId}#question:${round}:${questionId}`]);
+        await tab.click(merge);
+
+        assert.deepEqual(sent.filter(([method]) => method !== 'GET'), [], 'the click posts no answer');
+        const board = readBoard(boardId, home);
+        assert.equal(board.rounds.find(r => r.n === round).status, 'open');
+        assert.equal(board.answers[questionId], undefined);
+        assert.equal((await mission('MERGE_CLICK')).fire, undefined, 'a Merge records no Fire');
+        assert.deepEqual(actionButtons(cardFor(tab.document, 'MERGE_CLICK')), [{ kind: 'merge', label: 'Merge' }], 'the round still asks, so Merge stays');
+      } finally {
+        globalThis.fetch = pageFetch;
+        tab.restoreFetch();
+      }
+    });
 
     await check('Check again on a gone session\'s card posts its recheck and re-reads the columns', async () => {
       const tab = await openMissionsTab();
