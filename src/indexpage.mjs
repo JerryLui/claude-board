@@ -359,7 +359,7 @@ function missionsCardHeld(node, key) {
 // taken from the card's fresh markup 'html' so it reads as a repainted card's would.
 function missionsSyncHeld(node, key, html) {
   var busy = !!missionsUi.sending[key];
-  var btns = node.querySelectorAll('button.mission-act, button.mission-stop, button.mission-stop-confirm, button.mission-comment-send');
+  var btns = node.querySelectorAll('button.mission-act, button.mission-stop, button.mission-stop-confirm, button.mission-comment-send, button[data-recheck]');
   for (var i = 0; i < btns.length; i++) {
     if (busy) btns[i].setAttribute('disabled', ''); else btns[i].removeAttribute('disabled');
   }
@@ -657,6 +657,15 @@ function onMissionsClick(ev) {
   var key = cardEl.getAttribute('data-mission-key');
   var act = t.closest('button.mission-act');
   if (act) { if (!act.disabled) missionsAnswer(key, act); return; }
+  var recheck = t.closest('button[data-recheck]');
+  if (recheck) {
+    if (!recheck.disabled) {
+      missionsSend(key, function () {
+        return postMissionJson('/api/mission/' + encodeURIComponent(key) + '/recheck', {});
+      }, 'Could not check again');
+    }
+    return;
+  }
   var stop = t.closest('button.mission-stop');
   if (stop) {
     if (stop.disabled) return;
@@ -1931,7 +1940,9 @@ function missionsParts(overview, ui) {
   // A card's title past this many characters may be cut at its clamp, so the card
   // carries the fold that shows it whole.
   var FOLD_TITLE_CHARS = 30;
-  var PR_MARKS = { green: '✓', merged: '✓', open: '○', draft: '○' };
+  // A PR's state is the view's, from GitHub at its head commit; 'checking' (no fact yet)
+  // takes the open ring.
+  var PR_MARKS = { green: '✓', merged: '✓', red: '✕', open: '○', draft: '○' };
   var STOP_ICON = '<svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="1.8"/><line x1="4.7" y1="4.7" x2="15.3" y2="15.3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
   var data = overview || {};
   var missions = Array.isArray(data.missions) ? data.missions : [];
@@ -1972,7 +1983,7 @@ function missionsParts(overview, ui) {
         : 'Stop asked: waiting for the Master Chief to relay it');
     }
     if (comments) lines.push(comments === 1 ? 'Comment waiting for the Master Chief' : comments + ' comments waiting for the Master Chief');
-    // The PM's newest order, and whether the session has marked it seen (ADR 140).
+    // The PM's newest order, and whether the session has marked it seen (ADR 141).
     if (pm && live) lines.push(pm.ackedAt ? 'PM’s order seen' : 'PM’s order sent, not seen yet');
     return { lines: lines, stopPending: !!(stop && live) };
   }
@@ -2053,6 +2064,12 @@ function missionsParts(overview, ui) {
     if (m.summary) out += '<p class="mission-summary">' + esc(m.summary) + '</p>';
     if (m.waitingOn) out += '<p class="mission-fact mission-waiting"><span class="mission-label">Waiting on</span>' + esc(m.waitingOn) + '</p>';
     if (m.next) out += '<p class="mission-fact mission-next"><span class="mission-label">Next</span>' + esc(m.next) + '</p>';
+    // A gone session says so with its last heartbeat, the whole time in its tooltip.
+    if (m.gone) {
+      var seen = age(m.gone.lastSeenAt);
+      out += '<p class="mission-fact" data-gone title="' + esc('Last seen ' + (m.gone.lastSeenAt || 'never')) + '">Session gone, last seen '
+        + esc(seen === 'now' ? 'just now' : seen ? seen + ' ago' : 'never') + '</p>';
+    }
     // The title, summary, waiting on and next each stop at a few lines, and this one fold
     // shows them whole. It is hidden on screen while nothing is cut (missionsMarkFits).
     out += moreFold(key, m.summary || m.waitingOn || m.next || String(title).length > FOLD_TITLE_CHARS);
@@ -2069,6 +2086,8 @@ function missionsParts(overview, ui) {
         + ' title="' + esc(name + ': ' + pr.state) + '">'
         + '<i aria-hidden="true">' + (PR_MARKS[pr.state] || '○') + '</i>' + esc(name) + '</' + tag + '>';
     }
+    // Check again re-derives the card now: its session's process and its PR facts.
+    if (m.gone) foot += '<button type="button" class="mission-btn" data-recheck' + (busy ? ' disabled' : '') + '>Check again</button>';
     var shown = {};
     for (var a = 0; a < actions.length; a++) {
       var act = actions[a];

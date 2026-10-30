@@ -1,6 +1,6 @@
 // Which mission a session is bound to (src/missions.mjs `bindingFor`), answered off the
 // stored records alone: `GET /api/binding`, which a session's hook asks every minute, and a
-// board post naming its session, which links the board to that session's mission (ADR 140).
+// board post naming its session, which links the board to that session's mission (ADR 141).
 //
 // The records are kept here per file, by each file's size, mtime and inode, so a call
 // re-reads only the records that moved since the last one: one readdir and a stat per

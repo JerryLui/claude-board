@@ -2524,7 +2524,7 @@ async function main() {
     }
   });
 
-  // ADR 140: a session binds by the id the agent passes, with this shim's parent process
+  // ADR 141: a session binds by the id the agent passes, with this shim's parent process
   // beside it, and a board it posts links to the mission it joined. Every shim here shares
   // this check process as its parent, so the session leaves before the check ends.
   await check('the mission tool binds the session id the caller passes: join, binding, seen and a write\'s heartbeat follow it under a new id from the same process, its boards link to the mission, leave lets it go; CLAUDE_MISSION links nothing', async () => {

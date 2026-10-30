@@ -67,7 +67,7 @@ import { createStrandedWatch } from './stranded.mjs';
 import { createMissionWatch } from './mission-watch.mjs';
 import { createMissionsCache } from './missions-cache.mjs';
 import { MAX_POST_BYTES, MAX_DRAINED_BYTES, postTooLargeMessage } from './post-limit.mjs';
-import { getMissionView, missionView, upsertMission, launchMission, bindSession, joinMission, leaveMission, addOrder, ackOrder, seenOrder, resentOrder, linkBoard, recordFire, assertMissionKey } from './missions.mjs';
+import { getMissionView, missionView, upsertMission, launchMission, bindSession, joinMission, leaveMission, addOrder, ackOrder, seenOrder, resentOrder, linkBoard, recordFire, recordPrFacts, assertMissionKey } from './missions.mjs';
 import { createBindingIndex } from './bindings.mjs';
 import { createSessionList, validateSessionRef, bindBoardSession } from './sessions.mjs';
 
@@ -576,16 +576,17 @@ const BOARD_COOKIE_ACTIONS = new Set(['submit', 'attended']);
  * from — and the window that decides what dies is named in the request, never here. */
 const STORE_COOKIE_ACTIONS = new Set(['prune']);
 
-/** The mission writes a cookie-holding browser may perform: `order`, and nothing else. A
- * named closed set for the reason `POMODORO_COOKIE_ACTIONS` above states.
+/** The mission writes a cookie-holding browser may perform: `order` and `recheck`, and
+ * nothing else. A named closed set for the reason `POMODORO_COOKIE_ACTIONS` above states.
  *
  * `order` is the missions view's Stop and comment buttons: it appends a request for the
  * Master Chief to relay and changes nothing the mission's session reads as its own. A `pm`
  * order, the PM's words the Master Chief carries, wants the secret even on this route
- * (`handleMission`). Every other mission write, the record itself, a launch, a join or leave,
- * a session bind and an order's ack, seen or resend, is a session's or the Master Chief's,
- * and wants the secret. */
-const MISSION_COOKIE_ACTIONS = new Set(['order']);
+ * (`handleMission`). `recheck` is a card's Check again: it writes nothing, only re-derives
+ * the view now. Every other mission write, the record itself, a launch, a join or leave, a
+ * session bind, an order's ack, seen or resend, and the PR facts, is a session's, its
+ * watcher's or the Master Chief's, and wants the secret. */
+const MISSION_COOKIE_ACTIONS = new Set(['order', 'recheck']);
 
 /** The session writes a cookie-holding browser may perform: a tab card's `order`, on the
  * footing `MISSION_COOKIE_ACTIONS` gives a mission card's (ADR 131). The snapshot itself
@@ -1009,7 +1010,7 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, s
       return sendJson(res, 400, { error: err.message });
     }
   }
-  // A post naming no mission goes to the one its session is bound to (ADR 140): matched by
+  // A post naming no mission goes to the one its session is bound to (ADR 141): matched by
   // the process it names, or by the id the watcher's list holds for that process. A lookup
   // that fails links nothing, and the post goes on.
   let mission = namedMission;
@@ -2714,12 +2715,14 @@ async function handlePrune(req, res, home, waiting) {
  *   POST /api/mission/:key/order/:id/ack    { order }
  *   POST /api/mission/:key/order/:id/seen   { order } | 409 not bound
  *   POST /api/mission/:key/order/:id/resent { order }
+ *   POST /api/mission/:key/facts            the watcher's PR facts, answers the view
+ *   POST /api/mission/:key/recheck          drops the missions cache, answers the fresh view
  *
  * A refusal is `{ error }` with its status, and a 409 also carries the bound `session`, plus
  * `silent: true` on a launch refused by a session that reads stalled by silence while its
  * process lives. `heldSecret` is whether the request carried the secret, not the cookie.
  * Every write publishes `missions` on the daemon-wide stream. */
-async function handleMission(req, res, parts, home, stream, heldSecret) {
+async function handleMission(req, res, parts, home, stream, cache, heldSecret) {
   const key = parts[2];
   const tail = parts.slice(3);
   try {
@@ -2728,6 +2731,9 @@ async function handleMission(req, res, parts, home, stream, heldSecret) {
       return sendJson(res, 200, getMissionView(key, { home }));
     }
     if (req.method !== 'POST') return sendText(res, 404, 'not found');
+    if (tail.length === 1 && (tail[0] === 'facts' || tail[0] === 'recheck')) {
+      return await handleMissionFacts(req, res, key, tail[0], home, stream, cache);
+    }
     const route = tail.length === 0 ? 'upsert'
       : tail.length === 1 && ['launch', 'join', 'leave', 'session', 'order'].includes(tail[0]) ? tail[0]
         : tail.length === 3 && tail[0] === 'order' && ['ack', 'seen', 'resent'].includes(tail[2]) ? tail[2]
@@ -2783,6 +2789,24 @@ function handleBinding(res, url, bindings) {
   }
   if (ref.id === undefined && ref.pid === undefined) return sendJson(res, 400, { error: 'binding needs id, or pid and procStart' });
   return sendJson(res, 200, bindings.binding(ref));
+}
+
+/** `POST /api/mission/:key/facts` stores the session watcher's PR facts and
+ * `POST /api/mission/:key/recheck` drops the missions cache (src/missions-cache.mjs), so
+ * a gone session or a fresh fact shows now rather than up to a bound later. Each answers
+ * the view, read afresh, and publishes `missions`. */
+async function handleMissionFacts(req, res, key, route, home, stream, cache) {
+  let body;
+  try {
+    body = await readJsonBody(req);
+  } catch (err) {
+    return sendJson(res, err.status || 400, { error: err.status ? err.message : 'invalid JSON body' });
+  }
+  if (route === 'facts') recordPrFacts(key, body, { home });
+  cache.drop();
+  const answer = getMissionView(key, { home });
+  broadcastMissions(stream, key);
+  return sendJson(res, 200, answer);
 }
 
 /** `missions` on the daemon-wide stream: which mission changed and when, `key` null for a
@@ -3190,7 +3214,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
         }
       }
 
-      // The mission a session is bound to (ADR 140), asked by its hook every minute: off the
+      // The mission a session is bound to (ADR 141), asked by its hook every minute: off the
       // records alone, never the derived overview. It carries the PM's orders, so it is read
       // with the secret only, as one mission is below.
       if (req.method === 'GET' && url.pathname === '/api/binding') {
@@ -3218,7 +3242,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
           res.end();
           return;
         }
-        return await handleMission(req, res, parts, home, streamHub, secretMatches(req.headers[SECRET_HEADER], secret));
+        return await handleMission(req, res, parts, home, streamHub, missionsCache, secretMatches(req.headers[SECRET_HEADER], secret));
       }
 
       return sendText(res, 404, 'not found');

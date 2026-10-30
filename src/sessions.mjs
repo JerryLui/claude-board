@@ -347,7 +347,7 @@ export function createSessionList({ now = Date.now, onChange = () => {} } = {}) 
  * its last launch ended. A session a mission launched is that mission's card, never a tab,
  * even once the mission has moved on while its process lingers; the pid covers it under a
  * new id before its next beat binds that (a `/clear`). A session that left its mission
- * (`session: { ended, leftAt }`, src/missions.mjs `leaveMission`) is a tab again (ADR 140). */
+ * (`session: { ended, leftAt }`, src/missions.mjs `leaveMission`) is a tab again (ADR 141). */
 function missionSessions(missions) {
   const ids = new Set();
   const pids = new Set();

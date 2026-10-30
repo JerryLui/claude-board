@@ -968,7 +968,7 @@ making a stub mission (titled by its key, phase `grill`, state `waiting`) when t
 stores `mission` on the board. A later round naming a mission links a board that had none; a
 board never moves from one mission to another, so naming a second is a **400**, and so is a key
 off the pattern, both before anything is written. **A post naming no mission links to the one
-its session is bound to** (ADR 140, "The missions routes"): the post's `session` (below), or the
+its session is bound to** (ADR 141, "The missions routes"): the post's `session` (below), or the
 id the session watcher lists for that process, matched against each mission's bound session; a
 board that already belongs to a mission stays with it. The shim names no mission itself.
 
@@ -1445,7 +1445,8 @@ Mission = {
   state,                     // stored: 'needs-you' | 'working' | 'waiting' | 'queued' | 'released'
   summary?,                  // at most 280 characters
   waitingOn?, next?,         // short phrases, at most 280 characters each
-  prs: [ { repo, number, url, state, order? } ],   // state: 'draft'|'open'|'green'|'merged'
+  prs: [ { repo, number, url, order? } ],          // the session names its PRs (a `state` is dropped)
+  prFacts?: [ { repo, number, state, head, checkedAt } ],   // the watcher's, from GitHub (ADR 140)
   boards: [ { id, url, at } ],                     // linked by a post; the last is the latest
   session: { id?, pid?, procStart?, name?, login?, startedAt, seenAt, typedAt?, ended? }
          | { ended, leftAt }  // the session left (`leave`)
@@ -1461,12 +1462,17 @@ Mission = {
 }
 ```
 
-**A view is what every read answers**: the stored record plus three fields derived on each read
-and never stored. `view` is the column the mission shows in: `released` while stored released;
-else `stalled` when its session is gone (a bound `pid` that no longer exists, or a reservation no
-`pid` or `id` bound within 5 minutes) or it is stored `working` and `session.seenAt` is over 15
-minutes old; else `needs-you` when a linked board's newest round is open and asks a question or was
-minted awaited (a lapsed wait still counts; an older round left open does not, ADR 134); else the stored `state`. `live` is whether a session
+**A view is what every read answers**: the stored record, its `prs` read through the facts, plus
+four fields derived on each read and never stored. `view` is the column the mission shows in:
+`released` while stored released; else `needs-you` when a linked board's newest round is open and
+asks a question or was minted awaited (a lapsed wait still counts; an older round left open does
+not, ADR 134), whatever its session is doing (ADR 140); else `stalled` when its session is gone (a
+bound `pid` that no longer exists, or a reservation no `pid` or `id` bound within 5 minutes) or it
+is stored `working` and `session.seenAt` is over 15 minutes old; else the stored `state`. `gone` is
+`{ lastSeenAt }`, the session's `seenAt`, while that session is gone and the mission has not
+recorded its end, else `null`. Each of `prs` carries `state`, `head` and `checkedAt` from the
+latest fact for its repo and number: `state` one of `'draft' | 'open' | 'green' | 'red' |
+'merged'`, or `'checking'` with `head` and `checkedAt` null before the first. `live` is whether a session
 holds the mission (ADR 129): bound or reserved, not gone, and the mission has not recorded its end
 (stored `released`, or phase `grill` with `fire` set); silence frees only a session with no `pid`.
 `actions` lists the card's buttons (ADR 125):
@@ -1531,7 +1537,7 @@ GET  /api/binding?id=<session id>[&pid=&procStart=]
        -> { key | null, takeover: { by, at } | null, orders: [Order], handoff | null }
 ```
 
-**A session is bound to a mission by its own session id** (ADR 140), which the agent reads fresh
+**A session is bound to a mission by its own session id** (ADR 141), which the agent reads fresh
 (Claude Code's `CLAUDE_CODE_SESSION_ID`), and by its process, `pid` and `procStart` (UTC
 ISO-8601), which a `/clear` keeps while the id changes. No environment variable names a mission.
 A join binds when no session holds the mission (`live` above), when the bound session is this one
@@ -1574,7 +1580,7 @@ POST /api/mission/:key/order/:id/resent  {} -> { order }
 ```
 
 An order is a card's Stop or comment for the Master Chief to carry to the session (ADR 125), or
-`pm`, the PM's own words the Master Chief carries to the bound session word for word (ADR 140),
+`pm`, the PM's own words the Master Chief carries to the bound session word for word (ADR 141),
 stored `by: 'master-chief'`. Its id is `o_` and 16 hex digits. A comment and a pm order need
 non-empty `text`, at most 4 KB. A card's order is the one mission write the browser's cookie may
 make; a pm order wants the secret. The ack, secret only, is the Master Chief's: it sets
@@ -1582,6 +1588,21 @@ make; a pm order wants the secret. The ack, secret only, is the Master Chief's: 
 process as a join is: it sets `ackedAt` once, which the card shows on the PM's newest order, and
 another session is a 409. `resent` sets `resentAt` once, the Master Chief having sent an unseen
 order a second time. A repeat of any keeps the first time. An absent mission or order is a 404.
+
+```
+POST /api/mission/:key/facts    { prs: [ { repo, number, state, head, checkedAt? } ] } -> View
+POST /api/mission/:key/recheck  {} -> View
+```
+
+`facts` is the session watcher's reading of the mission's PRs on GitHub (ADR 140), secret only:
+`state` is the PR at its `head` commit, one of `'draft' | 'open' | 'green' | 'red' | 'merged'`,
+`head` the commit, at most 200 characters, and `checkedAt` an ISO time, now when absent. Each fact
+replaces the one held for its `repo` and `number`, a fact for a PR the mission does not list is
+dropped, and the facts leave `updatedAt` as it was. Any other field, a wrong type or over 50
+entries is a 400 that writes nothing. `recheck` is a card's Check again, by the secret or the
+cookie: it writes nothing, drops the daemon's cached missions overview so the next
+`GET /api/missions` reads afresh, and answers the view read now. An absent mission is a 404 on
+either.
 
 Every write publishes `missions` on the daemon-wide stream ("SSE events"). A refusal is
 `{ error }` with its status.
@@ -1633,7 +1654,7 @@ A session a mission holds or held is never a tab: its `id` or `pid` is a mission
 `session.ended`'s, its `jobId` is the first 8 characters of such an id, or it posted a board that
 belongs to a mission holding only a launch's reservation (a launch reserves a session before it
 knows its pid or id). A session that left its mission (`session: { ended, leftAt }`) is a tab
-again, a board it posted while bound staying the mission's (ADR 140). `folder` is the
+again, a board it posted while bound staying the mission's (ADR 141). `folder` is the
 cwd's last segment; `command` the name's leading `/word`, else null. `state` is `needs-you` while a
 round that wants its answer (open and asking, as a mission's needs-you reads a round, but any
 round of the board, not only its newest) sits on a board of no mission whose

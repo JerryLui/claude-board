@@ -93,7 +93,7 @@ const BACKGROUND = process.env.CLAUDE_BOARD_CLIENT === 'background';
 // The mission tool's key rule: the store's `SAFE_MISSION_KEY` (src/store.mjs), spelled again
 // here because importing the store pulls the page assets, the mermaid engine among them, into
 // every shim. No environment names a mission: a board post names its session (below), and
-// the daemon links the board to the mission that session joined (ADR 140).
+// the daemon links the board to the mission that session joined (ADR 141).
 const MISSION_KEY_RE = /^[A-Za-z0-9_-]{1,80}$/;
 
 // The agent session this shim runs under, carried on every board post so the daemon links
@@ -704,7 +704,7 @@ const READ_TOOL = {
  * Chief's write onto ANOTHER session's board, answering that session's round on the PM's
  * words.
  *
- * A session binds to a mission by its own session id (ADR 140), which the CALLER passes as
+ * A session binds to a mission by its own session id (ADR 141), which the CALLER passes as
  * `session` on every call that binds or acks: a `/clear` gives the session a new id, which
  * the agent reads fresh (Claude Code's `CLAUDE_CODE_SESSION_ID`) while this process keeps
  * the one it was spawned under, so the shim never supplies an id of its own. It adds its

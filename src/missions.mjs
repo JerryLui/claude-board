@@ -7,12 +7,14 @@
 // every field a caller may write is on `MISSION_FIELDS`, typed and capped below, and
 // anything else is refused rather than stored.
 //
-// What a reader sees is a view, derived on every read and never stored: a session whose
-// process is gone, a reservation no process bound within `UNBOUND_GRACE_MS`, or a working
-// one silent past `STALL_SILENCE_MS`, reads stalled; a mission whose board's newest round
-// still waits on an answer reads needs-you. The derivation needs the board store and a
-// process table, which is why it is computed here and not written by whoever last touched
-// the record.
+// What a reader sees is a view, derived on every read and never stored: a mission whose
+// board's newest round still waits on an answer reads needs-you, ahead of everything but
+// released; else a session whose process is gone, a reservation no process bound within
+// `UNBOUND_GRACE_MS`, or a working one silent past `STALL_SILENCE_MS`, reads stalled, and a
+// gone one also carries `gone: { lastSeenAt }`. A PR's state and head commit are the facts
+// the session watcher read from GitHub (`recordPrFacts`), never the session's own words.
+// The derivation needs the board store and a process table, which is why it is computed
+// here and not written by whoever last touched the record.
 
 import { randomBytes } from 'node:crypto';
 import { readBoard, boardHome, readMission, writeMission, listMissions, assertMissionKey, SAFE_MISSION_KEY, MISSION_RETENTION_MS } from './store.mjs';
@@ -22,7 +24,10 @@ export { SAFE_MISSION_KEY, assertMissionKey, MISSION_RETENTION_MS };
 
 export const PHASES = ['grill', 'direct', 'landing'];
 export const STORED_STATES = ['needs-you', 'working', 'waiting', 'queued', 'released'];
-export const PR_STATES = ['draft', 'open', 'green', 'merged'];
+/** A PR's state as the session watcher reads it from GitHub at the PR's head commit. */
+export const PR_STATES = ['draft', 'open', 'green', 'red', 'merged'];
+/** A listed PR's state in the view before the first fact for it arrives. */
+export const PR_CHECKING = 'checking';
 /** What an order asks: a card's Stop or comment (`CARD_ORDER_KINDS`, the only kinds a card or
  * a tab's card may post), or `pm`, the PM's own words the Master Chief carries to the bound
  * session word for word. */
@@ -116,20 +121,41 @@ function timestamp(value, what) {
   return value;
 }
 
+function prNumber(value, what) {
+  if (!Number.isInteger(value) || value <= 0) throw refuse(`${what}.number must be a positive integer`);
+  return value;
+}
+
+/** A PR a session lists names it, `{ repo, number, url }`. A `state` from a writer older
+ * than the PR facts is still taken, checked, and dropped: the view's state is a fact. */
 function validatePr(pr, i) {
   const what = `prs[${i}]`;
   assertObject(pr, what);
   assertOnly(pr, ['repo', 'number', 'url', 'state', 'order'], what);
-  if (!Number.isInteger(pr.number) || pr.number <= 0) throw refuse(`${what}.number must be a positive integer`);
   if (pr.order !== undefined && !Number.isFinite(pr.order)) throw refuse(`${what}.order must be a number`);
+  if (pr.state !== undefined) oneOf(pr.state, PR_STATES, `${what}.state`);
   return {
     repo: str(pr.repo, `${what}.repo`, MAX_NAME_CHARS),
-    number: pr.number,
+    number: prNumber(pr.number, what),
     url: str(pr.url, `${what}.url`, MAX_URL_CHARS),
-    state: oneOf(pr.state, PR_STATES, `${what}.state`),
     ...(pr.order !== undefined ? { order: pr.order } : {}),
   };
 }
+
+function validatePrFact(fact, i, now) {
+  const what = `prs[${i}]`;
+  assertObject(fact, what);
+  assertOnly(fact, ['repo', 'number', 'state', 'head', 'checkedAt'], what);
+  return {
+    repo: str(fact.repo, `${what}.repo`, MAX_NAME_CHARS),
+    number: prNumber(fact.number, what),
+    state: oneOf(fact.state, PR_STATES, `${what}.state`),
+    head: str(fact.head, `${what}.head`, MAX_NAME_CHARS),
+    checkedAt: fact.checkedAt === undefined ? iso(now) : timestamp(fact.checkedAt, `${what}.checkedAt`),
+  };
+}
+
+const prKey = pr => `${pr.repo}#${pr.number}`;
 
 /** One validator per writable field; each answers the value to store, or throws a 400.
  * `null` clears an optional field and is refused on a required one. */
@@ -345,24 +371,45 @@ export function missionActions(m, { home = boardHome() } = {}) {
 
 function viewState(m, linked, now, isAlive) {
   if (m.state === 'released') return 'released';
-  if (sessionStalled(m, now, isAlive)) return 'stalled';
   if (boardsNeedYou(linked())) return 'needs-you';
+  if (sessionStalled(m, now, isAlive)) return 'stalled';
   return m.state;
 }
 
-/** The column `m` shows in: released stays released; a stalled session wins over everything
- * else; then a board waiting on the PM; else the stored state. */
+/** `{ lastSeenAt }` while the session bound or reserved on `m` is gone (`sessionGone`) and
+ * the mission has not recorded its end, `lastSeenAt` being its last heartbeat; else null. */
+function goneOf(m, now, isAlive) {
+  const s = currentSession(m);
+  if (!s || sessionFinished(m) || !sessionGone(s, now, isAlive)) return null;
+  return { lastSeenAt: s.seenAt ?? s.startedAt ?? null };
+}
+
+/** The PRs `m` lists, each with the `state`, `head` and `checkedAt` of its latest fact,
+ * or `checking` and nulls before the first. */
+function prsOf(m) {
+  const facts = new Map((m.prFacts || []).map(f => [prKey(f), f]));
+  return (m.prs || []).map(({ state: _said, ...pr }) => {
+    const fact = facts.get(prKey(pr));
+    return { ...pr, state: fact ? fact.state : PR_CHECKING, head: fact ? fact.head : null, checkedAt: fact ? fact.checkedAt : null };
+  });
+}
+
+/** The column `m` shows in: released stays released; then a board's round waiting on the
+ * PM, whatever its session is doing; then a stalled session; else the stored state. */
 export function deriveState(m, { home = boardHome(), now = Date.now(), isAlive = pidAlive } = {}) {
   return viewState(m, () => linkedBoards(m, home), now, isAlive);
 }
 
-/** The record as a reader gets it: every stored field, plus `view` (the derived state),
- * `live` (a session holds the mission, `hasLiveSession`) and `actions` (`missionActions`). */
+/** The record as a reader gets it: every stored field, `prs` with each PR's facts
+ * (`prsOf`), plus `view` (the derived state), `gone` (`goneOf`), `live` (a session holds
+ * the mission, `hasLiveSession`) and `actions` (`missionActions`). */
 export function missionView(m, { home = boardHome(), now = Date.now(), isAlive = pidAlive } = {}) {
   const linked = linkedBoards(m, home);
   return {
     ...m,
+    prs: prsOf(m),
     view: viewState(m, () => linked, now, isAlive),
+    gone: goneOf(m, now, isAlive),
     live: hasLiveSession(m, now, isAlive),
     actions: actionsOf(linked),
   };
@@ -425,6 +472,27 @@ export function upsertMission(key, patch, { home = boardHome(), now = Date.now()
     else m[field] = value;
   }
   touch(m, now);
+  return writeMission(m, home);
+}
+
+/** `POST /api/mission/:key/facts`: the session watcher's reading of the mission's PRs on
+ * GitHub, `{ prs: [{ repo, number, state, head, checkedAt }] }`. Each fact replaces the one
+ * held for its repo and number; a fact for a PR the mission does not list is dropped, and
+ * so is a held one for a PR it no longer lists. `updatedAt` stays: a reading is not a
+ * change the mission made. Answers the stored record. */
+export function recordPrFacts(key, body, { home = boardHome(), now = Date.now() } = {}) {
+  assertMissionKey(key);
+  assertObject(body, 'the body');
+  assertOnly(body, ['prs'], 'the body');
+  if (!Array.isArray(body.prs)) throw refuse('prs must be an array');
+  if (body.prs.length > MAX_PRS) throw refuse(`prs holds over ${MAX_PRS} entries`);
+  const given = body.prs.map((f, i) => validatePrFact(f, i, now));
+  const m = readMission(key, home);
+  if (!m) throw notFound(key);
+  const listed = new Set((m.prs || []).map(prKey));
+  const facts = new Map((m.prFacts || []).filter(f => listed.has(prKey(f))).map(f => [prKey(f), f]));
+  for (const f of given) if (listed.has(prKey(f))) facts.set(prKey(f), f);
+  m.prFacts = [...facts.values()];
   return writeMission(m, home);
 }
 
@@ -518,7 +586,7 @@ export function bindSession(key, body, { home = boardHome(), now = Date.now(), i
   return writeMission(m, home);
 }
 
-// --- binding by session id (ADR 140) ---------------------------------------------------
+// --- binding by session id (ADR 141) ---------------------------------------------------
 
 /** A session as a caller names itself: `id` (its agent session id, which a `/clear`
  * changes), and its process as `pid` and `procStart` (which a `/clear` keeps). */
