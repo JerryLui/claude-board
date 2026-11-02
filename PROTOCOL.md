@@ -741,7 +741,16 @@ GET  /api/board/:id/read            one board's rounds, answers and comments, in
                                     answers the same twice. Secret only, like /wait: a tool
                                     calls it, never a page
 GET  /api/board/:id/events          SSE: round pushes, state changes; `?stages=held`
-                                    declares the page fills held stage frames
+                                    declares the page fills held stage frames. A page
+                                    opens it only where the browser has no SharedWorker
+GET  /api/stream                    SSE: one browser's shared stream (ADR 144), held by its
+                                    worker for every tab; see "The shared stream"
+GET  /api/stream/worker-<hash>.js   that worker's script, by content-addressed name
+POST /api/stream/:id/watch          { tab, board, held? } -> { watcher }: a tab of that
+                                    browser opened `board`; it is now a Watcher on it
+POST /api/stream/:id/unwatch        { watcher } -> { ok }: that tab went away
+POST /api/stream/:id/beat           { watchers } -> { unknown }: the worker still holds
+                                    these tabs; `unknown` names the ones the daemon dropped
 POST /api/board/:id/submit          { round, action: 'send'|'discuss', via?: 'card', answers,
                                     comments }
 POST /api/board/:id/abandon         {} -> { ok: true, rounds }; closes every round still
@@ -907,6 +916,10 @@ It is additionally accepted on `POST /api/board/:id/attended` — a browser hold
 only party that can honestly report whether its own tab is Attended, and the report reaches less
 than `submit` already does: no round named, no answer carried, nothing durable touched (see that
 route's own section, below).
+
+It is additionally accepted on the three shared-stream writes, `watch`, `unwatch` and `beat`
+(ADR 144): the browser's worker registering its tabs as Watchers, which reaches what holding a
+board's `/events` stream and posting `attended` already reach.
 
 It is additionally accepted on nine pomodoro writes — `ensure`, `pause`, `resume`, `reset`,
 `settings`, `preview`, `notifyTest`, `forward`, `restart` — so the index page's switch and its
@@ -1860,6 +1873,37 @@ derived change no write made: a session whose process died, or one gone silent p
 A read between the watch's ticks can therefore see a stall before the event says so. With `key:
 null` it names the tab cards instead ("The session routes"): a changed snapshot, the watcher up or
 down, a tab's order, or a round on a board a session posted.
+
+### The shared stream
+
+`GET /api/stream` (ADR 144): one connection per browser, held by a SharedWorker
+(`src/stream-worker.mjs`) for every board tab and index tab of that browser, so a reviewer with
+more tabs open than Chrome's six connections per host never leaves a page waiting for a slot. Same
+`: connected` comment, heartbeat and cleanup as the streams above. Every frame is an unnamed
+`message` event whose data is one JSON object:
+
+```js
+data: { to: null, event: 'stream', data: { id } }          // first, naming this stream
+data: { to: null, event: '<name>', data }                  // a daemon-wide event, as on /api/events
+data: { to: '<watcher>', event: 'watcher', data: { id, tab } }  // a tab's Watcher, ahead of its pushes
+data: { to: '<watcher>', event: '<name>', data }           // that Watcher's board event, as on /events
+```
+
+The worker registers each board tab with `POST /api/stream/:id/watch { tab, board, held }`; the
+daemon subscribes a Watcher on that board, writes its `watcher` frame down the stream and answers
+its id. The tab hears `open` and then `watcher`, as a tab holding its own `/events` stream does on
+each connect, and reports `attended` under that id. A reconnect is a new stream: the worker
+registers every tab again.
+
+Presence is judged from beats. Each tab holds a Web Lock for its life and beats the worker every
+5 s; the worker drops a tab when its lock frees, on its `pagehide`, or after 75 s without a beat
+(past Chrome's once-a-minute timers in a tab hidden five minutes), sending `unwatch`; a beat from a
+tab it no longer holds (one dropped while the machine slept) registers that tab again. It beats the
+daemon every 5 s naming every Watcher it holds; the daemon drops a Watcher no beat has named for
+20 s (`CLAUDE_BOARD_STREAM_BEAT_TTL_MS`, for checks), and every Watcher of a stream that closes.
+Each drop asks the stranded rule again, as a closed `/events` stream does.
+
+A browser with no SharedWorker opens `/api/board/:id/events` and `/api/events` per tab, as before.
 
 ## Stage postMessage channel
 

@@ -53,8 +53,9 @@ than left to the wall clock. A Send that arrives after is stored like a Lapsed r
 becomes Submitted; it reaches an agent through `read`, since no thread waits on that board again. _Avoid_: cancelled, dropped, discarded, closed, expired
 (that is Lapsed).
 
-**Watcher**: an open board tab holding a live stream to one board. Counted per board and
-never per machine: a reviewer sitting on another board's tab is not a watcher of this one.
+**Watcher**: an open board tab with a live stream to one board: its own, or its browser's shared
+stream (ADR 144), registered there and beaten for. Counted per board and never per machine: a
+reviewer sitting on another board's tab is not a watcher of this one.
 _Avoid_: client, connection, viewer.
 
 **Remote review**: answering boards from a second Mac's browser while the agent and the daemon

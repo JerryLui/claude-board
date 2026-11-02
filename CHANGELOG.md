@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Board pages open at once however many tabs are open**: every board tab and index tab of a
+  browser now shares one connection to the daemon through a SharedWorker, where each tab held its
+  own. Chrome allows six connections per host over plain HTTP, so through an SSH tunnel the
+  seventh page used to wait for a slot. A closed tab still stops counting as watching its board at
+  once, and the nobody-is-watching banner still fires after the grace. A tab already open on the
+  old page keeps its own stream until reloaded.
+
 - **An oversized post gets a 413, not a dropped connection**: a post over the 25,000,000-byte
   limit, up to 100,000,000 bytes, is now read through, stored nowhere, and answered HTTP 413
   naming the size it read and the byte limit; the next post on the same connection is served

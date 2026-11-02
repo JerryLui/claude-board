@@ -128,3 +128,4 @@ link where it is worth reading.
 | 141 | [A session joins its mission by its own id, one at a time, and takes the PM's orders](.agents/adr/0141-a-session-joins-its-mission-by-its-own-id.md) | 2026-10-30 | amends 123, 129, 131; relates to 125, 126 |
 | 142 | [A card's Merge opens the brief at its merge question, and answers nothing](.agents/adr/0142-a-cards-merge-opens-the-brief-at-its-merge-question.md) | 2026-10-30 | narrows 125, 137; relates to 134 |
 | 143 | [A reinstall fails on a refused read under ~/Documents, after registering](.agents/adr/0143-a-reinstall-fails-on-a-refused-read-under-documents.md) | 2026-10-30 | relates to 15, 100 |
+| 144 | [A browser shares one stream, and its tabs are Watchers by beats](.agents/adr/0144-a-browser-shares-one-stream-and-beats-for-its-tabs.md) | 2026-11-02 | relates to 55, 58, 73, 87 |

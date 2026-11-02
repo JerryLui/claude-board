@@ -48,8 +48,7 @@
 // boardForClient and holdStages): an awaited page board whose ~20 MB stage holds the
 // mp4. Its rows read what the tab loads (the page's copy of the board and the tab's
 // own catch-up read leave the stage out), then pause the clip, press Send, and measure
-// the push the tab receives, recorded by name and length from the page's own
-// EventSource, and whether the stage's frame and its paused second survive it.
+// the push the tab receives, recorded by name and length as the page hears it, and whether the stage's frame and its paused second survive it.
 
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -524,10 +523,22 @@ const SEND_BOARD = {
   wait: true,
   blocks: [{ kind: 'html', html: padStage(stageHtml('send', ['mp4']), 20_000_000) }],
 };
-// Installed before the board's own scripts: every SSE event the page's EventSource
-// hands a listener, by name and by the length of its data.
+// Installed before the board's own scripts: every SSE event the page hears, by name and
+// by the length of its data, off the shared stream's worker port (ADR 144) or, with no
+// SharedWorker, off the page's own EventSource.
 const PUSH_RECORDER = `(function () {
   window.__cbPushes = [];
+  var SW = window.SharedWorker;
+  if (SW) {
+    window.SharedWorker = function (url, opts) {
+      var w = new SW(url, opts);
+      w.port.addEventListener('message', function (ev) {
+        var m = ev.data;
+        if (m && m.type === 'event') window.__cbPushes.push({ type: m.event, bytes: typeof m.data === 'string' ? m.data.length : 0 });
+      });
+      return w;
+    };
+  }
   var ES = window.EventSource;
   if (!ES) return;
   var add = ES.prototype.addEventListener;

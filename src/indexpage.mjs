@@ -26,6 +26,7 @@ import { roundIsAwaited } from './badge.mjs';
 // (see that file's own comment) -- one mm:ss formatter, not two that can drift.
 import { formatCountdown } from './pomodoro.mjs';
 import { pomodoroWidget, TOMATO_ICON, REST_ICON } from './pomodoro-widget.mjs';
+import { openSharedStream, STREAM_WORKER_URL } from './stream-worker.mjs';
 
 function escHtml(s) {
   return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -1819,8 +1820,8 @@ function wakePomodoro() {
   fetchPomodoro().catch(function () { /* see this function's own comment */ });
 }
 
-// The daemon-wide stream (GET /api/events, src/server.mjs's handleStream): the same
-// connection the menu bar item holds, opened once more per open index tab. Without
+// The daemon-wide events, on the browser's one shared stream (GET /api/stream, ADR 144)
+// or, with no SharedWorker, on GET /api/events, the connection the menu bar holds. Without
 // it this page waits up to fifteen seconds for news the daemon already has, which is
 // visible the moment the reviewer presses something in the menu bar popover with
 // this page on screen.
@@ -1860,14 +1861,11 @@ function wakePomodoro() {
 // last-activity stamp drifting -- keeps arriving on the tick; teaching the daemon a
 // new event is a decision of its own, not a line added here.
 //
-// ponytail: one held connection per open index tab, the shape a board tab already
-// has. Ceiling: a reviewer who leaves a dozen index tabs open for days costs the
-// daemon a dozen idle subscribers. Upgrade path if that ever bites: drop the
-// subscription while the tab is hidden and re-open it on visibilitychange, which is
-// exactly what the 'open' -> re-fetch path above already covers.
+` + '\nvar STREAM_WORKER_URL = ' + JSON.stringify(STREAM_WORKER_URL) + ';\n' + openSharedStream.toString() + '\n' + `
 function initIndexStream() {
   if (typeof EventSource === 'undefined') return;
-  var es = new EventSource('/api/events');
+  // Through the browser's one shared stream (ADR 144), else a stream of its own.
+  var es = openSharedStream({ worker: STREAM_WORKER_URL, fallback: '/api/events', board: null, held: false });
   es.addEventListener('open', function () { patchRows(); patchMissions(); wakePomodoro(); fetchWaitingCount(); });
   // The one listener that reads what a push carried: the event's total IS the
   // count the Boards tab shows, so asking again would only fetch the same number.

@@ -345,7 +345,9 @@ the refusal page names one command that fixes it: `node bin/authorize.mjs` from 
 
 The secret authorizes every write; the cookie authorizes a strictly smaller, closed set,
 enumerated in `PROTOCOL.md` "The browser session cookie". Three named lists carry it —
-`BOARD_COOKIE_ACTIONS`, `POMODORO_COOKIE_ACTIONS` and `STORE_COOKIE_ACTIONS`, all in
+`BOARD_COOKIE_ACTIONS`, `POMODORO_COOKIE_ACTIONS`, `STORE_COOKIE_ACTIONS` and
+`STREAM_COOKIE_ACTIONS` (a tab registered or beaten for on its browser's shared stream, which
+reaches what holding a board's stream already does), all in
 `src/server.mjs` — and that they are named lists rather than an `/api/<thing>/*` prefix match is
 what keeps a route added later secret-only until someone widens it deliberately. The set reaches
 further than the name suggests: a browser holding only the cookie drives the whole pomodoro clock
