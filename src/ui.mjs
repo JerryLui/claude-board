@@ -61,6 +61,7 @@ import { palettes } from './styles.mjs';
 // src/vendor/mermaid/index.mjs's own header for why both this file and
 // src/assets.mjs import the name from there rather than from each other.
 import { MERMAID_ASSET } from './vendor/mermaid/index.mjs';
+import { openSharedStream, STREAM_WORKER_URL } from './stream-worker.mjs';
 
 // Mermaid variable -> CSS token, read at call time from the live computed style
 // rather than hardcoded a second time in the client script below. 'background'
@@ -7342,10 +7343,17 @@ export const ui = `
   }
 
   if (!readonly && typeof EventSource !== 'undefined') {
-    // '?stages=held': this script fills a held stage frame (fillHeldStages), so the
-    // daemon may send one; a tab still running a script from before that gets every
-    // stage whole (src/server.mjs's handleEvents).
-    var es = new EventSource('/api/board/' + boardId + '/events?stages=held');
+    // Through the browser's one shared stream (src/stream-worker.mjs, ADR 144), else a
+    // stream of its own. 'held': this script fills a held stage frame (fillHeldStages),
+    // so the daemon may send one; a tab still running a script from before that gets
+    // every stage whole (src/server.mjs's handleEvents).
+    var openSharedStream = ${openSharedStream.toString()};
+    var es = openSharedStream({
+      worker: ${JSON.stringify(STREAM_WORKER_URL)},
+      fallback: '/api/board/' + boardId + '/events?stages=held',
+      board: boardId,
+      held: true,
+    });
     // 'open' fires on the first connection AND on every automatic reconnect,
     // which is exactly the set of moments this client may have missed something.
     es.addEventListener('open', function () { resync(); });

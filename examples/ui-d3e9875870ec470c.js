@@ -7444,10 +7444,64 @@
   }
 
   if (!readonly && typeof EventSource !== 'undefined') {
-    // '?stages=held': this script fills a held stage frame (fillHeldStages), so the
-    // daemon may send one; a tab still running a script from before that gets every
-    // stage whole (src/server.mjs's handleEvents).
-    var es = new EventSource('/api/board/' + boardId + '/events?stages=held');
+    // Through the browser's one shared stream (src/stream-worker.mjs, ADR 144), else a
+    // stream of its own. 'held': this script fills a held stage frame (fillHeldStages),
+    // so the daemon may send one; a tab still running a script from before that gets
+    // every stage whole (src/server.mjs's handleEvents).
+    var openSharedStream = function openSharedStream(opts) {
+  // Read off window, never as bare globals: a check's stand-in window then decides, not
+  // whatever the node process running it exposes (QUIRKS.md, the new Function harness).
+  var Shared = window.SharedWorker;
+  if (!opts.worker || typeof Shared !== 'function') return new EventSource(opts.fallback);
+  var worker;
+  try {
+    worker = new Shared(opts.worker, { name: 'claude-board-stream' });
+  } catch (e) {
+    return new EventSource(opts.fallback);
+  }
+  var listeners = {};
+  var port = worker.port;
+  var tab = Math.random().toString(36).slice(2) + Date.now().toString(36);
+  var lockName = 'claude-board-tab-' + tab;
+  var locks = window.navigator && window.navigator.locks;
+  var hasLocks = !!locks && typeof locks.request === 'function';
+  port.onmessage = function (ev) {
+    var m = ev.data;
+    if (!m || m.type !== 'event') return;
+    (listeners[m.event] || []).forEach(function (fn) {
+      try { fn({ data: m.data }); } catch (e) { /* one listener's throw never silences the rest */ }
+    });
+  };
+  port.start();
+  function say(type) {
+    port.postMessage({ type: type, tab: tab, board: opts.board || null, held: !!opts.held, lock: hasLocks ? lockName : null });
+  }
+  function hello() { say('hello'); }
+  // The worker waits on this lock to learn the tab is gone, so the tab holds it before it
+  // says hello: a worker asking first would be granted it and drop the tab at once.
+  if (hasLocks) {
+    locks.request(lockName, function () {
+      hello();
+      return new Promise(function () {});
+    });
+  } else {
+    hello();
+  }
+  setInterval(function () { say('beat'); }, 5000);
+  window.addEventListener('pagehide', function () { port.postMessage({ type: 'bye', tab: tab }); });
+  window.addEventListener('pageshow', function (ev) { if (ev.persisted) hello(); });
+  return {
+    addEventListener: function (name, fn) {
+      (listeners[name] = listeners[name] || []).push(fn);
+    },
+  };
+};
+    var es = openSharedStream({
+      worker: "/api/stream/worker-1144ca7d81def86a.js",
+      fallback: '/api/board/' + boardId + '/events?stages=held',
+      board: boardId,
+      held: true,
+    });
     // 'open' fires on the first connection AND on every automatic reconnect,
     // which is exactly the set of moments this client may have missed something.
     es.addEventListener('open', function () { resync(); });

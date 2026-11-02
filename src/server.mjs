@@ -51,6 +51,8 @@ import { execFile } from 'node:child_process';
 import { randomBytes, createHash } from 'node:crypto';
 import { readBoard, writeBoard, writePage, readAsset, boardHome, listBoards, storeFingerprint, searchBoards, pruneStore, migrateMissions } from './store.mjs';
 import { ASSET_NAME, MERMAID_ASSET_NAME, SHARED_ASSETS, assetContentType } from './assets.mjs';
+import { createBrowserStreams } from './browser-stream.mjs';
+import { STREAM_WORKER_FILE, STREAM_WORKER_SOURCE } from './stream-worker.mjs';
 import { readSecret, secretPath, secretMatches, sessionToken, sessionCookieMatches, SECRET_HEADER, SESSION_COOKIE, SESSION_MAX_AGE_S } from './secret.mjs';
 import { createHandoffStore, handoffTarget, recoveryCommand, HANDOFF_TOKEN_RE, DEFAULT_PORT } from './handoff.mjs';
 import { createBoard, addRound, amendRound, abandonOpenRounds, applySubmit, buildPacket, roundAnswers, dropResolved, resolveComments, questionBlocks, SUPPRESSED, ANSWERS_DELIVERED, roundContentDrifted } from './board.mjs';
@@ -142,8 +144,10 @@ export function createSseHub() {
 
   return {
     /** `fillsHeld`: the tab's page script declared it can fill a held stage frame
-     * (`handleEvents`), so `broadcast` may send it one. */
-    subscribe(boardId, res, { fillsHeld = false } = {}) {
+     * (`handleEvents`), so `broadcast` may send it one. `relay`: the tab rides its
+     * browser's shared stream (src/browser-stream.mjs), so `broadcast` hands it the
+     * event's name and JSON instead of writing `res` a frame of its own. */
+    subscribe(boardId, res, { fillsHeld = false, relay = null } = {}) {
       let board = subs.get(boardId);
       if (!board) { board = new Map(); subs.set(boardId, board); }
       const watcherId = randomBytes(16).toString('hex');
@@ -155,7 +159,7 @@ export function createSseHub() {
       // neither end an absence nor hold a banner back (`attendedRemainingMs` below, which
       // the stranded rule asks, answers 0 for it); and it is not evidence they are gone
       // either, so `anyWatcher` and `clientCount` still count it as an open tab.
-      board.set(watcherId, { res, attended: null, seq: -1, focusedAt: 0, fillsHeld });
+      board.set(watcherId, { res, attended: null, seq: -1, focusedAt: 0, fillsHeld, relay });
       return watcherId;
     },
     unsubscribe(boardId, watcherId) {
@@ -179,16 +183,19 @@ export function createSseHub() {
         if (payloads.has(fillsHeld)) continue;
         try {
           const body = typeof data === 'function' ? data(fillsHeld) : data;
-          payloads.set(fillsHeld, `event: ${eventName}\ndata: ${JSON.stringify(body)}\n\n`);
+          payloads.set(fillsHeld, JSON.stringify(body));
         } catch (err) {
           payloads.set(fillsHeld, null);
           console.error(`claude-board: could not build the ${eventName} push for board ${boardId}: ${(err && err.message) || err}`);
         }
       }
-      for (const { res, fillsHeld } of board.values()) {
-        const payload = payloads.get(fillsHeld);
-        if (payload === null) continue;
-        try { res.write(payload); } catch { /* dead connection; the 'close' handler cleans it up */ }
+      for (const { res, fillsHeld, relay } of board.values()) {
+        const json = payloads.get(fillsHeld);
+        if (json === null) continue;
+        try {
+          if (relay) relay(eventName, json);
+          else res.write(`event: ${eventName}\ndata: ${json}\n\n`);
+        } catch { /* dead connection; the 'close' handler cleans it up */ }
       }
     },
     /** How many browsers currently have this board open, reported on the POST response.
@@ -347,12 +354,13 @@ export function createSseHub() {
  * per-Watcher Attended bookkeeping either, for the same reason: Attended is a fact about a
  * board tab, and nothing here is about a board. */
 export function createStreamHub() {
-  const subs = new Map(); // subscriberId -> res
+  const subs = new Map(); // subscriberId -> { res, relay }
 
   return {
-    subscribe(res) {
+    /** `relay`, as on `createSseHub.subscribe`: a shared stream's writer. */
+    subscribe(res, relay = null) {
       const id = randomBytes(16).toString('hex');
-      subs.set(id, res);
+      subs.set(id, { res, relay });
       return id;
     },
     unsubscribe(id) {
@@ -364,9 +372,13 @@ export function createStreamHub() {
      * function's own header for why there is no narrower audience to pick from. */
     broadcast(eventName, data) {
       if (subs.size === 0) return;
-      const payload = `event: ${eventName}\ndata: ${JSON.stringify(data)}\n\n`;
-      for (const res of subs.values()) {
-        try { res.write(payload); } catch { /* dead connection; the 'close' handler cleans it up */ }
+      const json = JSON.stringify(data);
+      const payload = `event: ${eventName}\ndata: ${json}\n\n`;
+      for (const { res, relay } of subs.values()) {
+        try {
+          if (relay) relay(eventName, json);
+          else res.write(payload);
+        } catch { /* dead connection; the 'close' handler cleans it up */ }
       }
     },
   };
@@ -596,6 +608,12 @@ const MISSION_COOKIE_ACTIONS = new Set(['order', 'recheck']);
  * any session it liked. */
 const SESSION_COOKIE_ACTIONS = new Set(['order']);
 
+/** The shared-stream writes a cookie-holding browser may perform (ADR 144): `watch`, `unwatch`
+ * and `beat`, the browser's worker registering its tabs as Watchers on the stream it holds.
+ * They reach what holding `GET /api/board/:id/events` and posting `attended` already
+ * reach: a Watcher on a board the cookie can read, kept or dropped. */
+const STREAM_COOKIE_ACTIONS = new Set(['watch', 'unwatch', 'beat']);
+
 /** Every write a cookie-holding browser may perform, one row per route family: the route's
  * second segment, its length, and the segment holding the action, which must be on that
  * family's named set above. A write matching no row wants the secret. */
@@ -605,6 +623,7 @@ const COOKIE_WRITES = new Map([
   ['store', { length: 3, at: 2, actions: STORE_COOKIE_ACTIONS }],
   ['mission', { length: 4, at: 3, actions: MISSION_COOKIE_ACTIONS }],
   ['session', { length: 4, at: 3, actions: SESSION_COOKIE_ACTIONS }],
+  ['stream', { length: 4, at: 3, actions: STREAM_COOKIE_ACTIONS }],
 ]);
 
 function isCookieWrite(parts) {
@@ -2372,6 +2391,78 @@ function handleStream(req, res, stream) {
   res.on('error', cleanup);
 }
 
+/** `GET /api/stream`: a browser's shared stream (ADR 144, src/browser-stream.mjs), held by
+ * its worker (src/stream-worker.mjs) for every tab of that browser. Its first frame names
+ * it; the worker then registers each board tab (`handleStreamWrite`). Kept alive and torn
+ * down exactly as `handleEvents` is, and its close drops every Watcher it carried. */
+function handleBrowserStream(req, res, browserStreams) {
+  res.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-cache, no-transform',
+    'connection': 'keep-alive',
+  });
+  res.write(': connected\n\n');
+  const id = browserStreams.open(res);
+  const heartbeat = setInterval(() => {
+    try { res.write(': heartbeat\n\n'); } catch { /* connection is gone; cleanup below handles it */ }
+  }, sseHeartbeatMs());
+  heartbeat.unref?.();
+  const cleanup = () => {
+    clearInterval(heartbeat);
+    browserStreams.close(id);
+  };
+  req.on('close', cleanup);
+  res.on('close', cleanup);
+  res.on('error', cleanup);
+}
+
+/** The worker's script, under a policy of its own: a worker takes its CSP from its own
+ * response, and it needs nothing past same-origin connections. */
+function handleStreamWorker(res) {
+  res.writeHead(200, {
+    'content-type': 'text/javascript; charset=utf-8',
+    'cache-control': 'no-cache',
+    'content-security-policy': "default-src 'none'; connect-src 'self'",
+  });
+  res.end(STREAM_WORKER_SOURCE);
+}
+
+const STREAM_TAB_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+/** `POST /api/stream/:id/watch` `{ tab, board, held }` answers `{ watcher }`; `unwatch`
+ * `{ watcher }` answers `{ ok }`; `beat` `{ watchers }` answers `{ unknown }`, the named
+ * Watchers this stream no longer holds. A stream this daemon does not hold is a 404, which
+ * the worker meets only across a reconnect, whose new stream registers its tabs again. */
+async function handleStreamWrite(req, res, streamId, action, home, browserStreams) {
+  if (!STREAM_COOKIE_ACTIONS.has(action)) return sendJson(res, 404, { error: 'not found' });
+  let body;
+  try {
+    body = await readJsonBody(req);
+  } catch (err) {
+    return sendJson(res, err.status || 400, { error: err.status ? err.message : 'invalid JSON body' });
+  }
+  if (action === 'watch') {
+    if (typeof body.tab !== 'string' || !STREAM_TAB_RE.test(body.tab)) return sendJson(res, 400, { error: 'watch requires a "tab" of 1 to 64 letters, digits, - or _' });
+    if (typeof body.board !== 'string' || !body.board) return sendJson(res, 400, { error: 'watch requires a string "board"' });
+    if (!readBoard(body.board, home)) return sendJson(res, 404, { error: 'board not found' });
+    const watcher = browserStreams.watch(streamId, {
+      boardId: body.board, tab: body.tab, fillsHeld: body.held === true, target: strandedTarget(req, body.board),
+    });
+    if (!watcher) return sendJson(res, 404, { error: 'stream not found' });
+    return sendJson(res, 200, { watcher });
+  }
+  if (action === 'unwatch') {
+    if (typeof body.watcher !== 'string' || !body.watcher) return sendJson(res, 400, { error: 'unwatch requires a string "watcher"' });
+    return sendJson(res, 200, { ok: browserStreams.unwatch(streamId, body.watcher) });
+  }
+  if (!Array.isArray(body.watchers) || !body.watchers.every(w => typeof w === 'string')) {
+    return sendJson(res, 400, { error: 'beat requires "watchers", an array of strings' });
+  }
+  const unknown = browserStreams.beat(streamId, body.watchers);
+  if (!unknown) return sendJson(res, 404, { error: 'stream not found' });
+  return sendJson(res, 200, { unknown });
+}
+
 // The one in-flight preview child, module scope rather than per-request: there is one
 // daemon and one reader, and "a rapid series of changes never overlaps
 // into a chorus" means the SECOND picker change must kill the FIRST preview, which is
@@ -2931,6 +3022,13 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
   // boundary notifier (every check that calls `createRequestHandler` directly) still gets
   // a working, if unshared, hub for free.
   const streamHub = stream || createStreamHub();
+  const browserStreams = createBrowserStreams({
+    sse,
+    stream: streamHub,
+    onWatchersChanged: (boardId, target) => stranded.evaluate(boardId, target),
+  });
+  const streamSweep = setInterval(() => browserStreams.sweep(), browserStreams.sweepEveryMs());
+  streamSweep.unref?.();
   // `GET /api/index/rows`'s one-entry cache: `{ print, query, html, lapseAt }`, or null
   // before the first poll. Per handler, like everything else here, so two daemons in one
   // process never serve each other's rows -- and dropped with the handler, so nothing here
@@ -3145,6 +3243,12 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
         return handleStream(req, res, streamHub);
       }
 
+      if (parts[0] === 'api' && parts[1] === 'stream') {
+        if (req.method === 'GET' && parts.length === 2) return handleBrowserStream(req, res, browserStreams);
+        if (req.method === 'GET' && parts.length === 3 && parts[2] === STREAM_WORKER_FILE) return handleStreamWorker(res);
+        if (req.method === 'POST' && parts.length === 4) return await handleStreamWrite(req, res, parts[2], parts[3], home, browserStreams);
+      }
+
       if (req.method === 'GET' && url.pathname === '/api/search') {
         const query = url.searchParams.get('q') || '';
         const results = searchBoards(query, home).map(r => ({ ...r, url: boardUrl(req, r.boardId) }));
@@ -3298,6 +3402,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
   // graces, which are unref'd timers, and the process-wide 'exit' hook still catches any
   // click-serving child.
   requestHandler.close = () => {
+    clearInterval(streamSweep);
     stranded.close();
     missionWatch.close();
     sessions.close();
