@@ -7546,30 +7546,48 @@
   // whatever the node process running it exposes (QUIRKS.md, the new Function harness).
   var Shared = window.SharedWorker;
   if (!opts.worker || typeof Shared !== 'function') return new EventSource(opts.fallback);
-  var worker;
-  try {
-    worker = new Shared(opts.worker, { name: 'claude-board-stream' });
-  } catch (e) {
-    return new EventSource(opts.fallback);
-  }
   var listeners = {};
-  var port = worker.port;
+  var port = null;
+  // Hellos and beats said on this port since the worker last answered one.
+  var unanswered = 0;
+  function connect() {
+    var worker;
+    try {
+      worker = new Shared(opts.worker, { name: 'claude-board-stream' });
+    } catch (e) {
+      return false;
+    }
+    port = worker.port;
+    unanswered = 0;
+    port.onmessage = function (ev) {
+      var m = ev.data;
+      if (!m) return;
+      if (m.type === 'ack') { unanswered = 0; return; }
+      if (m.type !== 'event') return;
+      (listeners[m.event] || []).forEach(function (fn) {
+        try { fn({ data: m.data }); } catch (e) { /* one listener's throw never silences the rest */ }
+      });
+    };
+    port.start();
+    return true;
+  }
+  if (!connect()) return new EventSource(opts.fallback);
   var tab = Math.random().toString(36).slice(2) + Date.now().toString(36);
   var lockName = 'claude-board-tab-' + tab;
   var locks = window.navigator && window.navigator.locks;
   var hasLocks = !!locks && typeof locks.request === 'function';
-  port.onmessage = function (ev) {
-    var m = ev.data;
-    if (!m || m.type !== 'event') return;
-    (listeners[m.event] || []).forEach(function (fn) {
-      try { fn({ data: m.data }); } catch (e) { /* one listener's throw never silences the rest */ }
-    });
-  };
-  port.start();
   function say(type) {
+    if (type === 'hello' || type === 'beat') unanswered++;
     port.postMessage({ type: type, tab: tab, board: opts.board || null, held: !!opts.held, lock: hasLocks ? lockName : null });
   }
   function hello() { say('hello'); }
+  // The same URL and name start a fresh worker once the old one is gone, and its hello
+  // registers this tab there: the tab hears 'open' and re-reads what it missed. A worker
+  // that was only slow is the same worker again, and takes the tab back.
+  function reopen() {
+    try { port.close(); } catch (e) { /* already gone */ }
+    if (connect()) hello();
+  }
   // The worker waits on this lock to learn the tab is gone, so the tab holds it before it
   // says hello: a worker asking first would be granted it and drop the tab at once.
   if (hasLocks) {
@@ -7580,7 +7598,22 @@
   } else {
     hello();
   }
-  setInterval(function () { say('beat'); }, 5000);
+  // A worker answers within a moment, so a hello or beat still unanswered at the next beat
+  // means the worker is gone.
+  setInterval(function () {
+    if (unanswered > 0) reopen();
+    else say('beat');
+  }, 5000);
+  // A tab shown again asks at once rather than at its next beat, which Chrome runs once a
+  // minute in a tab hidden for five.
+  var doc = window.document;
+  if (doc && typeof doc.addEventListener === 'function') {
+    doc.addEventListener('visibilitychange', function () {
+      if (doc.visibilityState !== 'visible') return;
+      say('beat');
+      setTimeout(function () { if (unanswered > 0) reopen(); }, 2000);
+    });
+  }
   window.addEventListener('pagehide', function () { port.postMessage({ type: 'bye', tab: tab }); });
   window.addEventListener('pageshow', function (ev) { if (ev.persisted) hello(); });
   return {
@@ -7590,7 +7623,7 @@
   };
 };
     var es = openSharedStream({
-      worker: "/api/stream/worker-1144ca7d81def86a.js",
+      worker: "/api/stream/worker-6575034dc9a9a803.js",
       fallback: '/api/board/' + boardId + '/events?stages=held',
       board: boardId,
       held: true,

@@ -2287,6 +2287,17 @@ chrome band; if that ever surfaces, the fix is this same resend, not a broadcast
 
 Traps that have bitten once. A second bite moves the entry up into the section it belongs to.
 
+- **A SharedWorker that ends tells its tabs nothing.** Chrome 155 headless: `Target.closeTarget`
+  on the stream worker fired no `error` on the tab's `SharedWorker` and no `close` on its port
+  (`'onclose' in port` is false), and the tab went on posting into the dead port, deaf to every
+  push. A tab learns its worker is gone only from an answer that stops coming (the `ack` in
+  `src/stream-worker.mjs`); `new SharedWorker` with the same URL and name then starts a fresh one.
+- **Every `Target.createTarget` tab opens in the one headless window, the newest in front.** The
+  others read `visibilityState` 'hidden' and `Target.activateTarget` brings one forward, which is
+  how a check hides a tab and shows it again (`show` in `test/browser-check-answered-tabs.mjs`).
+  `Page.setWebLifecycleState { state: 'frozen' }` on a hidden tab holds its own tasks, a port
+  message included, until 'active', while `Runtime.evaluate` still answers in it.
+
 - **Chrome's media emulation ignores a 'hover' feature.** Chrome 154 headless:
   `Emulation.setEmulatedMedia` with `{ name: 'hover', value: 'none' }` returns no error and
   `matchMedia('(hover: none)')` stays false. `Emulation.setTouchEmulationEnabled` with

@@ -1903,6 +1903,11 @@ daemon every 5 s naming every Watcher it holds; the daemon drops a Watcher no be
 20 s (`CLAUDE_BOARD_STREAM_BEAT_TTL_MS`, for checks), and every Watcher of a stream that closes.
 Each drop asks the stranded rule again, as a closed `/events` stream does.
 
+The worker answers every hello and beat. A tab whose worker has left its last hello or beat
+unanswered at the next beat, or two seconds after the tab shows again, takes the worker for ended
+(Chrome tells a tab nothing when its worker crashes) and opens a fresh one of the same URL and
+name; its hello there registers it again, so it hears `open` and re-reads the board.
+
 A browser with no SharedWorker opens `/api/board/:id/events` and `/api/events` per tab, as before.
 
 ## Stage postMessage channel
