@@ -28,7 +28,7 @@
 // start time, so it never inherits a round or revives a card.
 
 import { randomBytes } from 'node:crypto';
-import { CARD_ORDER_KINDS, roundWantsAnswer, sameStart } from './missions.mjs';
+import { CARD_ORDER_KINDS, roundWantsAnswer, sameStart, sessionsMovedOn } from './missions.mjs';
 import { questionBlocks } from './badge.mjs';
 import { folderName } from './indexpage.mjs';
 
@@ -413,7 +413,11 @@ export function commandOf(name) {
  * its pid, or its job id being a held id's first 8 characters (a background job's id is
  * its session's short form); or when it posted a board that belongs to a mission holding
  * only a launch's reservation (a launch reserves a session before it knows its pid or id).
- * A board of a mission bound by id holds no one: the session that posted it may have left. `missions` are the stored
+ * A board of a mission bound by id holds no one: the session that posted it may have left.
+ * Nor is a blocked background job with no process a tab once a mission it is tied to has
+ * moved on from it (src/missions.mjs `sessionsMovedOn`: released, or another session holds
+ * it), tied by its id or its job id as above, its session having left that mission or not:
+ * a job left behind asks for nothing (ADR 147). `missions` are the stored
  * records, every one, retired or not; `boards` are `boardLink`s of every board in the
  * store. A card reads:
  *
@@ -441,7 +445,11 @@ export function deriveTabs({ sessions, missions = [], boards = [] }) {
   }
   const heldJobs = new Set([...held.ids].map(id => id.slice(0, 8)));
   const isMissions = s => held.ids.has(s.id) || (s.pid != null && held.pids.has(s.pid)) || (s.jobId && heldJobs.has(s.jobId));
-  const tabs = sessions.filter(s => !isMissions(s));
+  const movedOn = new Set(missions.flatMap(sessionsMovedOn));
+  const movedOnJobs = new Set([...movedOn].map(id => id.slice(0, 8)));
+  const leftBehind = s => s.kind === 'bg' && s.status === 'blocked' && s.pid == null
+    && (movedOn.has(s.id) || (s.jobId && movedOnJobs.has(s.jobId)));
+  const tabs = sessions.filter(s => !isMissions(s) && !leftBehind(s));
   const rounds = new Map(tabs.map(t => [t.id, []]));
   for (const link of links) {
     if (link.mission != null) continue;

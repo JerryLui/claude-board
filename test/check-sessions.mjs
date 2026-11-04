@@ -261,6 +261,42 @@ async function main() {
     });
     assert.deepEqual(tabs.map(t => [t.id, t.rounds]), [['left-tab', []]], 'the joined tab is its mission\'s card, and the mission\'s round stays on that card');
   });
+
+  await check('a blocked job with no process tied to a mission released or held by another session is no card; tied to one still its own, untied, or with its process alive it keeps its needs-you card (ADR 147)', () => {
+    const at = '2026-10-29T11:00:00Z';
+    const blocked = (id, fields = {}) => session({ id, pid: null, procStart: null, kind: 'bg', jobId: id.slice(0, 8), status: 'blocked', reason: 'need you', ...fields });
+    const left = (ended, state = 'released') => ({ key: `M-${ended.id}`, state, session: { ended, leftAt: at } });
+    const tabs = deriveTabs({
+      sessions: [
+        blocked('a0000001-left-released'),
+        blocked('a0000002-other-id', { jobId: 'a0000002' }),
+        blocked('a0000003-bound-released'),
+        blocked('a0000004-taken-over'),
+        blocked('a0000005-relaunched'),
+        blocked('b0000001-left-open'),
+        blocked('b0000002-untied'),
+        blocked('b0000003-live', { pid: 5400, procStart: '2026-10-29T10:00:00Z' }),
+        session({ id: 'b0000004-tab-left', pid: 5600, status: 'idle' }),
+      ],
+      missions: [
+        left({ pid: 5100, id: 'a0000001-left-released' }),
+        // Tied by its job id alone: the first 8 characters of the id the record holds.
+        left({ id: 'a0000002-record-id' }),
+        { key: 'BOUND', state: 'released', session: { id: 'a0000003-bound-released', pid: 5200, startedAt: at, seenAt: at } },
+        { key: 'HELD', state: 'working', session: { id: 'another', pid: 5300, startedAt: at, seenAt: at, ended: { id: 'a0000004-taken-over' } } },
+        { key: 'RESERVED', state: 'working', session: { startedAt: at, seenAt: at, ended: { id: 'a0000005-relaunched' } } },
+        left({ id: 'b0000001-left-open' }, 'waiting'),
+        left({ pid: 5400, id: 'b0000003-live' }),
+        left({ pid: 5600, id: 'b0000004-tab-left' }),
+      ],
+    });
+    assert.deepEqual(tabs.map(t => [t.id, t.state]), [
+      ['b0000001-left-open', 'needs-you'],
+      ['b0000002-untied', 'needs-you'],
+      ['b0000003-live', 'needs-you'],
+      ['b0000004-tab-left', 'waiting'],
+    ]);
+  });
 }
 
 runMain('sessions', main);

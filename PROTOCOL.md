@@ -1487,8 +1487,9 @@ Mission = {
 
 **A view is what every read answers**: the stored record, its `prs` read through the facts, plus
 fields derived on each read and never stored. `view` is the column the mission shows in:
-`released` while stored released; else `needs-you` when a linked board's newest round is open and
-asks a question or was minted awaited (a lapsed wait still counts; an older round left open does
+`released` while stored released; else `waiting` while it is retired (its `retiredAt` parses,
+ADR 147), whatever its rounds, its session or its `waitingOn`; else `needs-you` when a linked
+board's newest round is open and asks a question or was minted awaited (a lapsed wait still counts; an older round left open does
 not, ADR 134), whatever its session is doing (ADR 140); else `stalled` when its session is gone (a
 bound `pid` that no longer exists, or a reservation no `pid` or `id` bound within 5 minutes) or it
 is stored `working` and has not been heard from for 15 minutes; else the stored `state`. A session
@@ -1499,8 +1500,9 @@ stalls by silence while Claude Code lists it. With no snapshot held (the watcher
 the daemon started) heartbeats alone count. A bound `pid` that no longer exists while the snapshot
 lists the session's `id` in another live process is not gone: the session runs on there (a resume
 no launch made). `listedAt` is that snapshot's time while it lists the bound session, else `null`.
+`retired` is whether its `retiredAt` parses.
 `gone` is `{ lastSeenAt }`, the session's `seenAt`, while that session is gone and the mission has
-not recorded its end, else `null`. `rejoin` is `{ reason, since, id }` while the snapshot lists the bound
+neither recorded its end nor retired, else `null`. `rejoin` is `{ reason, since, id }` while the snapshot lists the bound
 session needing `/mission` again and no heartbeat has come from it since `since`, else `null`:
 `reason` is `'clear'` when its process is listed under another `id` (a `/clear`, which drops the
 skill's hooks), `'resume'` when its `id` is listed in another process (a resume or respawn no launch
@@ -1532,7 +1534,11 @@ GET  /api/missions[?all=1]
 ```
 
 Newest change first. A released mission is listed until 24 hours after `releasedAt`, or always with
-`all=1`. `tabs` and `watcher` are "The session routes"' below. `counts` are per `view` over the
+`all=1`. A retired mission is listed only while it has open work (ADR 147): a PR in its `prs` whose
+latest fact is not `merged` (no fact yet counts as open), or a `next` starting `release:`; its
+`waitingOn` is no open work. With none it is listed nowhere, `all=1` included, and
+`GET /api/mission/:key` still answers it until the prune deletes it, 30 days after `retiredAt`.
+`tabs` and `watcher` are "The session routes"' below. `counts` are per `view` over the
 missions listed, each tab added to its `state`'s count as the Missions view counts its cards; `live` counts every mission holding a
 live session, `working` including one that reads stalled. Secret or cookie.
 
@@ -1719,8 +1725,10 @@ A session a mission holds or held is never a tab: its `id` or `pid` is a mission
 `session.ended`'s, its `jobId` is the first 8 characters of such an id, or it posted a board that
 belongs to a mission holding only a launch's reservation (a launch reserves a session before it
 knows its pid or id). A session that left its mission (`session: { ended, leftAt }`) is a tab
-again, a board it posted while bound staying the mission's (ADR 141). `folder` is the
-cwd's last segment; `command` the name's leading `/word`, else null. `state` is `needs-you` while a
+again, a board it posted while bound staying the mission's (ADR 141). A blocked `bg` session with
+no `pid` is no tab either when its `id`, or the id its `jobId` is the first 8 characters of, is a
+mission's `session.id` or `session.ended.id`, left or not, and that mission is `released` or another
+`id` or a launch's reservation now holds it (ADR 147). `folder` is the cwd's last segment; `command` the name's leading `/word`, else null. `state` is `needs-you` while a
 round that wants its answer (open and asking, as a mission's needs-you reads a round, but any
 round of the board, not only its newest) sits on a board of no mission whose
 `session.id` is the tab's, or whose `session.id` is null or names no listed session, with the tab's

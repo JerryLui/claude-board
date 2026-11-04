@@ -153,6 +153,9 @@ const DARK = {
   '--warning-border-strong': 'rgba(229, 176, 77, 0.45)',
   '--warning-ring': 'rgba(229, 176, 77, 0.5)',
   '--warning-fade': 'rgba(229, 176, 77, 0)',
+  // A retired mission's tag (ADR 147): a violet no status chip uses.
+  '--retired': '#b9a8f0',
+  '--retired-border': 'rgba(185, 168, 240, 0.35)',
   '--critical': '#f0757a',
   '--critical-soft': 'rgba(240, 117, 122, 0.08)',
   '--critical-border': 'rgba(240, 117, 122, 0.25)',
@@ -258,6 +261,8 @@ const LIGHT = {
   '--warning-border-strong': 'rgba(128, 83, 0, 0.45)',
   '--warning-ring': 'rgba(128, 83, 0, 0.5)',
   '--warning-fade': 'rgba(128, 83, 0, 0)',
+  '--retired': '#6941c6',
+  '--retired-border': 'rgba(105, 65, 198, 0.35)',
   '--critical': '#b81b1b',
   '--critical-soft': 'rgba(184, 27, 27, 0.08)',
   '--critical-border': 'rgba(184, 27, 27, 0.25)',
@@ -2083,6 +2088,8 @@ body.home-page .mode-toggle:disabled { opacity: 0.5; cursor: default; }
 /* a tab card: a session no mission launched (ADR 131), the mission card tagged as one */
 .tab-tag { color: var(--accent); background: var(--accent-soft); border-color: transparent; }
 .tab-turn { color: var(--warning); background: var(--warning-soft); border-color: var(--warning-border); }
+/* a retired mission still listed, waiting on its open work (ADR 147) */
+.mission-retired { color: var(--retired); border-color: var(--retired-border); }
 .missions-notice { margin: 0 0 var(--space-4); padding: 8px 12px; font-size: 13px; color: var(--ink-2);
   background: var(--warning-soft); border: 1px solid var(--warning-border); border-radius: var(--r-sm); }
 .missions-notice b { color: var(--warning); }
