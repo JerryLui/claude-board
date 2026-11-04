@@ -773,17 +773,16 @@ export function boundTo(m, ref) {
 
 /** The session ids `m` records, its session's and the one it names as ended, left or not,
  * that it has moved on from: every one once it is released, else each but the id bound now
- * while another id or a launch's reservation holds it (ADR 147). With no session now (one
- * left, or a launch queued) or one bound by its pid alone, none. */
+ * while another id holds it (ADR 147). A launch's bare reservation is no other session yet
+ * (`mission-launch --resume <id>` reserves before that id binds again), so with it, with no
+ * session now (one left, or a launch queued) or with one bound by its pid alone, none. */
 export function sessionsMovedOn(m) {
   const s = m && m.session;
   if (!s || typeof s !== 'object') return [];
   const ids = [s.id, s.ended?.id].filter(id => typeof id === 'string' && id);
   if (m.state === 'released') return ids;
   const current = currentSession(m);
-  if (!current) return [];
-  if (isReservation(current)) return ids;
-  return current.id != null ? ids.filter(id => id !== current.id) : [];
+  return current?.id != null ? ids.filter(id => id !== current.id) : [];
 }
 
 /** `ref` is the session `ended` names resumed in a new process, not that process lingering:
