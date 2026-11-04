@@ -2327,6 +2327,17 @@ Traps that have bitten once. A second bite moves the entry up into the section i
   listens for `contextmenu` with `ctrlKey` and `button === 0` (`onMissionsContextmenu`,
   `src/indexpage.mjs`).
 
+- **A synthetic key with no character opens chrome://help.** Chrome 155 headless on a Mac: an
+  `Input.dispatchKeyEvent` `rawKeyDown` Escape carrying a `nativeVirtualKeyCode` (27 or the Mac's
+  own 53) and no `text` opens a `chrome://help` tab in front about 30ms later, on every press, the
+  page's keydown handler having run. With no native code, with `text: '\u001b'`, or with the
+  page calling `preventDefault`, it opens nothing. The tab in front blurs the driven one and
+  hides it: a control shown only on `:focus-within` hides with the focus on it, and Chrome's
+  focus fixup can move the focus to `body` before the window takes it back, so a focus read
+  after the press flakes (`test/browser-check-missions.mjs`'s Escape row, 2026-11-04). Send a key
+  as a Mac keyboard does, its own key code and character (`KEYS` there), and count the page
+  targets after a press when a row reads focus.
+
 - **A stage loaded inside `withFrameClock` reports its own fixture height on every turn of the
   clock.** `loadSrcdoc()` under the clock books the real `stageAgentScript`'s first report, so the
   next `clock.frames()` overwrites whatever height a check forged just before it (the stand-in's
