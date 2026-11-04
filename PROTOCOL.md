@@ -624,12 +624,20 @@ except for `cwd`.
   comments: [ { n, blockId, blockKind, anchor, text, round, createdAt, lost? } ],
   url,
   relayed?,                         // { words, at }: answered by a relay, not a Send
+  watch?,                           // a `timeout` from a Claude Code shim: the answer watch
 }
 ```
 
 `relayed` is present only on a round the Master Chief answered on the PM's typed words
 (`POST /api/board/:id/relay` below); the text channel says so in a `Relayed:` line carrying the
 words.
+
+`watch` is present only on a `timeout` packet a Claude Code shim returns, on either cap (its own
+or the daemon's), and the text channel names it too: the command that keeps an answer watch on
+that round, `node <clone>/bin/watch.mjs --board <id> --round <n>` (with `CLAUDE_BOARD_PORT=<port>`
+in front off the default port), run as one background call. See "The answer watch" under "MCP
+surface" (ADR 146). A shim under Codex or OpenCode (`CLAUDE_BOARD_CLIENT` naming either) sends none:
+the wake rests on Claude Code re-invoking a session when its background call ends.
 
 No `resolved` (ADR 99): it read as review state to every packet consumer, and duplicated `lost` —
 false exactly when `lost` is present. A comment whose anchor is gone still carries `lost`, naming
@@ -671,7 +679,9 @@ re-delivers rather than loses, and what has been delivered is never sent again. 
 packet comes next, `timeout` and `abandoned` included. `GET /api/board/:id/read` is not a packet
 and marks nothing (ADR 115), so what it returned is still owed: the same entry can ride a later
 packet too, and the `round` every entry carries is what tells a caller it is looking at an answer
-it already has.
+it already has. `POST /api/board/:id/collect` (ADR 146) is the other way out, and it does spend:
+a round the answer watch collected is marked as a packet leaving would mark it, so no later packet
+carries it.
 
 **The first exception: a comment left on a round that is not *awaited*** (ADR.md entry 35, narrowed by
 entry 45). A page board posted without `wait: true` is a round nothing ever waits on, so nothing
@@ -747,6 +757,9 @@ GET  /api/board/:id/read            one board's rounds, answers and comments, in
                                     delivered and nothing is written, so the same call twice
                                     answers the same twice. Secret only, like /wait: a tool
                                     calls it, never a page
+POST /api/board/:id/collect         { round } -> the round's packet plus `delivered`, once it
+                                    is sent, spending it; `status: 'open'` or `'abandoned'`
+                                    before then (ADR 146). The answer watch's poll. Secret only
 GET  /api/board/:id/events          SSE: round pushes, state changes; `?stages=held`
                                     declares the page fills held stage frames. A page
                                     opens it only where the browser has no SharedWorker
@@ -1469,6 +1482,34 @@ actually left: every undelivered comment is marked `delivered: true`, and every 
 whose answers this packet carried is recorded in `answersDelivered` -- so this is gated exactly
 like a write: the secret header, never the session cookie alone. The only caller is `bin/mcp.mjs`,
 which already sends the secret on every request, reads included.
+
+## `POST /api/board/:id/collect`
+
+```js
+{ round: 1, 2, 3… }
+  -> 200 { board, thread, title, round, status, answers, comments, url, relayed?, delivered }
+  -> 404 { error }   an unknown board, or a round not on it
+  -> 400 { error }   a round that is not a positive integer
+```
+
+The answer watch's poll (ADR 146; `bin/watch.mjs`, see "The answer watch" under "MCP surface"), on
+a round whose wait ended unanswered. While the round is `open`, `status` is `'open'`, and once it
+is abandoned `'abandoned'`: both carry empty `answers` and `comments`, `delivered: false`, and write
+nothing. Once the round is sent, the answer is that round's packet exactly as `/wait` would build
+it (`status` its `submitted` or `discuss`, `answers` and `comments` scoped to the round), plus
+`delivered`.
+
+A sent round is **spent** once the response has left, as a packet leaving spends it: the round
+goes on `answersDelivered` and its comments are marked delivered, so no later packet on the thread
+carries them. A board with no ledger yet adopts its other sent rounds into it on the way, as the
+next packet would. `delivered: true` says a packet had already carried the round, the thread's
+next one through the second exception under "Packet", so its session acted on it there: for a
+round that asked something it reads `answersDelivered`, and for one that asked nothing, whether
+each of its comments (at least one) was already delivered. A response that never leaves spends
+nothing, and the round stays owed.
+
+Secret-only, like every write off the cookie lists: a browser holding the cookie gets 401 and
+spends nothing.
 
 ## The pomodoro routes (ADR 8, 20, 67)
 
@@ -2376,7 +2417,9 @@ instant comes with the wait still open it reads the round's stored deadline back
 and follows a later one. A daemon it cannot reach then ends the wait at the last deadline read plus
 the grace, and none outlasts 24 hours. Against a daemon that answers no `awaitDeadline` (one from
 before the field) the shim waits its own `CLAUDE_BOARD_TIMEOUT_MS` from the post, as it always did.
-`notifications/progress` run for the whole wait, their `total` the deadline followed.
+`notifications/progress` run for the whole wait, their `total` the deadline followed. Under Claude
+Code a wait that ends `timeout` names the answer watch on its round (`watch`, ADR 146; "The answer
+watch" below).
 The return condition is the post succeeding, never the tab opening: `open` is spawned detached and
 this process never learns whether a tab appeared. Opening stays best-effort and its failure stays
 non-fatal.
@@ -2467,6 +2510,30 @@ legitimate caller rather than the case those refusals exist for. A missing or re
 refuses it exactly as it refuses `ask`, in the same words, naming the tool that was refused: "read
 refused: ... The claude-board daemon only serves a tool call from a caller holding the local secret
 at ~/.config/claude-board/secret".
+
+### The answer watch
+
+`bin/watch.mjs` (ADR 146) is what a Claude Code session runs when its `ask` ends `timeout`: the
+packet's `watch` names the command, absolute, so nothing has to find the clone. Claude Code
+re-invokes a session when its background call ends, and keeps a session whose background call is
+still running, so the watch's exit is the wake.
+
+```
+node bin/watch.mjs --board <id> --round <n> [--hours <h>]
+  0    round n was sent: prints its collect answer on one line (see
+       "POST /api/board/:id/collect"), and the round is spent
+  2    the round was abandoned, or the board or round is gone: prints `abandoned` or `gone`
+  3    the daemon did not answer twice in a row: prints `board down`
+  124  the bound passed with the round still open: prints `timeout`
+  64   usage
+```
+
+`--hours` defaults to 24 and is clamped to 24. One `POST /api/board/:id/collect` per poll, every
+30 s (`CLAUDE_BOARD_WATCH_INTERVAL_MS` overrides, for checks), the last landing on the bound, so a
+Send reaches the session within a poll and its wake. Port and credential as the shim's:
+`CLAUDE_BOARD_PORT`, else the port record beside the secret, else 7391, and the local secret
+(`CLAUDE_BOARD_SECRET_FILE` relocates it). A Send after the bound is stored like any late Send and
+read back through `read`.
 
 ### The `mission` tool
 

@@ -1939,6 +1939,70 @@ function handleReadBoard(req, res, id, home) {
   });
 }
 
+/** `POST /api/board/:id/collect { round }` (ADR 146): the answer watch's call
+ * (bin/watch.mjs), one per poll, on a round whose wait ended unanswered. An open round
+ * answers `status: 'open'` and an abandoned one `status: 'abandoned'`, both writing
+ * nothing. A sent round answers its packet plus `delivered`, and spends the round as a
+ * packet leaving would: its answers go on the `answersDelivered` ledger and its comments
+ * are marked delivered, so no later packet on the thread carries them again.
+ *
+ * `delivered: true` says a packet had already carried the round (the thread's next one,
+ * through `drainUndeliveredAnswers`), so the session acted on it there. A round that
+ * asked nothing has no ledger entry to read, and its comments decide instead.
+ *
+ * Spent on the response's `finish`, as `handleWait` does, so a watch that dies before the
+ * response lands leaves the round owed to the next packet rather than lost. Secret-only:
+ * `collect` is on no cookie list, so gate 3 refuses a browser. */
+async function handleCollect(req, res, id, home) {
+  let body;
+  try {
+    body = await readJsonBody(req);
+  } catch (err) {
+    return sendJson(res, err.status || 400, { error: err.status ? err.message : 'invalid JSON body' });
+  }
+  const round = body && typeof body === 'object' ? body.round : undefined;
+  if (!Number.isInteger(round) || round < 1) {
+    return sendJson(res, 400, { error: 'collect requires an integer "round" naming the round to collect' });
+  }
+  const board = readBoard(id, home);
+  if (!board) return sendJson(res, 404, { error: 'board not found' });
+  const r = board.rounds.find(x => x.n === round);
+  if (!r) return sendJson(res, 404, { error: 'round not found' });
+  const url = boardUrl(req, id);
+  if (r.status !== 'sent') {
+    const status = r.status === 'abandoned' ? 'abandoned' : 'open';
+    return sendJson(res, 200, { board: board.id, thread: board.thread, title: board.title, round, status, answers: [], comments: [], delivered: false, url });
+  }
+  const packet = buildPacket(board, round, url);
+  const asked = roundAnswers(board, round).length > 0;
+  const own = (board.comments || []).filter(c => (c.round ?? round) === round);
+  const delivered = asked
+    ? Array.isArray(board[ANSWERS_DELIVERED]) && board[ANSWERS_DELIVERED].includes(round)
+    : own.length > 0 && own.every(c => c.delivered === true);
+  res.once('finish', () => {
+    // Re-read and merge, as the wait's own commit does: another writer may have landed
+    // on the document since the read above.
+    try {
+      const fresh = readBoard(id, home);
+      if (!fresh) return;
+      if (asked) {
+        // No ledger yet: adopt what was already sent, as `drainUndeliveredAnswers` would.
+        const prior = Array.isArray(fresh[ANSWERS_DELIVERED])
+          ? fresh[ANSWERS_DELIVERED]
+          : fresh.rounds.filter(x => x.status === 'sent' && roundAnswers(fresh, x.n).length).map(x => x.n);
+        fresh[ANSWERS_DELIVERED] = [...new Set([...prior, round])].sort((x, y) => x - y);
+      }
+      for (const c of fresh.comments || []) {
+        if ((c.round ?? round) === round) c.delivered = true;
+      }
+      writeBoard(fresh, home);
+    } catch (err) {
+      console.error(`claude-board: could not spend round ${round} of board ${id}: ${(err && err.message) || err}`);
+    }
+  });
+  return sendJson(res, 200, { ...packet, delivered });
+}
+
 async function handleWait(req, res, id, url, home, sse, stream, waiting) {
   const roundParam = url.searchParams.get('round');
   const round = roundParam ? parseInt(roundParam, 10) : 1;
@@ -3421,6 +3485,9 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
             return;
           }
           return handleReadBoard(req, res, boardId, home);
+        }
+        if (req.method === 'POST' && action === 'collect') {
+          return await handleCollect(req, res, boardId, home);
         }
         if (req.method === 'GET' && action === 'events') {
           return handleEvents(req, res, boardId, home, sse, stranded, url);

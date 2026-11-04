@@ -32,7 +32,7 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readSecret, secretPath, daemonPort, SECRET_HEADER } from '../src/secret.mjs';
-import { HANDOFF_TOKEN_RE, recoveryCommand } from '../src/handoff.mjs';
+import { HANDOFF_TOKEN_RE, recoveryCommand, shellQuote, DEFAULT_PORT } from '../src/handoff.mjs';
 import { MAX_DRAINED_BYTES, postTooLargeMessage } from '../src/post-limit.mjs';
 import { processStartUtc } from '../src/proc-start.mjs';
 import { STATUS_TONES } from '../src/card-status.mjs';
@@ -94,6 +94,24 @@ const SECRET = readSecret();
 // environment"): it passes `assertInteractive` as any declared client does, and opens no
 // tab, since nobody is sitting at it; the board's own notification announces its rounds.
 const BACKGROUND = process.env.CLAUDE_BOARD_CLIENT === 'background';
+
+// The answer watch a `timeout` packet names (ADR 146), for Claude Code alone: it re-invokes a
+// session when that session's background call ends, which is the whole wake. Codex and
+// OpenCode declare themselves in CLAUDE_BOARD_CLIENT and have no such wake, so theirs name
+// none. The port rides along off the default, as the recovery command's does.
+const CLAUDE_CODE = !process.env.CLAUDE_BOARD_CLIENT || BACKGROUND;
+const WATCH_BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), 'watch.mjs');
+function answerWatch(boardId, round) {
+  if (!CLAUDE_CODE) return {};
+  const cmd = `node ${shellQuote(WATCH_BIN)} --board ${boardId} --round ${round}`;
+  return { watch: PORT === DEFAULT_PORT ? cmd : `CLAUDE_BOARD_PORT=${PORT} ${cmd}` };
+}
+function answerWatchText({ watch }) {
+  return watch
+    ? `\nAnswer watch: run \`${watch}\` as one background call, then end the turn. It checks every 30 s for ` +
+      `24 hours and exits once this round is sent, printing its answers; act on them once, as this round's.`
+    : '';
+}
 
 // The mission tool's key rule: the store's `SAFE_MISSION_KEY` (src/store.mjs), spelled again
 // here because importing the store pulls the page assets, the mermaid engine among them, into
@@ -1437,10 +1455,11 @@ async function askTool(args, session, { sendProgress, cancelled }) {
     throw toolErrorFor(err, url);
   }
 
+  const watch = answerWatch(posted.boardId, posted.round);
   if (waited.timedOut) {
     const text =
       `No response within ${formatDuration(TIMEOUT_MS)} of the post or of the reviewer's last activity on the round. Explicit no-response, ` +
-      `not a hang. Board is still open at ${url} — reopen it or post a fresh round to continue.`;
+      `not a hang. Board is still open at ${url} — reopen it or post a fresh round to continue.${answerWatchText(watch)}`;
     return askResult(text, {
       board: posted.boardId,
       thread: posted.thread,
@@ -1450,6 +1469,7 @@ async function askTool(args, session, { sendProgress, cancelled }) {
       answers: [],
       comments: [],
       url,
+      ...watch,
     });
   }
 
@@ -1469,9 +1489,10 @@ async function askTool(args, session, { sendProgress, cancelled }) {
   // `unanswered` and the round is still open. Same wording as the shim-side cap, which
   // is the same event seen from the other side.
   if (packet.status === 'timeout') {
+    Object.assign(packet, watch);
     const text =
       `No response before the round's wait ran out on the daemon. Explicit no-response, not a hang. ` +
-      `The round is still open at ${packet.url} — reopen it or post a fresh round to continue.\n` +
+      `The round is still open at ${packet.url} — reopen it or post a fresh round to continue.${answerWatchText(watch)}\n` +
       `${summarizeAnswers(packet)}`;
     return askResult(text, packet);
   }
