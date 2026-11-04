@@ -519,13 +519,16 @@ export function missionView(m, { home = boardHome(), now = Date.now(), isAlive =
   };
 }
 
+/** The launch caps' counts: the missions a live session holds, and those of them working. */
 function liveCounts(views) {
   const live = { working: 0, alive: 0 };
   for (const v of views) {
     if (!v.live) continue;
     live.alive += 1;
-    // A live session reading stalled is one silent while working: it still works.
-    if (v.view === 'working' || v.view === 'stalled') live.working += 1;
+    // The stored state, not the view: a live session stored working still works when it
+    // reads stalled (silent) or waiting (retired, ADR 147). One whose round waits on the PM
+    // holds no working slot.
+    if (v.state === 'working' && v.view !== 'needs-you') live.working += 1;
   }
   return live;
 }
