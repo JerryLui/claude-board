@@ -7555,8 +7555,15 @@
   if (!opts.worker || typeof Shared !== 'function') return new EventSource(opts.fallback);
   var listeners = {};
   var port = null;
-  // Hellos and beats said on this port since the worker last answered one.
-  var unanswered = 0;
+  // The stream of its own a tab opens once its worker's script will not load.
+  var own = null;
+  // Hellos and beats said on this port, and the worker's answers heard on it: the worker
+  // answers each, in order, so `answered` past n means the n-th one was answered.
+  var said = 0;
+  var answered = 0;
+  // `said` as the last beat left it: one of those still unanswered at the next beat is a
+  // full interval old. One said since, the beat a tab says on showing again, is not.
+  var due = 0;
   function connect() {
     var worker;
     try {
@@ -7564,19 +7571,34 @@
     } catch (e) {
       return false;
     }
-    port = worker.port;
-    unanswered = 0;
-    port.onmessage = function (ev) {
+    var mine = worker.port;
+    port = mine;
+    said = 0;
+    answered = 0;
+    due = 0;
+    // Fired when the script fails to load: a 404 once a daemon update renamed it, which a
+    // fresh worker of the same URL would only hit again. A worker that ran and ended says
+    // nothing; the beats find that one.
+    worker.addEventListener('error', function () {
+      if (port === mine && !answered) ownStream();
+    });
+    mine.onmessage = function (ev) {
       var m = ev.data;
       if (!m) return;
-      if (m.type === 'ack') { unanswered = 0; return; }
+      if (m.type === 'ack') { answered++; return; }
       if (m.type !== 'event') return;
       (listeners[m.event] || []).forEach(function (fn) {
         try { fn({ data: m.data }); } catch (e) { /* one listener's throw never silences the rest */ }
       });
     };
-    port.start();
+    mine.start();
     return true;
+  }
+  function ownStream() {
+    if (own) return;
+    try { port.close(); } catch (e) { /* already gone */ }
+    own = new EventSource(opts.fallback);
+    for (var name in listeners) listeners[name].forEach(function (fn) { own.addEventListener(name, fn); });
   }
   if (!connect()) return new EventSource(opts.fallback);
   var tab = Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -7584,7 +7606,8 @@
   var locks = window.navigator && window.navigator.locks;
   var hasLocks = !!locks && typeof locks.request === 'function';
   function say(type) {
-    if (type === 'hello' || type === 'beat') unanswered++;
+    if (own) return;
+    if (type === 'hello' || type === 'beat') said++;
     port.postMessage({ type: type, tab: tab, board: opts.board || null, held: !!opts.held, lock: hasLocks ? lockName : null });
   }
   function hello() { say('hello'); }
@@ -7594,6 +7617,7 @@
   function reopen() {
     try { port.close(); } catch (e) { /* already gone */ }
     if (connect()) hello();
+    else ownStream();
   }
   // The worker waits on this lock to learn the tab is gone, so the tab holds it before it
   // says hello: a worker asking first would be granted it and drop the tab at once.
@@ -7605,27 +7629,35 @@
   } else {
     hello();
   }
-  // A worker answers within a moment, so a hello or beat still unanswered at the next beat
-  // means the worker is gone.
+  // A worker answers within a moment, so a hello or beat said by the last beat and still
+  // unanswered at this one means the worker is gone. The test is that old message's, not
+  // any: Chrome runs a hidden tab's overdue beat the moment it shows again, before the
+  // answer to the beat said on showing has landed, and a live worker taken for gone drops
+  // the tab and registers it again, its Watcher leaving the board and coming back.
   setInterval(function () {
-    if (unanswered > 0) reopen();
+    if (own) return;
+    if (answered < due) reopen();
     else say('beat');
+    due = said;
   }, 5000);
   // A tab shown again asks at once rather than at its next beat, which Chrome runs once a
-  // minute in a tab hidden for five.
+  // minute in a tab hidden for five, and gives that beat two seconds.
   var doc = window.document;
   if (doc && typeof doc.addEventListener === 'function') {
     doc.addEventListener('visibilitychange', function () {
-      if (doc.visibilityState !== 'visible') return;
+      if (own || doc.visibilityState !== 'visible') return;
       say('beat');
-      setTimeout(function () { if (unanswered > 0) reopen(); }, 2000);
+      var asked = port;
+      var mark = said;
+      setTimeout(function () { if (!own && port === asked && answered < mark) reopen(); }, 2000);
     });
   }
-  window.addEventListener('pagehide', function () { port.postMessage({ type: 'bye', tab: tab }); });
+  window.addEventListener('pagehide', function () { if (!own) port.postMessage({ type: 'bye', tab: tab }); });
   window.addEventListener('pageshow', function (ev) { if (ev.persisted) hello(); });
   return {
     addEventListener: function (name, fn) {
       (listeners[name] = listeners[name] || []).push(fn);
+      if (own) own.addEventListener(name, fn);
     },
   };
 };

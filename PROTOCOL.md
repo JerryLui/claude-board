@@ -2036,12 +2036,17 @@ daemon every 5 s naming every Watcher it holds; the daemon drops a Watcher no be
 20 s (`CLAUDE_BOARD_STREAM_BEAT_TTL_MS`, for checks), and every Watcher of a stream that closes.
 Each drop asks the stranded rule again, as a closed `/events` stream does.
 
-The worker answers every hello and beat. A tab whose worker has left its last hello or beat
-unanswered at the next beat, or two seconds after the tab shows again, takes the worker for ended
-(Chrome tells a tab nothing when its worker crashes) and opens a fresh one of the same URL and
-name; its hello there registers it again, so it hears `open` and re-reads the board.
+The worker answers every hello and beat, in order. A tab whose worker has left a hello or beat
+unanswered a full beat (one said by the last beat, still unanswered at the next), or the beat the
+tab says on showing again unanswered two seconds on, takes the worker for ended (Chrome tells a
+tab nothing when its worker crashes) and opens a fresh one of the same URL and name; its hello
+there registers it again, so it hears `open` and re-reads the board. A beat said since the last
+one is not yet late: Chrome runs a hidden tab's overdue beat the moment it shows again, ahead of
+the answer to the beat it said on showing.
 
-A browser with no SharedWorker opens `/api/board/:id/events` and `/api/events` per tab, as before.
+A browser with no SharedWorker opens `/api/board/:id/events` and `/api/events` per tab, as before,
+and so does a tab whose fresh worker fails to load (an `error` before any answer: its script's
+name went with a daemon update, and that URL now answers 404).
 
 ## Stage postMessage channel
 

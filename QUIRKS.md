@@ -2293,6 +2293,8 @@ Traps that have bitten once. A second bite moves the entry up into the section i
   (`'onclose' in port` is false), and the tab went on posting into the dead port, deaf to every
   push. A tab learns its worker is gone only from an answer that stops coming (the `ack` in
   `src/stream-worker.mjs`); `new SharedWorker` with the same URL and name then starts a fresh one.
+  One whose script fails to load (a 404) does say so: Chrome 155 fires a plain `error` Event at
+  the `SharedWorker` a few ms on.
 - **Every `Target.createTarget` tab opens in the one headless window, the newest in front.** The
   others read `visibilityState` 'hidden' and `Target.activateTarget` brings one forward, which is
   how a check hides a tab and shows it again (`show` in `test/browser-check-answered-tabs.mjs`).
