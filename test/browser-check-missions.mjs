@@ -236,12 +236,18 @@ async function readUntil(tab, expr) {
   return value;
 }
 
+// Each key as a Mac keyboard sends it: its DOM key code, the Mac's own key code and its
+// character. A key code with no character, on a key the page leaves to the browser as it
+// does Escape, opens chrome://help in front of the tab (QUIRKS.md "A synthetic key with no
+// character opens chrome://help").
+const KEYS = { Enter: [13, 36, '\r'], Tab: [9, 48, '\t'], Escape: [27, 53, '\u001b'] };
+
 /** Presses `key` ('Enter', 'Tab' or 'Escape') on whatever has the tab's focus, as a keyboard does.
  * Enter is its key-down alone: the page may already be navigating away by its key-up. */
 async function pressKey(tab, key) {
-  const code = { Enter: 13, Tab: 9, Escape: 27 }[key];
-  const down = { key, code: key, windowsVirtualKeyCode: code, nativeVirtualKeyCode: code };
-  if (key === 'Enter') { await tab.sp('Input.dispatchKeyEvent', { type: 'keyDown', text: '\r', ...down }); return; }
+  const [code, mac, text] = KEYS[key];
+  const down = { key, code: key, windowsVirtualKeyCode: code, nativeVirtualKeyCode: mac, text, unmodifiedText: text };
+  if (key === 'Enter') { await tab.sp('Input.dispatchKeyEvent', { type: 'keyDown', ...down }); return; }
   await tab.sp('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...down });
   await tab.sp('Input.dispatchKeyEvent', { type: 'keyUp', ...down });
 }
@@ -640,6 +646,10 @@ async function main() {
           var stop = document.querySelector('${card} button.mission-stop');
           return { on: document.activeElement === stop, seen: getComputedStyle(stop).visibility, hovered: !!document.querySelector('${card}:hover') };
         })()`;
+        // A tab opened in front blurs this one, and Stop hides with the focus on it (QUIRKS.md
+        // "A synthetic key with no character opens chrome://help").
+        const pages = async () => (await send('Target.getTargets')).targetInfos.filter(t => t.type === 'page').length;
+        const open = await pages();
         try {
           for (const [how, shut] of [['Keep', async () => { await pressKey(tab, 'Tab'); await pressKey(tab, 'Enter'); }], ['Escape', () => pressKey(tab, 'Escape')]]) {
             await press(tab, `${card} button.mission-stop`);
@@ -647,6 +657,7 @@ async function main() {
             await away();
             await shut();
             await tab.until(`!document.querySelector('${card} div.mission-confirm')`, `${how} shutting the question`);
+            assert.equal(await pages(), open, `setup: ${how} opened no tab in front of this one`);
             const after = await tab.evalPage(focusOnStop);
             note(`${how}: focus on Stop ${after.on}, Stop ${after.seen}, card hovered ${after.hovered}`);
             assert.deepEqual(after, { on: true, seen: 'visible', hovered: false }, `${how} hands the focus to a visible Stop`);
