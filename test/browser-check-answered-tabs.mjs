@@ -15,6 +15,9 @@
 //   fails to load a fresh one and the tab opens a stream of its own;
 // - an older round, its wait already lapsed, sent after a newer round exists.
 //
+// Each away tab, once it reads answered, shows the round as the tab that sent it does: the
+// option picked there marked, the note typed there in its note field.
+//
 // Every tab of one browser shares one stream through a SharedWorker, and a frozen page's
 // message queue, a Web Lock and a dropped connection are browser behaviour the DOM
 // stand-in has none of.
@@ -88,6 +91,29 @@ const LOOK = n => `(function () {
 
 const answered = look => look.status === 'sent' && !look.owed && !look.countdown;
 
+// The note sendRound types beside its pick.
+const NOTE = 'Sent with the pick';
+
+/** What round `n`'s sent record shows of its question's answer: the options marked picked,
+ * and its note field's text. */
+const SENT = n => `(function () {
+  var section = document.querySelector('.round[data-round="${n}"]');
+  var question = section && section.querySelector('.question-block');
+  var note = question && question.querySelector('textarea[data-note-for]');
+  return {
+    picked: question ? Array.prototype.map.call(question.querySelectorAll('.choice-single.selected'), function (el) { return el.getAttribute('data-choice'); }) : null,
+    note: note ? note.value : null,
+  };
+})()`;
+
+/** Fails unless `tab` shows round `n` with the answer sendRound sent: Yes picked, its note
+ * shown. */
+async function showsSentAnswer(tab, n, who) {
+  const sent = await tab.evalPage(SENT(n));
+  assert.deepEqual(sent, { picked: ['Yes'], note: NOTE },
+    `${who} shows round ${n} sent without the answer that was sent (Yes, with its note)`);
+}
+
 /** Waits up to `ms` for round `n` to read answered in `tab`; answers how long it took, or
  * fails with what the tab still showed. */
 async function answeredWithin(tab, n, ms, who) {
@@ -98,7 +124,8 @@ async function answeredWithin(tab, n, ms, who) {
   return Date.now() - started;
 }
 
-/** Answers Yes to round `n`'s question in `tab`, on the page it is on, and presses Send. */
+/** Answers Yes to round `n`'s question in `tab`, with NOTE in its note field, on the page it
+ * is on, and presses Send. */
 async function sendRound(tab, n) {
   const sent = await tab.evalPage(`(function () {
     var section = document.querySelector('.round[data-round="${n}"]');
@@ -106,6 +133,10 @@ async function sendRound(tab, n) {
     var yes = section.querySelector('.choice-single');
     if (!yes) return 'round ${n} has no option to pick';
     yes.click();
+    var note = section.querySelector('textarea[data-note-for]');
+    if (!note) return 'round ${n} has no note field';
+    note.value = ${JSON.stringify(NOTE)};
+    note.dispatchEvent(new Event('input', { bubbles: true }));
     var send = document.querySelector('button#send-btn');
     if (!send || send.disabled) return 'Send is not live on round ${n}';
     send.click();
@@ -239,7 +270,7 @@ async function awayTabs() {
         return { board, away, sender, watchers };
       }
 
-      await row('a tab hidden and frozen while another tab sends reads answered within a few seconds of showing', async note => {
+      await row('a tab hidden and frozen while another tab sends reads answered within a few seconds of showing, the answer sent there picked', async note => {
         const { away, sender } = await twoTabs('Frozen briefly', origin);
         await away.sp('Page.setWebLifecycleState', { state: 'frozen' });
         await sendRound(sender, 1);
@@ -251,12 +282,14 @@ async function awayTabs() {
         await away.sp('Page.setWebLifecycleState', { state: 'active' });
         await show(send, away);
         note(`frozen tab: answered ${await answeredWithin(away, 1, SHOWN_MS, 'the frozen tab')} ms after showing`);
+        await showsSentAnswer(sender, 1, 'the sending tab');
+        await showsSentAnswer(away, 1, 'the frozen tab');
         await shoot(away, 'hidden-tab-shown.png', note);
         await away.close();
         await sender.close();
       });
 
-      await row('a tab frozen past the worker\'s silence, the answer sent after it was dropped, reads answered within a few seconds of showing', async note => {
+      await row('a tab frozen past the worker\'s silence, the answer sent after it was dropped, reads answered within a few seconds of showing, that answer picked', async note => {
         const { away, sender, watchers } = await twoTabs('Frozen long', origin);
         await away.sp('Page.setWebLifecycleState', { state: 'frozen' });
         await sleep(PAST_TAB_SILENCE_MS);
@@ -267,11 +300,13 @@ async function awayTabs() {
         await away.sp('Page.setWebLifecycleState', { state: 'active' });
         await show(send, away);
         note(`frozen tab: answered ${await answeredWithin(away, 1, SHOWN_MS, 'the frozen tab')} ms after showing`);
+        await showsSentAnswer(away, 1, 'the frozen tab');
+        await shoot(away, 'frozen-past-silence-tab.png', note);
         await away.close();
         await sender.close();
       });
 
-      await row('a tab whose stream dropped while another tab sends reads answered once it reconnects', async note => {
+      await row('a tab whose stream dropped while another tab sends reads answered once it reconnects, the answer sent there picked', async note => {
         const { away, sender } = await twoTabs('Dropped stream', relayOrigin);
         relay.cut();
         await sendRound(sender, 1);
@@ -282,12 +317,13 @@ async function awayTabs() {
         relay.restore();
         await show(send, away);
         note(`dropped tab: answered ${await answeredWithin(away, 1, RECONNECT_MS, 'the dropped tab')} ms after the stream came back`);
+        await showsSentAnswer(away, 1, 'the dropped tab');
         await shoot(away, 'dropped-stream-tab.png', note);
         await away.close();
         await sender.close();
       });
 
-      await row('every tab of a browser whose stream worker ended reads a round sent there answered: the sending tab at once, the tab shown again within a few seconds', async note => {
+      await row('every tab of a browser whose stream worker ended reads a round sent there answered, its answer picked: the sending tab at once, the tab shown again within a few seconds', async note => {
         const { away, sender } = await twoTabs('Worker ended', origin);
         const workers = async () => (await send('Target.getTargets')).targetInfos
           .filter(t => t.type === 'shared_worker' && t.url.startsWith(`${origin}/api/stream/`));
@@ -301,10 +337,12 @@ async function awayTabs() {
         // round, where the stream would have taken it two beats to find its worker gone.
         await sendRound(sender, 1);
         note(`sending tab: answered ${await answeredWithin(sender, 1, AT_ONCE_MS, 'the sending tab')} ms after its Send`);
+        await showsSentAnswer(sender, 1, 'the sending tab');
         await sleep(AWAY_MS);
         await show(send, away);
         try {
           note(`tab shown again: answered ${await answeredWithin(away, 1, SHOWN_MS, 'the tab shown again')} ms after showing`);
+          await showsSentAnswer(away, 1, 'the tab shown again');
         } finally {
           await shoot(away, 'worker-ended-tab.png', note);
         }
@@ -312,7 +350,7 @@ async function awayTabs() {
         await sender.close();
       });
 
-      await row('a tab whose stream worker ended after a daemon update took its script away reads a round sent in another tab answered within a few seconds of showing, and is its board\'s Watcher again', async note => {
+      await row('a tab whose stream worker ended after a daemon update took its script away reads a round sent in another tab answered within a few seconds of showing, its answer picked, and is its board\'s Watcher again', async note => {
         const { away, sender, watchers } = await twoTabs('Worker script gone', updatedOrigin);
         const workers = async () => (await send('Target.getTargets')).targetInfos
           .filter(t => t.type === 'shared_worker' && t.url.startsWith(`${updatedOrigin}/api/stream/`));
@@ -328,6 +366,7 @@ async function awayTabs() {
         await show(send, away);
         try {
           note(`tab shown again: answered ${await answeredWithin(away, 1, SHOWN_MS, 'the tab shown again')} ms after showing`);
+          await showsSentAnswer(away, 1, 'the tab shown again');
         } finally {
           await shoot(away, 'worker-script-gone-tab.png', note);
         }

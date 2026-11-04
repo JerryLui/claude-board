@@ -7377,7 +7377,7 @@ export const ui = `
       // (roundsClosedUnsent above), while we were away.
       board = fresh;
       clearFieldState(patch.changedBlockIds);
-      patch.roundsNowSent.forEach(markRoundHistory);
+      applySentRounds(patch.roundsNowSent, fresh, doc);
       // The pager states everything this branch changed -- the badge, the dot
       // on a round that no longer owes an answer, and the send bar, which a
       // round going sent while this client was away must take away even though
@@ -7407,7 +7407,25 @@ export const ui = `
       });
       if (html) applyRoundPush({ round: n, mode: 'amend', board: fresh, html: html });
     });
+    // After the replays: each diffs this tab's board against the snapshot, which
+    // takes the board to it, so a sent round applied first would leave them nothing
+    // to diff. The replay marks such a round history; this swaps in its record.
+    applySentRounds(patch.roundsNowSent, fresh, doc);
     refreshPins(document);
+  }
+
+  /** The rounds a snapshot says went sent while this tab was not listening, taken on
+   * as the 'submitted' push it missed would have brought each (applySubmittedPush):
+   * the page's render of a round is the markup that push carries, from the same
+   * board, its stages held alike, so the record shows the answers that went out
+   * rather than this tab's own fields. Once per round, whichever of the three
+   * (this, the push, this tab's own Send's answer) comes first. */
+  function applySentRounds(sent, fresh, doc) {
+    sent.forEach(function (n) {
+      var freshSection = doc.querySelector('.round[data-round="' + n + '"]');
+      if (freshSection) applySubmittedPush({ round: n, board: fresh, html: freshSection.outerHTML });
+      else markRoundHistory(n);
+    });
   }
 
   function resync() {
@@ -7458,6 +7476,9 @@ export const ui = `
       var node = doc.querySelector('script#board-data[type="application/json"]');
       if (!node) return;
       applyResync(JSON.parse(node.textContent), doc);
+      // The catch-up replays what it missed through the push paths, and each counts
+      // itself a push; none is a live one, so a fresher catch-up in the air still lands.
+      pushGeneration = generation;
       // On every path through it, the ones that change nothing included: a fill that
       // failed before the stream dropped is tried again on its reconnect.
       fillHeldStages();

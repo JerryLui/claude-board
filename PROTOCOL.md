@@ -1982,7 +1982,8 @@ form, every stage in it held, since a submit changes no block; without it a clie
 submit would show its own unsent, in-progress state as if it were what was sent. A client that
 receives no `html` must fall back to disabling the round in place. The page that sent has the
 same payload in its Send's answer too (`POST /api/board/:id/submit`'s `submitted`), and applies
-whichever of the two lands first.
+whichever of the two lands first; a tab that missed both takes the round on from its catch-up
+(below), the same way.
 
 `awaitExpired` is the one event that carries no board: it fires from `GET /api/board/:id/wait`'s
 own timeout branch, at the moment that wall clock gives up, and is a wake-up nudge rather than a
@@ -2011,8 +2012,12 @@ same apply path as a live push. A first connection with nothing missed diffs to 
 touches no DOM. The re-read is `GET /b/:boardId?stages=held`, the page with every stage held: it
 inlines both the payload (`#board-data`, `resolveComment` already run over it, the same bytes as the
 plain page) and the server-rendered markup for every round, and leaves out the stages the tab
-already holds, so a page loads once rather than twice. A dedicated JSON route would be leaner and
-can be added later without changing this rule.
+already holds, so a page loads once rather than twice. A round the re-read shows sent that the
+client's copy still has unsent is taken on as the `submitted` push it missed: that round's
+`<section class="round">` in the page is the push's `html`, rendered from the same board with its
+stages held alike, so the tab shows the answers that went out, not its own fields. Each round's sent
+record is applied once, from whichever of the push, the Send's answer and the re-read lands first. A
+dedicated JSON route would be leaner and can be added later without changing this rule.
 
 ### The daemon-wide stream
 
