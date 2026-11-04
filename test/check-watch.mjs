@@ -12,6 +12,7 @@ import { spawn } from 'node:child_process';
 import { startServer, buildPacketWithUndelivered } from '../src/server.mjs';
 import { ANSWERS_DELIVERED } from '../src/board.mjs';
 import { readBoard } from '../src/store.mjs';
+import { WAIT_CEILING_MS } from '../src/handoff.mjs';
 import {
   check, freePort, rawRequest, repoRoot, runMain, secretFetch, secretHome, sessionCookieHeader, sleep, writeHeaders,
 } from './support.mjs';
@@ -219,6 +220,18 @@ async function main() {
     assert.equal(stdout.trim(), 'timeout');
     assert.ok(elapsed >= 1080, `not before the bound of 1.08 s: ${elapsed}ms`);
     assert.equal(readFileSync(boardFile, 'utf8'), before, 'a poll on an open round marks nothing');
+  });
+
+  await check('the watch is bounded by the wait ceiling the daemon and the shim enforce: by default, and however many --hours it is asked for', async () => {
+    for (const extra of [[], ['--hours', '48']]) {
+      const before = Date.now();
+      const { code, stderr } = await startWatch([...watchArgs('b_no_such_board', 1), ...extra]).done;
+      const after = Date.now();
+      assert.equal(code, 2, 'setup: a board that is gone ends the watch at its first poll');
+      const until = Date.parse(/until (\S+)/.exec(stderr)?.[1]);
+      assert.ok(until >= before + WAIT_CEILING_MS && until <= after + WAIT_CEILING_MS,
+        `${JSON.stringify(extra)}: bound ${until - before - WAIT_CEILING_MS}ms past the ceiling`);
+    }
   });
 
   await check('a daemon that does not answer twice in a row ends the watch with 3', async () => {

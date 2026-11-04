@@ -54,7 +54,7 @@ import { ASSET_NAME, MERMAID_ASSET_NAME, SHARED_ASSETS, assetContentType } from 
 import { createBrowserStreams } from './browser-stream.mjs';
 import { STREAM_WORKER_FILE, STREAM_WORKER_SOURCE } from './stream-worker.mjs';
 import { readSecret, secretPath, secretMatches, sessionToken, sessionCookieMatches, SECRET_HEADER, SESSION_COOKIE, SESSION_MAX_AGE_S } from './secret.mjs';
-import { createHandoffStore, handoffTarget, recoveryCommand, HANDOFF_TOKEN_RE, DEFAULT_PORT } from './handoff.mjs';
+import { createHandoffStore, handoffTarget, recoveryCommand, HANDOFF_TOKEN_RE, DEFAULT_PORT, waitCeilingMs } from './handoff.mjs';
 import { createBoard, addRound, amendRound, abandonOpenRounds, applySubmit, buildPacket, roundAnswers, dropResolved, resolveComments, questionBlocks, SUPPRESSED, ANSWERS_DELIVERED, roundContentDrifted } from './board.mjs';
 import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, renderRefusalPage, boardForClient, holdStages, holdAllStages, stageShas, CSP, INDEX_CSP } from './render.mjs';
 import { buildThreadIndex, renderIndexPage, renderMissionsPage, renderThreadRows, folderName } from './indexpage.mjs';
@@ -422,20 +422,13 @@ const DAEMON_ID = createHash('sha256').update(String(process.argv[1] || ''), 'ut
  * equal src/board.mjs's `DEFAULT_AWAIT_TIMEOUT_MS`, which is what `handlePostBoard`
  * below stamps a round's `awaitDeadline` with, and what an activity report moves a
  * moving round's deadline to from now (ADR 145). A wait on such a round follows its
- * stored deadline instead, under `MOVING_WAIT_CEILING_MS`. */
+ * stored deadline instead, under `waitCeilingMs()` (src/handoff.mjs). */
 export const DEFAULT_WAIT_TIMEOUT_MS = 2_400_000;
 
 function waitTimeoutMs() {
   const v = Number(process.env.CLAUDE_BOARD_TIMEOUT_MS);
   return Number.isFinite(v) && v > 0 ? v : DEFAULT_WAIT_TIMEOUT_MS;
 }
-
-/** The ceiling on one `/wait` call on a round whose deadline moves (ADR 145). Such a wait
- * ends when the round's STORED deadline passes, and the reviewer's activity keeps moving
- * it, so the fixed cap above no longer ends it; this does, so a poll loop on a board
- * somebody keeps touching still has an end. A day: the longest a session is told to keep
- * watching a round. */
-const MOVING_WAIT_CEILING_MS = 24 * 60 * 60 * 1000;
 
 /** The least time between two accepted activity reports on one round (ADR 145). Five
  * seconds: the deadline is minutes long, so a report every keystroke buys nothing a
@@ -1142,10 +1135,16 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, s
         return sendJson(res, 200, {
           boardId: board.id,
           thread: board.thread,
-          round: board.rounds[board.rounds.length - 1].n,
+          round: guarded.n,
           url: boardUrl(req, board.id),
           clients: sse.clientCount(board.id),
           deduped: true,
+          // What the post that applied this id answered, read off the round it guarded, so
+          // a retried post waits to the stored deadline as the first one would have
+          // rather than to a clock of the shim's own.
+          suppressed: board[SUPPRESSED] === true,
+          awaited: roundIsAwaited(board, guarded),
+          awaitDeadline: guarded.awaitDeadline ?? null,
         });
       }
       const latestRound = board.rounds[board.rounds.length - 1];
@@ -2072,12 +2071,14 @@ async function handleWait(req, res, id, url, home, sse, stream, waiting) {
   res.on('close', onClose);
 
   // A round whose deadline moves (ADR 145) is waited on to its stored deadline, re-read
-  // on every poll, under a day's ceiling; every other round keeps the fixed cap from this
-  // call's entry, which is what a shim from before the moving deadline was built against.
+  // on every poll, under the wait ceiling from this call's entry (src/handoff.mjs), which
+  // the shim outlives by its grace so that this side's timeout packet is the one it gets;
+  // every other round keeps the fixed cap from this call's entry, which is what a shim from
+  // before the moving deadline was built against.
   const moving = initial.rounds.find(r => r.n === round).movingDeadline === true;
   const result = await waitForRound(id, round, home, {
     isAborted: () => aborted,
-    deadlineAt: Date.now() + (moving ? MOVING_WAIT_CEILING_MS : waitTimeoutMs()),
+    deadlineAt: Date.now() + (moving ? waitCeilingMs() : waitTimeoutMs()),
     followDeadline: moving,
   });
   if (result.aborted) return; // the client is gone: nothing to write, nothing to keep polling for
@@ -2135,6 +2136,16 @@ async function handleWait(req, res, id, url, home, sse, stream, waiting) {
     // "did anything change" would mean it never ran at all. Ordered ahead of the
     // broadcast so a tab that refetches on the nudge cannot read a board still
     // claiming to be awaited. See closeLapsedAwaitedRounds (src/badge.mjs).
+    //
+    // The ceiling can end a moving round's wait with its stored deadline, moved by the
+    // reviewer's activity, still ahead, and the sweep clears only a deadline that passed.
+    // Nobody waits on the round past this answer, so its deadline becomes now: the sweep
+    // then clears `awaited`, the page stops counting down, the waiting count drops the
+    // round and a later activity report moves nothing.
+    const ended = moving ? result.board.rounds.find(r => r.n === round) : null;
+    if (ended && ended.awaited === true && ended.status === 'open' && ended.awaitDeadline && !roundWaitLapsed(ended)) {
+      ended.awaitDeadline = new Date().toISOString();
+    }
     closeLapsedAwaitedRounds(result.board);
     writeBoard(result.board, home);
     sse.broadcast(id, 'awaitExpired', { round });

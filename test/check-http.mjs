@@ -359,6 +359,12 @@ async function main() {
     assert.equal(retry.deduped, true, 'the daemon must say it recognised the retry rather than silently reapplying');
     assert.equal(retry.round, first.round, 'a retry does not advance the round');
     const board = JSON.parse(readFileSync(path.join(home, 'boards', `${created.boardId}.json`), 'utf8'));
+    // The guarded round's wait, so a retried `ask` waits to the stored deadline (ADR 145)
+    // rather than to a clock of the shim's own.
+    const guarded = board.rounds.find(r => r.n === first.round);
+    assert.equal(typeof guarded.awaitDeadline, 'string', 'setup: the question round is awaited, with a deadline');
+    assert.deepEqual([retry.awaited, retry.awaitDeadline, retry.suppressed], [true, guarded.awaitDeadline, first.suppressed],
+      'a deduped retry answers what the post that applied the id did');
     const prompts = board.blocks.filter(b => b.kind === 'question' && b.round === first.round);
     assert.equal(prompts.length, 1, `the retried round must hold ONE question, not two (got ${prompts.length})`);
     // A genuinely different round still lands: dedupe is on the id, not on "any repeat".
@@ -5044,6 +5050,33 @@ async function main() {
       assert.deepEqual(JSON.parse(res.body), { round: 1, awaitDeadline: deadline, moved: false });
       assert.equal(readBoard(boardId, home).rounds[0].awaitDeadline, deadline, 'the stored deadline is untouched');
     }
+  });
+
+  await check('ADR 145: a wait the ceiling ends while the reviewer keeps moving the deadline answers timeout and leaves the round not awaited, so a later report moves nothing', async () => {
+    await withEnv({ CLAUDE_BOARD_TIMEOUT_MS: '600', CLAUDE_BOARD_WAIT_CEILING_MS: '900', CLAUDE_BOARD_ACTIVITY_MIN_MS: '50' }, async () => {
+      const r = await askRound('CEILING_Q', { movingDeadline: true });
+      const enteredAt = Date.now();
+      let endedAt = null;
+      const waiting = fetch(`${base}/api/board/${r.boardId}/wait?round=1`)
+        .then(res => res.json()).then(packet => { endedAt = Date.now(); return packet; });
+      let lastMoved = null;
+      while (endedAt === null && Date.now() - enteredAt < 5000) {
+        const res = await reportActivity(r.boardId, 1);
+        if (res.status === 200 && JSON.parse(res.body).moved) lastMoved = Date.parse(JSON.parse(res.body).awaitDeadline);
+        await sleep(100);
+      }
+      const packet = await withTimeout(waiting, 5000, 'the wait must end at the ceiling');
+      assert.equal(packet.status, 'timeout');
+      assert.ok(endedAt >= enteredAt + 900, `not before the ceiling: ${endedAt - enteredAt}ms`);
+      assert.ok(lastMoved > endedAt, `setup: the ceiling, not the moved deadline, ended the wait (${lastMoved - endedAt}ms ahead)`);
+
+      const read = await (await fetch(`${base}/api/board/${r.boardId}/read`)).json();
+      assert.equal(read.rounds[0].awaited, false, 'nobody waits on the round now: its page counts down nothing and the waiting count drops it');
+      assert.ok(Date.parse(read.rounds[0].deadline) <= endedAt, 'its deadline is the moment the wait ended');
+      const after = await reportActivity(r.boardId, 1);
+      assert.equal(after.status, 200, after.body);
+      assert.deepEqual(JSON.parse(after.body), { round: 1, awaitDeadline: read.rounds[0].deadline, moved: false });
+    });
   });
 
   await check('ADR 145: a second report on a round inside 5 s is a 429 naming how long until one is taken, and moves nothing; another board\'s report is its own', async () => {
