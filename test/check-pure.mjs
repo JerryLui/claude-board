@@ -10807,7 +10807,7 @@ check('no block of any kind, top level or nested, renders a type caption: no kic
   }
 });
 
-check('a block with a title and a status renders both in its head row, the chip last, for every kind and nested in a compare side and a question\'s context; the status tone rides on the chip', () => {
+check('a block with a title and a status renders both in its head row, the chip last, for every kind and nested in a compare side and a question\'s context; the status tone rides on the chip; a compare side\'s diagram opens that row with the side\'s label', () => {
   const board = everyKindBoard();
   const tones = ['good', 'warn', 'bad', 'neutral', 'good'];
   const titled = board.blocks.filter(b => b.kind !== 'question');
@@ -10841,6 +10841,10 @@ check('a block with a title and a status renders both in its head row, the chip 
     const head = headOf(titled.find(b => b.kind === kind).id);
     assert.deepEqual(head.children.map(c => c.className.split(' ')[0]), ['card-title', 'comment-btn', 'card-status'], `${kind}'s head row`);
   }
+  // On a compare side the label leads that row, so the Comment button sits beside it.
+  const sideHead = headOf(sideBlock.id);
+  assert.deepEqual(sideHead.children.map(c => c.className.split(' ')[0]), ['compare-label', 'card-title', 'comment-btn', 'card-status'], 'the compare side\'s head row');
+  assert.equal(sideHead.children[0].textContent, 'After');
 });
 
 check('a card\'s title is its own title, else a markdown block\'s opening heading lifted out of the body (said once), else none; an untitled card opens with its content', () => {

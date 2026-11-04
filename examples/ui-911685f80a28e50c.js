@@ -354,8 +354,9 @@
   // does, since every line here runs synchronously at IIFE start). Real
   // functions, not a hand-written twin: badge.mjs's own header comment is what
   // explains why only THIS file may ever call roundIsCurrentlyAwaited/
-  // roundCountdownText/pageBoardPillMeta with a real clock -- src/render.mjs
-  // never does, so a rendered page stays a pure function of its board JSON.
+  // roundCountdownText/pageBoardPillMeta/roundDeadlineMoves with a real clock --
+  // src/render.mjs never does, so a rendered page stays a pure function of its
+  // board JSON.
   var ROUND_COUNTDOWN_TITLE = "Time left before this round's wait ends";
   var PILL_READONLY_TITLE = "No agent is listening on this page -- commenting is off.";
   var ROUND_OPEN_UNAWAITED_TITLE = "No agent is waiting live right now -- comments and answers sent here are saved and reach the next agent that reads the board.";
@@ -383,6 +384,12 @@
   // button is the same false statement on both.
   const title = (!fullpage && round && round.status !== 'sent') ? ROUND_OPEN_UNAWAITED_TITLE : PILL_READONLY_TITLE;
   return { text: 'read-only', title };
+};
+  // ADR 145: the same gate the daemon's activity route applies, spliced here
+  // rather than hand-copied so the page and the route can never quietly
+  // disagree about which rounds take an activity report.
+  var roundDeadlineMoves = function roundDeadlineMoves(round, nowMs) {
+  return roundIsCurrentlyAwaited(round, nowMs) && round.movingDeadline === true;
 };
 
   function seedAnswers(blockIds, boardData) {
@@ -6664,12 +6671,12 @@
     return isFinite(n) ? n : currentRound;
   }
 
-  /** Open, awaited, short of its deadline, and posted to follow the moving
-   * deadline: a round posted by an older shim keeps its fixed wait, so its
-   * page never reports. */
+  /** roundDeadlineMoves (badge.mjs, ADR 145), the same gate the daemon's
+   * activity route applies: open, awaited, short of its deadline, and posted
+   * to follow the moving deadline. A round posted by an older shim keeps its
+   * fixed wait, so its page never reports. */
   function roundTakesActivity(n) {
-    var r = roundEntry(n);
-    return !!r && r.movingDeadline === true && roundIsCurrentlyAwaited(r, Date.now());
+    return roundDeadlineMoves(roundEntry(n), Date.now());
   }
 
   function reportActivity(el) {

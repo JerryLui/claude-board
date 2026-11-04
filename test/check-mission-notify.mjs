@@ -161,7 +161,7 @@ async function main() {
     r.watch.close();
   });
 
-  await check('a mission that moves on before its batch speaks leaves the batch, and an empty batch posts nothing', () => {
+  await check('a mission that moves on before its batch speaks leaves the batch, retired or answered, and an empty batch posts nothing', () => {
     const r = rig();
     r.set('FOXTROT', { state: 'working' });
     r.at(0);
@@ -170,6 +170,16 @@ async function main() {
     r.at(80 * SECOND);
     assert.deepEqual(r.posted, []);
     r.watch.close();
+
+    // Retired with no open work, it leaves the list the watch reads, and the batch (ADR 147).
+    const g = rig();
+    g.set('GOLF', { state: 'working' });
+    g.at(0);
+    g.at(10 * SECOND, () => g.set('GOLF', { state: 'needs-you' }));
+    g.at(40 * SECOND, () => g.set('GOLF', { retiredAt: new Date(g.clock.t).toISOString() }));
+    g.at(80 * SECOND);
+    assert.deepEqual(g.posted, []);
+    g.watch.close();
   });
 
   await check('the batch speaks when its window timer fires, though the clock reads a hair before the window closes or the read fails', async () => {

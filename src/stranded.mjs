@@ -88,10 +88,11 @@ function registerStrandedWatch(watch) {
  * resolves to the oldest round still waiting AT THE MOMENT IT IS CLICKED rather than to
  * whichever round happened to trigger this.
  *
- * Five things drive it, and all five are events the daemon already handles: a round
+ * Six things drive it, and all six are events the daemon already handles: a round
  * landing (`handlePostBoard`), a Watcher arriving or leaving (`handleEvents`), a tab
  * reporting whether it is looked at (`handleAttended`), a round being answered
- * (`handleSubmit`), and a thread's open rounds being abandoned (`handleAbandon`) -- all in
+ * (`handleSubmit`), a thread's open rounds being abandoned (`handleAbandon`), and a
+ * round's deadline moving on the reviewer's activity (`handleActivity`, ADR 145) -- all in
  * src/server.mjs. There is no polling and no clock of its own beyond the one grace timer
  * per board, because everything else it needs to know is a fact it can read off the board
  * when one of those happens. That is why "is this round still waiting" is decided LAZILY
@@ -560,8 +561,10 @@ export function createStrandedWatch({
       }
       const at = Date.now();
       // What bounds the process serving this banner's click. Normally the round's own
-      // deadline; on a Suppressed board's content-only first round there is no deadline to
-      // read (ADR.md entry 92), and the launcher's hard ceiling alone bounds it instead --
+      // deadline, read off the board as it stands now: one the reviewer's activity has
+      // moved (ADR 145) is the one the click lives to. On a Suppressed board's content-only
+      // first round there is no deadline to read (ADR.md entry 92), and the launcher's hard
+      // ceiling alone bounds it instead --
       // the same ceiling `until` below takes a minimum with, so the two cannot disagree.
       //
       // The FIELD is tested, not the parse, and the difference matters: `Date.parse`

@@ -132,7 +132,7 @@ board = {
   cwd,                              // project directory of the session that owns the thread
   createdAt, updatedAt,             // ISO 8601
   state,                            // 'open' | 'submitted' | 'discuss' | 'timeout'
-  rounds: [ { n, postedAt, status, sentAt, title, action?, awaited, awaitDeadline, abandonedAt? } ],
+  rounds: [ { n, postedAt, status, sentAt, title, action?, awaited, awaitDeadline, movingDeadline?, abandonedAt? } ],
                                      // status: 'open' | 'sent' | 'abandoned'
   blocks: [ Block ],                // every block of every round, in display order
   answers: { [questionBlockId]: Answer },
@@ -185,6 +185,13 @@ below) — stamped at mint time and never recomputed by an amend of the same rou
 round is awaited by its question either way and the deadline is identical either way, so
 the flag asks for the state the round is already in. It stays the two routes above; `wait`
 never becomes a third.
+
+**Round `movingDeadline`** (ADR 145) is `true` on an awaited round minted by a post that carried
+`movingDeadline: true` (`POST /api/board`, below): the poster waits to the round's stored deadline,
+so the reviewer's activity on the round may move it (`POST /api/board/:id/activity`). Then
+`awaitDeadline` is the instant of the last accepted report plus the wait timeout, or `postedAt`
+plus it when nothing was reported. It is absent everywhere else, a round nothing awaits and a round
+from a poster that waits on a clock of its own alike, and such a round's deadline is never moved.
 
 **`answersDelivered`** (ADR 107) is a daemon-only ledger beside the rounds: the round numbers of
 this board whose answers a packet has actually carried out, ascending. It is what makes the
@@ -638,7 +645,7 @@ the drain path `noWait` opens (`POST /api/board` below): what the thread is owed
 carried rides that one response, each entry naming its own round. Without the field, and on a
 daemon older than it, both arrays are empty. `discuss` means the reviewer chose Discuss in chat:
 partial answers are included and the agent must stop posting boards for the rest of the session.
-`timeout` is the wall-clock cap (default 40m, ADR.md entry 47) and carries an explicit no-response about ITS OWN
+`timeout` is the wall-clock cap (default 40m, ADR.md entry 47; restarted by the reviewer's activity on a moving round, ADR 145) and carries an explicit no-response about ITS OWN
 round — an empty `answers` and no comments of its own — plus whatever the two exceptions below
 owe the thread, which are owed to a timed-out round exactly as they are to any other. `abandoned`
 is the round being closed under a blocked call — the
@@ -730,8 +737,8 @@ GET  /auth/:token                   consume a handoff -> 302 + Set-Cookie  (open
 POST /api/handoff                   { boardId? } -> { token, expiresAt, ttlMs }
 POST /api/board                     post a board or a round into a live thread
                                     -> { boardId, thread, round, url, clients, suppressed,
-                                    awaited }, plus { answers, comments } on a post that
-                                    carried noWait (see the section below)
+                                    awaited, awaitDeadline }, plus { answers, comments } on a
+                                    post that carried noWait (see the section below)
 GET  /api/board/:id/wait?round=N    blocks until the round is sent -> Packet. Secret only:
                                     never cookie-reachable -- `handleWait` also writes
 GET  /api/board/:id/read            one board's rounds, answers and comments, in packet
@@ -758,6 +765,10 @@ POST /api/board/:id/abandon         {} -> { ok: true, rounds }; closes every rou
                                     (ADR.md entry 69). Secret only: never cookie-reachable
 POST /api/board/:id/attended        { watcher, attended, seq?, sinceFocusMs? } -> { ok: true };
                                     the open tab reporting whether it is Attended right now
+POST /api/board/:id/activity        { round } -> { round, awaitDeadline, moved }: the page
+                                    reporting a pick, note or comment on the round, which
+                                    restarts a moving round's wait (ADR 145); 429
+                                    { retryAfterMs } inside 5 s of the last one taken
                                     (CONTEXT.md "Watcher", "Attended"); stores nothing
                                     durable itself, but a report that the reviewer has
                                     returned withdraws the stranded banner recorded on that
@@ -917,6 +928,10 @@ only party that can honestly report whether its own tab is Attended, and the rep
 than `submit` already does: no round named, no answer carried, nothing durable touched (see that
 route's own section, below).
 
+It is additionally accepted on `POST /api/board/:id/activity` (ADR 145): the page is the only
+party that sees the reviewer pick, type or comment, and the report reaches less than `submit`
+does: it moves an open round's deadline later and answers nothing.
+
 It is additionally accepted on the three shared-stream writes, `watch`, `unwatch` and `beat`
 (ADR 144): the browser's worker registering its tabs as Watchers, which reaches what holding a
 board's `/events` stream and posting `attended` already reach.
@@ -970,8 +985,8 @@ the same page is served whether or not the board exists.
 
 ## `POST /api/board`
 
-`{ title, blocks, cwd?, thread?, wait?, noWait? }` starts a new thread;
-`{ boardId, blocks, title?, wait?, noWait? }` pushes into a live one. `cwd` is only meaningful on
+`{ title, blocks, cwd?, thread?, wait?, noWait?, movingDeadline? }` starts a new thread;
+`{ boardId, blocks, title?, wait?, noWait?, movingDeadline? }` pushes into a live one. `cwd` is only meaningful on
 the thread-creating form. `title` is meaningful
 on **both**: on the `boardId` form it labels the round being minted or amended. `wait` (boolean,
 default `false`) is meaningful only on whichever call actually MINTS the round being posted — an
@@ -1009,6 +1024,13 @@ board then puts that session's tab card in Needs you. The shim sends its parent 
 `claude` process that spawned it) and that process's start as `TZ=UTC ps -o lstart=` prints it,
 read once at startup; a start it cannot read sends no `session`, never a failed post.
 
+**`movingDeadline: true` is the caller stating its wait follows the round's stored deadline**
+(ADR 145), which lets the reviewer's activity move it. It is stamped on the round the post mints,
+when that round is awaited, and nowhere else; an amend never stamps it, since an amend keeps the
+round as it was minted. Anything but `true` is no declaration: a shim from before the field sends
+nothing, gives up at its own fixed cap, and its round's deadline stays where it was minted, so
+moving it would only promise the reviewer a wait nobody is doing.
+
 **`noWait` (boolean) is the caller stating it will not open `/wait` on this post**, which is what
 makes the response the thread's next packet. On it the daemon drains into that response whatever
 the thread is owed and no packet has carried (an answer sent after an earlier round's wait ended,
@@ -1045,10 +1067,11 @@ sealed VM context; a diagram over the page's own 50,000-character limit is refus
 parses, while a non-parse engine failure is logged and fails open. Nothing is stored, rendered,
 broadcast or pushed, and the same rule applies on an amend, leaving its stored round unchanged.
 
-Either way the response is `{ boardId, thread, round, url, clients, suppressed, awaited }`, plus
-`answers` and `comments` on a post that carried `noWait: true` (below) and on no other, `round`
-naming whichever round was amended or minted and `awaited` carrying that round's own minted
-`awaited` flag. The flag is on the response because the daemon is the only side that has seen the
+Either way the response is `{ boardId, thread, round, url, clients, suppressed, awaited,
+awaitDeadline }`, plus `answers` and `comments` on a post that carried `noWait: true` (below) and
+on no other, `round` naming whichever round was amended or minted, `awaited` carrying that round's
+own minted `awaited` flag and `awaitDeadline` its stored deadline (null when nothing awaits it), the
+instant a caller following the stored deadline waits to. The flag is on the response because the daemon is the only side that has seen the
 normalised round: the poster checks the raw blocks it sent, which is a different question (the
 case that first split the two answers — a page board whose `html` `source` failed to resolve, minted
 *not* awaited — is a refusal now rather than a round). A caller deciding whether to wait should
@@ -1301,6 +1324,44 @@ asks only whether one has *said* it is looking, so holding `/events` open and sa
 needs only a read credential — cannot mute a board. A tab that drops and reconnects inside the grace
 is silent because it reports, not because its socket exists.
 
+## `POST /api/board/:id/activity`
+
+```js
+{ round: 1, 2, 3… }
+  -> 200 { round, awaitDeadline, moved }
+  -> 429 { error, retryAfterMs }
+```
+
+The page reporting that the reviewer did something on `round` (ADR 145): an answer change (an
+option, a multi-select toggle, a rank move, a rendered-variant pick, Defer), a typed answer or
+note, or a saved comment, sent only while the round is open, awaited, unlapsed and carries
+`movingDeadline`. Never a focus, a visibility change or a scroll: a tab left focused overnight is
+not a reviewer working on the round.
+
+The page sends the first change at once, then takes at most one report per round every 5.25 s
+(`ACTIVITY_GAP_MS`, src/ui.mjs), carrying the window's last change at its end; a failed or 429
+report is dropped, and the next change reports again. It applies the `awaitDeadline` it gets back
+off its own report, off the `deadline` event (see "SSE events") and off a reconnect snapshot,
+forward only -- never moving a round's countdown earlier.
+
+`moved: true` when the round is open, awaited, minted `movingDeadline` (see "Board document") and
+its deadline has not passed: its `awaitDeadline` becomes now plus the wait timeout
+(`CLAUDE_BOARD_TIMEOUT_MS`, default 40 minutes), the board and `pages/<id>.html` are written
+together, and the move is published as the `deadline` event (see "SSE events"). `moved: false`
+otherwise, and nothing is written: a round from a poster that waits on a fixed cap of its own, a
+round nothing awaits, and a lapsed, sent or abandoned round all keep the deadline they have.
+`awaitDeadline` is the round's deadline after the report, moved or not.
+
+One report per round is taken every 5 s (`CLAUDE_BOARD_ACTIVITY_MIN_MS` overrides, for checks):
+inside that, the answer is a **429** carrying `retryAfterMs`, the time until the next is taken, and
+nothing moves. A report answered 200 counts, moved or not; the interval is held in memory, so a
+daemon restart lets one report through early. **404** for an unknown board, **400** for a `round`
+that is not a positive integer or not on the board.
+
+Authenticated as `submit` is: the session cookie with its same-origin checks, or the secret (see
+"The browser session cookie"). A forged report keeps a session waiting longer on a round it is
+already waiting on; it answers nothing.
+
 ## The stranded banner
 
 The daemon raises one native notification for a board no Watcher is looking at, carrying either an
@@ -1325,7 +1386,8 @@ unattended when the amend lands: one the reviewer is currently on, or inside its
 window, is left entirely to the ordinary Attended/return-gate handling below, which needs the
 mark undisturbed to open the gate on. It is re-decided after
 every event that can change the answer — a round landing, a Watcher arriving or leaving, an
-`attended` report, a submit, an amend to an already-open round — never polled, and it fires
+`attended` report, a submit, an amend to an already-open round, a deadline moved by an `activity`
+report (ADR 145) — never polled, and it fires
 after a grace of 5000ms (`CLAUDE_BOARD_STRANDED_GRACE_MS` overrides, and the launcher passes
 it through), so a tab that is merely reconnecting, or one about to open on its own for the
 thread's first round, is never mistaken for an absent reviewer.
@@ -1356,13 +1418,17 @@ other.
 
 The banner is recorded on the board document as `strandedBanner`,
 `{ at, until, round, returned, pid } | null`: when it went up, when the process serving it will exit
-and withdraw it (the round's deadline or the launcher's hard ceiling, whichever is sooner — a
+and withdraw it (the round's deadline as stored when the banner went up, a moved one included, or
+the launcher's hard ceiling, whichever is sooner — a
 Suppressed board's content-only first round has no deadline at all, and that ceiling alone bounds
 it), the highest round announced — the **mark**, permanent for the life of that round unless an
 amend to it moves it back one (ADR.md entry 97) — whether the reviewer has returned since, and the
 pid of the process serving the click. It is stripped from everything a
 client sees, so the served page stays byte-identical to `pages/<id>.html`. A daemon restart reads it
 back and does not re-announce; a record written before `returned` existed reads as a shut gate.
+A banner already up when a report moves the deadline keeps the lifetime it went up with, since its
+process takes its lifetime once, at launch; a report comes from a tab the reviewer is working in,
+whose `attended` report takes that banner down anyway.
 
 The gate opens exactly one way: the reviewer returns, meaning a Watcher *reports* its tab focused.
 Nothing else does — not a round ending, not the banner expiring off the screen, not a daemon
@@ -1398,6 +1464,12 @@ A server-side wall-clock ceiling matching `CLAUDE_BOARD_TIMEOUT_MS` (default 40m
 the call returns 200 with a packet whose `status` is `timeout`, carrying whatever partial answers
 the store holds. A client that disconnects ends the wait outright — nothing is written and the
 poll stops.
+
+**A round minted `movingDeadline` is waited on to its stored deadline instead** (ADR 145): the
+deadline is read off the board on every poll (every 120 ms), so one an `activity` report moved is
+the one that ends the wait, with the same `timeout` packet; the fixed cap does not, and a ceiling of
+24 hours from the call does. A round without the flag keeps the fixed cap from the call's entry,
+which is what a shim from before the field waits against.
 
 **Secret-only, unlike every other GET.** `handleWait` writes -- it persists the board on the
 timeout branch above and, on every branch, spends what the thread is owed once the response has
@@ -1487,8 +1559,9 @@ Mission = {
 
 **A view is what every read answers**: the stored record, its `prs` read through the facts, plus
 fields derived on each read and never stored. `view` is the column the mission shows in:
-`released` while stored released; else `needs-you` when a linked board's newest round is open and
-asks a question or was minted awaited (a lapsed wait still counts; an older round left open does
+`released` while stored released; else `waiting` while it is retired (its `retiredAt` parses,
+ADR 147), whatever its rounds, its session or its `waitingOn`; else `needs-you` when a linked
+board's newest round is open and asks a question or was minted awaited (a lapsed wait still counts; an older round left open does
 not, ADR 134), whatever its session is doing (ADR 140); else `stalled` when its session is gone (a
 bound `pid` that no longer exists, or a reservation no `pid` or `id` bound within 5 minutes) or it
 is stored `working` and has not been heard from for 15 minutes; else the stored `state`. A session
@@ -1499,8 +1572,9 @@ stalls by silence while Claude Code lists it. With no snapshot held (the watcher
 the daemon started) heartbeats alone count. A bound `pid` that no longer exists while the snapshot
 lists the session's `id` in another live process is not gone: the session runs on there (a resume
 no launch made). `listedAt` is that snapshot's time while it lists the bound session, else `null`.
+`retired` is whether its `retiredAt` parses.
 `gone` is `{ lastSeenAt }`, the session's `seenAt`, while that session is gone and the mission has
-not recorded its end, else `null`. `rejoin` is `{ reason, since, id }` while the snapshot lists the bound
+neither recorded its end nor retired, else `null`. `rejoin` is `{ reason, since, id }` while the snapshot lists the bound
 session needing `/mission` again and no heartbeat has come from it since `since`, else `null`:
 `reason` is `'clear'` when its process is listed under another `id` (a `/clear`, which drops the
 skill's hooks), `'resume'` when its `id` is listed in another process (a resume or respawn no launch
@@ -1532,7 +1606,11 @@ GET  /api/missions[?all=1]
 ```
 
 Newest change first. A released mission is listed until 24 hours after `releasedAt`, or always with
-`all=1`. `tabs` and `watcher` are "The session routes"' below. `counts` are per `view` over the
+`all=1`. A retired mission is listed only while it has open work (ADR 147): a PR in its `prs` whose
+latest fact is not `merged` (no fact yet counts as open), or a `next` starting `release:`; its
+`waitingOn` is no open work. With none it is listed nowhere, `all=1` included, and
+`GET /api/mission/:key` still answers it until the prune deletes it, 30 days after `retiredAt`.
+`tabs` and `watcher` are "The session routes"' below. `counts` are per `view` over the
 missions listed, each tab added to its `state`'s count as the Missions view counts its cards; `live` counts every mission holding a
 live session, `working` including one that reads stalled. Secret or cookie.
 
@@ -1719,8 +1797,10 @@ A session a mission holds or held is never a tab: its `id` or `pid` is a mission
 `session.ended`'s, its `jobId` is the first 8 characters of such an id, or it posted a board that
 belongs to a mission holding only a launch's reservation (a launch reserves a session before it
 knows its pid or id). A session that left its mission (`session: { ended, leftAt }`) is a tab
-again, a board it posted while bound staying the mission's (ADR 141). `folder` is the
-cwd's last segment; `command` the name's leading `/word`, else null. `state` is `needs-you` while a
+again, a board it posted while bound staying the mission's (ADR 141). A blocked `bg` session with
+no `pid` is no tab either when its `id`, or the id its `jobId` is the first 8 characters of, is a
+mission's `session.id` or `session.ended.id`, left or not, and every mission naming it so is
+`released` or held by another `id` or a launch's reservation (ADR 147). `folder` is the cwd's last segment; `command` the name's leading `/word`, else null. `state` is `needs-you` while a
 round that wants its answer (open and asking, as a mission's needs-you reads a round, but any
 round of the board, not only its newest) sits on a board of no mission whose
 `session.id` is the tab's, or whose `session.id` is null or names no listed session, with the tab's
@@ -1765,7 +1845,7 @@ never ends on its own. Heartbeat comment lines (`: heartbeat\n\n`) keep it alive
 timers and proxies — invisible to `EventSource`'s message events, so they never surface as a stray
 event. `CLAUDE_BOARD_SSE_HEARTBEAT_MS` overrides the cadence (default 15000), for checks only.
 
-Four named events. The middle two carry the page's own copy of the board, the same bytes a served
+Five named events. `round` and `submitted` carry the page's own copy of the board, the same bytes a served
 page inlines as `#board-data` (ADR 122), so a client can diff against its own last-known copy, plus
 enough to apply the push without a reload. That copy is the stored board less `cwd`, the daemon-only
 fields, and every html block's `html`, wherever the block sits; the block keeps its `sha`, which is
@@ -1776,9 +1856,10 @@ event: watcher        data: { id }
 event: round          data: { round, mode: 'new-round' | 'amend', blockIds, html, board }
 event: submitted      data: { round, board, html }
 event: awaitExpired   data: { round }
+event: deadline       data: { round, awaitDeadline }
 ```
 
-`watcher` is the first thing the stream sends, ahead of any of the other three, on every open and
+`watcher` is the first thing the stream sends, ahead of any of the others, on every open and
 every reconnect alike: a server-minted id naming this one connection (CONTEXT.md "Watcher"), which
 the same tab then carries on every `POST /api/board/:id/attended` it sends (see below) so the
 daemon knows which live connection an attended report is updating. It is not a credential — it
@@ -1827,6 +1908,12 @@ by then cleared the round's `awaited` flag and persisted it, so a client that re
 recomputing sees the same answer. A client that misses it is not stranded — the page re-checks its
 own deadline on a ~20s tick regardless, which is what an archive and a sleeping laptop rely on.
 
+`deadline` fires when an `activity` report moved a round's deadline (ADR 145), to every tab of the
+board, the ones on a browser's shared stream included: `awaitDeadline` is the round's new stored
+deadline, the one its countdown now reads. It carries no board: a move changes that one field, so
+applying it is setting the round's `awaitDeadline` in the tab's copy. A tab that misses it reads the
+moved deadline on its next catch-up.
+
 The client subscribes only when NOT running read-only from `file:` — the standalone archive stays
 network-free.
 
@@ -1856,6 +1943,7 @@ nothing published here is per-connection.
 event: pomodoro   data: { settings, cycle, cycleDate, timer, now }   // same shape as GET /api/pomodoro
 event: waiting    data: { total, now }                               // same total as GET /api/waiting
 event: missions   data: { key, now }                                 // which mission changed; key null: the tabs
+event: deadline   data: { board, round, awaitDeadline }              // a round's deadline moved (ADR 145)
 ```
 
 `pomodoro` fires after every write under `/api/pomodoro/*` (ensure, pause, resume, reset, forward,
@@ -1864,6 +1952,10 @@ phase boundary on its own — the daemon's internal clock reconciling with nobod
 fires whenever a round could plausibly have entered or left the waiting set: a round posted or
 amended into an awaited state, a submit, an abandon, or a wait's wall clock lapsing. It carries
 only the count, not the rows — a client that wants the rows still asks `GET /api/waiting` for them.
+
+`deadline` is the board stream's `deadline` (above) with the board it is about, for a page listing
+every board's countdown: it fires on every move an `activity` report makes. A move leaves the
+waiting count where it was, so no `waiting` goes with it.
 
 `missions` names one mission whose view may have moved, and nothing else: a subscriber re-reads
 `GET /api/missions` for it. It fires on every write under `/api/mission/:key`, on every `waiting`
@@ -2288,6 +2380,16 @@ too, but only when it is a page board — one `html` block and nothing else — 
 `wait: true` (ADR.md entry 45, CONTEXT.md "Awaited"); every other content-only shape returns the
 instant the post succeeds regardless of `wait`, packet `status: 'posted'`. `wait` defaults to
 `false`, and the wall-clock cap either route blocks on is the same 40 minutes (ADR.md entry 47).
+
+**The wait follows the round's stored deadline** (ADR 145, narrowing 47). Every post carries
+`movingDeadline: true`, so the 40 minutes restart on each pick, note or comment the reviewer makes
+on the round. The shim waits to the `awaitDeadline` the post answered, plus a grace (5% of the
+cap, 250 ms to 5 s) that lets the daemon's own timeout branch be the one that fires; when that
+instant comes with the wait still open it reads the round's stored deadline back through `read`
+and follows a later one. A daemon it cannot reach then ends the wait at the last deadline read plus
+the grace, and none outlasts 24 hours. Against a daemon that answers no `awaitDeadline` (one from
+before the field) the shim waits its own `CLAUDE_BOARD_TIMEOUT_MS` from the post, as it always did.
+`notifications/progress` run for the whole wait, their `total` the deadline followed.
 The return condition is the post succeeding, never the tab opening: `open` is spawned detached and
 this process never learns whether a tab appeared. Opening stays best-effort and its failure stays
 non-fatal.
@@ -2430,7 +2532,10 @@ Additive to `CLAUDE_BOARD_HOME` / `CLAUDE_BOARD_PORT` above.
 
 ```
 CLAUDE_BOARD_TIMEOUT_MS       wall-clock cap on the blocking wait, default 40m (2_400_000,
-                               ADR.md entry 47) -- shared by the daemon's own /wait cap
+                               ADR.md entry 47) -- shared by the daemon's own /wait cap.
+                               The daemon stamps a round's deadline with it and moves it
+                               to now plus it (ADR 145); the shim waits to that stored
+                               deadline, and to this cap only on a daemon reporting none
 CLAUDE_BOARD_PROGRESS_MS      notifications/progress cadence, default 20_000 (20s)
 CLAUDE_BOARD_POST_TIMEOUT_MS  timeout on POST /api/board only, default 10_000; never applied
                                to the /wait call, which must survive the full wall-clock cap

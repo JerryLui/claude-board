@@ -1898,10 +1898,11 @@ directory, routinely, on a stock Mac. `src/resolve.mjs` compares `dev`+`ino` ins
 The shim and the daemon both read `CLAUDE_BOARD_TIMEOUT_MS` and default to the same 40
 minutes, and only the daemon's side of that race does anything: its timeout branch is
 what broadcasts `awaitExpired`, closes the lapsed round and returns the timeout packet.
-The shim wins that race by default twice over. Its deadline starts at `blockingWait`
-entry while the daemon's starts after connect and parse, and `waitForRound`
-(`src/server.mjs`) polls the store every 120ms, so the daemon can only notice its own
-deadline at the next tick after it. A margin sized for request latency is therefore not
+The shim used to win that race by default twice over: its deadline started at
+`blockingWait` entry while the daemon's started after connect and parse, and
+`waitForRound` (`src/server.mjs`) polls the store every 120ms, so the daemon can only
+notice its own deadline at the next tick after it. Since ADR 145 both wait to the round's
+stored deadline, so the first half is gone and the poll interval is the whole race. A margin sized for request latency is therefore not
 enough: `WAIT_GRACE_MS` (`bin/mcp.mjs`) is floored at 250ms for the poll interval, not
 for the network. If you shorten the poll interval or add a second waiter, that floor is
 the thing to re-check — and the symptom of getting it wrong is silent, since both sides
@@ -2520,3 +2521,9 @@ Traps that have bitten once. A second bite moves the entry up into the section i
   leaving, and so may a `Page.getNavigationHistory` read in the gap. Send Enter as its key-down
   alone, and tolerate that one error on the press and on the read
   (`test/browser-check-missions.mjs`'s `landedAt`, `pressKey` and its card-click row).
+
+- **A full-page shot of a scrolling board paints the send bar and the pager over its foot.**
+  `Page.captureScreenshot` with `captureBeyondViewport` and a clip taller than the window lays the
+  page out at the window's height, so the fixed send bar and round pager land over whatever sits at
+  the window's foot, here the last compare card's pictures. Open the tab taller than the board and
+  clip to the last card's bottom (`test/browser-check-compare-head.mjs`'s `--shot`).

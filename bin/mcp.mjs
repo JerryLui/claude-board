@@ -42,15 +42,15 @@ import { STATUS_TONES } from '../src/card-status.mjs';
 
 const PORT = daemonPort();
 const BASE_URL = `http://127.0.0.1:${PORT}`;
-const TIMEOUT_MS = Number(process.env.CLAUDE_BOARD_TIMEOUT_MS) || 40 * 60 * 1000; // 40m default (ADR.md entry 47)
-// The shim outlives the daemon's own identical cap by this much, and only this much.
-// Both read the same CLAUDE_BOARD_TIMEOUT_MS and default to the same 40m, but the
-// shim's deadline is computed at blockingWait entry while the daemon's starts after
-// connect and parse -- so without a margin the shim always fires first by the request
-// latency, aborts, and the daemon sees a dead client and returns early: its whole
-// timeout branch unreachable, no `awaitExpired` broadcast, no timeout packet, and the
-// round never closed. The cap the reviewer and the agent are told about stays
-// TIMEOUT_MS, the daemon's.
+// 40m default (ADR.md entry 47). Since ADR 145 the wait follows the round's stored
+// deadline, which the daemon stamps and the reviewer's activity moves; this is the cap
+// only against a daemon from before that, which reports no deadline.
+const TIMEOUT_MS = Number(process.env.CLAUDE_BOARD_TIMEOUT_MS) || 40 * 60 * 1000;
+// The shim outlives the round's deadline by this much, and only this much. Without a
+// margin the shim fires at the same instant the daemon's poll does, aborts, and the
+// daemon sees a dead client and returns early: its whole timeout branch unreachable, no
+// `awaitExpired` broadcast, no timeout packet, and the round never closed. The deadline
+// the reviewer and the agent are told about stays the daemon's.
 //
 // Proportional rather than a flat five seconds, because the checks drive the cap down
 // to a few hundred milliseconds and a fixed margin would be the entire runtime there.
@@ -59,6 +59,10 @@ const TIMEOUT_MS = Number(process.env.CLAUDE_BOARD_TIMEOUT_MS) || 40 * 60 * 1000
 // daemon's resolution, not latency: `waitForRound` (src/server.mjs) polls the store
 // every 120ms, so a margin under that lets the shim win again on a short cap.
 const WAIT_GRACE_MS = Math.min(5_000, Math.max(250, Math.round(TIMEOUT_MS * 0.05)));
+// The longest one `ask` blocks, however often the reviewer's activity moves the round's
+// deadline (ADR 145): the daemon's own ceiling on a wait whose deadline moves, so the two
+// sides of the wait cannot outlast each other.
+const WAIT_CEILING_MS = 24 * 60 * 60 * 1000;
 const PROGRESS_MS = Number(process.env.CLAUDE_BOARD_PROGRESS_MS) || 20_000; // ~20s cadence
 const POST_TIMEOUT_MS = Number(process.env.CLAUDE_BOARD_POST_TIMEOUT_MS) || 10_000;
 // How long the THREAD-CREATING post itself may run, as opposed to how long this call
@@ -518,9 +522,34 @@ function formatDuration(ms) {
   return `${h}h`;
 }
 
-async function blockingWait({ boardId, round, timeoutMs, progressMs, onProgress, onReattach, cancelled }) {
+/** The round's stored deadline (epoch ms) as the daemon holds it now, or null when it cannot
+ * say: the daemon unreachable, the board gone, a round with no deadline. Read through `read`
+ * (ADR 115), which names each round's `deadline`, and only when the deadline this side
+ * holds has passed with the wait still open, so a wait the reviewer never touches reads it
+ * never. */
+async function readRoundDeadline(boardId, round) {
+  try {
+    const doc = await httpJson('GET', `${BASE_URL}/api/board/${boardId}/read`, null, { timeoutMs: POST_TIMEOUT_MS });
+    const r = Array.isArray(doc && doc.rounds) ? doc.rounds.find(x => x && x.n === round) : null;
+    const at = r ? Date.parse(r.deadline) : NaN;
+    return Number.isFinite(at) ? at : null;
+  } catch {
+    return null;
+  }
+}
+
+/** `deadlineAt` is the round's deadline as the post reported it (ADR 145), and the wait
+ * follows it: this side gives up WAIT_GRACE_MS past it, so the daemon's own timeout branch
+ * is the one that fires. When that instant comes with the wait still open, the reviewer's
+ * activity may have moved the deadline, so `readDeadline` asks the daemon for the stored
+ * one: a later one is followed, the same one or no answer ends the wait. A daemon that
+ * cannot be reached therefore ends it at the last deadline read plus the grace. Never past
+ * WAIT_CEILING_MS from entry. */
+async function blockingWait({ boardId, round, deadlineAt, readDeadline, progressMs, onProgress, onReattach, cancelled }) {
   const start = Date.now();
-  const deadline = start + timeoutMs;
+  const ceiling = start + WAIT_CEILING_MS;
+  let followed = deadlineAt;
+  let deadline = Math.min(followed + WAIT_GRACE_MS, ceiling);
   const url = `${BASE_URL}/api/board/${boardId}/wait?round=${round}`;
   let finished = false;
   let backoffMs = RETRY_MS;
@@ -529,37 +558,63 @@ async function blockingWait({ boardId, round, timeoutMs, progressMs, onProgress,
   // timer does not care that our socket blipped, so neither may the cadence.
   const progressTimer = setInterval(() => {
     if (finished) return;
-    onProgress(Date.now() - start);
+    onProgress(Date.now() - start, Math.max(0, followed - start));
   }, progressMs);
+
+  // True when the daemon holds a later deadline than this side does, which is then the one
+  // waited to. Cancellable like every other await in the wait.
+  const extend = async () => {
+    const at = await Promise.race([readDeadline(), ...(cancelled ? [cancelled] : [])]);
+    if (at === CANCELLED) throw new CancelledError('the client cancelled this ask');
+    if (at == null) return false;
+    const next = Math.min(at + WAIT_GRACE_MS, ceiling);
+    if (next <= Date.now()) return false;
+    followed = at;
+    deadline = next;
+    return true;
+  };
 
   try {
     for (;;) {
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) return { timedOut: true };
+      if (deadline - Date.now() <= 0 && !(await extend())) return { timedOut: true };
 
       const controller = new AbortController();
-      let deadlineTimer;
-      const deadlinePromise = new Promise(resolve => {
-        deadlineTimer = setTimeout(() => resolve(TIMED_OUT), remaining);
-      });
       // Never rejects: the outcome is inspected, so a losing race leaves no
       // unhandled rejection behind.
       const attempt = httpJson('GET', url, null, { signal: controller.signal })
         .then(packet => ({ packet }), err => ({ err }));
+      let settled = null;
+      attempt.then(o => { settled = o; });
 
       let outcome;
-      try {
-        // Cancellation is a third way out, beside the packet and the wall clock:
-        // the user pressed escape, so the GET, the interval and this loop all stop.
-        outcome = await Promise.race([attempt, deadlinePromise, ...(cancelled ? [cancelled] : [])]);
-      } finally {
-        clearTimeout(deadlineTimer);
-      }
-
-      if (outcome === TIMED_OUT) {
+      for (;;) {
+        let deadlineTimer;
+        const deadlinePromise = new Promise(resolve => {
+          deadlineTimer = setTimeout(() => resolve(TIMED_OUT), Math.max(0, deadline - Date.now()));
+        });
+        try {
+          // Cancellation is a third way out, beside the packet and the deadline:
+          // the user pressed escape, so the GET, the interval and this loop all stop.
+          outcome = await Promise.race([attempt, deadlinePromise, ...(cancelled ? [cancelled] : [])]);
+        } finally {
+          clearTimeout(deadlineTimer);
+        }
+        if (outcome !== TIMED_OUT) break;
+        // The deadline this side held has passed and the same GET is still open: follow a
+        // moved one, else end -- unless the daemon's own answer landed during the read.
+        let extended;
+        try {
+          extended = await extend();
+        } catch (err) {
+          controller.abort();
+          throw err;
+        }
+        if (extended) continue;
+        if (settled) { outcome = settled; break; }
         controller.abort();
         return { timedOut: true };
       }
+
       if (outcome === CANCELLED) {
         controller.abort();
         throw new CancelledError('the client cancelled this ask');
@@ -568,7 +623,7 @@ async function blockingWait({ boardId, round, timeoutMs, progressMs, onProgress,
 
       const err = outcome.err;
       if (!isTransportError(err)) throw err; // a refusal from the daemon itself: terminal
-      if (Date.now() >= deadline) return { timedOut: true };
+      if (Date.now() >= deadline && !(await extend())) return { timedOut: true };
 
       logErr(
         `lost the daemon mid-wait (${err.code || err.message}); board ${boardId} round ${round} is still open on disk — ` +
@@ -594,7 +649,8 @@ const ASK_TOOL = {
     'Post a board (questions plus artifact context) to the local claude-board daemon. ' +
     'Blocks until the reviewer submits when the round carries any question block, or when ' +
     'it is a page board (one html block) posted with wait: true; every other round returns ' +
-    'as soon as the post succeeds, nothing to wait for. The default wait is 40 minutes. Opens ' +
+    'as soon as the post succeeds, nothing to wait for. The default wait is 40 minutes, restarted by ' +
+    'each answer pick, note or comment the reviewer makes on the round. Opens ' +
     'a browser tab on the first board of this conversation; later rounds push into the same tab. ' +
     'Returns a packet naming each question\'s status, choice and note, and every comment ' +
     'with its anchor.',
@@ -715,7 +771,7 @@ const MISSION_TOOL = {
       phase: { type: 'string', enum: ['grill', 'direct', 'landing'], description: 'join: the phase the session works in.' },
       takeover: { type: 'boolean', description: 'join: take the mission over from the live session bound to it, which finishes its step and leaves.' },
       text: { type: 'string', description: 'order: the PM\'s words, verbatim, at most 4 KB.' },
-      all: { type: 'boolean', description: 'list: keep missions released more than 24 hours ago.' },
+      all: { type: 'boolean', description: 'list: keep missions released more than 24 hours ago. A retired mission with no open PR and no release step is never listed.' },
       fields: {
         type: 'object',
         description: 'write: the fields to set, from title cwd phase state summary waitingOn next prs handoff fire queue retiredAt.',
@@ -1092,7 +1148,7 @@ async function postThisRound(session, title, blocks, wait, fresh) {
     const creating = (async () => {
       const posted = await httpJson(
         'POST', `${BASE_URL}/api/board`,
-        { title, blocks, wait: Boolean(wait), noWait, cwd: process.cwd(), thread: session.thread ?? null, requestId: createRequestId, ...sessionField() },
+        { title, blocks, wait: Boolean(wait), noWait, movingDeadline: true, cwd: process.cwd(), thread: session.thread ?? null, requestId: createRequestId, ...sessionField() },
         { timeoutMs: CREATE_TIMEOUT_MS }
       );
       session.boardId = posted.boardId;
@@ -1152,7 +1208,7 @@ async function postThisRound(session, title, blocks, wait, fresh) {
   try {
     posted = await httpJson(
       'POST', `${BASE_URL}/api/board`,
-      { boardId: session.boardId, blocks, title, wait: Boolean(wait), noWait, requestId, ...sessionField() },
+      { boardId: session.boardId, blocks, title, wait: Boolean(wait), noWait, movingDeadline: true, requestId, ...sessionField() },
       { timeoutMs: POST_TIMEOUT_MS }
     );
   } catch (err) {
@@ -1362,14 +1418,18 @@ async function askTool(args, session, { sendProgress, cancelled }) {
     return askResult(text, packet);
   }
 
+  // The round's stored deadline, which this wait follows (ADR 145). A daemon from before it
+  // reports none and never moves one, so the wait falls back to this side's own cap.
+  const reported = Date.parse(posted.awaitDeadline);
   let waited;
   try {
     waited = await blockingWait({
       boardId: posted.boardId,
       round: posted.round,
-      timeoutMs: TIMEOUT_MS + WAIT_GRACE_MS,
+      deadlineAt: Number.isFinite(reported) ? reported : Date.now() + TIMEOUT_MS,
+      readDeadline: () => readRoundDeadline(posted.boardId, posted.round),
       progressMs: PROGRESS_MS,
-      onProgress: elapsedMs => sendProgress(elapsedMs, TIMEOUT_MS, url),
+      onProgress: (elapsedMs, totalMs) => sendProgress(elapsedMs, totalMs, url),
       cancelled,
     });
   } catch (err) {
@@ -1379,7 +1439,7 @@ async function askTool(args, session, { sendProgress, cancelled }) {
 
   if (waited.timedOut) {
     const text =
-      `No response within the ${formatDuration(TIMEOUT_MS)} wall-clock cap. Explicit no-response, ` +
+      `No response within ${formatDuration(TIMEOUT_MS)} of the post or of the reviewer's last activity on the round. Explicit no-response, ` +
       `not a hang. Board is still open at ${url} — reopen it or post a fresh round to continue.`;
     return askResult(text, {
       board: posted.boardId,
@@ -1410,7 +1470,7 @@ async function askTool(args, session, { sendProgress, cancelled }) {
   // is the same event seen from the other side.
   if (packet.status === 'timeout') {
     const text =
-      `No response before the daemon's wall-clock cap. Explicit no-response, not a hang. ` +
+      `No response before the round's wait ran out on the daemon. Explicit no-response, not a hang. ` +
       `The round is still open at ${packet.url} — reopen it or post a fresh round to continue.\n` +
       `${summarizeAnswers(packet)}`;
     return askResult(text, packet);

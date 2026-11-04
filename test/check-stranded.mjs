@@ -260,6 +260,24 @@ async function layerOne() {
     watch.close();
   });
 
+  await check('ADR 145: a deadline the reviewer\'s activity moved while the grace ran is the one the banner\'s click lives to', async () => {
+    await withEnv({ CLAUDE_BOARD_STRANDED_GRACE_MS: '80' }, async () => {
+      const { banners, watch } = stand();
+      const board = seedBoard();
+      watch.evaluate(board.id, target(board.id));
+      // What `POST /api/board/:id/activity` writes, landing inside the grace.
+      const moving = readBoard(board.id, home);
+      const moved = new Date(Date.parse(moving.rounds[0].awaitDeadline) + 10 * 60 * 1000).toISOString();
+      moving.rounds[0].awaitDeadline = moved;
+      writeBoard(moving, home);
+      await sleep(200);
+      assert.equal(banners.length, 1, 'setup: the grace ran out with nobody looking');
+      assert.equal(banners[0].deadlineAt, Date.parse(moved), 'the stored deadline when the banner goes up, not the one when the grace was armed');
+      assert.equal(bannerOn(board.id).until, moved, 'and the record bounds the process serving it by the same deadline');
+      watch.close();
+    });
+  });
+
   await check('the announced marker is recorded on the board document, not in the hub closure', async () => {
     const { banners, watch } = stand();
     const board = seedBoard();

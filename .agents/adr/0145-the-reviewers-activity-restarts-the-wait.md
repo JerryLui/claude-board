@@ -1,0 +1,5 @@
+# 145. The reviewer's activity restarts the wait, for a shim that follows the stored deadline
+
+2026-11-04, narrows 47; relates to 50, 57, 74, 144
+
+**Context:** the 40 minutes ran from the post, and nothing before Send reached the daemon, so a careful answer landed after the session had given up and reached it only with the next round's answers. **Decision:** the page reports each pick, typed note and saved comment on `POST /api/board/:id/activity`, at most one per round every 5 s, and on a round minted for a shim that declared `movingDeadline: true` the stored deadline becomes now plus 40 minutes; the shim's wait, the daemon's `/wait` (under a 24-hour ceiling) and the banner's click lifetime all read that one stored deadline. Rejected: counting a tab open or focused as activity, since a focused tab left on a screen overnight would hold a wait for good; moving every round's deadline, since a shim from before the field gives up at its own fixed 40 minutes whatever the board says. **Consequences:** a round posted by an old shim keeps its fixed deadline; a banner already up keeps the lifetime it was raised with, since its process takes one at launch.
