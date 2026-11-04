@@ -344,6 +344,24 @@ async function main() {
     assert.equal(overview.counts.queued, 1);
   });
 
+  await check('a retired mission whose session is still stored working holds a working slot, though its card counts under Waiting (ADR 147)', () => {
+    const dir = scratchHome('retired-working');
+    const now = Date.now();
+    const alive = () => true;
+    for (let i = 0; i < MAX_WORKING - 1; i++) {
+      seed(dir, `W${i}`, { session: { pid: 1000 + i, startedAt: iso(now), seenAt: iso(now) } });
+    }
+    seed(dir, 'RETIRED_WORKING', {
+      retiredAt: iso(now - minutes(5)), prs: [{ repo: 'service', number: 12, url: 'https://github.com/o/service/pull/12' }],
+      session: { pid: 4000, startedAt: iso(now - minutes(30)), seenAt: iso(now) },
+    });
+    const overview = missionsOverview({ home: dir, now, isAlive: alive });
+    assert.equal(overview.missions.find(m => m.key === 'RETIRED_WORKING').view, 'waiting');
+    assert.deepEqual([overview.counts.working, overview.counts.waiting], [MAX_WORKING - 1, 1]);
+    assert.deepEqual(overview.live, { working: MAX_WORKING, alive: MAX_WORKING });
+    assert.deepEqual(launchMission('OVER_CAP', { phase: 'direct' }, { home: dir, now, isAlive: alive }), { queued: true });
+  });
+
   await check(`a launch queues at ${MAX_ALIVE} alive sessions with fewer than ${MAX_WORKING} working`, () => {
     const dir = scratchHome('alive-cap');
     const now = Date.now();
