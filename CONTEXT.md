@@ -39,6 +39,11 @@ Stranded is the narrower thing a Banner fires on. _Avoid_: unanswered, pending, 
 round being answered. A lapsed round is no longer Awaited and is never resumed by a repeat post.
 _Avoid_: expired, stale, dead.
 
+**Answer watch**: a Claude Code session's background call on one Lapsed round, named by that
+round's `timeout` result, which wakes the session once the round is Submitted, for up to a day.
+The late answer it brings is acted on once, as that round's. _Avoid_: poll, background wait,
+listener.
+
 **Submitted**: of a round, that the reviewer sent their answers, which is the reader-facing
 name for the round state the store calls `sent`. One of the two closed states a reader is told
 about by name, Abandoned being the other; Lapsed and never-Awaited rounds are both read-only and

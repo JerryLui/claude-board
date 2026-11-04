@@ -30,7 +30,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import http from 'node:http';
 import { SECRET_HEADER } from '../src/secret.mjs';
-import { recoveryCommand } from '../src/handoff.mjs';
+import { recoveryCommand, shellQuote } from '../src/handoff.mjs';
 import { startServer } from '../src/server.mjs';
 // The delivery ledger's own field name, read from the product rather than restated: the
 // `read` checks below assert that reading a board never writes one.
@@ -769,6 +769,82 @@ async function main() {
       timeoutClient.close();
       silent.close();
     }
+  });
+
+  await check('a Claude Code shim\'s timeout packet names the answer watch on its round, on the shim\'s cap and the daemon\'s, and the command as named collects a late Send; a Codex shim\'s names none (ADR 146)', async () => {
+    const watchCommand = (atPort, { board, round }) =>
+      `CLAUDE_BOARD_PORT=${atPort} node ${shellQuote(path.join(repoRoot, 'bin', 'watch.mjs'))} --board ${board} --round ${round}`;
+    const clients = {
+      'Claude Code': {},
+      'a Claude Code background session': { CLAUDE_BOARD_CLIENT: 'background' },
+      Codex: { CLAUDE_CODE_ENTRYPOINT: undefined, CLAUDE_BOARD_CLIENT: 'codex' },
+    };
+    const timedOut = async (env, title) => {
+      const shim = spawnShim({ ...baseEnv, ...env });
+      try {
+        const res = await withTimeout(shim.request('tools/call', { name: 'ask', arguments: { title, blocks: [QUESTION] } }),
+          5000, `timed out after 5000ms: "${title}" must end unanswered`);
+        assert.equal(res.result.status, 'timeout', `setup: ${title}`);
+        return res.result;
+      } finally {
+        shim.close();
+      }
+    };
+
+    // The shim's own cap: a daemon that reports no deadline and never answers the wait.
+    const silent = await startSilentWaitDaemon();
+    try {
+      for (const [client, env] of Object.entries(clients)) {
+        const result = await timedOut({ ...env, CLAUDE_BOARD_PORT: String(silent.port), CLAUDE_BOARD_TIMEOUT_MS: '150' }, `${client}, shim cap`);
+        if (client === 'Codex') {
+          assert.equal('watch' in result, false, 'a Codex packet names no watch: nothing wakes a Codex session when a call ends');
+          assert.doesNotMatch(result.content[0].text, /watch\.mjs/);
+        } else {
+          assert.equal(result.watch, watchCommand(silent.port, result), `${client}, shim cap`);
+          assert.ok(result.content[0].text.includes(result.watch), `${client}: the text names the command too`);
+        }
+      }
+    } finally {
+      silent.close();
+    }
+
+    // The daemon's cap: the in-process daemon's own timeout packet, on a 300 ms wait.
+    await withEnv({ CLAUDE_BOARD_TIMEOUT_MS: '300' }, async () => {
+      const results = {};
+      for (const [client, env] of Object.entries(clients)) {
+        results[client] = await timedOut({ ...env, CLAUDE_BOARD_TIMEOUT_MS: '300' }, `${client}, daemon cap`);
+        assert.equal(results[client].answers[0].status, 'unanswered', `setup: ${client} holds the daemon's own packet`);
+      }
+      assert.equal('watch' in results.Codex, false);
+      for (const client of ['Claude Code', 'a Claude Code background session']) {
+        assert.equal(results[client].watch, watchCommand(port, results[client]), `${client}, daemon cap`);
+        assert.ok(results[client].content[0].text.includes(results[client].watch));
+      }
+
+      // Run as a session's background call runs it: through a shell, from anywhere.
+      const { board } = results['Claude Code'];
+      const watcher = spawn('/bin/sh', ['-c', results['Claude Code'].watch], {
+        cwd: tempHome('watch-cwd'),
+        env: { ...process.env, CLAUDE_BOARD_WATCH_INTERVAL_MS: '100' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let out = '';
+      watcher.stdout.on('data', c => { out += c; });
+      const exited = new Promise(resolve => watcher.on('close', resolve));
+      try {
+        await sleep(300);
+        const sent = await fetch(`${base}/api/board/${board}/submit`, {
+          method: 'POST',
+          headers: writeHeaders(SECRET),
+          body: JSON.stringify({ round: 1, action: 'send', answers: [{ id: 'q1', status: 'answered', choice: 'No', note: 'late' }], comments: [] }),
+        });
+        assert.equal(sent.status, 200, 'setup: the late Send lands');
+        assert.equal(await withTimeout(exited, 5000, 'timed out after 5000ms: the watch must end on the Send'), 0);
+        assert.deepEqual(JSON.parse(out).answers.map(a => [a.round, a.choice, a.note]), [[1, 'No', 'late']]);
+      } finally {
+        watcher.kill('SIGKILL');
+      }
+    });
   });
 
   await check('a report during the wait moves the round\'s deadline and the shim follows it: the call ends at the moved deadline with the daemon\'s timeout packet, progress running throughout', async () => {

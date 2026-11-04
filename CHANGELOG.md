@@ -8,7 +8,16 @@
   round that draws none of that activity still ends 40 minutes after it was posted, as before. A
   session already waiting when the update ships keeps its original fixed 40-minute deadline,
   unaffected.
-
+- **A late answer wakes the session that asked**: when a Claude Code session's wait on a round
+  ends with nobody having answered, the `timeout` result now names an answer watch, a command the
+  session runs as a background call (`node <clone>/bin/watch.mjs --board <id> --round <n>`). For up
+  to 24 hours it checks the board every 30 seconds, and once the round is sent it wakes the session
+  with that round's answers and comments, to act on once: no later round's result carries them
+  again, and a round a later result already carried comes back marked `delivered: true`. A late
+  pick that differs from something the session already built, fired or merged comes to you as a
+  question; nothing built is undone. A Codex or OpenCode session gets no watch and says its wait
+  ended, as before. Before, a late Send reached the session only with its next round's result, or
+  when it thought to read the board.
 - **A retired mission stops asking**: a mission carrying a retired time never shows under Needs
   you or Stalled again, whatever its last rounds or its last "waiting on" say. While it still has
   an unmerged PR or a release step waiting, its card sits under Waiting with a Retired tag; once it
