@@ -898,16 +898,20 @@ export const DEFAULT_AWAIT_TIMEOUT_MS = 2_400_000;
  * `blocks` here is THIS round's own normalized blocks only (never the whole
  * board's), which is what both callers below already have in hand and what makes
  * `isPageRound` and `questionBlocks({ blocks })` correct without a `round` filter. */
-function mintAwait(blocks, round, wait, postedAt, awaitTimeoutMs) {
+function mintAwait(blocks, round, wait, postedAt, awaitTimeoutMs, movingDeadline) {
   const awaited = questionBlocks({ blocks }).some(q => q.round === round)
     || (Boolean(wait) && isPageRound(blocks));
   return {
     awaited,
     awaitDeadline: awaited ? new Date(Date.parse(postedAt) + awaitTimeoutMs).toISOString() : null,
+    // ADR 145: the poster follows the stored deadline, so the reviewer's activity may move
+    // it. Stamped only on an awaited round and only when declared, so a round from a shim
+    // that does not follow it keeps the shape and the fixed deadline it always had.
+    ...(awaited && movingDeadline === true ? { movingDeadline: true } : {}),
   };
 }
 
-/** Create a new board (round 1) from posted args: `{ title, blocks, cwd, thread, wait, mission }`.
+/** Create a new board (round 1) from posted args: `{ title, blocks, cwd, thread, wait, movingDeadline, mission }`.
  * `threadCwd` (additive) is the project directory already bound to `thread`, when the
  * caller is starting a second board in a thread that exists; the request may agree with
  * it but never change it. `wait` is round 1's own declared-awaited flag (ADR.md entry
@@ -918,13 +922,13 @@ function mintAwait(blocks, round, wait, postedAt, awaitTimeoutMs) {
  * `threadCwd`). It only ever narrows what `mintThreadId` may draw -- see its own comment
  * for why a collision is a routing fault rather than a cosmetic one -- and is irrelevant
  * when the caller names the thread. */
-export function createBoard({ title, blocks, cwd = null, thread = null, threadCwd = null, wait = false, awaitTimeoutMs = DEFAULT_AWAIT_TIMEOUT_MS, takenThreads = null, mission = null }) {
+export function createBoard({ title, blocks, cwd = null, thread = null, threadCwd = null, wait = false, awaitTimeoutMs = DEFAULT_AWAIT_TIMEOUT_MS, movingDeadline = false, takenThreads = null, mission = null }) {
   const now = new Date().toISOString();
   const boundCwd = bindBoardCwd(cwd, threadCwd);
   const counters = {};
   const ids = emptyIdLedger();
   const normalized = normalizePost(blocks, 1, counters, boundCwd, ids);
-  const { awaited, awaitDeadline } = mintAwait(normalized, 1, wait, now, awaitTimeoutMs);
+  const awaitFields = mintAwait(normalized, 1, wait, now, awaitTimeoutMs, movingDeadline);
   return {
     id: mintBoardId(),
     thread: thread || mintThreadId(takenThreads),
@@ -936,7 +940,7 @@ export function createBoard({ title, blocks, cwd = null, thread = null, threadCw
     // `title` is stored on the round as well as on the board: every later round
     // carries its own (see addRound), and round 1's would otherwise be the only one
     // the page label and the round pager could not name.
-    rounds: [{ n: 1, postedAt: now, status: 'open', sentAt: null, title: title || '', awaited, awaitDeadline }],
+    rounds: [{ n: 1, postedAt: now, status: 'open', sentAt: null, title: title || '', ...awaitFields }],
     blocks: normalized,
     answers: {},
     comments: [],
@@ -955,7 +959,7 @@ export function createBoard({ title, blocks, cwd = null, thread = null, threadCw
  * a Send racing an amend, and appending a second block under that id would silently
  * destroy the original round's answer (`board.answers` is keyed by id) and its
  * history-rail entry. Nothing on the board is mutated before the throw. */
-export function addRound(board, { blocks, cwd, title, wait = false, awaitTimeoutMs = DEFAULT_AWAIT_TIMEOUT_MS }) {
+export function addRound(board, { blocks, cwd, title, wait = false, awaitTimeoutMs = DEFAULT_AWAIT_TIMEOUT_MS, movingDeadline = false }) {
   assertCwdNotRetargeted(cwd, board);
   const now = new Date().toISOString();
   const n = board.rounds.length + 1;
@@ -963,14 +967,14 @@ export function addRound(board, { blocks, cwd, title, wait = false, awaitTimeout
   const ids = idLedgerFromBoard(board, null);
   ids.openRound = n;
   const normalized = normalizePost(blocks, n, counters, board.cwd, ids);
-  const { awaited, awaitDeadline } = mintAwait(normalized, n, wait, now, awaitTimeoutMs);
+  const awaitFields = mintAwait(normalized, n, wait, now, awaitTimeoutMs, movingDeadline);
   // Per-round title, stored rather than dropped. `ask` requires a non-empty title on
   // every call and commands/grill.md tells the agent to make it the branch name, so a
   // thread that ran five rounds across five branches used to render five identical
   // "Round N" headings with the FIRST round's title as the only label on the page.
   // Falls back to the board title so a caller that omits it still gets a labelled
   // round rather than a bare number.
-  board.rounds.push({ n, postedAt: now, status: 'open', sentAt: null, title: title || board.title || '', awaited, awaitDeadline });
+  board.rounds.push({ n, postedAt: now, status: 'open', sentAt: null, title: title || board.title || '', ...awaitFields });
   board.blocks.push(...normalized);
   board.state = 'open';
   board.updatedAt = now;

@@ -42,7 +42,7 @@ link where it is worth reading.
 | 44 | ["A page board is never sent" is a browser rule, not a daemon rule](.agents/adr/0044-page-board-is-never-sent-is-a-browser.md) | 2026-08-07 | narrowed by 45 |
 | 45 | [A page board may be awaited, and the caller declares it](.agents/adr/0045-page-board-may-be-awaited-and-the-caller.md) | 2026-08-07 | narrows 35 and 44; completed by 50 |
 | 46 | [Commenting exists only where someone is waiting](.agents/adr/0046-commenting-exists-only-where-someone-is-waiting.md) | 2026-08-07 | narrows 35; widened by 98, 101 |
-| 47 | [The wait is 40 minutes, for every round, and the page shows what is left](.agents/adr/0047-wait-is-40-minutes-for-every-round-and.md) | 2026-08-07 | accepted |
+| 47 | [The wait is 40 minutes, for every round, and the page shows what is left](.agents/adr/0047-wait-is-40-minutes-for-every-round-and.md) | 2026-08-07 | narrowed by 145 |
 | 50 | [A wait that dies is recorded on the round](.agents/adr/0050-wait-that-dies-is-recorded-on-the-round.md) | 2026-08-08 | completes 45 |
 | 55 | [A stranded round is announced, not opened onto](.agents/adr/0055-stranded-round-is-announced-not-opened-onto.md) | 2026-08-09 | narrows 4; widened by 58; narrowed by 74; narrowed by 91; widened by 92 |
 | 56 | [The launcher may compose a notification body, behind a filter](.agents/adr/0056-launcher-may-compose-a-notification-body-behind-a.md) | 2026-08-09 | narrows 19; widened by 128 |
@@ -129,3 +129,4 @@ link where it is worth reading.
 | 142 | [A card's Merge opens the brief at its merge question, and answers nothing](.agents/adr/0142-a-cards-merge-opens-the-brief-at-its-merge-question.md) | 2026-10-30 | narrows 125, 137; relates to 134 |
 | 143 | [A reinstall fails on a refused read under ~/Documents, after registering](.agents/adr/0143-a-reinstall-fails-on-a-refused-read-under-documents.md) | 2026-10-30 | relates to 15, 100 |
 | 144 | [A browser shares one stream, and its tabs are Watchers by beats](.agents/adr/0144-a-browser-shares-one-stream-and-beats-for-its-tabs.md) | 2026-11-02 | relates to 55, 58, 73, 87 |
+| 145 | [The reviewer's activity restarts the wait, for a shim that follows the stored deadline](.agents/adr/0145-the-reviewers-activity-restarts-the-wait.md) | 2026-11-04 | narrows 47; relates to 50, 57, 74, 144 |

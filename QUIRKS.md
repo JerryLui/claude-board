@@ -1898,10 +1898,11 @@ directory, routinely, on a stock Mac. `src/resolve.mjs` compares `dev`+`ino` ins
 The shim and the daemon both read `CLAUDE_BOARD_TIMEOUT_MS` and default to the same 40
 minutes, and only the daemon's side of that race does anything: its timeout branch is
 what broadcasts `awaitExpired`, closes the lapsed round and returns the timeout packet.
-The shim wins that race by default twice over. Its deadline starts at `blockingWait`
-entry while the daemon's starts after connect and parse, and `waitForRound`
-(`src/server.mjs`) polls the store every 120ms, so the daemon can only notice its own
-deadline at the next tick after it. A margin sized for request latency is therefore not
+The shim used to win that race by default twice over: its deadline started at
+`blockingWait` entry while the daemon's started after connect and parse, and
+`waitForRound` (`src/server.mjs`) polls the store every 120ms, so the daemon can only
+notice its own deadline at the next tick after it. Since ADR 145 both wait to the round's
+stored deadline, so the first half is gone and the poll interval is the whole race. A margin sized for request latency is therefore not
 enough: `WAIT_GRACE_MS` (`bin/mcp.mjs`) is floored at 250ms for the poll interval, not
 for the network. If you shorten the poll interval or add a second waiter, that floor is
 the thing to re-check — and the symptom of getting it wrong is silent, since both sides
