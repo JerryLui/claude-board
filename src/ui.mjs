@@ -48,6 +48,7 @@ import {
   roundPageLabel, roundNumberLabel, isPageRound, roundHasCommentable,
   questionBlocks, roundIsAwaited,
   roundIsAwaitedOpen, roundIsCurrentlyAwaited, roundCountdownText, pageBoardPillMeta,
+  roundDeadlineMoves,
   ROUND_COUNTDOWN_TITLE, PILL_READONLY_TITLE, ROUND_OPEN_UNAWAITED_TITLE, PILL_SUBMITTED_TITLE,
   PAGE_SEND_EXPIRED_LABEL, PAGE_SEND_EXPIRED_TITLE, ANSWER_CHIP_LABEL,
 } from './badge.mjs';
@@ -298,8 +299,9 @@ export const ui = `
   // does, since every line here runs synchronously at IIFE start). Real
   // functions, not a hand-written twin: badge.mjs's own header comment is what
   // explains why only THIS file may ever call roundIsCurrentlyAwaited/
-  // roundCountdownText/pageBoardPillMeta with a real clock -- src/render.mjs
-  // never does, so a rendered page stays a pure function of its board JSON.
+  // roundCountdownText/pageBoardPillMeta/roundDeadlineMoves with a real clock --
+  // src/render.mjs never does, so a rendered page stays a pure function of its
+  // board JSON.
   var ROUND_COUNTDOWN_TITLE = ${JSON.stringify(ROUND_COUNTDOWN_TITLE)};
   var PILL_READONLY_TITLE = ${JSON.stringify(PILL_READONLY_TITLE)};
   var ROUND_OPEN_UNAWAITED_TITLE = ${JSON.stringify(ROUND_OPEN_UNAWAITED_TITLE)};
@@ -310,6 +312,10 @@ export const ui = `
   var roundIsCurrentlyAwaited = ${roundIsCurrentlyAwaited.toString()};
   var roundCountdownText = ${roundCountdownText.toString()};
   var pageBoardPillMeta = ${pageBoardPillMeta.toString()};
+  // ADR 145: the same gate the daemon's activity route applies, spliced here
+  // rather than hand-copied so the page and the route can never quietly
+  // disagree about which rounds take an activity report.
+  var roundDeadlineMoves = ${roundDeadlineMoves.toString()};
 
   function seedAnswers(blockIds, boardData) {
     blockIds.forEach(function (id) {
@@ -6563,12 +6569,12 @@ export const ui = `
     return isFinite(n) ? n : currentRound;
   }
 
-  /** Open, awaited, short of its deadline, and posted to follow the moving
-   * deadline: a round posted by an older shim keeps its fixed wait, so its
-   * page never reports. */
+  /** roundDeadlineMoves (badge.mjs, ADR 145), the same gate the daemon's
+   * activity route applies: open, awaited, short of its deadline, and posted
+   * to follow the moving deadline. A round posted by an older shim keeps its
+   * fixed wait, so its page never reports. */
   function roundTakesActivity(n) {
-    var r = roundEntry(n);
-    return !!r && r.movingDeadline === true && roundIsCurrentlyAwaited(r, Date.now());
+    return roundDeadlineMoves(roundEntry(n), Date.now());
   }
 
   function reportActivity(el) {

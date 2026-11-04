@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Answering a waiting round restarts its 40-minute wait (ADR 145)**: each answer pick, typed
+  note or saved comment on a round a session is waiting on now moves that round's deadline to a
+  full 40 minutes from that moment, both on the page's own countdown and in the session's wait. A
+  round that draws none of that activity still ends 40 minutes after it was posted, as before. A
+  session already waiting when the update ships keeps its original fixed 40-minute deadline,
+  unaffected.
 - **A late answer wakes the session that asked**: when a Claude Code session's wait on a round
   ends with nobody having answered, the `timeout` result now names an answer watch, a command the
   session runs as a background call (`node <clone>/bin/watch.mjs --board <id> --round <n>`). For up

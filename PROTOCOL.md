@@ -1345,9 +1345,17 @@ is silent because it reports, not because its socket exists.
   -> 429 { error, retryAfterMs }
 ```
 
-The page reporting that the reviewer did something on `round` (ADR 145): picked an answer (an
-option, a multi-select toggle, a rank move), typed a note, or saved a comment. Never a focus, a
-visibility change or a scroll: a tab left focused overnight is not a reviewer working on the round.
+The page reporting that the reviewer did something on `round` (ADR 145): an answer change (an
+option, a multi-select toggle, a rank move, a rendered-variant pick, Defer), a typed answer or
+note, or a saved comment, sent only while the round is open, awaited, unlapsed and carries
+`movingDeadline`. Never a focus, a visibility change or a scroll: a tab left focused overnight is
+not a reviewer working on the round.
+
+The page sends the first change at once, then takes at most one report per round every 5.25 s
+(`ACTIVITY_GAP_MS`, src/ui.mjs), carrying the window's last change at its end; a failed or 429
+report is dropped, and the next change reports again. It applies the `awaitDeadline` it gets back
+off its own report, off the `deadline` event (see "SSE events") and off a reconnect snapshot,
+forward only -- never moving a round's countdown earlier.
 
 `moved: true` when the round is open, awaited, minted `movingDeadline` (see "Board document") and
 its deadline has not passed: its `awaitDeadline` becomes now plus the wait timeout
