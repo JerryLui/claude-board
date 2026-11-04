@@ -5828,7 +5828,7 @@ export const ui = `
     fetch('/api/board/' + boardId + '/submit', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ action: action, round: currentRound, answers: answers, comments: comments }),
+      body: JSON.stringify({ action: action, round: currentRound, answers: answers, comments: comments, stages: 'held' }),
     }).then(function (r) {
       // 409 is not an error: it means this round was already sent (a second tab,
       // or a double click that beat the disable). The right response is the same
@@ -5868,6 +5868,7 @@ export const ui = `
       // rather than joined by the server-numbered copies of the same comments.
       // A comment that stayed behind keeps its provisional pin.
       pendingComments = pendingComments.filter(function (c) { return comments.indexOf(c) === -1; });
+      applyOwnSend(result);
       refreshPins(document);
       clearPendingMark();
       if (sendStatus) {
@@ -5881,6 +5882,21 @@ export const ui = `
       // unless a flip mid-flight left a page Send cannot answer on screen.
       setSendBarEnabled(currentPageSendable());
     });
+  }
+
+  /** The tab that sent closes its round from its own Send's answer: 'stages: held' in
+   * the body asks the daemon to answer with the 'submitted' push this tab's stream
+   * carries, which a browser whose stream worker ended never delivers (ADR 144), so
+   * without it the sending tab showed its round open until the worker came back, two
+   * beats on. Applied only while this tab still has the round unsent: whatever told it
+   * otherwise (the push, a catch-up) came after the Send, so its board is the newer.
+   * An answer carrying no round (a daemon from before) leaves the push to close it. */
+  function applyOwnSend(result) {
+    var sent = result && result.submitted;
+    if (!sent || !sent.board || typeof sent.round !== 'number') return;
+    var round = roundEntry(sent.round);
+    if (round && round.status === 'sent') return;
+    applySubmittedPush(sent);
   }
 
   if (sendBtn) {
@@ -5981,7 +5997,7 @@ export const ui = `
     fetch('/api/board/' + boardId + '/submit', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ action: action, round: roundN, answers: [], comments: mine }),
+      body: JSON.stringify({ action: action, round: roundN, answers: [], comments: mine, stages: 'held' }),
     }).then(function (r) {
       // 409: already sent, by another tab or a double click that beat the
       // disable above -- not an error, and the live 'submitted' push (already
@@ -5993,6 +6009,7 @@ export const ui = `
     }).then(function (result) {
       if (result && result.alreadySent) return;
       pendingComments = pendingComments.filter(function (c) { return c.blockId !== blockId; });
+      applyOwnSend(result);
       refreshPins(document);
       clearPendingMark();
     }).catch(function () {
@@ -6713,6 +6730,8 @@ export const ui = `
   // from "how many are outstanding" -- see resync() below.
   var resyncIssued = 0;
   var resyncNewest = 0;
+  // The rounds whose 'submitted' payload this tab has applied (applySubmittedPush).
+  var submittedApplied = {};
 
   // --- a push leaves a stage it does not change alone (ADR 122) -----------------
   //
@@ -7139,6 +7158,11 @@ export const ui = `
   }
 
   function applySubmittedPush(data) {
+    // A round is sent once (the daemon's 409), so its sent record is applied once: from
+    // this tab's own Send's answer (applyOwnSend) or its stream's push, whichever lands
+    // first, the two built from the one board.
+    if (submittedApplied[data.round]) return;
+    submittedApplied[data.round] = true;
     pushGeneration++; // see applyRoundPush above, and resync below
     lensClose(); // see applyRoundPush above
     stageLensClose();

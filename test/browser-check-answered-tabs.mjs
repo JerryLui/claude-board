@@ -49,9 +49,6 @@ const SHOWN_MS = 5000;
 // A dropped stream comes back on EventSource's own retry, about 3 s, and then registers
 // the tab before the tab re-reads the board.
 const RECONNECT_MS = 10000;
-// A tab finds its worker gone at the second beat after it went, 5 to 10 s, and opens
-// a fresh one.
-const WORKER_GONE_MS = 15000;
 // "At once": a push, no reconnect.
 const AT_ONCE_MS = 2000;
 // How long a tab that missed the answer is left away before it shows again, so a push it
@@ -290,7 +287,7 @@ async function awayTabs() {
         await sender.close();
       });
 
-      await row('every tab of a browser whose stream worker ended reads a round sent there answered: the tab shown again within a few seconds, the sending tab within two beats', async note => {
+      await row('every tab of a browser whose stream worker ended reads a round sent there answered: the sending tab at once, the tab shown again within a few seconds', async note => {
         const { away, sender } = await twoTabs('Worker ended', origin);
         const workers = async () => (await send('Target.getTargets')).targetInfos
           .filter(t => t.type === 'shared_worker' && t.url.startsWith(`${origin}/api/stream/`));
@@ -300,8 +297,10 @@ async function awayTabs() {
         await send('Target.closeTarget', { targetId: worker.targetId });
         assert.equal(await waitFor(async () => (await workers()).length === 0, { timeoutMs: 3000, intervalMs: 100 }), true,
           'setup: the stream worker outlived its close');
-        const sentAt = Date.now();
+        // The sending tab hears no push on its dead port: its own Send's answer closes the
+        // round, where the stream would have taken it two beats to find its worker gone.
         await sendRound(sender, 1);
+        note(`sending tab: answered ${await answeredWithin(sender, 1, AT_ONCE_MS, 'the sending tab')} ms after its Send`);
         await sleep(AWAY_MS);
         await show(send, away);
         try {
@@ -309,8 +308,6 @@ async function awayTabs() {
         } finally {
           await shoot(away, 'worker-ended-tab.png', note);
         }
-        await answeredWithin(sender, 1, WORKER_GONE_MS, 'the sending tab');
-        note(`sending tab: answered ${Date.now() - sentAt} ms after its Send`);
         await away.close();
         await sender.close();
       });

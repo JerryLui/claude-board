@@ -782,7 +782,8 @@ POST /api/stream/:id/unwatch        { watcher } -> { ok }: that tab went away
 POST /api/stream/:id/beat           { watchers } -> { unknown }: the worker still holds
                                     these tabs; `unknown` names the ones the daemon dropped
 POST /api/board/:id/submit          { round, action: 'send'|'discuss', via?: 'card', answers,
-                                    comments }
+                                    comments, stages?: 'held' } -> { ok: true, board, round,
+                                    submitted? }
 POST /api/board/:id/abandon         {} -> { ok: true, rounds }; closes every round still
                                     open on a board a conversation walked away from
                                     (ADR.md entry 69). Secret only: never cookie-reachable
@@ -1176,8 +1177,19 @@ page the reviewer sent from, which may be any unsent round (ADR 134).
   comments: [ { blockId, anchor, text } ],        // n, createdAt, round assigned server-side
   via: 'card',                                    // optional: sent by a mission card's
                                                   // Fire or Merge, absent from the page
+  stages: 'held',                                 // optional: sent by the page, asking for
+                                                  // `submitted` in the answer
 }
 ```
+
+A sent round answers **200** `{ ok: true, board, round }`, the board's id and the round sent. A
+body carrying `stages: 'held'`, as the page's own Send does, also gets `submitted`: the
+`submitted` push (see "SSE events") its stream carries, `{ round, board, html }`, every stage
+held. The tab that sent closes its round from it whatever its stream's state, since a browser
+whose stream worker ended delivers no push to any of its tabs until a beat finds the worker gone
+(ADR 144). It applies the one that lands first of the two, and this one only while its own copy
+still has the round unsent. A relay never carries it, its answer reaching an agent whole, and a
+payload that fails to build is left out: the round is stored by then.
 
 `round` names the round the page believed it was answering when the reviewer pressed the button:
 the page on screen. Send's check, its count of questions left and the answers it posts cover that
@@ -1967,7 +1979,9 @@ submitted, so a second tab sees the round go sent — and read-only, if that pag
 showing — without reloading. Its `html` is the re-rendered `<section class="round">` in sent/history
 form, every stage in it held, since a submit changes no block; without it a client that did not
 submit would show its own unsent, in-progress state as if it were what was sent. A client that
-receives no `html` must fall back to disabling the round in place.
+receives no `html` must fall back to disabling the round in place. The page that sent has the
+same payload in its Send's answer too (`POST /api/board/:id/submit`'s `submitted`), and applies
+whichever of the two lands first.
 
 `awaitExpired` is the one event that carries no board: it fires from `GET /api/board/:id/wait`'s
 own timeout branch, at the moment that wall clock gives up, and is a wake-up nudge rather than a

@@ -2344,7 +2344,14 @@ async function handleSubmit(req, res, id, home, sse, stranded, stream, waiting, 
   // correct, not merely convenient. Its stages are the exception, and carry no state
   // of the reviewer's answer: a Send changes no block, so each goes out held and every
   // tab keeps the frame it has (buildSubmittedPushPayload).
-  sse.broadcast(id, 'submitted', fillsHeld => buildSubmittedPushPayload(board, round, { wholeStages: !fillsHeld }));
+  //
+  // The held payload is built once and shared with the answer below, which a page that
+  // sends `stages: 'held'` closes its round from, whatever its stream's state.
+  let heldPush = null;
+  const pushFor = fillsHeld => (fillsHeld
+    ? (heldPush ??= buildSubmittedPushPayload(board, round))
+    : buildSubmittedPushPayload(board, round, { wholeStages: true }));
+  sse.broadcast(id, 'submitted', pushFor);
   // Answered is the other way off the waiting list -- an open round this same call just
   // closed, mirroring `handleWait`'s timeout branch and `handleAbandon` above.
   broadcastWaiting(stream, waiting, board);
@@ -2360,7 +2367,20 @@ async function handleSubmit(req, res, id, home, sse, stranded, stream, waiting, 
   // `mayAnnounce`, once the round it named stops being awaited.
   stranded.answered(id, round);
   stranded.evaluate(id, strandedTarget(req, id));
-  return sendJson(res, 200, { ok: true, board: board.id, round });
+  // The tab that sent learns of its own Send here as well as from its stream's push, which
+  // a browser whose stream worker ended never delivers (ADR 144). Only the page asks for
+  // it: a relay's answer reaches an agent whole, and a copy of the board would only bloat
+  // it. The round is sent and stored by now, so a payload that fails to build is left
+  // out and the Send still answers 200.
+  let submitted = null;
+  if (!relayed && body.stages === 'held') {
+    try {
+      submitted = pushFor(true);
+    } catch (err) {
+      console.error(`claude-board: could not build the submitted answer for board ${id} round ${round}: ${(err && err.message) || err}`);
+    }
+  }
+  return sendJson(res, 200, submitted ? { ok: true, board: board.id, round, submitted } : { ok: true, board: board.id, round });
 }
 
 /** The relayed words' cap, in UTF-8 bytes: a PM's yes and the sentence around it, never a
