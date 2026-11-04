@@ -32,7 +32,7 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readSecret, secretPath, daemonPort, SECRET_HEADER } from '../src/secret.mjs';
-import { HANDOFF_TOKEN_RE, recoveryCommand, shellQuote, DEFAULT_PORT } from '../src/handoff.mjs';
+import { HANDOFF_TOKEN_RE, recoveryCommand, shellQuote, DEFAULT_PORT, WAIT_CEILING_MS, WATCH_INTERVAL_MS, waitCeilingMs } from '../src/handoff.mjs';
 import { MAX_DRAINED_BYTES, postTooLargeMessage } from '../src/post-limit.mjs';
 import { processStartUtc } from '../src/proc-start.mjs';
 import { STATUS_TONES } from '../src/card-status.mjs';
@@ -60,9 +60,11 @@ const TIMEOUT_MS = Number(process.env.CLAUDE_BOARD_TIMEOUT_MS) || 40 * 60 * 1000
 // every 120ms, so a margin under that lets the shim win again on a short cap.
 const WAIT_GRACE_MS = Math.min(5_000, Math.max(250, Math.round(TIMEOUT_MS * 0.05)));
 // The longest one `ask` blocks, however often the reviewer's activity moves the round's
-// deadline (ADR 145): the daemon's own ceiling on a wait whose deadline moves, so the two
-// sides of the wait cannot outlast each other.
-const WAIT_CEILING_MS = 24 * 60 * 60 * 1000;
+// deadline (ADR 145): the daemon's own ceiling on such a wait (src/handoff.mjs) plus the
+// grace above, for the reason the grace exists. The daemon's ceiling starts at its `/wait`
+// entry, after this side's start, so a bare copy fired first, aborted the request and
+// handed the agent an empty packet of this side's instead of the daemon's timeout packet.
+const ASK_CEILING_MS = waitCeilingMs() + WAIT_GRACE_MS;
 const PROGRESS_MS = Number(process.env.CLAUDE_BOARD_PROGRESS_MS) || 20_000; // ~20s cadence
 const POST_TIMEOUT_MS = Number(process.env.CLAUDE_BOARD_POST_TIMEOUT_MS) || 10_000;
 // How long the THREAD-CREATING post itself may run, as opposed to how long this call
@@ -108,8 +110,9 @@ function answerWatch(boardId, round) {
 }
 function answerWatchText({ watch }) {
   return watch
-    ? `\nAnswer watch: run \`${watch}\` as one background call, then end the turn. It checks every 30 s for ` +
-      `24 hours and exits once this round is sent, printing its answers; act on them once, as this round's.`
+    ? `\nAnswer watch: run \`${watch}\` as one background call, then end the turn. It checks every ` +
+      `${WATCH_INTERVAL_MS / 1000} s for ${WAIT_CEILING_MS / 3_600_000} hours and exits once this round is sent, ` +
+      `printing its answers; act on them once, as this round's.`
     : '';
 }
 
@@ -562,10 +565,10 @@ async function readRoundDeadline(boardId, round) {
  * activity may have moved the deadline, so `readDeadline` asks the daemon for the stored
  * one: a later one is followed, the same one or no answer ends the wait. A daemon that
  * cannot be reached therefore ends it at the last deadline read plus the grace. Never past
- * WAIT_CEILING_MS from entry. */
+ * ASK_CEILING_MS from entry. */
 async function blockingWait({ boardId, round, deadlineAt, readDeadline, progressMs, onProgress, onReattach, cancelled }) {
   const start = Date.now();
-  const ceiling = start + WAIT_CEILING_MS;
+  const ceiling = start + ASK_CEILING_MS;
   let followed = deadlineAt;
   let deadline = Math.min(followed + WAIT_GRACE_MS, ceiling);
   const url = `${BASE_URL}/api/board/${boardId}/wait?round=${round}`;
@@ -1458,7 +1461,7 @@ async function askTool(args, session, { sendProgress, cancelled }) {
   const watch = answerWatch(posted.boardId, posted.round);
   if (waited.timedOut) {
     const text =
-      `No response within ${formatDuration(TIMEOUT_MS)} of the post or of the reviewer's last activity on the round. Explicit no-response, ` +
+      `No response before the round's wait ran out. Explicit no-response, ` +
       `not a hang. Board is still open at ${url} — reopen it or post a fresh round to continue.${answerWatchText(watch)}`;
     return askResult(text, {
       board: posted.boardId,

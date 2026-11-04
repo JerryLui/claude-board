@@ -54,7 +54,7 @@ import { ASSET_NAME, MERMAID_ASSET_NAME, SHARED_ASSETS, assetContentType } from 
 import { createBrowserStreams } from './browser-stream.mjs';
 import { STREAM_WORKER_FILE, STREAM_WORKER_SOURCE } from './stream-worker.mjs';
 import { readSecret, secretPath, secretMatches, sessionToken, sessionCookieMatches, SECRET_HEADER, SESSION_COOKIE, SESSION_MAX_AGE_S } from './secret.mjs';
-import { createHandoffStore, handoffTarget, recoveryCommand, HANDOFF_TOKEN_RE, DEFAULT_PORT } from './handoff.mjs';
+import { createHandoffStore, handoffTarget, recoveryCommand, HANDOFF_TOKEN_RE, DEFAULT_PORT, waitCeilingMs } from './handoff.mjs';
 import { createBoard, addRound, amendRound, abandonOpenRounds, applySubmit, buildPacket, roundAnswers, dropResolved, resolveComments, questionBlocks, SUPPRESSED, ANSWERS_DELIVERED, roundContentDrifted } from './board.mjs';
 import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, renderRefusalPage, boardForClient, holdStages, holdAllStages, stageShas, CSP, INDEX_CSP } from './render.mjs';
 import { buildThreadIndex, renderIndexPage, renderMissionsPage, renderThreadRows, folderName } from './indexpage.mjs';
@@ -423,20 +423,13 @@ const DAEMON_ID = createHash('sha256').update(String(process.argv[1] || ''), 'ut
  * equal src/board.mjs's `DEFAULT_AWAIT_TIMEOUT_MS`, which is what `handlePostBoard`
  * below stamps a round's `awaitDeadline` with, and what an activity report moves a
  * moving round's deadline to from now (ADR 145). A wait on such a round follows its
- * stored deadline instead, under `MOVING_WAIT_CEILING_MS`. */
+ * stored deadline instead, under `waitCeilingMs()` (src/handoff.mjs). */
 export const DEFAULT_WAIT_TIMEOUT_MS = 2_400_000;
 
 function waitTimeoutMs() {
   const v = Number(process.env.CLAUDE_BOARD_TIMEOUT_MS);
   return Number.isFinite(v) && v > 0 ? v : DEFAULT_WAIT_TIMEOUT_MS;
 }
-
-/** The ceiling on one `/wait` call on a round whose deadline moves (ADR 145). Such a wait
- * ends when the round's STORED deadline passes, and the reviewer's activity keeps moving
- * it, so the fixed cap above no longer ends it; this does, so a poll loop on a board
- * somebody keeps touching still has an end. A day: the longest a session is told to keep
- * watching a round. */
-const MOVING_WAIT_CEILING_MS = 24 * 60 * 60 * 1000;
 
 /** Number of /wait polls currently running in this process. Exported for the checks:
  * a waiter whose client disconnected must drop this back to zero (see waitForRound). */
@@ -1136,10 +1129,16 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, s
         return sendJson(res, 200, {
           boardId: board.id,
           thread: board.thread,
-          round: board.rounds[board.rounds.length - 1].n,
+          round: guarded.n,
           url: boardUrl(req, board.id),
           clients: sse.clientCount(board.id),
           deduped: true,
+          // What the post that applied this id answered, read off the round it guarded
+          // after the restart above, so a retried post waits to the stored deadline
+          // rather than to a clock of the shim's own.
+          suppressed: board[SUPPRESSED] === true,
+          awaited: roundIsAwaited(board, guarded),
+          awaitDeadline: guarded.awaitDeadline ?? null,
         });
       }
       const latestRound = board.rounds[board.rounds.length - 1];
@@ -1417,7 +1416,7 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, s
   // the marks spent. Closing that needs the shim to hold what a post its caller abandoned
   // brought back, which is a delivery rule, not a guard on this line.
   const owed = body.noWait === true ? drainOwedForPost(board, round, home, allBoards()) : null;
-  if (owed) res.once('finish', owed.commit);
+  if (owed) spendWhenSent(res, owed);
   // `clients` is the count at the instant this round landed. Nothing in bin/ reads it --
   // see createSseHub.clientCount.
   return sendJson(res, 200, {
@@ -1616,6 +1615,110 @@ function threadBoards(thread, board, home, prebuilt = null) {
     .sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
 }
 
+// The rounds a response still on the wire is carrying, per board: `<home>\0<board id>` ->
+// round n -> the hold that took it. A round's marks are written on its response's
+// `finish` (ADR 107), so between one response reading a round as owed and that write, a
+// second reader would find it owed too: the answer watch's collect (ADR 146) and the
+// thread's next packet both handed out one late round. The first to read a round holds
+// it until its response finishes (marked) or closes (not marked, so still owed), and
+// every other reader leaves it alone.
+const carrying = new Map();
+
+/** One response's hold on the rounds it carries. `claim(boardId, n)` takes round n for
+ * this response and answers false only when another response holds it, so the check and
+ * the take are one step and nothing can read the round between them. A comment from
+ * before rounds were numbered has no round to hold and is claimed freely. `release`
+ * gives back everything this hold took, and is safe to call twice. */
+function createHold(home) {
+  const taken = [];
+  const hold = {
+    claim(boardId, n) {
+      if (!Number.isInteger(n)) return true;
+      const key = `${home ?? ''}\0${boardId}`;
+      let rounds = carrying.get(key);
+      if (!rounds) carrying.set(key, rounds = new Map());
+      const holder = rounds.get(n);
+      if (holder) return holder === hold;
+      rounds.set(n, hold);
+      taken.push([key, n]);
+      return true;
+    },
+    release() {
+      for (const [key, n] of taken.splice(0)) {
+        const rounds = carrying.get(key);
+        if (rounds?.get(n) === hold) rounds.delete(n);
+        if (rounds && !rounds.size) carrying.delete(key);
+      }
+    },
+  };
+  return hold;
+}
+
+/** Wires a response's `{ commit, release }` to its socket: `commit` (which marks, then
+ * releases) once the response has left, `release` alone when it closes without leaving. */
+function spendWhenSent(res, { commit, release }) {
+  res.once('finish', commit);
+  res.once('close', release);
+}
+
+/** The one write that spends what a response carried, for every way out: the packet
+ * drains below and `handleCollect`. `rounds` go onto the `answersDelivered` ledger
+ * (`null` leaves it alone; an array, even an empty one, writes it, which is how a board
+ * from before ADR 107 joins the ledger), and the comments numbered `commentNs` are
+ * marked delivered. By number, never by a filter over the fresh read: a comment that
+ * landed after the response was built was not in it.
+ *
+ * `board` is the caller's captured copy, kept in step for free so nothing depends on an
+ * argument about who else holds it. The write itself goes to a FRESH read, merging only
+ * these marks: it runs on the response's `finish`, a later macrotask than the capture,
+ * and in that window another writer (the stranded rule's timer callback,
+ * src/stranded.mjs, whose `persist` defends its own field against this writer by name)
+ * can have landed a record on the same document. Writing the captured board back would
+ * erase that record, or resurrect one the reviewer had dismissed.
+ *
+ * A throw is swallowed per board. By the time a `finish` handler runs the request's own
+ * try/catch is gone, and bin/daemon.mjs answers an uncaught exception by exiting, taking
+ * every blocked `/wait` with it; the marks staying unwritten only means the next packet
+ * carries them again, which is noise (ADR 35 tolerates a redelivery) rather than loss. */
+function markDelivered(board, home, { rounds = null, commentNs = [] }) {
+  const ns = new Set(commentNs);
+  const merge = ledger => [...new Set([...(ledger || []), ...rounds])].sort((x, y) => x - y);
+  if (rounds) board[ANSWERS_DELIVERED] = merge(board[ANSWERS_DELIVERED]);
+  for (const c of board.comments || []) if (ns.has(c.n)) c.delivered = true;
+  try {
+    const fresh = readBoard(board.id, home);
+    if (!fresh) return; // the board is gone; nothing to mark
+    if (rounds) fresh[ANSWERS_DELIVERED] = merge(fresh[ANSWERS_DELIVERED]);
+    for (const c of fresh.comments || []) if (ns.has(c.n)) c.delivered = true;
+    writeBoard(fresh, home);
+  } catch (err) {
+    console.error(`claude-board: could not mark board ${board.id} delivered: ${(err && err.message) || err}`);
+  }
+}
+
+/** ADR 107's candidates on one board: every round that is sent, asked something and is
+ * not on the ledger, with its answer entries. `adopting` is a board with no ledger at
+ * all, one written before the rule: what it has sent is recorded as delivered rather
+ * than paid out (see ANSWERS_DELIVERED, src/board.mjs).
+ *
+ * `sent` is what makes a round a candidate: an `open` round has no submitted answers for
+ * a packet to have carried, nor has an `abandoned` one (a late Send turns it `sent`,
+ * ADR 114). That is also why a timeout packet does not spend its own round: at the
+ * instant it leaves, that round is still `open`. A round that asked nothing owes nothing
+ * and never will, so it is no candidate either, and recording one would put a write on
+ * the wire for every page board a thread ever posted. */
+function unspentRounds(board) {
+  const adopting = !Array.isArray(board[ANSWERS_DELIVERED]);
+  const delivered = new Set(adopting ? [] : board[ANSWERS_DELIVERED]);
+  const rounds = [];
+  for (const r of board.rounds || []) {
+    if (r.status !== 'sent' || delivered.has(r.n)) continue;
+    const entries = roundAnswers(board, r.n);
+    if (entries.length) rounds.push({ n: r.n, entries });
+  }
+  return { adopting, rounds };
+}
+
 /** ADR 35: a comment left on a round that returned no packet is held as undelivered
  * and rides the next packet the same thread returns, once.
  *
@@ -1655,18 +1758,21 @@ function threadBoards(thread, board, home, prebuilt = null) {
  * commit only on the response's own `finish` event). Marking eagerly, before the packet
  * is known to have left the daemon, loses the comment outright to a request that aborts
  * or a daemon that restarts in that window -- and noise beats data loss, since ADR 35
- * exists precisely so a comment produces something somebody reads. */
-function drainUndeliveredComments(boards, board, round, home, { carriesOwnRound = true } = {}) {
+ * exists precisely so a comment produces something somebody reads.
+ *
+ * `hold` is the response's hold (`createHold` above), taken here at read time on every
+ * round whose comments this marks, and released by the caller once the response
+ * finishes or closes. */
+function drainUndeliveredComments(boards, board, round, home, hold, { carriesOwnRound = true } = {}) {
   const comments = [];
   const pendingByBoard = [];
   for (const b of boards) {
-    const undelivered = (b.comments || []).filter(c => c.delivered !== true);
     // The waited round's own comments are DRAINED by nobody -- `buildPacket`'s
     // round-scoped filter already put them in this very packet, and repeating them here
     // would duplicate them in one response -- but they are MARKED by this commit all the
     // same, because that packet leaving is precisely what makes them delivered. Split
-    // lists, one `writeBoard`: `drained` is what the caller adds to the packet, `mark`
-    // is everything this packet accounts for.
+    // lists, one write: `drained` is what the caller adds to the packet, `mark` is
+    // everything this packet accounts for.
     //
     // `carriesOwnRound: false` says the caller is assembling a response that has NO
     // round-scoped body of its own -- the `posted` packet a content-only post returns
@@ -1675,10 +1781,12 @@ function drainUndeliveredComments(boards, board, round, home, { carriesOwnRound 
     // post amended is exactly where the reviewer's unanswered comments sit, and marking
     // them delivered off a response that never carried them is the loss ADR 35 exists
     // to prevent.
-    const drained = carriesOwnRound
-      ? undelivered.filter(c => b.id !== board.id || c.round !== round)
-      : undelivered;
-    const mark = b.id === board.id ? undelivered : drained;
+    const ownBody = c => carriesOwnRound && b.id === board.id && c.round === round;
+    // A comment on a round another response still on the wire is carrying is that
+    // response's, so this one neither carries nor marks it (see `carrying` above). The
+    // packet's own round is carried by its body whoever holds it, so it is marked anyway.
+    const mark = (b.comments || []).filter(c => c.delivered !== true && (hold.claim(b.id, c.round) || ownBody(c)));
+    const drained = mark.filter(c => !ownBody(c));
     if (!mark.length) continue;
     // `dropResolved` for the same reason `buildPacket` applies it to its own
     // comments (src/board.mjs, ADR 99): this function's `comments` lands in the
@@ -1686,48 +1794,12 @@ function drainUndeliveredComments(boards, board, round, home, { carriesOwnRound 
     // carried forward from an earlier board must not be the one entry in the
     // packet still carrying the field the round's own comments dropped.
     if (drained.length) comments.push(...dropResolved(resolveComments(b, drained)));
-    pendingByBoard.push({ board: b, pending: mark });
+    pendingByBoard.push({ board: b, commentNs: mark.map(c => c.n) });
   }
+  // Matched by each comment's stable, append-only per-board `n` (src/board.mjs), never by
+  // identity or array position: `markDelivered` writes to a fresh read of each board.
   const commit = () => {
-    for (const { board: b, pending } of pendingByBoard) {
-      // Kept even though nothing in this process reads it again before `commit` runs
-      // (the packet was already built from `resolveComments`' own copies, above): it
-      // costs nothing, and it keeps this in-memory board agreeing with what is about to
-      // be written, rather than depending on an argument about who else might hold `b`.
-      for (const c of pending) c.delivered = true;
-      // Re-read, and copy across ONLY the delivered marks this rule owns -- matched by
-      // each comment's stable, append-only per-board `n` (src/board.mjs), never by
-      // identity or array position. Writing back the whole captured `b`, as this used
-      // to, made this function a participant in every read-modify-write race on the
-      // board document rather than in none of them: `commit` runs on the response's own
-      // `finish` event (see handleWait), a LATER macrotask than the capture above -- and
-      // in that window the stranded rule's timer callback can have written a fresh
-      // `STRANDED_BANNER` record onto this same board (src/stranded.mjs's `persist`
-      // already defends that field against this exact writer, by name, in its own
-      // comment -- that half and this one are the two sides of one invariant). This
-      // is the reverse direction: without it, this closure's stale whole-board write
-      // would silently erase that record, or resurrect one the reviewer had already
-      // dismissed.
-      //
-      // A throw here is an uncaught exception at the top of the event loop -- by the
-      // time a `finish` handler runs, the request's own try/catch is long gone, and
-      // bin/daemon.mjs answers one of those by exiting, taking every blocked `/wait`
-      // with it. So, like src/stranded.mjs's `persist`, swallow per board: the comment stays
-      // undelivered and rides the next `/wait` on the thread instead, which is noise
-      // (ADR 35 already tolerates a redelivery), not the data loss a crashed daemon
-      // would be.
-      try {
-        const fresh = readBoard(b.id, home);
-        if (!fresh) continue; // the board is gone; nothing to mark
-        const deliveredNs = new Set(pending.map(c => c.n));
-        for (const fc of fresh.comments || []) {
-          if (deliveredNs.has(fc.n)) fc.delivered = true;
-        }
-        writeBoard(fresh, home);
-      } catch (err) {
-        console.error(`claude-board: could not mark comments delivered for board ${b && b.id}: ${(err && err.message) || err}`);
-      }
-    }
+    for (const { board: b, commentNs } of pendingByBoard) markDelivered(b, home, { commentNs });
   };
   return { comments, commit };
 }
@@ -1753,16 +1825,8 @@ function drainUndeliveredComments(boards, board, round, home, { carriesOwnRound 
  * as delivered and the ledger is written even when there is nothing else to write, so the
  * board joins the rule from that moment on instead of paying out its whole history once.
  *
- * A round is owed exactly when it is `sent` and unmarked. `sent` is what makes the
- * question interesting at all: an `open` round has no submitted answers for any packet to
- * have carried, and an `abandoned` one never will have (`handleSubmit` below refuses a
- * round that is not open), so neither is ever a candidate. That is also precisely why a
- * timeout packet does not spend the mark on its own round -- at the instant it leaves,
- * that round is still `open`.
- *
- * A round with no question blocks at all is skipped outright rather than marked: an
- * artifact round owes nothing and never will, and recording a delivery for it would put
- * a write on the wire for every page board a thread ever posted.
+ * A round is owed exactly when it is one of `unspentRounds` above: sent, asked something,
+ * and not on the ledger.
  *
  * The waited round itself is MARKED but not drained, exactly as its comments are:
  * `buildPacket` (src/board.mjs) already put its answers in this very packet through its
@@ -1772,27 +1836,26 @@ function drainUndeliveredComments(boards, board, round, home, { carriesOwnRound 
  * Split into read-and-resolve plus a `commit` closure for the same reason
  * `drainUndeliveredComments` above is, and with the same failure mode in mind: marking
  * eagerly loses the answers to a request that aborts in the window before the response
- * leaves, and a redelivery is noise where a loss is the thing this exists to prevent. */
-function drainUndeliveredAnswers(boards, board, round, home, { carriesOwnRound = true } = {}) {
+ * leaves, and a redelivery is noise where a loss is the thing this exists to prevent.
+ *
+ * `hold` as on `drainUndeliveredComments`: a round another response still on the wire
+ * is carrying (a packet, or the answer watch's collect) is that response's, so this one
+ * neither carries nor marks it, and it stays owed if that response closes unsent. */
+function drainUndeliveredAnswers(boards, board, round, home, hold, { carriesOwnRound = true } = {}) {
   const answers = [];
   const pendingByBoard = [];
   for (const b of boards) {
-    // No ledger at all: a board written before this rule shipped. Everything already sent
-    // on it is adopted below rather than paid out -- see ANSWERS_DELIVERED (src/board.mjs).
-    const adopting = !Array.isArray(b[ANSWERS_DELIVERED]);
-    const delivered = new Set(adopting ? [] : b[ANSWERS_DELIVERED]);
+    const { adopting, rounds } = unspentRounds(b);
     const mark = [];
-    for (const r of b.rounds || []) {
-      if (r.status !== 'sent' || delivered.has(r.n)) continue;
-      const entries = roundAnswers(b, r.n);
-      if (!entries.length) continue; // asked nothing, so there is nothing to owe
-      mark.push(r.n);
-      if (adopting) continue;
+    for (const { n, entries } of rounds) {
       // Its own round is the one exception, and it is the packet's own: buildPacket
-      // already carried it.
+      // already carried it, so it is marked whoever else holds it, and never drained.
       // ...unless the caller has no packet of its own (`carriesOwnRound: false`, the
       // posted-packet path -- see the same option on drainUndeliveredComments above).
-      if (!carriesOwnRound || b.id !== board.id || r.n !== round) answers.push(...entries);
+      const ownBody = carriesOwnRound && b.id === board.id && n === round;
+      if (!hold.claim(b.id, n) && !ownBody) continue;
+      mark.push(n);
+      if (!adopting && !ownBody) answers.push(...entries);
     }
     // `adopting` on its own is enough to write: a legacy board with nothing sent yet has
     // an empty adoption, and skipping it would leave it legacy until the round it is
@@ -1800,26 +1863,7 @@ function drainUndeliveredAnswers(boards, board, round, home, { carriesOwnRound =
     if (adopting || mark.length) pendingByBoard.push({ board: b, rounds: mark });
   }
   const commit = () => {
-    for (const { board: b, rounds } of pendingByBoard) {
-      // Kept in step with what is about to be written for the same reason the comment
-      // commit does it: it costs nothing, and it keeps this in-memory board honest rather
-      // than depending on an argument about who else is holding `b`.
-      b[ANSWERS_DELIVERED] = [...new Set([...(b[ANSWERS_DELIVERED] || []), ...rounds])].sort((x, y) => x - y);
-      // Re-read and MERGE, never write the captured board back: `commit` runs on the
-      // response's own `finish` event, a later macrotask than the capture above, and in
-      // that window another writer (the stranded rule's timer callback, src/stranded.mjs)
-      // can have landed a record on this same document. Same reasoning, same swallow, and
-      // the same consequence for a failure -- the rounds stay unmarked and ride the next
-      // `/wait` on the thread, which is a redelivery rather than a loss.
-      try {
-        const fresh = readBoard(b.id, home);
-        if (!fresh) continue; // the board is gone; nothing to mark
-        fresh[ANSWERS_DELIVERED] = [...new Set([...(fresh[ANSWERS_DELIVERED] || []), ...rounds])].sort((x, y) => x - y);
-        writeBoard(fresh, home);
-      } catch (err) {
-        console.error(`claude-board: could not mark answers delivered for board ${b && b.id}: ${(err && err.message) || err}`);
-      }
-    }
+    for (const { board: b, rounds } of pendingByBoard) markDelivered(b, home, { rounds });
   };
   return { answers, commit };
 }
@@ -1837,20 +1881,26 @@ function drainUndeliveredAnswers(boards, board, round, home, { carriesOwnRound =
  * One thread walk (`threadBoards` above), two independent rules: each owns one field and
  * commits it separately, so a failure to persist one cannot silently spend the other.
  *
- * Returns `{ packet, commit }`, not a bare packet: see `drainUndeliveredComments` for
- * why persisting the delivered marks is deliberately not this function's job. Exported
- * so a check can prove the marks stay unpersisted until `commit()` runs without having
- * to win a real socket-abort race. */
+ * Returns `{ packet, commit, release }`, not a bare packet: see `drainUndeliveredComments`
+ * for why persisting the delivered marks is deliberately not this function's job. The
+ * packet holds the rounds it carries from this call on (`carrying` above); `commit`
+ * marks them and lets go, `release` lets go without marking, for a response that closed
+ * unsent. `spendWhenSent` wires the two to a response. Exported so a check can hold a
+ * packet between the two moments without having to win a real socket race. */
 export function buildPacketWithUndelivered(board, round, url, home) {
   const packet = buildPacket(board, round, url);
   const boards = threadBoards(board.thread, board, home);
-  const { comments: drained, commit: commitComments } = drainUndeliveredComments(boards, board, round, home);
-  const { answers: owed, commit: commitAnswers } = drainUndeliveredAnswers(boards, board, round, home);
+  const hold = createHold(home);
+  const { comments: drained, commit: commitComments } = drainUndeliveredComments(boards, board, round, home, hold);
+  const { answers: owed, commit: commitAnswers } = drainUndeliveredAnswers(boards, board, round, home, hold);
   if (drained.length) packet.comments = packet.comments.concat(drained);
   if (owed.length) packet.answers = packet.answers.concat(owed);
   return {
     packet,
-    commit: () => { commitComments(); commitAnswers(); },
+    commit: () => {
+      try { commitComments(); commitAnswers(); } finally { hold.release(); }
+    },
+    release: hold.release,
   };
 }
 
@@ -1870,12 +1920,16 @@ export function buildPacketWithUndelivered(board, round, url, home) {
 function drainOwedForPost(board, round, home, boards) {
   const own = threadBoards(board.thread, board, home, boards);
   const opts = { carriesOwnRound: false };
-  const { comments, commit: commitComments } = drainUndeliveredComments(own, board, round, home, opts);
-  const { answers, commit: commitAnswers } = drainUndeliveredAnswers(own, board, round, home, opts);
+  const hold = createHold(home);
+  const { comments, commit: commitComments } = drainUndeliveredComments(own, board, round, home, hold, opts);
+  const { answers, commit: commitAnswers } = drainUndeliveredAnswers(own, board, round, home, hold, opts);
   return {
     answers,
     comments,
-    commit: () => { commitComments(); commitAnswers(); },
+    commit: () => {
+      try { commitComments(); commitAnswers(); } finally { hold.release(); }
+    },
+    release: hold.release,
   };
 }
 
@@ -1947,11 +2001,14 @@ function handleReadBoard(req, res, id, home) {
  * are marked delivered, so no later packet on the thread carries them again.
  *
  * `delivered: true` says a packet had already carried the round (the thread's next one,
- * through `drainUndeliveredAnswers`), so the session acted on it there. A round that
- * asked nothing has no ledger entry to read, and its comments decide instead.
+ * through `drainUndeliveredAnswers`), or is carrying it as this lands, so the session
+ * acts on it there. A round that asked nothing has no ledger entry to read, and its
+ * comments decide instead.
  *
- * Spent on the response's `finish`, as `handleWait` does, so a watch that dies before the
- * response lands leaves the round owed to the next packet rather than lost. Secret-only:
+ * Spent through `markDelivered` on the response's `finish`, as `handleWait` does, so a
+ * watch that dies before the response lands leaves the round owed to the next packet
+ * rather than lost; the round is held from the read until then, so no packet carries it
+ * meanwhile. Secret-only:
  * `collect` is on no cookie list, so gate 3 refuses a browser. */
 async function handleCollect(req, res, id, home) {
   let body;
@@ -1974,31 +2031,29 @@ async function handleCollect(req, res, id, home) {
     return sendJson(res, 200, { board: board.id, thread: board.thread, title: board.title, round, status, answers: [], comments: [], delivered: false, url });
   }
   const packet = buildPacket(board, round, url);
+  // A packet still on the wire with this round in it holds the round (`carrying` above):
+  // it is that packet's, as it would be had the packet finished first, so this answers
+  // `delivered: true` and spends nothing. Should that packet close unsent, the round is
+  // owed again, to this watch's next poll or the thread's next packet.
+  const hold = createHold(home);
+  if (!hold.claim(id, round)) return sendJson(res, 200, { ...packet, delivered: true });
   const asked = roundAnswers(board, round).length > 0;
   const own = (board.comments || []).filter(c => (c.round ?? round) === round);
   const delivered = asked
     ? Array.isArray(board[ANSWERS_DELIVERED]) && board[ANSWERS_DELIVERED].includes(round)
     : own.length > 0 && own.every(c => c.delivered === true);
-  res.once('finish', () => {
-    // Re-read and merge, as the wait's own commit does: another writer may have landed
-    // on the document since the read above.
-    try {
-      const fresh = readBoard(id, home);
-      if (!fresh) return;
-      if (asked) {
-        // No ledger yet: adopt what was already sent, as `drainUndeliveredAnswers` would.
-        const prior = Array.isArray(fresh[ANSWERS_DELIVERED])
-          ? fresh[ANSWERS_DELIVERED]
-          : fresh.rounds.filter(x => x.status === 'sent' && roundAnswers(fresh, x.n).length).map(x => x.n);
-        fresh[ANSWERS_DELIVERED] = [...new Set([...prior, round])].sort((x, y) => x - y);
-      }
-      for (const c of fresh.comments || []) {
-        if ((c.round ?? round) === round) c.delivered = true;
-      }
-      writeBoard(fresh, home);
-    } catch (err) {
-      console.error(`claude-board: could not spend round ${round} of board ${id}: ${(err && err.message) || err}`);
-    }
+  // A board with no ledger yet adopts what it has already sent, as the next packet would;
+  // a round another response is carrying is left to it.
+  let rounds = null;
+  if (asked) {
+    const { adopting, rounds: unspent } = unspentRounds(board);
+    rounds = adopting ? unspent.map(u => u.n).filter(n => hold.claim(id, n)) : [round];
+  }
+  spendWhenSent(res, {
+    commit: () => {
+      try { markDelivered(board, home, { rounds, commentNs: own.map(c => c.n) }); } finally { hold.release(); }
+    },
+    release: hold.release,
   });
   return sendJson(res, 200, { ...packet, delivered });
 }
@@ -2016,12 +2071,14 @@ async function handleWait(req, res, id, url, home, sse, stream, waiting) {
   res.on('close', onClose);
 
   // A round whose deadline moves (ADR 145) is waited on to its stored deadline, re-read
-  // on every poll, under a day's ceiling; every other round keeps the fixed cap from this
-  // call's entry, which is what a shim from before the moving deadline was built against.
+  // on every poll, under the wait ceiling from this call's entry (src/handoff.mjs), which
+  // the shim outlives by its grace so that this side's timeout packet is the one it gets;
+  // every other round keeps the fixed cap from this call's entry, which is what a shim from
+  // before the moving deadline was built against.
   const moving = initial.rounds.find(r => r.n === round).movingDeadline === true;
   const result = await waitForRound(id, round, home, {
     isAborted: () => aborted,
-    deadlineAt: Date.now() + (moving ? MOVING_WAIT_CEILING_MS : waitTimeoutMs()),
+    deadlineAt: Date.now() + (moving ? waitCeilingMs() : waitTimeoutMs()),
     followDeadline: moving,
   });
   if (result.aborted) return; // the client is gone: nothing to write, nothing to keep polling for
@@ -2045,9 +2102,9 @@ async function handleWait(req, res, id, url, home, sse, stream, waiting) {
     // to any other. `status: 'abandoned'` is additive -- PROTOCOL.md's packet statuses
     // gain a third terminal one beside `submitted`/`discuss`/`timeout`, matching the
     // third terminal ROUND state `abandonOpenRounds` (src/board.mjs) already invented.
-    const { packet, commit } = buildPacketWithUndelivered(result.board, round, boardUrl(req, id), home);
-    res.once('finish', commit);
-    return sendJson(res, 200, { ...packet, status: 'abandoned' });
+    const built = buildPacketWithUndelivered(result.board, round, boardUrl(req, id), home);
+    spendWhenSent(res, built);
+    return sendJson(res, 200, { ...built.packet, status: 'abandoned' });
   }
   if (result.timedOut) {
     // The wall-clock cap is an explicit no-response, not an error: same `timeout`
@@ -2079,25 +2136,35 @@ async function handleWait(req, res, id, url, home, sse, stream, waiting) {
     // "did anything change" would mean it never ran at all. Ordered ahead of the
     // broadcast so a tab that refetches on the nudge cannot read a board still
     // claiming to be awaited. See closeLapsedAwaitedRounds (src/badge.mjs).
+    //
+    // The ceiling can end a moving round's wait with its stored deadline, moved by the
+    // reviewer's activity, still ahead, and the sweep clears only a deadline that passed.
+    // Nobody waits on the round past this answer, so its deadline becomes now: the sweep
+    // then clears `awaited`, the page stops counting down, the waiting count drops the
+    // round and a later activity report moves nothing.
+    const ended = moving ? result.board.rounds.find(r => r.n === round) : null;
+    if (ended && ended.awaited === true && ended.status === 'open' && ended.awaitDeadline && !roundWaitLapsed(ended)) {
+      ended.awaitDeadline = new Date().toISOString();
+    }
     closeLapsedAwaitedRounds(result.board);
     writeBoard(result.board, home);
     sse.broadcast(id, 'awaitExpired', { round });
     // A wait dying is a round leaving the waiting count exactly as surely as an answer is.
     broadcastWaiting(stream, waiting, result.board);
-    const { packet, commit } = buildPacketWithUndelivered(result.board, round, boardUrl(req, id), home);
+    const built = buildPacketWithUndelivered(result.board, round, boardUrl(req, id), home);
     // Committed only once the response has actually left this process (see
     // drainUndeliveredComments): if the socket died in the window between
     // waitForRound resolving and here -- the exact race `isAborted()` above cannot
     // always catch, since a close event and a timer callback land in different libuv
     // phases -- `res.end()` below either never reaches 'finish' or errors out, and
-    // this listener simply never fires, leaving the comment undelivered for the next
+    // only the close's release runs, leaving the comment undelivered for the next
     // wait to pick up rather than losing it.
-    res.once('finish', commit);
-    return sendJson(res, 200, { ...packet, status: 'timeout' });
+    spendWhenSent(res, built);
+    return sendJson(res, 200, { ...built.packet, status: 'timeout' });
   }
-  const { packet, commit } = buildPacketWithUndelivered(result.board, round, boardUrl(req, id), home);
-  res.once('finish', commit);
-  return sendJson(res, 200, packet);
+  const built = buildPacketWithUndelivered(result.board, round, boardUrl(req, id), home);
+  spendWhenSent(res, built);
+  return sendJson(res, 200, built.packet);
 }
 
 /** POST /api/board/:id/abandon -> `{ ok, board, closed: [n…] }`: the shim declaring that

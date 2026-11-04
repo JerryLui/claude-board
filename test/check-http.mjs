@@ -359,6 +359,12 @@ async function main() {
     assert.equal(retry.deduped, true, 'the daemon must say it recognised the retry rather than silently reapplying');
     assert.equal(retry.round, first.round, 'a retry does not advance the round');
     const board = JSON.parse(readFileSync(path.join(home, 'boards', `${created.boardId}.json`), 'utf8'));
+    // The guarded round's wait, so a retried `ask` waits to the stored deadline (ADR 145)
+    // rather than to a clock of the shim's own.
+    const guarded = board.rounds.find(r => r.n === first.round);
+    assert.equal(typeof guarded.awaitDeadline, 'string', 'setup: the question round is awaited, with a deadline');
+    assert.deepEqual([retry.awaited, retry.awaitDeadline, retry.suppressed], [true, guarded.awaitDeadline, first.suppressed],
+      'a deduped retry answers what the post that applied the id did');
     const prompts = board.blocks.filter(b => b.kind === 'question' && b.round === first.round);
     assert.equal(prompts.length, 1, `the retried round must hold ONE question, not two (got ${prompts.length})`);
     // A genuinely different round still lands: dedupe is on the id, not on "any repeat".
@@ -4251,7 +4257,7 @@ async function main() {
     assert.equal(packet2.comments.length, 0, 'a comment already delivered by its own round\'s ordinary packet must not be redelivered on a later round');
   });
 
-  await check('a drained comment is not marked delivered until the packet is known to have left -- commit is deferred, not eager', async () => {
+  await check('a drained comment is not marked delivered until the packet is known to have left -- commit is deferred, not eager -- and no other packet carries it meanwhile', async () => {
     // The audit reproduced this over a real socket by destroying the client mid-wait at
     // swept millisecond offsets -- 5 permanent losses in 130 trials, because the old
     // code flipped `delivered` and wrote it as part of COMPUTING the packet, before the
@@ -4303,19 +4309,28 @@ async function main() {
       'building the packet must not itself persist the mark -- the response has not gone anywhere yet',
     );
 
-    // Simulate the response never reaching the client: this build's `commit` is simply
-    // never called (an aborted connection or a daemon restart before res.on('finish')
-    // fires). A second, independent build -- standing in for a LATER wait -- must still
-    // find the comment: nothing was lost by computing a packet that never shipped.
+    // While that response is still on the wire, the comment is its: another packet built
+    // on the thread meanwhile leaves it alone, and marks nothing for it.
+    const during = buildPacketWithUndelivered(board2, 1, 'http://test.invalid/', home);
+    assert.equal(during.packet.comments.length, 0, 'a second packet while the first is on the wire must leave the comment to it');
+    during.commit();
+    assert.equal(readBoard(board1, home).comments[0].delivered, undefined, 'and must not mark a comment it did not carry');
+
+    // Simulate the response never reaching the client: its socket closes before
+    // `finish`, so `release` runs and `commit` never does (an aborted connection; a
+    // daemon restart forgets the hold with everything else). A second, independent
+    // build -- standing in for a LATER wait -- must still find the comment: nothing was
+    // lost by computing a packet that never shipped.
+    first.release();
     const second = buildPacketWithUndelivered(board2, 1, 'http://test.invalid/', home);
     assert.equal(second.packet.comments.length, 1, 'an uncommitted drain must not have consumed the comment -- it is still there for the next attempt');
     assert.equal(
       readBoard(board1, home).comments[0].delivered, undefined,
-      'still nothing on disk -- two computed packets, zero commits, zero writes',
+      'still nothing on disk -- the packets that carried it made no commit',
     );
 
     // Now simulate the response that DOES make it out: commit runs, after the fact,
-    // the way `handleWait` wires it to `res.once('finish', commit)`.
+    // the way `handleWait` wires it to the response's `finish`.
     second.commit();
     assert.equal(readBoard(board1, home).comments[0].delivered, true, 'commit is what persists the mark, and only commit');
 
@@ -4589,7 +4604,7 @@ async function main() {
     assert.deepEqual(packet3.answers.map(a => a.round), [3], 'an already-delivered round must not come back a second time');
   });
 
-  await check('ADR 107 AC 3: the delivered mark stays unpersisted until commit -- deferred, not eager, provable without winning a socket race', async () => {
+  await check('ADR 107 AC 3: the delivered mark stays unpersisted until commit -- deferred, not eager, provable without winning a socket race -- and no other packet carries the round meanwhile', async () => {
     // Byte-for-byte the argument the ADR 35 deferred-commit check above makes, and driven
     // at the same exported seam for the same reason: a loopback response flushes far too
     // fast to land an assertion inside the window where the packet is computed and the
@@ -4608,13 +4623,22 @@ async function main() {
     assert.deepEqual(readBoard(r1.boardId, home)[ANSWERS_DELIVERED], [],
       'building the packet must not itself persist the mark -- the response has not gone anywhere yet');
 
-    // The response never reaches the client: this build's `commit` is simply never called,
-    // exactly as `res.once('finish', commit)` never fires for a socket that died. A second,
-    // independent build -- a later wait -- must still find the answers.
+    // While that response is still on the wire, round 1 is its: another packet built on
+    // the thread meanwhile leaves it alone and marks nothing for it.
+    const during = buildPacketWithUndelivered(collector, 1, 'http://test.invalid/', home);
+    assert.equal(during.packet.answers.filter(a => a.note === 'DEFERRED_ANSWER_NOTE').length, 0,
+      'a second packet while the first is on the wire must leave the round to it');
+    during.commit();
+    assert.deepEqual(readBoard(r1.boardId, home)[ANSWERS_DELIVERED], [], 'and must not mark a round it did not carry');
+
+    // The response never reaches the client: its socket closes before `finish`, so
+    // `release` runs and `commit` never does. A second, independent build -- a later
+    // wait -- must still find the answers.
+    first.release();
     const second = buildPacketWithUndelivered(collector, 1, 'http://test.invalid/', home);
     assert.equal(second.packet.answers.filter(a => a.note === 'DEFERRED_ANSWER_NOTE').length, 1,
       'an uncommitted drain must not have consumed the answers -- they are still there for the next attempt');
-    assert.deepEqual(readBoard(r1.boardId, home)[ANSWERS_DELIVERED], [], 'still nothing on disk -- two computed packets, zero commits');
+    assert.deepEqual(readBoard(r1.boardId, home)[ANSWERS_DELIVERED], [], 'still nothing on disk -- the packets that carried it made no commit');
 
     second.commit();
     assert.deepEqual(readBoard(r1.boardId, home)[ANSWERS_DELIVERED], [1], 'commit is what persists the mark, and only commit');
@@ -5043,6 +5067,33 @@ async function main() {
     }
   });
 
+  await check('ADR 145: a wait the ceiling ends while the reviewer keeps moving the deadline answers timeout and leaves the round not awaited, so a later report moves nothing', async () => {
+    await withEnv({ CLAUDE_BOARD_TIMEOUT_MS: '600', CLAUDE_BOARD_WAIT_CEILING_MS: '900', CLAUDE_BOARD_ACTIVITY_MIN_MS: '50' }, async () => {
+      const r = await askRound('CEILING_Q', { movingDeadline: true });
+      const enteredAt = Date.now();
+      let endedAt = null;
+      const waiting = fetch(`${base}/api/board/${r.boardId}/wait?round=1`)
+        .then(res => res.json()).then(packet => { endedAt = Date.now(); return packet; });
+      let lastMoved = null;
+      while (endedAt === null && Date.now() - enteredAt < 5000) {
+        const res = await reportActivity(r.boardId, 1);
+        if (res.status === 200 && JSON.parse(res.body).moved) lastMoved = Date.parse(JSON.parse(res.body).awaitDeadline);
+        await sleep(100);
+      }
+      const packet = await withTimeout(waiting, 5000, 'the wait must end at the ceiling');
+      assert.equal(packet.status, 'timeout');
+      assert.ok(endedAt >= enteredAt + 900, `not before the ceiling: ${endedAt - enteredAt}ms`);
+      assert.ok(lastMoved > endedAt, `setup: the ceiling, not the moved deadline, ended the wait (${lastMoved - endedAt}ms ahead)`);
+
+      const read = await (await fetch(`${base}/api/board/${r.boardId}/read`)).json();
+      assert.equal(read.rounds[0].awaited, false, 'nobody waits on the round now: its page counts down nothing and the waiting count drops it');
+      assert.ok(Date.parse(read.rounds[0].deadline) <= endedAt, 'its deadline is the moment the wait ended');
+      const after = await reportActivity(r.boardId, 1);
+      assert.equal(after.status, 200, after.body);
+      assert.deepEqual(JSON.parse(after.body), { round: 1, awaitDeadline: read.rounds[0].deadline, moved: false });
+    });
+  });
+
   await check('ADR 145: a second report on a round inside 5 s is a 429 naming how long until one is taken, and moves nothing; another board\'s report is its own', async () => {
     const r = await askRound('ACTIVITY_LIMIT_Q', { movingDeadline: true });
     setDeadlineLeft(r.boardId, 2 * MINUTE_MS);
@@ -5119,7 +5170,7 @@ async function main() {
       const at = Date.parse(stored);
       assert.ok(at >= sentAt + FULL_WAIT_MS && at <= answeredAt + FULL_WAIT_MS,
         `${what}: the stored deadline, the one the shim follows, is a full wait from the re-ask: ${at - sentAt - FULL_WAIT_MS}ms off`);
-      if (!deduped) assert.equal(posted.awaitDeadline, stored, `${what}: and the post answers it`);
+      assert.equal(posted.awaitDeadline, stored, `${what}: and the post answers it, which is what the shim waits to`);
       const served = await (await fetch(`${base}/b/${asked.boardId}`)).text();
       assert.equal(served, readFileSync(path.join(home, 'pages', `${asked.boardId}.html`), 'utf8'), `${what}: the pages/ file is written with it`);
     }

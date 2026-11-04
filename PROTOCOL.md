@@ -192,11 +192,12 @@ never becomes a third.
 so the reviewer's activity on the round may move it (`POST /api/board/:id/activity`), and so does
 the poster asking again: an amend of the round, or a retry answered from its `requestId`. Then
 `awaitDeadline` is the instant of the last restart plus the wait timeout, or `postedAt` plus it
-when nothing restarted it. A restart that would move it by less than a minute (a fortieth of the
-wait, when the wait is shorter than 40 minutes) is not made, so the deadline can sit up to that
-much short of a full wait; the countdown reads in whole minutes. It is absent everywhere else, a
-round nothing awaits and a round from a poster that waits on a clock of its own alike, and such a
-round's deadline is never moved.
+when nothing restarted it; a wait the 24-hour ceiling ends (`GET /api/board/:id/wait`, below) sets
+it to that instant, so the round stops being awaited. A restart that would move it by less than a
+minute (a fortieth of the wait, when the wait is shorter than 40 minutes) is not made, so the
+deadline can sit up to that much short of a full wait; the countdown reads in whole minutes. It is
+absent everywhere else, a round nothing awaits and a round from a poster that waits on a clock of
+its own alike, and such a round's deadline is never moved.
 
 **`answersDelivered`** (ADR 107) is a daemon-only ledger beside the rounds: the round numbers of
 this board whose answers a packet has actually carried out, ascending. It is what makes the
@@ -681,7 +682,10 @@ same thread returns, once** — and both are additive: they append to the array 
 built, are told apart by the `round` every entry carries, and change nothing about the packet's
 shape, so a consumer that has never heard of either keeps working unread. "Once" means committed
 as delivered only after the response has actually left the daemon, so a dropped connection
-re-delivers rather than loses, and what has been delivered is never sent again. They ride whatever
+re-delivers rather than loses, and what has been delivered is never sent again. From the read
+to that commit the response holds the rounds it carries: any other response on the board in that
+window, a packet or a collect, leaves them to it, and they are owed again only if it closes
+unsent. They ride whatever
 packet comes next, `timeout` and `abandoned` included. `GET /api/board/:id/read` is not a packet
 and marks nothing (ADR 115), so what it returned is still owed: the same entry can ride a later
 packet too, and the `round` every entry carries is what tells a caller it is looking at an answer
@@ -1124,11 +1128,14 @@ daemon older than the field omits it, and a caller then opens exactly as it alwa
 
 A **retry** carrying a `requestId` this board has already applied is answered from what that id
 already did (`deduped: true`) while the round it guarded is still `open`, **its wait has not
-lapsed**, **and the content that round resolved has not changed on disk**. A round whose
+lapsed**, **and the content that round resolved has not changed on disk**. The answer carries that
+round's `awaited` and `awaitDeadline` and the board's `suppressed`, as the post that applied the
+id did, so a caller following the stored deadline waits to it on a retry too. A round whose
 `awaitDeadline` has passed can never hand a caller a packet again, so it is never the answer to a
 retry: the post falls through and mints the next round, against a live deadline. A retry answered
-on a `movingDeadline` round restarts its wait (above), writing the board and its page and
-publishing the `deadline` event as an `activity` report's move does.
+on a `movingDeadline` round restarts its wait (above) before it answers, so the `awaitDeadline` it
+carries is the restarted one; the restart writes the board and its page and publishes the
+`deadline` event as an `activity` report's move does.
 
 The content gate is what makes `requestId` an identity over what a round *resolved to* rather than
 over the bytes of the request. `requestId` is derived from the raw blocks, and a raw block names a
@@ -1497,8 +1504,11 @@ poll stops.
 **A round minted `movingDeadline` is waited on to its stored deadline instead** (ADR 145): the
 deadline is read off the board on every poll (every 120 ms), so one an `activity` report moved is
 the one that ends the wait, with the same `timeout` packet; the fixed cap does not, and a ceiling of
-24 hours from the call does. A round without the flag keeps the fixed cap from the call's entry,
-which is what a shim from before the field waits against.
+24 hours from the call does (`CLAUDE_BOARD_WAIT_CEILING_MS` shortens it, for checks). A wait the
+ceiling ends sets the round's deadline to that instant before the write, so the round stops being
+awaited: its page stops counting down, the waiting count drops it and a later `activity` report
+moves nothing. A round without the flag keeps the fixed cap from the call's entry, which is what a
+shim from before the field waits against.
 
 **Secret-only, unlike every other GET.** `handleWait` writes -- it persists the board on the
 timeout branch above and, on every branch, spends what the thread is owed once the response has
@@ -1529,8 +1539,10 @@ carries them. A board with no ledger yet adopts its other sent rounds into it on
 next packet would. `delivered: true` says a packet had already carried the round, the thread's
 next one through the second exception under "Packet", so its session acted on it there: for a
 round that asked something it reads `answersDelivered`, and for one that asked nothing, whether
-each of its comments (at least one) was already delivered. A response that never leaves spends
-nothing, and the round stays owed.
+each of its comments (at least one) was already delivered. It is also `true`, with nothing spent,
+while a packet that read the round first is still leaving with it, and a packet built while a
+collect holds the round carries none of it, so the two never both hand it out. A response that
+never leaves spends nothing, and the round stays owed.
 
 Secret-only, like every write off the cookie lists: a browser holding the cookie gets 401 and
 spends nothing.
@@ -2054,12 +2066,17 @@ daemon every 5 s naming every Watcher it holds; the daemon drops a Watcher no be
 20 s (`CLAUDE_BOARD_STREAM_BEAT_TTL_MS`, for checks), and every Watcher of a stream that closes.
 Each drop asks the stranded rule again, as a closed `/events` stream does.
 
-The worker answers every hello and beat. A tab whose worker has left its last hello or beat
-unanswered at the next beat, or two seconds after the tab shows again, takes the worker for ended
-(Chrome tells a tab nothing when its worker crashes) and opens a fresh one of the same URL and
-name; its hello there registers it again, so it hears `open` and re-reads the board.
+The worker answers every hello and beat, in order. A tab whose worker has left a hello or beat
+unanswered a full beat (one said by the last beat, still unanswered at the next), or the beat the
+tab says on showing again unanswered two seconds on, takes the worker for ended (Chrome tells a
+tab nothing when its worker crashes) and opens a fresh one of the same URL and name; its hello
+there registers it again, so it hears `open` and re-reads the board. A beat said since the last
+one is not yet late: Chrome runs a hidden tab's overdue beat the moment it shows again, ahead of
+the answer to the beat it said on showing.
 
-A browser with no SharedWorker opens `/api/board/:id/events` and `/api/events` per tab, as before.
+A browser with no SharedWorker opens `/api/board/:id/events` and `/api/events` per tab, as before,
+and so does a tab whose fresh worker fails to load (an `error` before any answer: its script's
+name went with a daemon update, and that URL now answers 404).
 
 ## Stage postMessage channel
 
@@ -2446,8 +2463,10 @@ on the round. The shim waits to the `awaitDeadline` the post answered, plus a gr
 cap, 250 ms to 5 s) that lets the daemon's own timeout branch be the one that fires; when that
 instant comes with the wait still open it reads the round's stored deadline back through `read`
 and follows a later one. A daemon it cannot reach then ends the wait at the last deadline read plus
-the grace, and none outlasts 24 hours. Against a daemon that answers no `awaitDeadline` (one from
-before the field) the shim waits its own `CLAUDE_BOARD_TIMEOUT_MS` from the post, as it always did.
+the grace, and none outlasts the daemon's 24-hour ceiling plus the grace, so a wait the reviewer
+keeps moving for a day still ends on the daemon's `timeout` packet. Against a daemon that answers
+no `awaitDeadline` (one from before the field) the shim waits its own `CLAUDE_BOARD_TIMEOUT_MS` from
+the post, as it always did.
 `notifications/progress` run for the whole wait, their `total` the deadline followed. Under Claude
 Code a wait that ends `timeout` names the answer watch on its round (`watch`, ADR 146; "The answer
 watch" below).
@@ -2621,6 +2640,9 @@ CLAUDE_BOARD_TIMEOUT_MS       wall-clock cap on the blocking wait, default 40m (
                                The daemon stamps a round's deadline with it and moves it
                                to now plus it (ADR 145); the shim waits to that stored
                                deadline, and to this cap only on a daemon reporting none
+CLAUDE_BOARD_WAIT_CEILING_MS  shortens the 24h ceiling on a wait whose deadline moves (ADR
+                               145), for checks; never lengthens it. Shared by the daemon's
+                               /wait ceiling, which the shim outlives by its grace
 CLAUDE_BOARD_PROGRESS_MS      notifications/progress cadence, default 20_000 (20s)
 CLAUDE_BOARD_POST_TIMEOUT_MS  timeout on POST /api/board only, default 10_000; never applied
                                to the /wait call, which must survive the full wall-clock cap

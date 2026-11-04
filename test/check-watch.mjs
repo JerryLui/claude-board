@@ -9,9 +9,10 @@ import assert from 'node:assert/strict';
 import { readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { startServer } from '../src/server.mjs';
+import { startServer, buildPacketWithUndelivered } from '../src/server.mjs';
 import { ANSWERS_DELIVERED } from '../src/board.mjs';
 import { readBoard } from '../src/store.mjs';
+import { WAIT_CEILING_MS } from '../src/handoff.mjs';
 import {
   check, freePort, rawRequest, repoRoot, runMain, secretFetch, secretHome, sessionCookieHeader, sleep, writeHeaders,
 } from './support.mjs';
@@ -153,6 +154,40 @@ async function main() {
     assert.deepEqual(out.answers.map(a => [a.round, a.choice, a.note]), [[1, 'Yes', 'late, before round 2']]);
   });
 
+  await check('a late round the next packet is carrying is the packet\'s: collect answers delivered: true and spends nothing, and gets the round once that packet closes unsent', async () => {
+    const collect = async (boardId, round) => (await fetch(`${base}/api/board/${boardId}/collect`, {
+      method: 'POST', headers: writeHeaders(SECRET), body: JSON.stringify({ round }),
+    })).json();
+
+    const carried = await askRound('RACED_Q1');
+    assert.equal((await lapse(carried.boardId)).status, 'timeout');
+    await answer(carried.boardId, 1, carried.qid, 'Yes', 'sent as round 2 left');
+    await askRound('RACED_Q2', { boardId: carried.boardId });
+    // Round 2's packet has read the board and is on the wire: its `finish`, which spends
+    // round 1, has not fired, so the ledger does not name round 1 yet.
+    const inFlight = buildPacketWithUndelivered(readBoard(carried.boardId, home), 2, base, home);
+    assert.deepEqual(inFlight.packet.answers.map(a => a.round), [2, 1], 'setup: the packet carries round 1\'s late answer');
+    const during = await collect(carried.boardId, 1);
+    assert.equal(during.delivered, true, 'the collect leaves round 1 to the packet carrying it');
+    assert.deepEqual(during.answers.map(a => [a.round, a.note]), [[1, 'sent as round 2 left']]);
+    assert.deepEqual(readBoard(carried.boardId, home)[ANSWERS_DELIVERED], [], 'and marks nothing');
+    inFlight.commit();
+    assert.deepEqual(readBoard(carried.boardId, home)[ANSWERS_DELIVERED], [1], 'the packet that carried it spends it');
+
+    const dropped = await askRound('DROPPED_Q1');
+    assert.equal((await lapse(dropped.boardId)).status, 'timeout');
+    await answer(dropped.boardId, 1, dropped.qid, 'No', 'sent as round 2 left, which never arrived');
+    await askRound('DROPPED_Q2', { boardId: dropped.boardId });
+    const lost = buildPacketWithUndelivered(readBoard(dropped.boardId, home), 2, base, home);
+    assert.deepEqual(lost.packet.answers.map(a => a.round), [2, 1], 'setup: the packet carries round 1\'s late answer');
+    // Its socket closes before `finish`, as a session that went away leaves it.
+    lost.release();
+    const after = await collect(dropped.boardId, 1);
+    assert.equal(after.delivered, false, 'no packet carried round 1, so the collect is its delivery');
+    assert.deepEqual(after.answers.map(a => [a.round, a.note]), [[1, 'sent as round 2 left, which never arrived']]);
+    assert.deepEqual(readBoard(dropped.boardId, home)[ANSWERS_DELIVERED], [1]);
+  });
+
   await check('an abandoned round, a board that is gone and a round not on its board end the watch with 2', async () => {
     const abandoned = await askRound('ABANDONED_WATCH_Q');
     assert.equal((await lapse(abandoned.boardId)).status, 'timeout');
@@ -185,6 +220,18 @@ async function main() {
     assert.equal(stdout.trim(), 'timeout');
     assert.ok(elapsed >= 1080, `not before the bound of 1.08 s: ${elapsed}ms`);
     assert.equal(readFileSync(boardFile, 'utf8'), before, 'a poll on an open round marks nothing');
+  });
+
+  await check('the watch is bounded by the wait ceiling the daemon and the shim enforce: by default, and however many --hours it is asked for', async () => {
+    for (const extra of [[], ['--hours', '48']]) {
+      const before = Date.now();
+      const { code, stderr } = await startWatch([...watchArgs('b_no_such_board', 1), ...extra]).done;
+      const after = Date.now();
+      assert.equal(code, 2, 'setup: a board that is gone ends the watch at its first poll');
+      const until = Date.parse(/until (\S+)/.exec(stderr)?.[1]);
+      assert.ok(until >= before + WAIT_CEILING_MS && until <= after + WAIT_CEILING_MS,
+        `${JSON.stringify(extra)}: bound ${until - before - WAIT_CEILING_MS}ms past the ceiling`);
+    }
   });
 
   await check('a daemon that does not answer twice in a row ends the watch with 3', async () => {

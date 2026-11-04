@@ -11,6 +11,8 @@
 //   cuts while the other tab, on the daemon's own port, sends;
 // - on a stream worker that ended (closed over DevTools, as a crash ends it) before the
 //   round is sent, which leaves every tab of that browser on a dead port;
+// - on a stream worker that ended after a daemon update took its script away, so Chrome
+//   fails to load a fresh one and the tab opens a stream of its own;
 // - an older round, its wait already lapsed, sent after a newer round exists.
 //
 // Every tab of one browser shares one stream through a SharedWorker, and a frozen page's
@@ -28,6 +30,7 @@
 
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
 import { sessionToken } from '../src/secret.mjs';
@@ -169,13 +172,50 @@ function createCutRelay(daemonPort) {
   };
 }
 
+/** An HTTP relay to the daemon that, once `takeScript()` is called, answers 404 for the
+ * stream worker's script, as the daemon does for the name an update replaced; `asked()`
+ * counts the 404s. Another origin, so the tab loaded through it has a worker of its own. */
+function createUpdatedRelay(daemonPort) {
+  let gone = false;
+  let asked = 0;
+  const server = http.createServer((req, res) => {
+    if (gone && /^\/api\/stream\/worker-[0-9a-f]+\.js$/.test(req.url)) {
+      asked++;
+      res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+      res.end('not found');
+      return;
+    }
+    const upstream = http.request({ host: '127.0.0.1', port: daemonPort, method: req.method, path: req.url, headers: req.headers }, answer => {
+      res.writeHead(answer.statusCode, answer.headers);
+      answer.pipe(res);
+    });
+    upstream.on('error', () => res.destroy());
+    res.on('close', () => upstream.destroy());
+    req.pipe(upstream);
+  });
+  return {
+    async listen() {
+      await new Promise(res => server.listen(0, '127.0.0.1', res));
+      return server.address().port;
+    },
+    takeScript() { gone = true; },
+    asked: () => asked,
+    close() {
+      server.closeAllConnections();
+      return new Promise(res => server.close(res));
+    },
+  };
+}
+
 async function awayTabs() {
   const daemon = await startScratchDaemon('cb-answered-tabs');
   const relay = createCutRelay(await daemon.port());
+  const updated = createUpdatedRelay(await daemon.port());
   try {
     const port = await daemon.port();
     const origin = `http://127.0.0.1:${port}`;
     const relayOrigin = `http://127.0.0.1:${await relay.listen()}`;
+    const updatedOrigin = `http://127.0.0.1:${await updated.listen()}`;
     const post = body => postJson(`${origin}/api/board`, body, daemon.secret);
     const cookie = sessionToken(daemon.secret);
 
@@ -274,8 +314,35 @@ async function awayTabs() {
         await away.close();
         await sender.close();
       });
+
+      await row('a tab whose stream worker ended after a daemon update took its script away reads a round sent in another tab answered within a few seconds of showing, and is its board\'s Watcher again', async note => {
+        const { away, sender, watchers } = await twoTabs('Worker script gone', updatedOrigin);
+        const workers = async () => (await send('Target.getTargets')).targetInfos
+          .filter(t => t.type === 'shared_worker' && t.url.startsWith(`${updatedOrigin}/api/stream/`));
+        const [worker, ...others] = await workers();
+        assert.ok(worker && !others.length, 'setup: the away tab has no stream worker of its own');
+        updated.takeScript();
+        await send('Target.closeTarget', { targetId: worker.targetId });
+        assert.equal(await waitFor(async () => (await workers()).length === 0, { timeoutMs: 3000, intervalMs: 100 }), true,
+          'setup: the stream worker outlived its close');
+        await sendRound(sender, 1);
+        await answeredWithin(sender, 1, AT_ONCE_MS, 'the sending tab');
+        await sleep(AWAY_MS);
+        await show(send, away);
+        try {
+          note(`tab shown again: answered ${await answeredWithin(away, 1, SHOWN_MS, 'the tab shown again')} ms after showing`);
+        } finally {
+          await shoot(away, 'worker-script-gone-tab.png', note);
+        }
+        assert.ok(updated.asked() > 0, 'setup: the tab never asked for the script that is gone, so its worker never ended');
+        assert.equal(await waitFor(async () => (await watchers()) === 2, { timeoutMs: 3000, intervalMs: 100 }), true,
+          'the tab on a stream of its own does not count as its board\'s Watcher');
+        await away.close();
+        await sender.close();
+      });
     });
   } finally {
+    await updated.close();
     await relay.close();
     await daemon.stop();
   }
