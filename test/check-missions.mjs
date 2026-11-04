@@ -978,6 +978,9 @@ async function main() {
       assert.equal((await post('/api/mission/FACTS/facts', body)).status, 400, `${JSON.stringify(body)} is refused`);
     }
     assert.deepEqual(readMission('FACTS', home).prFacts, record.prFacts, 'a refused post writes nothing');
+    const closed = await post('/api/mission/FACTS/facts', { prs: [{ repo: 'admin', number: 7, state: 'closed', head: '0c1d2e', checkedAt: '2026-10-30T10:04:00.000Z' }] });
+    assert.equal(closed.status, 200, JSON.stringify(closed.body));
+    assert.deepEqual(closed.body.prs.map(p => [p.repo, p.state, p.head]), [['service', 'green', 'def456'], ['admin', 'closed', '0c1d2e']], 'a PR closed without merging reads closed');
     assert.equal((await post('/api/mission/NO_SUCH_MISSION/facts', { prs: [] })).status, 404);
   });
 
@@ -1066,14 +1069,15 @@ async function main() {
     assert.ok(all.includes('ROUTE_RELEASED'));
   });
 
-  await check('a retired mission with no open work leaves the list and ?all=1, a read by key still answering it; one with a PR not read merged or a release step waiting stays, waiting, marked retired (ADR 147)', async () => {
+  await check('a retired mission with no open work leaves the list and ?all=1, a read by key still answering it; one with a PR read neither merged nor closed or a release step waiting stays, waiting, marked retired (ADR 147)', async () => {
     const dir = scratchHome('retired');
     const now = Date.parse('2026-10-28T12:00:00Z');
     const retiredAt = iso(now - minutes(90));
     const pr = number => ({ repo: 'service', number, url: `https://github.com/o/service/pull/${number}` });
     const fact = (number, state) => ({ repo: 'service', number, state, head: 'a1b2c3', checkedAt: iso(now) });
-    // No open work: every PR read merged, no release step, whatever it last waited on.
+    // No open work: every PR read merged or closed without merging, no release step, whatever it last waited on.
     seed(dir, 'RETIRED_MERGED', { retiredAt, prs: [pr(1), pr(2)], prFacts: [fact(1, 'merged'), fact(2, 'merged')], next: 'nothing', waitingOn: 'the merge yes' });
+    seed(dir, 'RETIRED_CLOSED', { retiredAt, prs: [pr(7)], prFacts: [fact(7, 'closed')], waitingOn: 'checks on #7' });
     seed(dir, 'RETIRED_BARE', { retiredAt, state: 'needs-you', waitingOn: 'round 3' });
     seed(dir, 'RETIRED_RELEASED', { retiredAt, state: 'released', releasedAt: iso(now - minutes(5)) });
     // Open work.

@@ -9,8 +9,8 @@
 //
 // What a reader sees is a view, derived on every read and never stored: a released mission
 // reads released, and a retired one (its `retiredAt` set) waiting, no list showing it once
-// its PRs are merged and no release step waits (ADR 147); else a mission whose board's
-// newest round still waits on an answer reads needs-you; else a session whose process is
+// its PRs are merged or closed and no release step waits (ADR 147); else a mission whose
+// board's newest round still waits on an answer reads needs-you; else a session whose process is
 // gone, a reservation no process bound within `UNBOUND_GRACE_MS`, or a working one silent
 // past `STALL_SILENCE_MS`, reads stalled, and a gone one also carries `gone: { lastSeenAt }`.
 // A session the session watcher's latest snapshot lists counts as heard from at the
@@ -30,8 +30,11 @@ export { SAFE_MISSION_KEY, assertMissionKey, MISSION_RETENTION_MS };
 
 export const PHASES = ['grill', 'direct', 'landing'];
 export const STORED_STATES = ['needs-you', 'working', 'waiting', 'queued', 'released'];
-/** A PR's state as the session watcher reads it from GitHub at the PR's head commit. */
-export const PR_STATES = ['draft', 'open', 'green', 'red', 'merged'];
+/** A PR's state as the session watcher reads it from GitHub at the PR's head commit,
+ * `closed` being one closed without merging. */
+export const PR_STATES = ['draft', 'open', 'green', 'red', 'merged', 'closed'];
+/** The states that end a PR: neither is open work (ADR 147). */
+const PR_ENDED = ['merged', 'closed'];
 /** A listed PR's state in the view before the first fact for it arrives. */
 export const PR_CHECKING = 'checking';
 /** What an order asks: a card's Stop or comment (`CARD_ORDER_KINDS`, the only kinds a card or
@@ -416,13 +419,14 @@ function isRetired(m) {
   return Number.isFinite(Date.parse(m.retiredAt));
 }
 
-/** Work still open on `m`: a PR it lists that GitHub has not read merged, a PR with no fact
- * yet counting as open, or a release step waiting, its `next` naming one (`release: ...`).
+/** Work still open on `m`: a PR it lists that GitHub has read neither merged nor closed, a
+ * PR with no fact yet counting as open, or a release step waiting, its `next` naming one
+ * (`release: ...`).
  * What it last waited on is not open work: a stale `waitingOn` is what made a retired
  * mission read as asking (ADR 147). */
 function hasOpenWork(m) {
-  const merged = new Set((m.prFacts || []).filter(f => f.state === 'merged').map(prKey));
-  return (m.prs || []).some(pr => !merged.has(prKey(pr))) || (typeof m.next === 'string' && m.next.startsWith('release:'));
+  const ended = new Set((m.prFacts || []).filter(f => PR_ENDED.includes(f.state)).map(prKey));
+  return (m.prs || []).some(pr => !ended.has(prKey(pr))) || (typeof m.next === 'string' && m.next.startsWith('release:'));
 }
 
 function viewState(m, linked, now, isAlive, listed) {

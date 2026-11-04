@@ -1941,8 +1941,8 @@ function missionsParts(overview, ui) {
   // carries the fold that shows it whole.
   var FOLD_TITLE_CHARS = 30;
   // A PR's state is the view's, from GitHub at its head commit; 'checking' (no fact yet)
-  // takes the open ring.
-  var PR_MARKS = { green: '✓', merged: '✓', red: '✕', open: '○', draft: '○' };
+  // takes the open ring, and one closed without merging the struck one.
+  var PR_MARKS = { green: '✓', merged: '✓', red: '✕', open: '○', draft: '○', closed: '⊘' };
   var STOP_ICON = '<svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="1.8"/><line x1="4.7" y1="4.7" x2="15.3" y2="15.3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
   var data = overview || {};
   var missions = Array.isArray(data.missions) ? data.missions : [];

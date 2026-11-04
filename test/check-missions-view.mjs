@@ -192,10 +192,12 @@ async function main() {
     await liveMission('WORKING_ONE');
     await liveMission('WORKING_TWO', { summary: 'Wave 2 of 3', waitingOn: 'checks on #12', next: 'merge',
       prs: [{ repo: 'service', number: 12, url: 'https://github.com/o/service/pull/12' },
-        { repo: 'service', number: 13, url: 'https://github.com/o/service/pull/13', state: 'green' }] });
+        { repo: 'service', number: 13, url: 'https://github.com/o/service/pull/13', state: 'green' },
+        { repo: 'service', number: 14, url: 'https://github.com/o/service/pull/14' }] });
     assert.equal((await post('/api/mission/WORKING_TWO/facts', { prs: [
       { repo: 'service', number: 12, state: 'green', head: 'a1b2c3', checkedAt: new Date().toISOString() },
       { repo: 'service', number: 13, state: 'red', head: 'd4e5f6', checkedAt: new Date().toISOString() },
+      { repo: 'service', number: 14, state: 'closed', head: '0c1d2e', checkedAt: new Date().toISOString() },
     ] })).status, 200);
     assert.equal((await post('/api/mission/WAITING_ONE', { title: 'Waiting one', state: 'waiting', phase: 'landing',
       prs: [{ repo: 'admin', number: 7, url: 'javascript:alert(1)', state: 'open' }] })).status, 200);
@@ -253,7 +255,8 @@ async function main() {
         assert.deepEqual(prs.map(p => [p.textContent, p.getAttribute('data-state'), p.getAttribute('title')]), [
           ['✓service #12', 'green', 'service #12: green'],
           ['✕service #13', 'red', 'service #13: red'],
-        ], 'each PR shows its state from the facts, the session\'s green on #13 left unread');
+          ['⊘service #14', 'closed', 'service #14: closed'],
+        ], 'each PR shows its state from the facts, the session\'s green on #13 left unread, #14 closed without merging');
         const odd = cardFor(tab.document, 'WAITING_ONE').querySelector('.mission-pr');
         assert.deepEqual([odd.tagName, odd.getAttribute('href'), odd.textContent, odd.getAttribute('data-state')], ['SPAN', null, '○admin #7', 'checking'],
           'a url that is not a web address is shown, never linked, and with no fact yet the PR is checking');
