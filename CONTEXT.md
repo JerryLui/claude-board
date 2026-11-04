@@ -299,6 +299,11 @@ infra apply, one-time script, secret, switch or production check that puts the c
 production or proves it there. A Mission with none is Released at its merge. _Avoid_: landed
 (that is the merge), shipped, done, deployed.
 
+**Retired**: of a Mission, that it carries a retired time: it asks nothing, never needs you or
+Stalled, and waits under its Retired tag while a PR on it is unmerged or a release step waits,
+else it is on no list; its record is deleted 30 days after. Nothing in the board retires a
+Mission. _Avoid_: archived, closed, done (Released is the end of its work).
+
 **Live**: of a Mission's session, that it holds the Mission: bound or reserved, its Mission has
 not recorded its end, and its process is not gone. Only one session is Live per Mission, and only
 a Live one has a Stop. _Avoid_: alive, running, active, open.
@@ -329,8 +334,9 @@ daemon's memory: its name shows while it runs and is never stored. In Needs you 
 posted waits on the person or it is blocked, else Working while busy, else Waiting with "your
 turn". It is a Mission card in shape, as tall as its text and its long fields cut short
 under the same fold; while rounds it posted wait on the person, the whole card opens the first. It takes Orders like a Mission's card and counts toward no launch cap. A session a Mission
-holds is that Mission's card, never a Tab card. _Avoid_: session card, tab (unqualified: a
-browser tab), orphan, hand mission.
+holds is that Mission's card, never a Tab card, and a blocked background job left by a session
+whose every Mission is Released or held by another session is no card. _Avoid_: session card, tab
+(unqualified: a browser tab), orphan, hand mission.
 
 **Session watcher**: the process outside the board that posts the running sessions to the daemon
 every interval; the board reads no agent's folder itself. Two missed intervals read it down, and

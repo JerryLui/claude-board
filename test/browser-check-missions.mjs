@@ -7,7 +7,8 @@
 // covers the card under its chips and controls, so a click anywhere else on it or Enter on
 // the link opens its board, while in comment mode both open its note instead; its Stop
 // shows only on its hover or focus, on a screen with no hover always, keeps clear of a tab
-// card's key line, and takes the focus back after Keep or Escape; the Boards view is one
+// card's key line, and takes the focus back after Keep or Escape; a retired mission with open
+// work waits, tagged Retired in a hue of its own, and one with none shows nowhere; the Boards view is one
 // grouped list at 1280, 1440 and 2560, a 38px line a board under "Waiting on you" and
 // "Earlier", the whole line a link (test/check-pure.mjs owns the filter); and Stop, pressed
 // with a real mouse, plain or with Ctrl, Shift or Alt held, asks once and then sends its
@@ -49,6 +50,8 @@ const LONG_TAB = 'tab:tab-long'; // a tab card with its name and blocked reason 
 const CUTS = { title: ['b.mission-title', 2], summary: ['p.mission-summary', 2], 'waiting on': ['p.mission-waiting', 2], next: ['p.mission-next', 1] };
 const TITLE_ONLY = 'TITLE_ONLY'; // a title and its key line, nothing else
 const ASKING_TAB = 'tab:tab-asking'; // a tab card with a round waiting, so a link over its key line
+const RETIRED = 'RETIRED_BATCH'; // retired with open work: under Waiting, tagged Retired (ADR 147)
+const RETIRED_DONE = 'RETIRED_IMPORT'; // retired with none: on no column
 const words = (n, seed) => Array.from({ length: n }, (_, i) => `${seed}${i}`).join(' ');
 const longText = (max, seed) => words(200, seed).slice(0, max);
 const LONG_BOARD = longText(400, 'boardtitle'); // a board title far wider than its line
@@ -119,6 +122,12 @@ const MEASURE_EXPR = `(function () {
       keyClear: stop && ident && !c.querySelector('.mission-age') ? stop.getBoundingClientRect().left - ident.getBoundingClientRect().right : null,
       openButtons: [].slice.call(c.querySelectorAll('a, button')).filter(function (b) { return /Open (board|round)/.test(b.textContent); }).length });
   });
+  var tags = [].slice.call(document.querySelectorAll('article.mission-card:not(.tab-card) span.mission-tag')).map(function (t) {
+    var ts = getComputedStyle(t);
+    return { key: t.closest('article.mission-card').getAttribute('data-mission-key'), text: t.textContent,
+      col: t.closest('section.mission-col').getAttribute('data-col'), height: t.getBoundingClientRect().height,
+      color: ts.color, border: ts.borderTopColor };
+  });
   var digest = document.querySelector('article.mission-card[data-mission-key="MODEL_MAP"] p.mission-summary');
   var long = document.querySelector('article.mission-card[data-mission-key=${JSON.stringify(LONG)}]');
   var longTab = document.querySelector('article.mission-card[data-mission-key=${JSON.stringify(LONG_TAB)}]');
@@ -141,6 +150,7 @@ const MEASURE_EXPR = `(function () {
     content: bar ? { left: bar.getBoundingClientRect().left + parseFloat(cs.paddingLeft), width: bar.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight) } : null,
     cols: cols,
     cards: cards,
+    tags: tags,
     cuts: cuts,
     digest: digest ? { text: digest.textContent, lineHeight: parseFloat(getComputedStyle(digest).lineHeight), client: digest.clientHeight, scroll: digest.scrollHeight } : null,
     longFolds: long ? long.querySelectorAll('details.mission-more').length : 0,
@@ -293,6 +303,17 @@ async function main() {
       prs: [{ repo: 'service', number: 1862, url: 'https://github.com/o/service/pull/1862', state: 'merged' }] });
     // A board for the released mission, so a card with no Stop still opens one.
     await post('/api/board', { title: 'Estate goldens: notes', mission: 'ESTATE_GOLDENS', blocks: [{ kind: 'markdown', text: 'Notes' }] });
+    // Retired (ADR 147), each with a round still asking and its session gone: one with a PR
+    // open and a release step waiting, under Waiting tagged Retired; one with neither, on no column.
+    for (const [key, next] of [[RETIRED, 'release: reinstall the board on both Macs'], [RETIRED_DONE, 'nothing']]) {
+      await post(`/api/mission/${key}`, { title: key === RETIRED ? 'Board batch' : 'Old import', phase: 'landing', state: 'working', next,
+        waitingOn: 'round 3', retiredAt: '2026-11-03T15:45:01Z', prs: [{ repo: 'claude-board', number: 12, url: 'https://github.com/o/claude-board/pull/12' }] });
+      await post(`/api/mission/${key}/session`, { pid: await deadPid() });
+      await post(`/api/mission/${key}/facts`, { prs: [{ repo: 'claude-board', number: 12, state: key === RETIRED ? 'open' : 'merged', head: 'abc1234' }] });
+      await post('/api/board', { title: `${key}: round 3`, mission: key, blocks: [
+        { kind: 'question', prompt: 'Import the old cases?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] },
+      ] });
+    }
 
     const tabSession = (id, fields) => ({ id, pid: null, procStart: null, kind: 'interactive', jobId: null, cwd: '/Users/pm/work/tab-repo',
       login: '/Users/pm/.claude-a', name: null, status: 'busy', reason: null, ...fields });
@@ -428,6 +449,18 @@ async function main() {
             const linked = cards.filter(c => c.link);
             assert.ok(linked.length >= 4, 'setup: several cards open a board');
             assert.deepEqual(linked.filter(c => c.corners.some(hit => !hit)).map(c => `${c.key} ${c.corners}`), []);
+          });
+
+          await row(`${mode}, at ${key}: a retired mission with open work sits under Waiting, its Retired tag a chip as tall as Queued's in a hue of its own; one with none is on no column`, note => {
+            const { tags, cards } = m.missions;
+            const retired = tags.find(t => t.key === RETIRED);
+            const queued = tags.find(t => t.key === 'PAGE_READ_ROLLOUT');
+            note(`Retired ${retired && `${retired.col}, ${px(retired.height)}, ${retired.color} on ${retired.border}`}; Queued ${queued && `${px(queued.height)}, ${queued.color} on ${queued.border}`}`);
+            assert.deepEqual([retired.text, retired.col, queued.text], ['Retired', 'waiting', 'Queued']);
+            assert.equal(retired.height, queued.height);
+            assert.notEqual(retired.color, queued.color);
+            assert.notEqual(retired.border, queued.border);
+            assert.equal(cards.find(c => c.key === RETIRED_DONE), undefined);
           });
 
           await row(`${mode}, at ${key}: a tab card's Stop keeps clear of its key line's text`, note => {

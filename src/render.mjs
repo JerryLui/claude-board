@@ -244,7 +244,8 @@ function commentButton(blockId) {
 // The title is the block's `title`, a question's prompt, else a markdown block's
 // opening heading (lifted out of the body, so it is not said twice), else none.
 // The chip is the block's `status`, or a question's answer state. A stage or a
-// diagram also carries its comment button in the head, before the chip. The
+// diagram also carries its comment button in the head, before the chip, and on
+// a compare side its head opens with the side's label. The
 // head, the summary and the details fold are chrome to the comment gesture
 // (src/ui.mjs's ANCHOR_CHROME_SELECTOR, src/anchor.mjs's CHROME_CLASSES), and
 // a comment stored against the old captioned markup resolves through
@@ -273,9 +274,10 @@ function cardHead(titleHtml, tools = '', chip = '') {
 
 /** The head row and summary of a block whose title is only its own `title`: every
  * kind but markdown, which may lift its opening heading (titleParts), and a
- * question, whose prompt is its title. */
-function blockCardHead(block, tools = '') {
-  return cardHead(cardTitle(block.title), tools, statusChip(block.status)) + cardSummary(block);
+ * question, whose prompt is its title. `lead` goes ahead of the title: a compare
+ * side's label (renderCompareSide). */
+function blockCardHead(block, tools = '', lead = '') {
+  return cardHead(lead + cardTitle(block.title), tools, statusChip(block.status)) + cardSummary(block);
 }
 
 function cardSummary(block) {
@@ -1043,8 +1045,11 @@ function resolveErrorNote(block) {
  * second, direct-child `pageDomPinLayer` below is where THOSE anchors draw their
  * pin — a second, independent layer coexisting with the stage-scoped one, never
  * populated by the same code path (renderDomPins filters `kind === 'dom'`,
- * renderMermaidPins filters `kind === 'mermaid'`). */
-function renderMermaidBlock(block, board, commentsByBlock, historical) {
+ * renderMermaidPins filters `kind === 'mermaid'`).
+ *
+ * `sideLabel`: a compare side's label, which this diagram's head row then
+ * opens with (renderCompareSide). */
+function renderMermaidBlock(block, board, commentsByBlock, historical, sideLabel = '') {
   const body = block.error ? resolveErrorNote(block) : `
   <div class="stage-wrap">
     <pre class="mermaid">${escHtml(block.text)}</pre>
@@ -1053,7 +1058,7 @@ function renderMermaidBlock(block, board, commentsByBlock, historical) {
   </div>`;
   return `
 <section class="block mermaid-block" data-block-id="${escAttr(block.id)}" data-block-kind="mermaid">
-  ${blockCardHead(block, commentButton(block.id))}
+  ${blockCardHead(block, commentButton(block.id), sideLabel)}
   ${body}
   ${pageDomPinLayer(block.id)}
   ${cardDetails(block)}
@@ -3068,8 +3073,12 @@ function renderPageCommentPanel(block, round, commentsByBlock) {
  *
  * `folds` (default true) is false for a stage in a variant option's card
  * (renderVariantOption), which clips at the cap rather than folding, and so
- * carries no fold bar. */
-function renderHtmlBlock(block, board, commentsByBlock, historical, fullpage = false, folds = true) {
+ * carries no fold bar.
+ *
+ * `sideLabel`: a compare side's label, which this stage's head row then opens
+ * with (renderCompareSide). */
+function renderHtmlBlock(block, board, commentsByBlock, historical, fullpage = false, folds = true, sideLabel = '') {
+  const head = blockCardHead(block, commentButton(block.id), sideLabel);
   // A referenced source can fail to resolve (sliced
   // with lines/section, over the byte cap, or outside the confinement boundary) --
   // same block-level-error shape as renderMarkdownBlock/renderCodeBlock/
@@ -3077,7 +3086,7 @@ function renderHtmlBlock(block, board, commentsByBlock, historical, fullpage = f
   if (block.error) {
     return `
 <section class="block html-block" data-block-id="${escAttr(block.id)}" data-block-kind="html">
-  ${blockCardHead(block, commentButton(block.id))}
+  ${head}
   ${resolveErrorNote(block)}
   ${pageDomPinLayer(block.id)}
   ${cardDetails(block)}
@@ -3125,7 +3134,7 @@ function renderHtmlBlock(block, board, commentsByBlock, historical, fullpage = f
   const opened = stageRendersOpened(block, commentsByBlock, folds);
   return `
 <section class="block html-block${opened ? ' stage-opened' : ''}" data-block-id="${escAttr(block.id)}" data-block-kind="html">
-  ${blockCardHead(block, commentButton(block.id))}
+  ${head}
   <div class="stage-wrap">
     ${frame}
     <div class="pin-layer" data-block-id="${escAttr(block.id)}"></div>
@@ -3137,23 +3146,34 @@ function renderHtmlBlock(block, board, commentsByBlock, historical, fullpage = f
 </section>`;
 }
 
+/** One side of a compare. A stage or a diagram takes the side's label into its
+ * own head row, ahead of its title, comment button and chip, so its picture
+ * starts one row under the side's top, level with the other side's. The label
+ * moves in rather than the head moving out: the block's section keeps the
+ * children renderBlock gives it at top level, which src/board.mjs re-renders to
+ * resolve a page-scoped comment's path. Any other side keeps its label above
+ * its block. */
 function renderCompareSide(side, board, commentsByBlock, historical, folds = true) {
-  const label = side && side.label ? side.label : '';
-  const body = side && side.block
-    ? renderBlock(side.block, board, commentsByBlock, historical, false, folds)
-    : '<p class="unsupported-widget">no content</p>';
+  const label = `<div class="compare-label">${escHtml(side && side.label ? side.label : '')}</div>`;
+  const block = side && side.block ? side.block : null;
+  const body = !block ? '<p class="unsupported-widget">no content</p>'
+    : block.kind === 'html' ? renderHtmlBlock(block, board, commentsByBlock, historical, false, folds, label)
+    : block.kind === 'mermaid' ? renderMermaidBlock(block, board, commentsByBlock, historical, label)
+    : renderBlock(block, board, commentsByBlock, historical, false, folds);
+  const labelInHead = block && (block.kind === 'html' || block.kind === 'mermaid');
   return `<div class="compare-side">
-    <div class="compare-label">${escHtml(label)}</div>
-    ${body}
+    ${labelInHead ? body : `${label}
+    ${body}`}
   </div>`;
 }
 
 /** The side-by-side comparison stage inherited from /example, used whenever two
  * candidate designs exist. Each side is itself a content block (markdown/code/
- * mermaid/html), rendered through the same renderBlock dispatch, so a side holding
- * an `html` stage or a `mermaid` diagram keeps that kind's own comment affordance
+ * mermaid/html), rendered by that kind's own renderer, so a side holding an
+ * `html` stage or a `mermaid` diagram keeps that kind's own comment affordance
  * here exactly as it has it anywhere else -- ADR.md entry 28 draws the rule on
- * kind, never on position. A side holding `markdown` or `code` has none, for the
+ * kind, never on position -- with the side's label on the same row
+ * (renderCompareSide). A side holding `markdown` or `code` has none, for the
  * same reason and just as positionally.
  *
  * No commentButton/commentArea/pageDomPinLayer on the wrapper itself (ADR

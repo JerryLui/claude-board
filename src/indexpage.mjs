@@ -1911,7 +1911,8 @@ export function filterThreads(threads, query) {
  * server renders the first paint with it and indexScript carries its source to repaint
  * from every later fetch, so the two can never draw a card differently.
  *
- * Five columns by derived state (`view`), queued shown under waiting. A card's Fire or
+ * Five columns by derived state (`view`), queued shown under waiting with its tag; a
+ * retired mission's card is tagged Retired, under waiting unless released (ADR 147). A card's Fire or
  * Merge button exists only while `actions` holds that kind, which the daemon fills only
  * from a round still waiting on the PM. Fire carries what a click submits; Merge is a
  * link to the brief at its merge question, and the summary shows whole beside it. Stop
@@ -2084,7 +2085,9 @@ function missionsParts(overview, ui) {
     out += moreFold(key, m.summary || m.waitingOn || m.next || String(title).length > FOLD_TITLE_CHARS);
     out += '</div>';
 
-    var foot = m.view === 'queued' ? '<span class="mission-tag">Queued</span>' : '';
+    // A retired mission is listed only while it has open work (ADR 147).
+    var foot = m.retired ? '<span class="mission-tag mission-retired" title="' + esc('Retired ' + m.retiredAt) + '">Retired</span>'
+      : m.view === 'queued' ? '<span class="mission-tag">Queued</span>' : '';
     var prs = Array.isArray(m.prs) ? m.prs : [];
     for (var p = 0; p < prs.length; p++) {
       var pr = prs[p];

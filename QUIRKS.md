@@ -2510,3 +2510,9 @@ Traps that have bitten once. A second bite moves the entry up into the section i
   leaving, and so may a `Page.getNavigationHistory` read in the gap. Send Enter as its key-down
   alone, and tolerate that one error on the press and on the read
   (`test/browser-check-missions.mjs`'s `landedAt`, `pressKey` and its card-click row).
+
+- **A full-page shot of a scrolling board paints the send bar and the pager over its foot.**
+  `Page.captureScreenshot` with `captureBeyondViewport` and a clip taller than the window lays the
+  page out at the window's height, so the fixed send bar and round pager land over whatever sits at
+  the window's foot, here the last compare card's pictures. Open the tab taller than the board and
+  clip to the last card's bottom (`test/browser-check-compare-head.mjs`'s `--shot`).
