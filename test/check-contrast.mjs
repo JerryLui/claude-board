@@ -158,6 +158,8 @@ const TEXT_SITES = [
   ['--critical', '--critical-soft'],
   // `.comment-item .comment-lost` -- comment-item's own --panel-2 background.
   ['--critical', '--panel-2'],
+  // `.mission-retired`, a mission card's Retired tag: no fill, on the card's --panel.
+  ['--retired', '--panel'],
 ];
 
 for (const [themeName, palette] of Object.entries(palettes)) {

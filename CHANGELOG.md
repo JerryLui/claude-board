@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **A retired mission stops asking**: a mission carrying a retired time never shows under Needs
+  you or Stalled again, whatever its last rounds or its last "waiting on" say. While it still has
+  an unmerged PR or a release step waiting, its card sits under Waiting with a Retired tag; once it
+  has neither it leaves the Missions page, the Master Chief's list and the missions watch's full
+  list, though reading it by key still answers. Its record is still deleted 30 days after it
+  retired. Before, a retired mission whose session had gone read Stalled, or Needs you while an
+  old round stayed open, and the Master Chief raised it as a live ask.
+- **A leftover background job stops needing you**: a blocked background job with no process
+  whose session belonged only to missions that are now released, or that another session now
+  holds, no longer shows a Needs you card. Every other blocked job keeps its card, as before.
 - **A compare card's Comment buttons sit on its BEFORE and AFTER rows**: a side holding a stage
   or a diagram now opens one row with its label, then its title if it has one, its Comment button
   and its chip, and its picture starts under that row, level with the other side's. Before, the

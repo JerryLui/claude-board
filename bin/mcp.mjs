@@ -715,7 +715,7 @@ const MISSION_TOOL = {
       phase: { type: 'string', enum: ['grill', 'direct', 'landing'], description: 'join: the phase the session works in.' },
       takeover: { type: 'boolean', description: 'join: take the mission over from the live session bound to it, which finishes its step and leaves.' },
       text: { type: 'string', description: 'order: the PM\'s words, verbatim, at most 4 KB.' },
-      all: { type: 'boolean', description: 'list: keep missions released more than 24 hours ago.' },
+      all: { type: 'boolean', description: 'list: keep missions released more than 24 hours ago. A retired mission with no open PR and no release step is never listed.' },
       fields: {
         type: 'object',
         description: 'write: the fields to set, from title cwd phase state summary waitingOn next prs handoff fire queue retiredAt.',
