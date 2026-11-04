@@ -896,33 +896,34 @@ async function main() {
     });
   });
 
-  await check('a wait the reviewer keeps moving past the shim\'s start plus the ceiling ends on the daemon\'s timeout packet, carrying the unanswered question, not an empty one of the shim\'s', async () => {
+  await check('a wait whose deadline the reviewer moved past the shim\'s start plus the ceiling ends on the daemon\'s timeout packet, carrying the unanswered question, not an empty one of the shim\'s', async () => {
     // The daemon's ceiling starts at its /wait entry, after the shim's start, so the shim
-    // has to outlive it by its grace for the daemon's packet to be the one that arrives.
-    const env = { CLAUDE_BOARD_TIMEOUT_MS: '1000', CLAUDE_BOARD_WAIT_CEILING_MS: '2000', CLAUDE_BOARD_ACTIVITY_MIN_MS: '50' };
+    // has to outlive it by its grace for the daemon's packet to be the one that arrives. A
+    // 40 s wait under a 3 s ceiling: the moved deadline stands far past the ceiling, and
+    // the grace (5% of the wait) is 2 s, which no runner's poll lag eats. A minute's
+    // minimum move scales to 1 s on that wait, which a report 1.5 s in clears.
+    const env = { CLAUDE_BOARD_TIMEOUT_MS: '40000', CLAUDE_BOARD_WAIT_CEILING_MS: '3000', CLAUDE_BOARD_ACTIVITY_MIN_MS: '50' };
     await withEnv(env, async () => {
       const knownIds = listBoardIds(home);
       const ceilingClient = spawnShim({ ...baseEnv, ...env });
       try {
         const start = Date.now();
-        let ended = false;
         const call = ceilingClient.request('tools/call', { name: 'ask', arguments: { title: 'Ceiling', blocks: [QUESTION] } });
-        call.then(() => { ended = true; }, () => { ended = true; });
         const boardId = await waitForNewBoardFile(home, knownIds, 5000);
-        let lastMoved = null;
-        while (!ended && Date.now() - start < 8000) {
-          const report = await fetch(`${base}/api/board/${boardId}/activity`, {
-            method: 'POST', headers: writeHeaders(SECRET), body: JSON.stringify({ round: 1 }),
-          }).then(r => r.json());
-          if (report.moved) lastMoved = Date.parse(report.awaitDeadline);
-          await sleep(150);
-        }
-        const res = await withTimeout(call, 8000, 'timed out after 8000ms: the call must end at the ceiling');
+        const minted = JSON.parse(readFileSync(path.join(home, 'boards', `${boardId}.json`), 'utf8')).rounds[0];
+        await sleep(Math.max(0, Date.parse(minted.postedAt) + 1500 - Date.now()));
+        const report = await fetch(`${base}/api/board/${boardId}/activity`, {
+          method: 'POST', headers: writeHeaders(SECRET), body: JSON.stringify({ round: 1 }),
+        }).then(r => r.json());
+        assert.equal(report.moved, true, 'setup: the report lands inside the wait and moves the deadline');
+
+        const res = await withTimeout(call, 15000, 'timed out after 15000ms: the call must end at the ceiling');
         const endedAt = Date.now();
         const result = res.result;
         assert.equal(result.status, 'timeout');
-        assert.ok(endedAt - start >= 2000, `not before the ceiling: ${endedAt - start}ms`);
-        assert.ok(lastMoved > endedAt, `setup: the reviewer kept the deadline ahead of the ceiling (${lastMoved - endedAt}ms ahead)`);
+        assert.ok(endedAt - start >= 3000, `not before the ceiling: ${endedAt - start}ms`);
+        assert.ok(Date.parse(report.awaitDeadline) > endedAt,
+          `setup: the moved deadline stands past the ceiling (${Date.parse(report.awaitDeadline) - endedAt}ms ahead)`);
         assert.deepEqual(result.answers.map(a => a.status), ['unanswered'],
           'the daemon\'s own timeout packet, carrying the unanswered question, not the shim cutting the wait');
       } finally {

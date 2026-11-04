@@ -5067,30 +5067,40 @@ async function main() {
     }
   });
 
-  await check('ADR 145: a wait the ceiling ends while the reviewer keeps moving the deadline answers timeout and leaves the round not awaited, so a later report moves nothing', async () => {
-    await withEnv({ CLAUDE_BOARD_TIMEOUT_MS: '600', CLAUDE_BOARD_WAIT_CEILING_MS: '900', CLAUDE_BOARD_ACTIVITY_MIN_MS: '50' }, async () => {
+  await check('ADR 145: a wait the ceiling ends while the reviewer\'s activity holds the deadline past it answers timeout and leaves the round not awaited, so a later report moves nothing', async () => {
+    // A wait far longer than the ceiling, so the moved deadline stands seconds past the
+    // ceiling on any runner and the ceiling is what ends the wait. A minute's minimum move
+    // scales to 500 ms on a 20 s wait, which a report a second in clears.
+    await withEnv({ CLAUDE_BOARD_TIMEOUT_MS: '20000', CLAUDE_BOARD_WAIT_CEILING_MS: '3000', CLAUDE_BOARD_ACTIVITY_MIN_MS: '50' }, async () => {
       const r = await askRound('CEILING_Q', { movingDeadline: true });
       const enteredAt = Date.now();
       let endedAt = null;
-      const waiting = fetch(`${base}/api/board/${r.boardId}/wait?round=1`)
+      const abort = new AbortController();
+      const waiting = fetch(`${base}/api/board/${r.boardId}/wait?round=1`, { signal: abort.signal })
         .then(res => res.json()).then(packet => { endedAt = Date.now(); return packet; });
-      let lastMoved = null;
-      while (endedAt === null && Date.now() - enteredAt < 5000) {
+      waiting.catch(() => {}); // aborted on a failing assertion below: that failure is the report
+      try {
+        await sleep(1000);
         const res = await reportActivity(r.boardId, 1);
-        if (res.status === 200 && JSON.parse(res.body).moved) lastMoved = Date.parse(JSON.parse(res.body).awaitDeadline);
-        await sleep(100);
-      }
-      const packet = await withTimeout(waiting, 5000, 'the wait must end at the ceiling');
-      assert.equal(packet.status, 'timeout');
-      assert.ok(endedAt >= enteredAt + 900, `not before the ceiling: ${endedAt - enteredAt}ms`);
-      assert.ok(lastMoved > endedAt, `setup: the ceiling, not the moved deadline, ended the wait (${lastMoved - endedAt}ms ahead)`);
+        assert.equal(res.status, 200, res.body);
+        const report = JSON.parse(res.body);
+        assert.equal(report.moved, true, 'setup: the report lands inside the wait and moves the deadline');
 
-      const read = await (await fetch(`${base}/api/board/${r.boardId}/read`)).json();
-      assert.equal(read.rounds[0].awaited, false, 'nobody waits on the round now: its page counts down nothing and the waiting count drops it');
-      assert.ok(Date.parse(read.rounds[0].deadline) <= endedAt, 'its deadline is the moment the wait ended');
-      const after = await reportActivity(r.boardId, 1);
-      assert.equal(after.status, 200, after.body);
-      assert.deepEqual(JSON.parse(after.body), { round: 1, awaitDeadline: read.rounds[0].deadline, moved: false });
+        const packet = await withTimeout(waiting, 10000, 'the wait must end at the ceiling');
+        assert.equal(packet.status, 'timeout');
+        assert.ok(endedAt >= enteredAt + 3000, `not before the ceiling: ${endedAt - enteredAt}ms`);
+        assert.ok(Date.parse(report.awaitDeadline) > endedAt,
+          `setup: the ceiling, not the moved deadline, ended the wait (${Date.parse(report.awaitDeadline) - endedAt}ms ahead)`);
+
+        const read = await (await fetch(`${base}/api/board/${r.boardId}/read`)).json();
+        assert.equal(read.rounds[0].awaited, false, 'nobody waits on the round now: its page counts down nothing and the waiting count drops it');
+        assert.ok(Date.parse(read.rounds[0].deadline) <= endedAt, 'its deadline is the moment the wait ended');
+        const after = await reportActivity(r.boardId, 1);
+        assert.equal(after.status, 200, after.body);
+        assert.deepEqual(JSON.parse(after.body), { round: 1, awaitDeadline: read.rounds[0].deadline, moved: false });
+      } finally {
+        abort.abort();
+      }
     });
   });
 
