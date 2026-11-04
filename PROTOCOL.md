@@ -1652,7 +1652,7 @@ session to message. The session's own join or heartbeat
 rebinds the new `id` or process, which clears it; the card says "Session needs /mission again", and
 the Master Chief asks that session to run `/mission <key>`. Each of `prs` carries `state`, `head` and `checkedAt` from the
 latest fact for its repo and number: `state` one of `'draft' | 'open' | 'green' | 'red' |
-'merged'`, or `'checking'` with `head` and `checkedAt` null before the first (a PR stored with a
+'merged' | 'closed'`, or `'checking'` with `head` and `checkedAt` null before the first (a PR stored with a
 `state` before facts existed reads that one instead). A `prs` read here writes back as read: the
 write drops `state`, `head` and `checkedAt`. `live` is whether a session
 holds the mission (ADR 129): bound or reserved, not gone, and the mission has not recorded its end
@@ -1676,7 +1676,7 @@ GET  /api/missions[?all=1]
 
 Newest change first. A released mission is listed until 24 hours after `releasedAt`, or always with
 `all=1`. A retired mission is listed only while it has open work (ADR 147): a PR in its `prs` whose
-latest fact is not `merged` (no fact yet counts as open), or a `next` starting `release:`; its
+latest fact is neither `merged` nor `closed` (no fact yet counts as open), or a `next` starting `release:`; its
 `waitingOn` is no open work. With none it is listed nowhere, `all=1` included, and
 `GET /api/mission/:key` still answers it until the prune deletes it, 30 days after `retiredAt`.
 `tabs` and `watcher` are "The session routes"' below. `counts` are per `view` over the
@@ -1803,8 +1803,9 @@ POST /api/mission/:key/recheck  {} -> View
 ```
 
 `facts` is the session watcher's reading of the mission's PRs on GitHub (ADR 140), secret only:
-`state` is the PR at its `head` commit, one of `'draft' | 'open' | 'green' | 'red' | 'merged'`,
-`head` the commit, at most 200 characters, and `checkedAt` an ISO time, now when absent. Each fact
+`state` is the PR at its `head` commit, one of `'draft' | 'open' | 'green' | 'red' | 'merged' |
+'closed'`, `closed` being a PR closed without merging (ADR 147), `head` the commit, at most 200
+characters, and `checkedAt` an ISO time, now when absent. Each fact
 replaces the one held for its `repo` and `number`, a fact for a PR the mission does not list is
 dropped, and the facts leave `updatedAt` as it was. Any other field, a wrong type or over 50
 entries is a 400 that writes nothing. `recheck` is a card's Check again, by the secret or the

@@ -20,9 +20,9 @@
   when it thought to read the board.
 - **A retired mission stops asking**: a mission carrying a retired time never shows under Needs
   you or Stalled again, whatever its last rounds or its last "waiting on" say. While it still has
-  an unmerged PR or a release step waiting, its card sits under Waiting with a Retired tag; once it
-  has neither it leaves the Missions page, the Master Chief's list and the missions watch's full
-  list, though reading it by key still answers. Its record is still deleted 30 days after it
+  an open PR (one neither merged nor closed) or a release step waiting, its card sits under
+  Waiting with a Retired tag; once it has neither it leaves the Missions page, the Master Chief's
+  list and the missions watch's full list, though reading it by key still answers. Its record is still deleted 30 days after it
   retired. Before, a retired mission whose session had gone read Stalled, or Needs you while an
   old round stayed open, and the Master Chief raised it as a live ask.
 - **A leftover background job stops needing you**: a blocked background job with no process

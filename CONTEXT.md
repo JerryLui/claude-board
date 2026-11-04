@@ -305,9 +305,9 @@ production or proves it there. A Mission with none is Released at its merge. _Av
 (that is the merge), shipped, done, deployed.
 
 **Retired**: of a Mission, that it carries a retired time: it asks nothing, never needs you or
-Stalled, and waits under its Retired tag while a PR on it is unmerged or a release step waits,
-else it is on no list; its record is deleted 30 days after. Nothing in the board retires a
-Mission. _Avoid_: archived, closed, done (Released is the end of its work).
+Stalled, and waits under its Retired tag while a PR on it is open (neither merged nor closed) or
+a release step waits, else it is on no list; its record is deleted 30 days after. Nothing in the
+board retires a Mission. _Avoid_: archived, closed, done (Released is the end of its work).
 
 **Live**: of a Mission's session, that it holds the Mission: bound or reserved, its Mission has
 not recorded its end, and its process is not gone. Only one session is Live per Mission, and only
