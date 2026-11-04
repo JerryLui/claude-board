@@ -180,7 +180,8 @@ what the index's "N rounds left" badge and the tab mark count, and what gates th
 arrival mark and the daemon's Stranded banner. `awaitDeadline` is `null` when `awaited` is `false`, otherwise the ISO
 8601 instant `postedAt` plus the wait timeout in effect when the round was minted (default
 40 minutes, `CLAUDE_BOARD_TIMEOUT_MS` — the same clock `GET /api/board/:id/wait` enforces,
-below) — stamped at mint time and never recomputed by an amend of the same round.
+below) — stamped at mint time and never recomputed by an amend of the same round, unless the
+round carries `movingDeadline` (below).
 `wait: true` on a round that already carries a question is **ignored, not refused**: the
 round is awaited by its question either way and the deadline is identical either way, so
 the flag asks for the state the round is already in. It stays the two routes above; `wait`
@@ -188,10 +189,14 @@ never becomes a third.
 
 **Round `movingDeadline`** (ADR 145) is `true` on an awaited round minted by a post that carried
 `movingDeadline: true` (`POST /api/board`, below): the poster waits to the round's stored deadline,
-so the reviewer's activity on the round may move it (`POST /api/board/:id/activity`). Then
-`awaitDeadline` is the instant of the last accepted report plus the wait timeout, or `postedAt`
-plus it when nothing was reported. It is absent everywhere else, a round nothing awaits and a round
-from a poster that waits on a clock of its own alike, and such a round's deadline is never moved.
+so the reviewer's activity on the round may move it (`POST /api/board/:id/activity`), and so does
+the poster asking again: an amend of the round, or a retry answered from its `requestId`. Then
+`awaitDeadline` is the instant of the last restart plus the wait timeout, or `postedAt` plus it
+when nothing restarted it. A restart that would move it by less than a minute (a fortieth of the
+wait, when the wait is shorter than 40 minutes) is not made, so the deadline can sit up to that
+much short of a full wait; the countdown reads in whole minutes. It is absent everywhere else, a
+round nothing awaits and a round from a poster that waits on a clock of its own alike, and such a
+round's deadline is never moved.
 
 **`answersDelivered`** (ADR 107) is a daemon-only ledger beside the rounds: the round numbers of
 this board whose answers a packet has actually carried out, ascending. It is what makes the
@@ -214,7 +219,8 @@ is not touched either, so a lapsed round is `{ status: 'open', awaited: false }`
 deadline is what distinguishes it from a round that was never awaited at all. The flip is
 persisted opportunistically (the daemon's own `/wait` timeout branch writes it; otherwise it
 rides the board's next write), so a reader may see it before disk does — never the reverse.
-`amendRound` never touches either field: a round is only ever amendable while it already
+`amendRound` never touches either field, and the daemon's amend path moves `awaitDeadline` only on
+a `movingDeadline` round (above): a round is only ever amendable while it already
 carries a question (see `POST /api/board` below), which means it was already `awaited: true`
 the moment it was minted. **A round persisted before this pair of fields existed carries
 neither key at all** (`undefined`, not `false`) — `roundIsAwaited(board, round)`
@@ -1040,9 +1046,12 @@ read once at startup; a start it cannot read sends no `session`, never a failed 
 **`movingDeadline: true` is the caller stating its wait follows the round's stored deadline**
 (ADR 145), which lets the reviewer's activity move it. It is stamped on the round the post mints,
 when that round is awaited, and nowhere else; an amend never stamps it, since an amend keeps the
-round as it was minted. Anything but `true` is no declaration: a shim from before the field sends
-nothing, gives up at its own fixed cap, and its round's deadline stays where it was minted, so
-moving it would only promise the reviewer a wait nobody is doing.
+round as it was minted. An amend of a round carrying it, or a retry answered from what its
+`requestId` did (below), restarts that round's wait: either is the caller asking again, and it waits
+to the deadline the response answers, so a re-ask late in the wait would otherwise end minutes after
+it. Anything but `true` is no declaration: a shim from before the field sends nothing, gives up
+at its own fixed cap, and its round's deadline stays where it was minted, so moving it would only
+promise the reviewer a wait nobody is doing.
 
 **`noWait` (boolean) is the caller stating it will not open `/wait` on this post**, which is what
 makes the response the thread's next packet. On it the daemon drains into that response whatever
@@ -1084,7 +1093,8 @@ Either way the response is `{ boardId, thread, round, url, clients, suppressed, 
 awaitDeadline }`, plus `answers` and `comments` on a post that carried `noWait: true` (below) and
 on no other, `round` naming whichever round was amended or minted, `awaited` carrying that round's
 own minted `awaited` flag and `awaitDeadline` its stored deadline (null when nothing awaits it), the
-instant a caller following the stored deadline waits to. The flag is on the response because the daemon is the only side that has seen the
+instant a caller following the stored deadline waits to: on an amend of a `movingDeadline` round,
+the one the amend restarted. The flag is on the response because the daemon is the only side that has seen the
 normalised round: the poster checks the raw blocks it sent, which is a different question (the
 case that first split the two answers — a page board whose `html` `source` failed to resolve, minted
 *not* awaited — is a refusal now rather than a round). A caller deciding whether to wait should
@@ -1116,7 +1126,9 @@ A **retry** carrying a `requestId` this board has already applied is answered fr
 already did (`deduped: true`) while the round it guarded is still `open`, **its wait has not
 lapsed**, **and the content that round resolved has not changed on disk**. A round whose
 `awaitDeadline` has passed can never hand a caller a packet again, so it is never the answer to a
-retry: the post falls through and mints the next round, against a live deadline.
+retry: the post falls through and mints the next round, against a live deadline. A retry answered
+on a `movingDeadline` round restarts its wait (above), writing the board and its page and
+publishing the `deadline` event as an `activity` report's move does.
 
 The content gate is what makes `requestId` an identity over what a round *resolved to* rather than
 over the bytes of the request. `requestId` is derived from the raw blocks, and a raw block names a
@@ -1351,21 +1363,25 @@ note, or a saved comment, sent only while the round is open, awaited, unlapsed a
 `movingDeadline`. Never a focus, a visibility change or a scroll: a tab left focused overnight is
 not a reviewer working on the round.
 
-The page sends the first change at once, then takes at most one report per round every 5.25 s
-(`ACTIVITY_GAP_MS`, src/ui.mjs), carrying the window's last change at its end; a failed or 429
-report is dropped, and the next change reports again. It applies the `awaitDeadline` it gets back
-off its own report, off the `deadline` event (see "SSE events") and off a reconnect snapshot,
-forward only -- never moving a round's countdown earlier.
+The page sends the first change at once, then at most one report per round every 5.25 s
+(`ACTIVITY_GAP_MS`, src/ui.mjs: the daemon's interval below, which its script carries, plus 250 ms),
+carrying the window's last change at its end; a failed or 429 report is dropped, and the next
+change reports again. It applies the `awaitDeadline` it gets back off its own report, off the
+`deadline` event (see "SSE events") and off a reconnect snapshot, forward only -- never moving a
+round's countdown earlier.
 
-`moved: true` when the round is open, awaited, minted `movingDeadline` (see "Board document") and
-its deadline has not passed: its `awaitDeadline` becomes now plus the wait timeout
-(`CLAUDE_BOARD_TIMEOUT_MS`, default 40 minutes), the board and `pages/<id>.html` are written
-together, and the move is published as the `deadline` event (see "SSE events"). `moved: false`
-otherwise, and nothing is written: a round from a poster that waits on a fixed cap of its own, a
-round nothing awaits, and a lapsed, sent or abandoned round all keep the deadline they have.
+`moved: true` when the round is open, awaited, minted `movingDeadline` (see "Board document"), its
+deadline has not passed, and now plus the wait timeout (`CLAUDE_BOARD_TIMEOUT_MS`, default 40
+minutes) is a minute or more past it (a fortieth of the wait, when the wait is shorter): its
+`awaitDeadline` becomes that, the board and `pages/<id>.html` are written together, and the move is
+published as the `deadline` event (see "SSE events"). `moved: false` otherwise, and nothing is
+written: a report that would gain less, the commonest one while the reviewer types, a round from a
+poster that waits on a fixed cap of its own, a round nothing awaits, and a lapsed, sent or abandoned
+round all keep the deadline they have.
 `awaitDeadline` is the round's deadline after the report, moved or not.
 
-One report per round is taken every 5 s (`CLAUDE_BOARD_ACTIVITY_MIN_MS` overrides, for checks):
+One report per round is taken every 5 s (`CLAUDE_BOARD_ACTIVITY_MIN_MS` overrides, for checks, and
+the page's script carries the daemon's value, read when it starts):
 inside that, the answer is a **429** carrying `retryAfterMs`, the time until the next is taken, and
 nothing moves. A report answered 200 counts, moved or not; the interval is held in memory, so a
 daemon restart lets one report through early. **404** for an unknown board, **400** for a `round`
@@ -1949,11 +1965,12 @@ by then cleared the round's `awaited` flag and persisted it, so a client that re
 recomputing sees the same answer. A client that misses it is not stranded — the page re-checks its
 own deadline on a ~20s tick regardless, which is what an archive and a sleeping laptop rely on.
 
-`deadline` fires when an `activity` report moved a round's deadline (ADR 145), to every tab of the
-board, the ones on a browser's shared stream included: `awaitDeadline` is the round's new stored
-deadline, the one its countdown now reads. It carries no board: a move changes that one field, so
-applying it is setting the round's `awaitDeadline` in the tab's copy. A tab that misses it reads the
-moved deadline on its next catch-up.
+`deadline` fires when an `activity` report or a retry of a post moved a round's deadline (ADR 145),
+to every tab of the board, the ones on a browser's shared stream included: `awaitDeadline` is the
+round's new stored deadline, the one its countdown now reads. It carries no board: a move changes
+that one field, so applying it is setting the round's `awaitDeadline` in the tab's copy. A tab that
+misses it reads the moved deadline on its next catch-up. An amend's restart sends none: the amend's
+`round` push carries the board copy holding it.
 
 The client subscribes only when NOT running read-only from `file:` — the standalone archive stays
 network-free.
@@ -1995,8 +2012,9 @@ amended into an awaited state, a submit, an abandon, or a wait's wall clock laps
 only the count, not the rows — a client that wants the rows still asks `GET /api/waiting` for them.
 
 `deadline` is the board stream's `deadline` (above) with the board it is about, for a page listing
-every board's countdown: it fires on every move an `activity` report makes. A move leaves the
-waiting count where it was, so no `waiting` goes with it.
+every board's countdown: it fires on every move an `activity` report or a retry makes. A move leaves
+the waiting count where it was, so no `waiting` goes with it; an amend's restart sends no
+`deadline`, and the `waiting` its post publishes is what a listing re-reads it on.
 
 `missions` names one mission whose view may have moved, and nothing else: a subscriber re-reads
 `GET /api/missions` for it. It fires on every write under `/api/mission/:key`, on every `waiting`

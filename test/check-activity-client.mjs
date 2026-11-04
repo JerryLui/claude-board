@@ -1,9 +1,9 @@
 // The page half of the moving deadline (ADR 145). On a round posted to follow it
 // (`movingDeadline` on the round), each answer change, typed answer or note, and saved
 // comment reports activity, `POST /api/board/:id/activity { round }`, at most once per
-// round every five seconds with the last change in a window still reported; a round
-// without the flag, or past its deadline, reports nothing, and neither do focus,
-// visibility or scroll. A moved deadline, whether on the report's own answer, the
+// round every five seconds (the daemon's CLAUDE_BOARD_ACTIVITY_MIN_MS when it is started
+// with one) with the last change in a window still reported; a round without the flag, or
+// past its deadline, reports nothing, and neither do focus, visibility or scroll. A moved deadline, whether on the report's own answer, the
 // `deadline` event or a reconnect's snapshot, is what the countdown reads.
 //
 // Driven for real: the `ui` script on test/dom-stand-in.mjs, with `fetch` stubbed. The
@@ -139,28 +139,46 @@ await check('focus, blur, a visibility change and a scroll send no activity repo
   } finally { restore(); }
 });
 
-await check('a note typed in bursts reports at once, then once at the end of each five-second window, carrying the last change', async () => {
-  const board = boardWith();
-  const { document } = loadBoardWithEventSource(renderBoardPage(board));
-  const note = blockOf(document, 'single').querySelector('textarea[data-note-for]');
-  const { activity, restore } = stubFetch();
-  const timers = holdTimers();
+/** The page's script as a daemon started with `CLAUDE_BOARD_ACTIVITY_MIN_MS=<value>` serves
+ * it: src/ui.mjs evaluated afresh under that environment. */
+async function uiUnderActivityMin(value) {
+  const previous = process.env.CLAUDE_BOARD_ACTIVITY_MIN_MS;
+  process.env.CLAUDE_BOARD_ACTIVITY_MIN_MS = value;
   try {
-    typeInto(note, 'O');
-    typeInto(note, 'On');
-    typeInto(note, 'Onl');
-    assert.equal(activity().length, 1, 'the first keystroke reports at once, the rest of the burst waits');
-    assert.equal(timers.held.length, 1, 'one report booked for the end of the window, however many keys');
-    assert.ok(timers.held[0].delay > 5000 && timers.held[0].delay <= 5250,
-      `booked past the route's five seconds, so the daemon takes it: ${timers.held[0].delay}ms`);
-    timers.held[0].fn();
-    assert.equal(activity().length, 2, 'the booked report goes at the end of the window');
-    typeInto(note, 'Only');
-    assert.equal(activity().length, 2, 'a keystroke right after it waits for the next window');
-    assert.equal(timers.held.length, 2, 'and books that window\'s one report');
-    assert.ok(activity().every(c => c.body.round === 1));
-  } finally { timers.restore(); restore(); }
-});
+    return (await import(`../src/ui.mjs?activity-min=${value}`)).ui;
+  } finally {
+    if (previous === undefined) delete process.env.CLAUDE_BOARD_ACTIVITY_MIN_MS;
+    else process.env.CLAUDE_BOARD_ACTIVITY_MIN_MS = previous;
+  }
+}
+
+for (const { gap, minMs, script } of [
+  { gap: 'the route\'s five seconds', minMs: 5000, script: undefined },
+  { gap: 'a daemon\'s CLAUDE_BOARD_ACTIVITY_MIN_MS of 30 s', minMs: 30000, script: await uiUnderActivityMin('30000') },
+]) {
+  await check(`a note typed in bursts reports at once, then once at the end of each window of ${gap}, carrying the last change`, async () => {
+    const board = boardWith();
+    const { document } = loadBoardWithEventSource(renderBoardPage(board), script ? { script } : {});
+    const note = blockOf(document, 'single').querySelector('textarea[data-note-for]');
+    const { activity, restore } = stubFetch();
+    const timers = holdTimers();
+    try {
+      typeInto(note, 'O');
+      typeInto(note, 'On');
+      typeInto(note, 'Onl');
+      assert.equal(activity().length, 1, 'the first keystroke reports at once, the rest of the burst waits');
+      assert.equal(timers.held.length, 1, 'one report booked for the end of the window, however many keys');
+      assert.ok(timers.held[0].delay > minMs && timers.held[0].delay <= minMs + 250,
+        `booked past the route's ${minMs}ms, so the daemon takes it: ${timers.held[0].delay}ms`);
+      timers.held[0].fn();
+      assert.equal(activity().length, 2, 'the booked report goes at the end of the window');
+      typeInto(note, 'Only');
+      assert.equal(activity().length, 2, 'a keystroke right after it waits for the next window');
+      assert.equal(timers.held.length, 2, 'and books that window\'s one report');
+      assert.ok(activity().every(c => c.body.round === 1));
+    } finally { timers.restore(); restore(); }
+  });
+}
 
 for (const [failure, respond] of Object.entries({
   'refused inside the window (429)': () => ({ ok: false, status: 429, json: async () => ({ retryAfterMs: 3000 }) }),

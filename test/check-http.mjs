@@ -4936,6 +4936,19 @@ async function main() {
   const reportActivity = (boardId, round, headers = PAGE_WRITE) =>
     rawRequest(port, 'POST', `/api/board/${boardId}/activity`, { headers, body: JSON.stringify({ round }) });
 
+  const MINUTE_MS = 60 * 1000;
+  const FULL_WAIT_MS = 40 * MINUTE_MS;
+
+  /** Rewrites round 1's stored deadline to `leftMs` from now, as if that much of the wait
+   * were left, and answers it: a restart moves only a deadline it gains a minute on. */
+  function setDeadlineLeft(boardId, leftMs) {
+    const file = path.join(home, 'boards', `${boardId}.json`);
+    const raw = JSON.parse(readFileSync(file, 'utf8'));
+    raw.rounds[0].awaitDeadline = new Date(Date.now() + leftMs).toISOString();
+    writeFileSync(file, JSON.stringify(raw, null, 2));
+    return raw.rounds[0].awaitDeadline;
+  }
+
   /** The daemon-wide stream the index holds, collecting every `name` event's data. */
   function openIndexStream(name) {
     const events = [];
@@ -5010,6 +5023,8 @@ async function main() {
     const fixed = await askRound('FIXED_DEADLINE_Q');
     const fixedRound = readBoard(fixed.boardId, home).rounds[0];
     assert.equal('movingDeadline' in fixedRound, false, 'a round from a shim that waits on its own cap is stored exactly as before');
+    // Far enough into the wait that a moving round's report would move it.
+    fixedRound.awaitDeadline = setDeadlineLeft(fixed.boardId, 2 * MINUTE_MS);
 
     const lapsed = await askRound('LAPSED_MOVING_Q', { movingDeadline: true });
     const boardFile = path.join(home, 'boards', `${lapsed.boardId}.json`);
@@ -5030,6 +5045,7 @@ async function main() {
 
   await check('ADR 145: a second report on a round inside 5 s is a 429 naming how long until one is taken, and moves nothing; another board\'s report is its own', async () => {
     const r = await askRound('ACTIVITY_LIMIT_Q', { movingDeadline: true });
+    setDeadlineLeft(r.boardId, 2 * MINUTE_MS);
     const first = JSON.parse((await reportActivity(r.boardId, 1)).body);
     assert.equal(first.moved, true, 'setup: the first report is taken');
     const second = await reportActivity(r.boardId, 1);
@@ -5039,14 +5055,79 @@ async function main() {
     assert.equal(readBoard(r.boardId, home).rounds[0].awaitDeadline, first.awaitDeadline, 'the refused report moved nothing');
 
     const other = await askRound('ACTIVITY_LIMIT_OTHER_Q', { movingDeadline: true });
+    setDeadlineLeft(other.boardId, 2 * MINUTE_MS);
     const otherRes = await reportActivity(other.boardId, 1);
     assert.equal(otherRes.status, 200, otherRes.body);
     assert.equal(JSON.parse(otherRes.body).moved, true);
   });
 
+  await check('ADR 145: a report that would move a moving round\'s deadline by under a minute answers moved: false and writes nothing; one that moves it by a minute or more moves it', async () => {
+    for (const { leftMs, moves } of [
+      { leftMs: FULL_WAIT_MS - 30 * 1000, moves: false },
+      { leftMs: FULL_WAIT_MS - 90 * 1000, moves: true },
+    ]) {
+      const what = `${(FULL_WAIT_MS - leftMs) / 1000}s into the wait`;
+      const r = await askRound(`ACTIVITY_MARGIN_${moves ? 'MOVES' : 'HOLDS'}_Q`, { movingDeadline: true });
+      const deadline = setDeadlineLeft(r.boardId, leftMs);
+      const boardFile = path.join(home, 'boards', `${r.boardId}.json`);
+      const pageFile = path.join(home, 'pages', `${r.boardId}.html`);
+      const before = { board: readFileSync(boardFile, 'utf8'), page: readFileSync(pageFile, 'utf8') };
+      const sentAt = Date.now();
+      const res = await reportActivity(r.boardId, 1);
+      const answeredAt = Date.now();
+      assert.equal(res.status, 200, res.body);
+      const answer = JSON.parse(res.body);
+      if (!moves) {
+        assert.deepEqual(answer, { round: 1, awaitDeadline: deadline, moved: false }, what);
+        assert.deepEqual({ board: readFileSync(boardFile, 'utf8'), page: readFileSync(pageFile, 'utf8') }, before,
+          `${what}: neither the board nor its page is written`);
+      } else {
+        assert.equal(answer.moved, true, what);
+        const at = Date.parse(answer.awaitDeadline);
+        assert.ok(at >= sentAt + FULL_WAIT_MS && at <= answeredAt + FULL_WAIT_MS, `${what}: a full wait from the report`);
+        assert.equal(readBoard(r.boardId, home).rounds[0].awaitDeadline, answer.awaitDeadline, `${what}: stored`);
+      }
+    }
+  });
+
+  await check('ADR 145: an amend of a moving round, or a retry of its post, restarts its wait from the re-ask; an amend of a fixed round keeps the deadline it was minted', async () => {
+    const question = prompt => [{ kind: 'question', prompt, widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] }];
+    for (const { what, prompt, first, reask, deduped, restarts } of [
+      { what: 'an amend of a moving round', prompt: 'REASK_MOVING_Q', first: { movingDeadline: true },
+        reask: { movingDeadline: true, title: 'Re-asked', blocks: question('REASK_MOVING_AMEND_Q') }, deduped: false, restarts: true },
+      { what: 'a retry of a moving round\'s post', prompt: 'REASK_RETRY_Q', first: { movingDeadline: true, requestId: 'REASK_RETRY_REQ' },
+        reask: { movingDeadline: true, requestId: 'REASK_RETRY_REQ', title: 'REASK_RETRY_Q', blocks: question('REASK_RETRY_Q') }, deduped: true, restarts: true },
+      { what: 'an amend of a fixed round', prompt: 'REASK_FIXED_Q', first: {},
+        reask: { title: 'Re-asked', blocks: question('REASK_FIXED_AMEND_Q') }, deduped: false, restarts: false },
+    ]) {
+      const asked = await askRound(prompt, first);
+      // The session gave up two minutes before its deadline, and asks again.
+      const deadline = setDeadlineLeft(asked.boardId, 2 * MINUTE_MS);
+      const sentAt = Date.now();
+      const res = await fetch(`${base}/api/board`, { method: 'POST', headers: writeHeaders(SECRET), body: JSON.stringify({ boardId: asked.boardId, ...reask }) });
+      const answeredAt = Date.now();
+      assert.equal(res.status, 200, what);
+      const posted = await res.json();
+      assert.equal(posted.round, 1, `${what}: the re-ask lands on round 1, not a new round`);
+      assert.equal(posted.deduped === true, deduped, `${what}: setup, ${deduped ? 'answered from the first post' : 'amended'}`);
+      const stored = readBoard(asked.boardId, home).rounds[0].awaitDeadline;
+      if (!restarts) {
+        assert.equal(stored, deadline, `${what}: the stored deadline is the one it had`);
+        assert.equal(posted.awaitDeadline, deadline, `${what}: and the post answers it`);
+        continue;
+      }
+      const at = Date.parse(stored);
+      assert.ok(at >= sentAt + FULL_WAIT_MS && at <= answeredAt + FULL_WAIT_MS,
+        `${what}: the stored deadline, the one the shim follows, is a full wait from the re-ask: ${at - sentAt - FULL_WAIT_MS}ms off`);
+      if (!deduped) assert.equal(posted.awaitDeadline, stored, `${what}: and the post answers it`);
+      const served = await (await fetch(`${base}/b/${asked.boardId}`)).text();
+      assert.equal(served, readFileSync(path.join(home, 'pages', `${asked.boardId}.html`), 'utf8'), `${what}: the pages/ file is written with it`);
+    }
+  });
+
   await check('ADR 145: the activity route refuses a caller with no credential and a cross-origin page, takes the secret, and answers 404 for an unknown board and 400 for a bad round', async () => {
     const r = await askRound('ACTIVITY_GATE_Q', { movingDeadline: true });
-    const minted = readBoard(r.boardId, home).rounds[0].awaitDeadline;
+    const minted = setDeadlineLeft(r.boardId, 2 * MINUTE_MS);
     const { cookie, ...noCredential } = PAGE_WRITE;
     assert.equal((await reportActivity(r.boardId, 1, noCredential)).status, 401, 'no cookie, no secret');
     assert.equal((await reportActivity(r.boardId, 1, { ...PAGE_WRITE, origin: 'https://evil.example', 'sec-fetch-site': 'cross-site' })).status, 403,

@@ -63,6 +63,7 @@ import { palettes } from './styles.mjs';
 // src/assets.mjs import the name from there rather than from each other.
 import { MERMAID_ASSET } from './vendor/mermaid/index.mjs';
 import { openSharedStream, STREAM_WORKER_URL } from './stream-worker.mjs';
+import { activityMinMs } from './activity.mjs';
 
 // Mermaid variable -> CSS token, read at call time from the live computed style
 // rather than hardcoded a second time in the client script below. 'background'
@@ -6553,11 +6554,12 @@ export const ui = `
   // at once, and a change inside the window books one report at its end, which
   // carries every later change in it too (the daemon reads no payload but the
   // round). The route refuses a report under ACTIVITY_MIN_MS after the last it
-  // took (src/server.mjs, kept in step by hand like ATTENDED_RETRY_CEILING_MS
-  // above); the margin is for a report that reaches the daemon faster than the
-  // one before it. A failed or refused report is dropped, not retried: the
-  // next change reports again.
-  var ACTIVITY_MIN_MS = 5000;
+  // took, the daemon's own value spliced in here (src/activity.mjs), so a
+  // daemon run with a longer one never refuses the report that carries a
+  // burst's last change; the margin is for a report that reaches the daemon
+  // faster than the one before it. A failed or refused report is dropped, not
+  // retried: the next change reports again.
+  var ACTIVITY_MIN_MS = ${JSON.stringify(activityMinMs())};
   var ACTIVITY_GAP_MS = ACTIVITY_MIN_MS + 250;
   var activitySentAt = {};
   var activityBooked = {};

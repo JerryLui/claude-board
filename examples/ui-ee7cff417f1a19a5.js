@@ -6655,10 +6655,11 @@
   // at once, and a change inside the window books one report at its end, which
   // carries every later change in it too (the daemon reads no payload but the
   // round). The route refuses a report under ACTIVITY_MIN_MS after the last it
-  // took (src/server.mjs, kept in step by hand like ATTENDED_RETRY_CEILING_MS
-  // above); the margin is for a report that reaches the daemon faster than the
-  // one before it. A failed or refused report is dropped, not retried: the
-  // next change reports again.
+  // took, the daemon's own value spliced in here (src/activity.mjs), so a
+  // daemon run with a longer one never refuses the report that carries a
+  // burst's last change; the margin is for a report that reaches the daemon
+  // faster than the one before it. A failed or refused report is dropped, not
+  // retried: the next change reports again.
   var ACTIVITY_MIN_MS = 5000;
   var ACTIVITY_GAP_MS = ACTIVITY_MIN_MS + 250;
   var activitySentAt = {};

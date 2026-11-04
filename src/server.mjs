@@ -70,6 +70,7 @@ import { createStrandedWatch } from './stranded.mjs';
 import { createMissionWatch } from './mission-watch.mjs';
 import { createMissionsCache } from './missions-cache.mjs';
 import { MAX_POST_BYTES, MAX_DRAINED_BYTES, postTooLargeMessage } from './post-limit.mjs';
+import { activityMinMs } from './activity.mjs';
 import { getMissionView, missionView, upsertMission, launchMission, bindSession, joinMission, leaveMission, addOrder, ackOrder, seenOrder, resentOrder, linkBoard, recordFire, recordPrFacts, assertMissionKey } from './missions.mjs';
 import { createBindingIndex } from './bindings.mjs';
 import { createSessionList, validateSessionRef, bindBoardSession } from './sessions.mjs';
@@ -436,18 +437,6 @@ function waitTimeoutMs() {
  * somebody keeps touching still has an end. A day: the longest a session is told to keep
  * watching a round. */
 const MOVING_WAIT_CEILING_MS = 24 * 60 * 60 * 1000;
-
-/** The least time between two accepted activity reports on one round (ADR 145). Five
- * seconds: the deadline is minutes long, so a report every keystroke buys nothing a
- * report every few seconds does not, and each accepted move writes the board and its
- * page. `CLAUDE_BOARD_ACTIVITY_MIN_MS` overrides, for the checks; zero, negative and
- * unparseable fall back to the default, as every knob here does. */
-const DEFAULT_ACTIVITY_MIN_MS = 5_000;
-
-function activityMinMs() {
-  const v = Number(process.env.CLAUDE_BOARD_ACTIVITY_MIN_MS);
-  return Number.isFinite(v) && v > 0 ? v : DEFAULT_ACTIVITY_MIN_MS;
-}
 
 /** Number of /wait polls currently running in this process. Exported for the checks:
  * a waiter whose client disconnected must drop this back to zero (see waitForRound). */
@@ -1139,6 +1128,11 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, s
       const drifted = isRetry && !!guarded && roundContentDrifted(board, guarded.n);
       if (isRetry && guarded && guarded.status === 'open'
         && !roundWaitLapsed(guarded) && !drifted) {
+        // A retry is the session waiting on this round again, whether its response was
+        // lost or the session gave up and asked the same thing: on a round whose deadline
+        // moves, the wait restarts as an amend's does below (ADR 145). Without it the
+        // re-ask follows the deadline the first ask was given, and can end minutes later.
+        if (restartMovingWait(guarded, Date.now())) publishDeadlineMove(req, board, guarded, home, sse, stranded, stream, waiting);
         return sendJson(res, 200, {
           boardId: board.id,
           thread: board.thread,
@@ -1216,6 +1210,12 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, s
         round = result.round;
         touchedBlockIds = result.blockIds;
         pushMode = 'amend';
+        // An amend is the session asking again, and its shim waits to the deadline this
+        // response answers: on a round whose deadline moves, the wait restarts from now
+        // (ADR 145), or a re-ask late in the wait would end minutes after it. The move
+        // rides this post's own write, and the round push carries the board copy the
+        // page's countdown reads. A round on a fixed deadline keeps the one it was minted.
+        restartMovingWait(board.rounds.find(r => r.n === round), Date.now());
       } else {
         // `wait` (ADR.md entry 45): declared, never inferred from these blocks' shape
         // alone -- `addRound` (src/board.mjs) is what turns it into `awaited` +
@@ -1441,7 +1441,7 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, s
     awaited: roundIsAwaited(board, board.rounds.find(r => r.n === round)),
     // The round's stored deadline, which a shim that follows it (ADR 145) waits to rather
     // than to a clock of its own; null on a round nothing waits on. An amend reports the
-    // round's existing deadline, moved or not, since an amend never re-stamps it.
+    // deadline it restarted, or on a round whose deadline never moves, the minted one.
     awaitDeadline: board.rounds.find(r => r.n === round)?.awaitDeadline ?? null,
     // Present only on the `noWait` path above, and empty arrays there when the thread is
     // owed nothing: a caller that never sent the field sees a response byte-identical to
@@ -2401,6 +2401,52 @@ async function handleAttended(req, res, id, sse, stranded) {
   return sendJson(res, 200, { ok: true });
 }
 
+/** The least a restart moves a moving round's deadline by (ADR 145): a minute, or a
+ * fortieth of the wait when the wait is under 40 minutes, as the checks' short waits are.
+ * The page's countdown reads in whole minutes, so a smaller move is one nobody sees, and
+ * every move rewrites the board and its page: while the reviewer types, the page reports
+ * every few seconds, and this is what keeps those reports from each costing a render. */
+const DEADLINE_MOVE_MIN_MS = 60_000;
+
+function deadlineMoveMinMs() {
+  return Math.min(DEADLINE_MOVE_MIN_MS, waitTimeoutMs() / 40);
+}
+
+/** Restarts `round`'s wait from `now` (ADR 145): its `awaitDeadline` becomes `now` plus
+ * the wait, the wait a fresh post would get, when the round's deadline may move at all
+ * (`roundDeadlineMoves`, src/badge.mjs) and this moves it by `deadlineMoveMinMs()` or
+ * more. Three things restart it: an activity report, an amend of the round, and a retry
+ * answered from what its `requestId` already did, the last two being the session asking
+ * again. Answers whether it moved; mutates `round`, and the caller persists. */
+function restartMovingWait(round, now) {
+  if (!roundDeadlineMoves(round, now)) return false;
+  const next = now + waitTimeoutMs();
+  if (next - Date.parse(round.awaitDeadline) < deadlineMoveMinMs()) return false;
+  round.awaitDeadline = new Date(next).toISOString();
+  return true;
+}
+
+/** Persists and publishes a deadline `restartMovingWait` moved, for a request that writes
+ * nothing else: the board and its page together (the served page, `pages/<id>.html` and a
+ * fresh render stay byte-identical), the `deadline` event to every tab of the board and
+ * every index stream, and the stranded rule re-asked, whose banner reads the stored
+ * deadline when it is raised (src/stranded.mjs). An amend's move rides the amend's own
+ * write and round push instead. */
+function publishDeadlineMove(req, board, round, home, sse, stranded, stream, waiting) {
+  // Rendered before either persist, as every other write here is.
+  const html = renderBoardPage(board);
+  writeBoard(board, home);
+  writePage(board.id, html, home);
+  const moveEvent = { round: round.n, awaitDeadline: round.awaitDeadline };
+  sse.broadcast(board.id, 'deadline', moveEvent);
+  // The index streams list every board, so theirs names which one moved.
+  stream.broadcast('deadline', { board: board.id, ...moveEvent });
+  // No waiting count moved, so nothing is published for it; the cache takes the write
+  // so its next read does not walk the store over a board this process just wrote.
+  waiting.noteWrite(board);
+  stranded.evaluate(board.id, strandedTarget(req, board.id));
+}
+
 /** POST /api/board/:id/activity { round } -> `{ round, awaitDeadline, moved }` (ADR 145): the
  * page reporting that the reviewer did something on `round` -- picked an answer, typed a
  * note, saved a comment -- so the wait on it restarts. Cookie-authenticated like `submit`
@@ -2408,20 +2454,20 @@ async function handleAttended(req, res, id, sse, stranded) {
  * reaches less than `submit` does: it moves a clock, and a forged report keeps a session
  * waiting longer, never answers it.
  *
- * `moved` only for a round that is open, still awaited, minted for a poster that follows
- * its stored deadline (`roundDeadlineMoves`, src/badge.mjs) and not yet lapsed: then the
- * deadline becomes `now + waitTimeoutMs()`, the same wait a fresh post would get. A
- * round from a shim that waits on a clock of its own cannot be moved, since that shim
- * would give up at its own cap whatever the board said; a lapsed round cannot come back.
+ * `moved` when `restartMovingWait` moved the deadline: the round is open, still awaited,
+ * minted for a poster that follows its stored deadline and not yet lapsed, and the report
+ * moves it by `deadlineMoveMinMs()` or more. A round from a shim that waits on a clock of
+ * its own cannot be moved, since that shim would give up at its own cap whatever the board
+ * said; a lapsed round cannot come back. A report that gains less, the commonest one while
+ * the reviewer types, answers `moved: false` and writes nothing.
  *
- * One accepted report per round every `activityMinMs()`: a 429 with `retryAfterMs` in
- * between, decided before the board is read, so a page that reports on every keystroke
- * costs a map lookup rather than a parse. A report that moves nothing still counts.
+ * One accepted report per round every `activityMinMs()` (src/activity.mjs, the value the
+ * page's script carries): a 429 with `retryAfterMs` in between, decided before the board
+ * is read, so a page that reports on every keystroke costs a map lookup rather than a
+ * parse. A report that moves nothing still counts.
  *
- * A move writes the board and its page together (the served page, `pages/<id>.html` and a
- * fresh render stay byte-identical), tells every tab of the board and every index stream,
- * and re-asks the stranded rule, whose banner reads the stored deadline when it is raised
- * (src/stranded.mjs). `updatedAt` is left alone: a moved clock is not new content. */
+ * A move is published by `publishDeadlineMove`. `updatedAt` is left alone: a moved clock
+ * is not new content. */
 async function handleActivity(req, res, id, home, sse, stranded, stream, waiting, reports) {
   let body;
   try {
@@ -2449,22 +2495,8 @@ async function handleActivity(req, res, id, home, sse, stranded, stream, waiting
     for (const [k, at] of reports) if (now - at >= minMs) reports.delete(k);
   }
   reports.set(key, now);
-  const moved = roundDeadlineMoves(r, now);
-  if (moved) {
-    r.awaitDeadline = new Date(now + waitTimeoutMs()).toISOString();
-    // Rendered before either persist, as every other write here is.
-    const html = renderBoardPage(board);
-    writeBoard(board, home);
-    writePage(board.id, html, home);
-    const moveEvent = { round, awaitDeadline: r.awaitDeadline };
-    sse.broadcast(id, 'deadline', moveEvent);
-    // The index streams list every board, so theirs names which one moved.
-    stream.broadcast('deadline', { board: board.id, ...moveEvent });
-    // No waiting count moved, so nothing is published for it; the cache takes the write
-    // so its next read does not walk the store over a board this process just wrote.
-    waiting.noteWrite(board);
-    stranded.evaluate(id, strandedTarget(req, id));
-  }
+  const moved = restartMovingWait(r, now);
+  if (moved) publishDeadlineMove(req, board, r, home, sse, stranded, stream, waiting);
   return sendJson(res, 200, { round, awaitDeadline: r.awaitDeadline ?? null, moved });
 }
 
