@@ -1477,6 +1477,9 @@ body.comment-mode .blocks { cursor: crosshair; }
 .compare-side { background: var(--panel-2); border: 1px solid var(--hairline); border-radius: var(--r-md); padding: var(--space-3) var(--space-4); }
 .compare-label { font-size: 10.5px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted);
   margin-bottom: var(--space-2); }
+/* A stage's or a diagram's side opens its own head row with the label, its
+   title, Comment button and chip after it, so its picture starts one row down. */
+.card-head > .compare-label:first-child { flex: none; margin: 0 auto 0 0; }
 .compare-side .block { border: none; background: none; padding: 0; box-shadow: none; }
 .compare-side .block:hover { box-shadow: none; }
 

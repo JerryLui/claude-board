@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **A compare card's Comment buttons sit on its BEFORE and AFTER rows**: a side holding a stage
+  or a diagram now opens one row with its label, then its title if it has one, its Comment button
+  and its chip, and its picture starts under that row, level with the other side's. Before, the
+  Comment button (and a title) took a row of their own between the label and the picture. A title
+  long enough to wrap still makes its side's row taller.
+
 - **Board pages open at once however many tabs are open**: every board tab and index tab of a
   browser now shares one connection to the daemon through a SharedWorker, where each tab held its
   own. Chrome allows six connections per host over plain HTTP, so through an SSH tunnel the
