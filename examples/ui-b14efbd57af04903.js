@@ -3938,6 +3938,7 @@
       c.classList.toggle('selected', c === card);
     });
     updateQuestionsLeftPill();
+    reportActivity(card);
   }
 
   // --- the fold: a long prose item is clipped with a Show more control ---------
@@ -4017,6 +4018,7 @@
         b.classList.toggle('selected', b === btn);
       });
       updateQuestionsLeftPill();
+      reportActivity(btn);
     });
   });
 
@@ -4037,6 +4039,7 @@
       selections[qid] = arr;
       btn.classList.toggle('selected', idx === -1);
       updateQuestionsLeftPill();
+      reportActivity(btn);
     });
   });
 
@@ -4104,6 +4107,7 @@
       if (readonly) return;
       selections[qid] = ta.value;
       updateQuestionsLeftPill();
+      reportActivity(ta);
     });
   });
 
@@ -4142,6 +4146,7 @@
       selections[qid] = rankOrder(list);
       renumberRankList(list);
       updateQuestionsLeftPill();
+      reportActivity(list);
     });
     list.addEventListener('dragover', function (ev) {
       if (readonly || !dragging) return;
@@ -4162,6 +4167,7 @@
     ta.addEventListener('input', function () {
       if (readonly) return;
       notes[qid] = ta.value;
+      reportActivity(ta);
     });
   });
 
@@ -4182,6 +4188,7 @@
       deferred[qid] = !deferred[qid];
       btn.classList.toggle('active', !!deferred[qid]);
       updateQuestionsLeftPill();
+      reportActivity(btn);
     });
   });
 
@@ -4247,6 +4254,7 @@
       } else {
         pendingComments.push({ id: nextPendingId++, blockId: blockId, anchor: anchor, text: text });
       }
+      reportActivity(form);
       // The whole layer is re-rendered rather than one pin appended, so the
       // provisional numbers stay consistent as more comments queue up behind this
       // one; refreshPins rebuilds the list entries the same way, so editing in
@@ -6627,6 +6635,87 @@
   window.addEventListener('focus', function () { clearPendingMark(); reportAttended(); maybeJumpToStrandedRound(); });
   window.addEventListener('blur', function () { reportAttended(); });
 
+  // --- Activity report: the reviewer's work on a round restarts its wait -------
+  //
+  // ADR 145: a round posted by a shim that follows the moving deadline carries
+  // 'movingDeadline', and on such a round each pick, typed answer or note, and
+  // saved comment tells the daemon, which moves 'awaitDeadline' to a full wait
+  // from now. Only what the reviewer does ON the round counts, never focus,
+  // visibility or scroll: a focused tab left on a screen overnight would hold
+  // the session's wait for good, so none of the listeners above reports here.
+  //
+  // At most one report per round every ACTIVITY_GAP_MS: the first change sends
+  // at once, and a change inside the window books one report at its end, which
+  // carries every later change in it too (the daemon reads no payload but the
+  // round). The route refuses a report under ACTIVITY_MIN_MS after the last it
+  // took (src/server.mjs, kept in step by hand like ATTENDED_RETRY_CEILING_MS
+  // above); the margin is for a report that reaches the daemon faster than the
+  // one before it. A failed or refused report is dropped, not retried: the
+  // next change reports again.
+  var ACTIVITY_MIN_MS = 5000;
+  var ACTIVITY_GAP_MS = ACTIVITY_MIN_MS + 250;
+  var activitySentAt = {};
+  var activityBooked = {};
+
+  /** The round 'el' sits in, else the page on screen. */
+  function activityRound(el) {
+    var section = el && el.closest ? el.closest('.round') : null;
+    var n = section ? parseInt(section.getAttribute('data-round'), 10) : NaN;
+    return isFinite(n) ? n : currentRound;
+  }
+
+  /** Open, awaited, short of its deadline, and posted to follow the moving
+   * deadline: a round posted by an older shim keeps its fixed wait, so its
+   * page never reports. */
+  function roundTakesActivity(n) {
+    var r = roundEntry(n);
+    return !!r && r.movingDeadline === true && roundIsCurrentlyAwaited(r, Date.now());
+  }
+
+  function reportActivity(el) {
+    if (readonly) return;
+    var n = activityRound(el);
+    if (!roundTakesActivity(n) || activityBooked[n]) return;
+    var wait = (activitySentAt[n] || 0) + ACTIVITY_GAP_MS - Date.now();
+    if (wait <= 0) {
+      sendActivity(n);
+      return;
+    }
+    activityBooked[n] = true;
+    var timer = setTimeout(function () {
+      activityBooked[n] = false;
+      if (roundTakesActivity(n)) sendActivity(n);
+    }, wait);
+    if (timer && typeof timer.unref === 'function') timer.unref();
+  }
+
+  function sendActivity(n) {
+    activitySentAt[n] = Date.now();
+    fetch('/api/board/' + boardId + '/activity', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ round: n }),
+    }).then(function (r) {
+      return r.ok ? r.json() : null;
+    }).then(function (result) {
+      // The reporting tab takes the new deadline off its own answer, so its
+      // countdown moves even when the 'deadline' event is slow or lost.
+      if (result) applyDeadline(result.round, result.awaitDeadline);
+    }).catch(function () { /* dropped: the next change reports again */ });
+  }
+
+  /** Takes a moved deadline into this tab's copy of the board and repaints the
+   * countdown from it. Forward only: a deadline moves later on every report,
+   * so an earlier one is an answer or an event overtaken by a newer one. */
+  function applyDeadline(n, deadline) {
+    var r = roundEntry(n);
+    var at = typeof deadline === 'string' ? Date.parse(deadline) : NaN;
+    if (!r || !isFinite(at)) return;
+    if (r.awaitDeadline && Date.parse(r.awaitDeadline) >= at) return;
+    r.awaitDeadline = deadline;
+    refreshAwaitDisplay();
+  }
+
   // --- SSE: a follow-up round pushes into this already-open tab ---------------
   //
   // "Open once, then badge" / "Always on under launchd":
@@ -7298,6 +7387,10 @@
 
   function applyResync(fresh, doc) {
     var patch = computeBoardPatch(board, fresh);
+    // A deadline moved while this tab's stream was down (ADR 145): the snapshot
+    // is the only place this tab hears of it, and a patch that changes no block
+    // returns below without ever taking the fresh rounds.
+    (fresh.rounds || []).forEach(function (r) { applyDeadline(r.n, r.awaitDeadline); });
     // Ahead of the patch's own early return (that return is what swallowed this)
     // and after computeBoardPatch has read the OLD board -- see the two functions
     // just above.
@@ -7536,5 +7629,12 @@
     // than guessed at -- one path for both, since a re-read on a wait that merely
     // lapsed diffs to nothing and applyResync returns without touching the DOM.
     es.addEventListener('awaitExpired', function () { refreshAwaitDisplay(); resync(); });
+    // ADR 145: a report from any tab of this board moved a round's deadline.
+    es.addEventListener('deadline', function (ev) {
+      try {
+        var moved = JSON.parse(ev.data);
+        applyDeadline(moved.round, moved.awaitDeadline);
+      } catch (e) { /* malformed; the next resync carries the deadline */ }
+    });
   }
 })();

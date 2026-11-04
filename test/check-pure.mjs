@@ -4026,29 +4026,32 @@ function namedFunctionBody(src, name) {
 
 check('mode detection is synchronous, from the document\'s own protocol -- never a network probe to the daemon', () => {
   assert.ok(/var readonly\s*=\s*\(location\.protocol === 'file:'\)/.test(ui));
-  // Exactly five fetches, all accounted for: the ordinary send bar's submit,
+  // Exactly six fetches, all accounted for: the ordinary send bar's submit,
   // the resync that catches this client up on anything broadcast while it was
   // disconnected, submitPageRound's own submit -- a second POST to the same
   // route, since an awaited page round's Send control names its OWN round
   // rather than sharing submitBoard's openRoundNumber()-targeted path (ticket
   // 01's own note left for this one) -- (ADR.md entry 58) reportAttended's
   // POST to /attended, the tab telling the daemon whether it is being looked
-  // at, and fillHeldStages' read of the page, for a stage a push sent held to a
-  // tab that does not hold it. Any sixth is a
+  // at, fillHeldStages' read of the page, for a stage a push sent held to a
+  // tab that does not hold it, and (ADR 145) sendActivity's POST to /activity,
+  // the reviewer's work on a round moving its deadline. Any seventh is a
   // network call nobody has justified -- in particular, mode detection must
   // never become a probe to the daemon.
   const fetchCalls = [...ui.matchAll(/fetch\(([^)]*)/g)].map(m => m[1]);
-  assert.equal(fetchCalls.length, 5, `expected exactly the two submit fetches, the two reads of the board and the attended report, found ${fetchCalls.length}`);
+  assert.equal(fetchCalls.length, 6, `expected exactly the two submit fetches, the two reads of the board, the attended report and the activity report, found ${fetchCalls.length}`);
   const submitCalls = fetchCalls.filter(c => c.includes('/submit'));
   assert.equal(submitCalls.length, 2, 'both submitBoard and submitPageRound must post to /submit');
   assert.equal(fetchCalls.filter(c => c.includes("'/b/'")).length, 2, 'two fetches must read the board page: the resync and the held-stage fill');
   assert.ok(fetchCalls.some(c => c.includes('/attended')), 'one fetch must be the attended report');
-  // All five live behind a readonly guard: the standalone file:// archive is
+  assert.ok(fetchCalls.some(c => c.includes('/activity')), 'one fetch must be the activity report');
+  // All six live behind a readonly guard: the standalone file:// archive is
   // network-free, period.
   assert.match(namedFunctionBody(ui, 'resync'), /if \(readonly\) return;/);
   assert.match(namedFunctionBody(ui, 'fillHeldStages'), /^\s*if \(readonly\) return /);
   assert.match(namedFunctionBody(ui, 'submitPageRound'), /^\s*if \(readonly\) return;/);
   assert.match(namedFunctionBody(ui, 'reportAttended'), /if \(readonly \|\| !attendedWatcherId\) return;/);
+  assert.match(namedFunctionBody(ui, 'reportActivity'), /^\s*if \(readonly\) return;/);
 });
 
 check('every ui.mjs listener that mutates answer/comment state or submits guards on readonly', () => {
