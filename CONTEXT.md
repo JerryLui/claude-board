@@ -335,7 +335,7 @@ posted waits on the person or it is blocked, else Working while busy, else Waiti
 turn". It is a Mission card in shape, as tall as its text and its long fields cut short
 under the same fold; while rounds it posted wait on the person, the whole card opens the first. It takes Orders like a Mission's card and counts toward no launch cap. A session a Mission
 holds is that Mission's card, never a Tab card, and a blocked background job left by a session
-whose Mission is Released or held by another session is no card. _Avoid_: session card, tab
+whose every Mission is Released or held by another session is no card. _Avoid_: session card, tab
 (unqualified: a browser tab), orphan, hand mission.
 
 **Session watcher**: the process outside the board that posts the running sessions to the daemon

@@ -262,7 +262,7 @@ async function main() {
     assert.deepEqual(tabs.map(t => [t.id, t.rounds]), [['left-tab', []]], 'the joined tab is its mission\'s card, and the mission\'s round stays on that card');
   });
 
-  await check('a blocked job with no process tied to a mission released or held by another session is no card; tied to one still its own, untied, or with its process alive it keeps its needs-you card (ADR 147)', () => {
+  await check('a blocked job with no process whose every tied mission is released or held by another session is no card; tied to one still its own, untied, or with its process alive it keeps its needs-you card (ADR 147)', () => {
     const at = '2026-10-29T11:00:00Z';
     const blocked = (id, fields = {}) => session({ id, pid: null, procStart: null, kind: 'bg', jobId: id.slice(0, 8), status: 'blocked', reason: 'need you', ...fields });
     const left = (ended, state = 'released') => ({ key: `M-${ended.id}`, state, session: { ended, leftAt: at } });
@@ -276,6 +276,7 @@ async function main() {
         blocked('b0000001-left-open'),
         blocked('b0000002-untied'),
         blocked('b0000003-live', { pid: 5400, procStart: '2026-10-29T10:00:00Z' }),
+        blocked('b0000005-two-ties'),
         session({ id: 'b0000004-tab-left', pid: 5600, status: 'idle' }),
       ],
       missions: [
@@ -288,12 +289,16 @@ async function main() {
         left({ id: 'b0000001-left-open' }, 'waiting'),
         left({ pid: 5400, id: 'b0000003-live' }),
         left({ pid: 5600, id: 'b0000004-tab-left' }),
+        // Tied to a released mission and left on an open one nobody holds: still that one's ask.
+        left({ id: 'b0000005-two-ties' }),
+        { ...left({ id: 'b0000005-two-ties' }, 'waiting'), key: 'OPEN-TWO-TIES' },
       ],
     });
     assert.deepEqual(tabs.map(t => [t.id, t.state]), [
       ['b0000001-left-open', 'needs-you'],
       ['b0000002-untied', 'needs-you'],
       ['b0000003-live', 'needs-you'],
+      ['b0000005-two-ties', 'needs-you'],
       ['b0000004-tab-left', 'waiting'],
     ]);
   });

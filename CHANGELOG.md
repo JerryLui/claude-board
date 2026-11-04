@@ -10,8 +10,8 @@
   retired. Before, a retired mission whose session had gone read Stalled, or Needs you while an
   old round stayed open, and the Master Chief raised it as a live ask.
 - **A leftover background job stops needing you**: a blocked background job with no process
-  whose session belonged to a mission that is now released, or that another session now holds,
-  no longer shows a Needs you card. Every other blocked job keeps its card, as before.
+  whose session belonged only to missions that are now released, or that another session now
+  holds, no longer shows a Needs you card. Every other blocked job keeps its card, as before.
 
 - **Board pages open at once however many tabs are open**: every board tab and index tab of a
   browser now shares one connection to the daemon through a SharedWorker, where each tab held its
