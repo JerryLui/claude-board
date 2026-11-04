@@ -70,6 +70,24 @@ export function handoffTarget(boardId) {
  * to know whether the port is worth naming. */
 export const DEFAULT_PORT = 7391;
 
+/** The longest anything waits on one round, however often the reviewer's activity moves
+ * its deadline (ADR 145): the daemon's ceiling on a `/wait`, the shim's (that plus its
+ * grace, so the daemon's timeout packet is the one that ends the call) and the answer
+ * watch's bound (ADR 146) all read it, so no side outlasts another. Here because the
+ * daemon, the shim and the watch all import this module. A day. */
+export const WAIT_CEILING_MS = 24 * 60 * 60 * 1000;
+
+/** The wait ceiling the daemon and the shim enforce: `CLAUDE_BOARD_WAIT_CEILING_MS`
+ * shortens it, for the checks, which cannot wait a day; it never lengthens it, and zero,
+ * negative and unparseable fall back. */
+export function waitCeilingMs() {
+  const v = Number(process.env.CLAUDE_BOARD_WAIT_CEILING_MS);
+  return Number.isFinite(v) && v > 0 ? Math.min(v, WAIT_CEILING_MS) : WAIT_CEILING_MS;
+}
+
+/** How often the answer watch asks whether its round was sent (ADR 146). */
+export const WATCH_INTERVAL_MS = 30_000;
+
 /** The repository this daemon is running from. `install.sh` points launchd at a clone
  * wherever the user put it, so this is the only way to name the recovery command with a
  * path that actually exists on the reader's machine.

@@ -30,7 +30,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import http from 'node:http';
 import { SECRET_HEADER } from '../src/secret.mjs';
-import { recoveryCommand, shellQuote } from '../src/handoff.mjs';
+import { recoveryCommand, shellQuote, WAIT_CEILING_MS, WATCH_INTERVAL_MS } from '../src/handoff.mjs';
 import { startServer } from '../src/server.mjs';
 // The delivery ledger's own field name, read from the product rather than restated: the
 // `read` checks below assert that reading a board never writes one.
@@ -801,7 +801,14 @@ async function main() {
           assert.doesNotMatch(result.content[0].text, /watch\.mjs/);
         } else {
           assert.equal(result.watch, watchCommand(silent.port, result), `${client}, shim cap`);
-          assert.ok(result.content[0].text.includes(result.watch), `${client}: the text names the command too`);
+          // Claims no duration, since the ceiling may be what ended it, and states the watch's
+          // poll and bound as bin/watch.mjs holds them.
+          assert.equal(result.content[0].text,
+            `No response before the round's wait ran out. Explicit no-response, not a hang. Board is still open at ` +
+            `${result.url} — reopen it or post a fresh round to continue.\nAnswer watch: run \`${result.watch}\` as one ` +
+            `background call, then end the turn. It checks every ${WATCH_INTERVAL_MS / 1000} s for ` +
+            `${WAIT_CEILING_MS / 3_600_000} hours and exits once this round is sent, printing its answers; act on them ` +
+            `once, as this round's.`, `${client}: the text names the command too`);
         }
       }
     } finally {
@@ -885,6 +892,41 @@ async function main() {
         assert.ok(progress[progress.length - 1].total > progress[0].total, `the progress total follows the moved deadline: ${progress[0].total} -> ${progress[progress.length - 1].total}`);
       } finally {
         movingClient.close();
+      }
+    });
+  });
+
+  await check('a wait the reviewer keeps moving past the shim\'s start plus the ceiling ends on the daemon\'s timeout packet, carrying the unanswered question, not an empty one of the shim\'s', async () => {
+    // The daemon's ceiling starts at its /wait entry, after the shim's start, so the shim
+    // has to outlive it by its grace for the daemon's packet to be the one that arrives.
+    const env = { CLAUDE_BOARD_TIMEOUT_MS: '1000', CLAUDE_BOARD_WAIT_CEILING_MS: '2000', CLAUDE_BOARD_ACTIVITY_MIN_MS: '50' };
+    await withEnv(env, async () => {
+      const knownIds = listBoardIds(home);
+      const ceilingClient = spawnShim({ ...baseEnv, ...env });
+      try {
+        const start = Date.now();
+        let ended = false;
+        const call = ceilingClient.request('tools/call', { name: 'ask', arguments: { title: 'Ceiling', blocks: [QUESTION] } });
+        call.then(() => { ended = true; }, () => { ended = true; });
+        const boardId = await waitForNewBoardFile(home, knownIds, 5000);
+        let lastMoved = null;
+        while (!ended && Date.now() - start < 8000) {
+          const report = await fetch(`${base}/api/board/${boardId}/activity`, {
+            method: 'POST', headers: writeHeaders(SECRET), body: JSON.stringify({ round: 1 }),
+          }).then(r => r.json());
+          if (report.moved) lastMoved = Date.parse(report.awaitDeadline);
+          await sleep(150);
+        }
+        const res = await withTimeout(call, 8000, 'timed out after 8000ms: the call must end at the ceiling');
+        const endedAt = Date.now();
+        const result = res.result;
+        assert.equal(result.status, 'timeout');
+        assert.ok(endedAt - start >= 2000, `not before the ceiling: ${endedAt - start}ms`);
+        assert.ok(lastMoved > endedAt, `setup: the reviewer kept the deadline ahead of the ceiling (${lastMoved - endedAt}ms ahead)`);
+        assert.deepEqual(result.answers.map(a => a.status), ['unanswered'],
+          'the daemon\'s own timeout packet, carrying the unanswered question, not the shim cutting the wait');
+      } finally {
+        ceilingClient.close();
       }
     });
   });

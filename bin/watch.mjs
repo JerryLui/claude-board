@@ -14,17 +14,18 @@
 //     124  the bound passed with the round still open: prints `timeout`
 //     64   usage
 //
-// --hours defaults to 24 and is clamped to 24. One `POST /api/board/:id/collect` per poll,
-// every 30 s (CLAUDE_BOARD_WATCH_INTERVAL_MS overrides, for checks); the last poll lands on
-// the bound itself. Port and credential as the shim's: `daemonPort()` and the local secret
-// (src/secret.mjs).
+// --hours defaults to the wait ceiling, 24, and is clamped to it. One
+// `POST /api/board/:id/collect` per poll, every 30 s (CLAUDE_BOARD_WATCH_INTERVAL_MS
+// overrides, for checks); the last poll lands on the bound itself. Both numbers are
+// src/handoff.mjs's, which the shim's text about the watch reads too. Port and credential as
+// the shim's: `daemonPort()` and the local secret (src/secret.mjs).
 
 import http from 'node:http';
 import { readSecret, daemonPort, SECRET_HEADER } from '../src/secret.mjs';
-import { SAFE_BOARD_ID } from '../src/handoff.mjs';
+import { SAFE_BOARD_ID, WAIT_CEILING_MS, WATCH_INTERVAL_MS } from '../src/handoff.mjs';
 
-const MAX_HOURS = 24;
-const INTERVAL_MS = Number(process.env.CLAUDE_BOARD_WATCH_INTERVAL_MS) || 30_000;
+const MAX_HOURS = WAIT_CEILING_MS / 3_600_000;
+const INTERVAL_MS = Number(process.env.CLAUDE_BOARD_WATCH_INTERVAL_MS) || WATCH_INTERVAL_MS;
 const REQUEST_TIMEOUT_MS = 10_000;
 const USAGE = 'usage: node bin/watch.mjs --board <id> --round <n> [--hours <h>]';
 

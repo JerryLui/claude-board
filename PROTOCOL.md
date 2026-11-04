@@ -190,8 +190,10 @@ never becomes a third.
 `movingDeadline: true` (`POST /api/board`, below): the poster waits to the round's stored deadline,
 so the reviewer's activity on the round may move it (`POST /api/board/:id/activity`). Then
 `awaitDeadline` is the instant of the last accepted report plus the wait timeout, or `postedAt`
-plus it when nothing was reported. It is absent everywhere else, a round nothing awaits and a round
-from a poster that waits on a clock of its own alike, and such a round's deadline is never moved.
+plus it when nothing was reported; a wait the 24-hour ceiling ends (`GET /api/board/:id/wait`,
+below) sets it to that instant, so the round stops being awaited. It is absent everywhere else, a
+round nothing awaits and a round from a poster that waits on a clock of its own alike, and such a
+round's deadline is never moved.
 
 **`answersDelivered`** (ADR 107) is a daemon-only ledger beside the rounds: the round numbers of
 this board whose answers a packet has actually carried out, ascending. It is what makes the
@@ -1114,7 +1116,9 @@ daemon older than the field omits it, and a caller then opens exactly as it alwa
 
 A **retry** carrying a `requestId` this board has already applied is answered from what that id
 already did (`deduped: true`) while the round it guarded is still `open`, **its wait has not
-lapsed**, **and the content that round resolved has not changed on disk**. A round whose
+lapsed**, **and the content that round resolved has not changed on disk**. The answer carries that
+round's `awaited` and `awaitDeadline` and the board's `suppressed`, as the post that applied the
+id did, so a caller following the stored deadline waits to it on a retry too. A round whose
 `awaitDeadline` has passed can never hand a caller a packet again, so it is never the answer to a
 retry: the post falls through and mints the next round, against a live deadline.
 
@@ -1481,8 +1485,11 @@ poll stops.
 **A round minted `movingDeadline` is waited on to its stored deadline instead** (ADR 145): the
 deadline is read off the board on every poll (every 120 ms), so one an `activity` report moved is
 the one that ends the wait, with the same `timeout` packet; the fixed cap does not, and a ceiling of
-24 hours from the call does. A round without the flag keeps the fixed cap from the call's entry,
-which is what a shim from before the field waits against.
+24 hours from the call does (`CLAUDE_BOARD_WAIT_CEILING_MS` shortens it, for checks). A wait the
+ceiling ends sets the round's deadline to that instant before the write, so the round stops being
+awaited: its page stops counting down, the waiting count drops it and a later `activity` report
+moves nothing. A round without the flag keeps the fixed cap from the call's entry, which is what a
+shim from before the field waits against.
 
 **Secret-only, unlike every other GET.** `handleWait` writes -- it persists the board on the
 timeout branch above and, on every branch, spends what the thread is owed once the response has
@@ -2428,8 +2435,10 @@ on the round. The shim waits to the `awaitDeadline` the post answered, plus a gr
 cap, 250 ms to 5 s) that lets the daemon's own timeout branch be the one that fires; when that
 instant comes with the wait still open it reads the round's stored deadline back through `read`
 and follows a later one. A daemon it cannot reach then ends the wait at the last deadline read plus
-the grace, and none outlasts 24 hours. Against a daemon that answers no `awaitDeadline` (one from
-before the field) the shim waits its own `CLAUDE_BOARD_TIMEOUT_MS` from the post, as it always did.
+the grace, and none outlasts the daemon's 24-hour ceiling plus the grace, so a wait the reviewer
+keeps moving for a day still ends on the daemon's `timeout` packet. Against a daemon that answers
+no `awaitDeadline` (one from before the field) the shim waits its own `CLAUDE_BOARD_TIMEOUT_MS` from
+the post, as it always did.
 `notifications/progress` run for the whole wait, their `total` the deadline followed. Under Claude
 Code a wait that ends `timeout` names the answer watch on its round (`watch`, ADR 146; "The answer
 watch" below).
@@ -2603,6 +2612,9 @@ CLAUDE_BOARD_TIMEOUT_MS       wall-clock cap on the blocking wait, default 40m (
                                The daemon stamps a round's deadline with it and moves it
                                to now plus it (ADR 145); the shim waits to that stored
                                deadline, and to this cap only on a daemon reporting none
+CLAUDE_BOARD_WAIT_CEILING_MS  shortens the 24h ceiling on a wait whose deadline moves (ADR
+                               145), for checks; never lengthens it. Shared by the daemon's
+                               /wait ceiling, which the shim outlives by its grace
 CLAUDE_BOARD_PROGRESS_MS      notifications/progress cadence, default 20_000 (20s)
 CLAUDE_BOARD_POST_TIMEOUT_MS  timeout on POST /api/board only, default 10_000; never applied
                                to the /wait call, which must survive the full wall-clock cap
