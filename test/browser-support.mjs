@@ -224,8 +224,9 @@ export async function setSessionCookie(sp, cookie) {
 // Daemon: the branch's own bin/daemon.mjs, scratch port, scratch store, and an
 // osascript stub first on PATH (QUIRKS.md "Any check that boots a daemon will raise
 // real banners"). test/support.mjs's `freePort` picks the port: QUIRKS.md
-// "`CLAUDE_BOARD_PORT=0` silently becomes 7391".
-export async function startScratchDaemon(tag) {
+// "`CLAUDE_BOARD_PORT=0` silently becomes 7391". `env` adds to the daemon's environment
+// (a short `CLAUDE_BOARD_TIMEOUT_MS`, say).
+export async function startScratchDaemon(tag, { env = {} } = {}) {
   const home = scratchDir(`${tag}-home-`);
   const secretFile = path.join(home, 'secret');
   const secret = randomBytes(32).toString('hex');
@@ -244,6 +245,7 @@ export async function startScratchDaemon(tag) {
       CLAUDE_BOARD_SECRET_FILE: secretFile,
       CLAUDE_BOARD_PORT: String(wantPort),
       CLAUDE_BOARD_STRANDED_GRACE_MS: String(24 * 60 * 60 * 1000),
+      ...env,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -384,8 +386,9 @@ const QUIET_SCRIPT = `(function () {
  * request interception the tab must load under), waits for load and then for the tab to go quiet (see
  * QUIET_SCRIPT), and reads `expr`. Answers the tab's own `sp(method, params)`,
  * `evalPage(expr)`, `quiet()` (the next quiet moment), `until(expr, what)` (the first truthy
- * value of `expr`, re-read on every DOM change) and `close()`, and `measured`, what `expr`
- * read once quiet. The tab is closed if it never loads or never goes quiet. */
+ * value of `expr`, re-read on every DOM change) and `close()`, `targetId` (for
+ * `Target.activateTarget`: every tab opens in the one window, the newest in front), and
+ * `measured`, what `expr` read once quiet. The tab is closed if it never loads or never goes quiet. */
 export async function openTab(send, onEvent, url, cookie, { width, height, theme, expr, prepare = null }) {
   const { targetId } = await send('Target.createTarget', { url: 'about:blank' });
   const { sessionId } = await send('Target.attachToTarget', { targetId, flatten: true });
@@ -427,7 +430,7 @@ export async function openTab(send, onEvent, url, cookie, { width, height, theme
     await sp('Page.navigate', { url });
     await withTimeout(loadFired, 20000, `page never fired load: ${url}`);
     await quiet();
-    return { sp, evalPage, quiet, until, close, measured: await evalPage(expr) };
+    return { sp, evalPage, quiet, until, close, targetId, measured: await evalPage(expr) };
   } catch (err) {
     await close();
     throw err;

@@ -21,7 +21,7 @@ ask({ title, blocks, wait, fresh })
 - `blocks`: the ordered array the page shows. Each call posts one round to this conversation's board, which surfaces itself.
 - **A round carries at most 6 questions or about 4,000 characters of prompts, explainers and options**, whichever comes first. Post a branch's questions together and split a branch too big for one round across rounds; only a question whose shape depends on an answer in this round waits for the next.
 - `fresh` (default `false`) declares **you have posted no board in this conversation**. Pass it on your first `ask` whenever no board URL of yours is visible further up, and always after a `/clear`; never on later rounds, or each round gets its own board. It closes any open round on the board it leaves and names that board (`Abandoned board: <url>`) for `read`.
-- `wait` (default `false`): a question round blocks until the reviewer submits, chooses Discuss, or the clock runs out (40 minutes by default); a content-only round returns once it lands. `wait: true` makes a page board round (below) block too and return its comments, possibly none, in this call's packet. It does nothing elsewhere.
+- `wait` (default `false`): a question round blocks until the reviewer submits, chooses Discuss, or the clock runs out: 40 minutes by default, restarted by each pick, note or comment the reviewer makes on the round. A content-only round returns once it lands. `wait: true` makes a page board round (below) block too and return its comments, possibly none, in this call's packet. It does nothing elsewhere.
 
 **Say the board's URL in chat after every round.** A `/compact` rebuilds your context from the conversation, not from tool results, and a board you forget you have is abandoned by your next `ask`.
 
@@ -91,13 +91,15 @@ Two to four options read best, and every answer carries a free-text note. **Ever
   answers:  [ { id, round, prompt, widget, status, choice, note } ],
   comments: [ { n, blockId, blockKind, anchor, text, round, createdAt, lost? } ],
   url,
+  watch?,                           // a timeout in Claude Code: the answer watch's command
 }
 ```
 
 - **`posted`**: nothing was asked, so `answers` and `comments` hold only owed entries (below).
 - **`submitted`**: read every answer, then every comment.
 - **`discuss`**: the reviewer chose Discuss. Post no more boards this session; pick the remaining branches up in chat, using the partial answers.
-- **`timeout`**: no response, not a hang. Say so, then wait for the reviewer to reopen `url` or move on in chat. **Never silently retry the round.** A later `ask` opens a fresh round rather than amending the dead one. A late answer still reaches you (next packet, or `read`) and settles its question.
+- **`timeout`**: no response, not a hang. Say the wait ended and which defaults you are taking. When the packet carries `watch` (Claude Code), run that command as one background call and end the turn; without it (Codex, OpenCode), wait for the reviewer to reopen `url` or move on in chat. **Never silently retry the round.** A later `ask` opens a fresh round rather than amending the dead one. A late answer still reaches you (the watch, the next packet, or `read`) and settles its question.
+- **Woken by the watch**: it exits within a minute of the reviewer sending that round, for up to 24 hours, printing the round's packet with `delivered`. Act on its answers and comments once, as that round's: skip it when `delivered` is `true` or you already acted on that round. Reopen what changed and is not yet built, and say what you reopened. A late pick that differs from a default already built, fired or merged goes to the user as a question: undo nothing on your own. Exit 124 (a day passed), 2 (the round was abandoned or is gone) or 3 (the board is down) brings no answer; a later Send is stored, and `read` finds it.
 - **`abandoned`**: the board's conversation declared itself over (a `fresh` ask elsewhere) while you waited. No answer in it is a decision, but its comments count. A question that still stands goes to the *current* board, never into this one. A late Send there is stored, so `read` that board later if the question mattered.
 - **`error`**: posted, but the wait did not complete, so nothing was answered. Report the message verbatim, name `url`, and stop: the board may already hold the round.
 
@@ -109,7 +111,7 @@ Two to four options read best, and every answer carries a free-text note. **Ever
 
 A comment anchored to a block (`blockId`, `anchor`) is feedback on that block, not an answer; address it as its own input. One packet is one round: no packet redelivers earlier rounds.
 
-**What no packet has carried is owed to the next packet the same thread returns, once**, tagged with its own `round`: comments on a page board posted without `wait` (or whose wait timed out), and answers sent after a round's wait ended. Any packet can carry them, `timeout` and `abandoned` included, so check `round` on every answer and comment before assuming it belongs to the round you just posted; the same check spots an entry `read` already showed you.
+**What no packet has carried is owed to the next packet the same thread returns, once**, tagged with its own `round`: comments on a page board posted without `wait` (or whose wait timed out), and answers sent after a round's wait ended. Any packet can carry them, `timeout` and `abandoned` included, so check `round` on every answer and comment before assuming it belongs to the round you just posted; the same check spots an entry `read` already showed you. A round the watch handed you is spent: no later packet carries it.
 
 ## Collecting a late answer
 

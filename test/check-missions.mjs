@@ -14,7 +14,7 @@ import { readBoard, readMission, writeBoard, writeMission, pruneStore, MISSION_R
 import { createBoard } from '../src/board.mjs';
 import { createSessionList } from '../src/sessions.mjs';
 import {
-  missionsOverview, missionView, launchMission, bindSession, joinMission, leaveMission, upsertMission, bindingFor, deriveState, pidAlive, MAX_WORKING, MAX_ALIVE, STALL_SILENCE_MS, UNBOUND_GRACE_MS, RELEASED_VISIBLE_MS,
+  missionsOverview, missionView, getMissionView, launchMission, bindSession, joinMission, leaveMission, upsertMission, bindingFor, deriveState, pidAlive, MAX_WORKING, MAX_ALIVE, STALL_SILENCE_MS, UNBOUND_GRACE_MS, RELEASED_VISIBLE_MS,
 } from '../src/missions.mjs';
 import { createMissionsCache, MISSIONS_CACHE_MS } from '../src/missions-cache.mjs';
 import { processStartUtc } from '../src/proc-start.mjs';
@@ -342,6 +342,24 @@ async function main() {
     const overview = missionsOverview({ home: dir, now, isAlive: alive });
     assert.deepEqual(overview.live, { working: MAX_WORKING, alive: MAX_WORKING });
     assert.equal(overview.counts.queued, 1);
+  });
+
+  await check('a retired mission whose session is still stored working holds a working slot, though its card counts under Waiting (ADR 147)', () => {
+    const dir = scratchHome('retired-working');
+    const now = Date.now();
+    const alive = () => true;
+    for (let i = 0; i < MAX_WORKING - 1; i++) {
+      seed(dir, `W${i}`, { session: { pid: 1000 + i, startedAt: iso(now), seenAt: iso(now) } });
+    }
+    seed(dir, 'RETIRED_WORKING', {
+      retiredAt: iso(now - minutes(5)), prs: [{ repo: 'service', number: 12, url: 'https://github.com/o/service/pull/12' }],
+      session: { pid: 4000, startedAt: iso(now - minutes(30)), seenAt: iso(now) },
+    });
+    const overview = missionsOverview({ home: dir, now, isAlive: alive });
+    assert.equal(overview.missions.find(m => m.key === 'RETIRED_WORKING').view, 'waiting');
+    assert.deepEqual([overview.counts.working, overview.counts.waiting], [MAX_WORKING - 1, 1]);
+    assert.deepEqual(overview.live, { working: MAX_WORKING, alive: MAX_WORKING });
+    assert.deepEqual(launchMission('OVER_CAP', { phase: 'direct' }, { home: dir, now, isAlive: alive }), { queued: true });
   });
 
   await check(`a launch queues at ${MAX_ALIVE} alive sessions with fewer than ${MAX_WORKING} working`, () => {
@@ -960,6 +978,9 @@ async function main() {
       assert.equal((await post('/api/mission/FACTS/facts', body)).status, 400, `${JSON.stringify(body)} is refused`);
     }
     assert.deepEqual(readMission('FACTS', home).prFacts, record.prFacts, 'a refused post writes nothing');
+    const closed = await post('/api/mission/FACTS/facts', { prs: [{ repo: 'admin', number: 7, state: 'closed', head: '0c1d2e', checkedAt: '2026-10-30T10:04:00.000Z' }] });
+    assert.equal(closed.status, 200, JSON.stringify(closed.body));
+    assert.deepEqual(closed.body.prs.map(p => [p.repo, p.state, p.head]), [['service', 'green', 'def456'], ['admin', 'closed', '0c1d2e']], 'a PR closed without merging reads closed');
     assert.equal((await post('/api/mission/NO_SUCH_MISSION/facts', { prs: [] })).status, 404);
   });
 
@@ -1048,6 +1069,75 @@ async function main() {
     assert.ok(all.includes('ROUTE_RELEASED'));
   });
 
+  await check('a retired mission with no open work leaves the list and ?all=1, a read by key still answering it; one with a PR read neither merged nor closed or a release step waiting stays, waiting, marked retired (ADR 147)', async () => {
+    const dir = scratchHome('retired');
+    const now = Date.parse('2026-10-28T12:00:00Z');
+    const retiredAt = iso(now - minutes(90));
+    const pr = number => ({ repo: 'service', number, url: `https://github.com/o/service/pull/${number}` });
+    const fact = (number, state) => ({ repo: 'service', number, state, head: 'a1b2c3', checkedAt: iso(now) });
+    // No open work: every PR read merged or closed without merging, no release step, whatever it last waited on.
+    seed(dir, 'RETIRED_MERGED', { retiredAt, prs: [pr(1), pr(2)], prFacts: [fact(1, 'merged'), fact(2, 'merged')], next: 'nothing', waitingOn: 'the merge yes' });
+    seed(dir, 'RETIRED_CLOSED', { retiredAt, prs: [pr(7)], prFacts: [fact(7, 'closed')], waitingOn: 'checks on #7' });
+    seed(dir, 'RETIRED_BARE', { retiredAt, state: 'needs-you', waitingOn: 'round 3' });
+    seed(dir, 'RETIRED_RELEASED', { retiredAt, state: 'released', releasedAt: iso(now - minutes(5)) });
+    // Open work.
+    seed(dir, 'RETIRED_OPEN_PR', { retiredAt, prs: [pr(3), pr(4)], prFacts: [fact(3, 'merged'), fact(4, 'green')] });
+    seed(dir, 'RETIRED_UNREAD_PR', { retiredAt, state: 'needs-you', prs: [pr(5)] });
+    seed(dir, 'RETIRED_RELEASE_STEP', { retiredAt, next: 'release: reinstall the board on both Macs' });
+    seed(dir, 'NOT_RETIRED', {});
+    const viewsOf = o => o.missions.map(m => [m.key, m.view, m.retired]).sort(([a], [b]) => a.localeCompare(b));
+    const keptViews = [
+      ['NOT_RETIRED', 'working', false],
+      ['RETIRED_OPEN_PR', 'waiting', true],
+      ['RETIRED_RELEASE_STEP', 'waiting', true],
+      ['RETIRED_UNREAD_PR', 'waiting', true],
+    ];
+    const listed = missionsOverview({ home: dir, now });
+    assert.deepEqual(viewsOf(listed), keptViews);
+    assert.deepEqual(viewsOf(missionsOverview({ home: dir, now, all: true })), keptViews, 'the full list the mission watch reads drops it too');
+    assert.deepEqual(listed.counts, { needsYou: 0, working: 1, waiting: 3, stalled: 0, released: 0, queued: 0 });
+    assert.deepEqual(['RETIRED_BARE', 'RETIRED_MERGED', 'RETIRED_RELEASED'].map(k => readMission(k, dir)?.key), ['RETIRED_BARE', 'RETIRED_MERGED', 'RETIRED_RELEASED'],
+      'leaving the list deletes nothing: the purge alone does, 30 days on');
+    assert.deepEqual([getMissionView('RETIRED_BARE', { home: dir, now }).view, getMissionView('RETIRED_BARE', { home: dir, now }).retired], ['waiting', true],
+      'a read by key still answers a retired mission no list shows');
+
+    // The same over the routes, on the daemon's store.
+    seed(home, 'ROUTE_RETIRED_DONE', { retiredAt: iso(Date.now() - minutes(5)), waitingOn: 'round 2' });
+    seed(home, 'ROUTE_RETIRED_OPEN', { retiredAt: iso(Date.now() - minutes(5)), prs: [pr(6)] });
+    for (const route of ['/api/missions', '/api/missions?all=1']) {
+      const keys = (await getJson(route)).body.missions.map(m => m.key);
+      assert.deepEqual([keys.includes('ROUTE_RETIRED_DONE'), keys.includes('ROUTE_RETIRED_OPEN')], [false, true], route);
+    }
+    const byKey = await getJson('/api/mission/ROUTE_RETIRED_DONE');
+    assert.deepEqual([byKey.status, byKey.body.view, byKey.body.retired], [200, 'waiting', true]);
+  });
+
+  await check('a retired mission never reads needs-you or stalled, whatever its rounds, its session or its waitingOn, and never says its session went (ADR 147)', () => {
+    const dir = scratchHome('retired-asks-nothing');
+    const now = Date.parse('2026-10-28T12:00:00Z');
+    const boardId = 'b_retiredasking';
+    mkdirSync(path.join(dir, 'boards'), { recursive: true });
+    writeFileSync(path.join(dir, 'boards', `${boardId}.json`), JSON.stringify({
+      id: boardId, thread: 't', title: 'q', cwd: null, createdAt: iso(now), updatedAt: iso(now), state: 'open',
+      rounds: [{ n: 1, postedAt: iso(now - minutes(90)), status: 'open', sentAt: null, title: 'q' }],
+      blocks: [{ id: 'q1', kind: 'question', round: 1, prompt: 'Import?', widget: 'single', options: [{ label: 'Yes' }] }],
+      answers: {}, comments: [],
+    }));
+    const linked = [{ id: boardId, url: 'http://x/b/' + boardId, at: iso(now) }];
+    const session = seenAgo => ({ pid: 4545, id: 's', startedAt: iso(now - minutes(120)), seenAt: iso(now - seenAgo) });
+    for (const [what, state, boards, seenAgo, isAlive, unretired] of [
+      ['its round still asking', 'needs-you', linked, minutes(1), () => true, 'needs-you'],
+      ['its process gone', 'working', [], minutes(1), () => false, 'stalled'],
+      ['silent past the stall', 'working', [], STALL_SILENCE_MS + minutes(1), () => true, 'stalled'],
+      ['its round asking and its process gone', 'working', linked, minutes(1), () => false, 'needs-you'],
+    ]) {
+      const m = { key: 'K', phase: 'landing', state, boards, waitingOn: 'round 3', prs: [], next: 'release: reinstall', session: session(seenAgo) };
+      assert.equal(missionView(m, { home: dir, now, isAlive }).view, unretired, `setup, unretired: ${what}`);
+      const v = missionView({ ...m, retiredAt: iso(now - minutes(60)) }, { home: dir, now, isAlive });
+      assert.deepEqual([v.view, v.gone], ['waiting', null], what);
+    }
+  });
+
   await check('a record stored landed, from before ADR 130, reads as released through readMission and missionsOverview, and the read leaves the file as stored', () => {
     const dir = scratchHome('read-shim');
     const landedAt = '2026-10-28T11:00:00.000Z';
@@ -1122,14 +1212,16 @@ async function main() {
     assert.equal(JSON.parse(readFileSync(path.join(home, 'missions', 'POST_LANDED.json'), 'utf8')).state, 'released', 'stored as released on disk');
   });
 
-  await check('a prune deletes a mission record 30 days after its retiredAt, and keeps a younger or unretired one', () => {
+  await check('a prune deletes a mission record 30 days after its retiredAt, open work or not, and keeps a younger or unretired one', () => {
     const dir = scratchHome('prune');
     const now = Date.parse('2026-10-28T12:00:00Z');
     seed(dir, 'RETIRED_OLD', { retiredAt: iso(now - MISSION_RETENTION_MS - 1000) });
     seed(dir, 'RETIRED_NEW', { retiredAt: iso(now - MISSION_RETENTION_MS + 60_000) });
+    // Open work keeps a retired mission's card, never its record past 30 days (ADR 147).
+    seed(dir, 'RETIRED_OLD_OPEN', { retiredAt: iso(now - MISSION_RETENTION_MS - 1000), prs: [{ repo: 'service', number: 9, url: 'https://github.com/o/service/pull/9' }], next: 'release: deploy' });
     seed(dir, 'OPEN', {});
     const result = pruneStore(365, dir, now);
-    assert.deepEqual(result.missions, ['RETIRED_OLD']);
+    assert.deepEqual(result.missions.sort(), ['RETIRED_OLD', 'RETIRED_OLD_OPEN']);
     assert.deepEqual(readdirSync(path.join(dir, 'missions')).sort(), ['OPEN.json', 'RETIRED_NEW.json']);
   });
 
@@ -1152,7 +1244,7 @@ async function main() {
       'a PR is stored by its name alone');
     assert.deepEqual(r.body.prs, [{ repo: 'claude-board', number: 7, url: 'https://github.com/x/y/pull/7', state: 'checking', head: null, checkedAt: null }],
       'the view says checking until a fact arrives, whatever the session said');
-    assert.equal(r.body.view, 'working');
+    assert.deepEqual([r.body.view, r.body.retired], ['waiting', true], 'retired, its PR still open: it waits on it (ADR 147)');
     assert.equal((await post('/api/mission/WHITELIST', { summary: 'reworded' })).status, 200);
     assert.equal(readMission('WHITELIST', home).history.length, 1, 'a summary change appends no history');
     await post('/api/mission/WHITELIST', { phase: 'direct' });

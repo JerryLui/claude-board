@@ -15,7 +15,7 @@
 //
 // The first read after start is the baseline and says nothing, so a restart never floods
 // the screen with every mission already waiting. A mission that moves on before its batch
-// speaks (a needs-you answered inside the window) leaves the batch. The Banner level's Off
+// speaks (a needs-you answered inside the window, or retired) leaves the batch. The Banner level's Off
 // silences the batch (ADR 106); the other levels are about which board a reviewer is
 // looking at, and a mission is not a board, so every On level speaks.
 //
@@ -171,6 +171,8 @@ export function createMissionWatch({
       else batch.delete(v.key);
     }
     seen = next;
+    // A mission the read no longer lists (retired with its work done, ADR 147) has moved on.
+    for (const key of batch.keys()) if (!next.has(key)) batch.delete(key);
     for (const v of joining) join(v.key, { name: nameOf(v), state: v.view }, t);
     if (dueAt !== null && (closing || t >= dueAt)) flush();
   }

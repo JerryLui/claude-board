@@ -266,6 +266,15 @@ export function roundIsCurrentlyAwaited(round, nowMs) {
   return roundIsAwaitedOpen(round) && !!round.awaitDeadline && Date.parse(round.awaitDeadline) > nowMs;
 }
 
+// May the reviewer's activity move this round's deadline right now (ADR 145)? Only a
+// round minted for a poster that follows the stored deadline (`movingDeadline`, stamped
+// by `mintAwait` in src/board.mjs), and only while its wait is still live: a lapsed,
+// sent or abandoned round never comes back. The daemon's activity route moves on this
+// answer; a page asks the same question before it reports.
+export function roundDeadlineMoves(round, nowMs) {
+  return roundIsCurrentlyAwaited(round, nowMs) && round.movingDeadline === true;
+}
+
 // "38m left" -- always minutes, always rounded up, never zero while the gate
 // above still holds (a round that just crossed the deadline stops being
 // "currently awaited" at all, rather than ever printing "0m left"). `null`

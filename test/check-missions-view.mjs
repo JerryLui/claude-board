@@ -192,10 +192,12 @@ async function main() {
     await liveMission('WORKING_ONE');
     await liveMission('WORKING_TWO', { summary: 'Wave 2 of 3', waitingOn: 'checks on #12', next: 'merge',
       prs: [{ repo: 'service', number: 12, url: 'https://github.com/o/service/pull/12' },
-        { repo: 'service', number: 13, url: 'https://github.com/o/service/pull/13', state: 'green' }] });
+        { repo: 'service', number: 13, url: 'https://github.com/o/service/pull/13', state: 'green' },
+        { repo: 'service', number: 14, url: 'https://github.com/o/service/pull/14' }] });
     assert.equal((await post('/api/mission/WORKING_TWO/facts', { prs: [
       { repo: 'service', number: 12, state: 'green', head: 'a1b2c3', checkedAt: new Date().toISOString() },
       { repo: 'service', number: 13, state: 'red', head: 'd4e5f6', checkedAt: new Date().toISOString() },
+      { repo: 'service', number: 14, state: 'closed', head: '0c1d2e', checkedAt: new Date().toISOString() },
     ] })).status, 200);
     assert.equal((await post('/api/mission/WAITING_ONE', { title: 'Waiting one', state: 'waiting', phase: 'landing',
       prs: [{ repo: 'admin', number: 7, url: 'javascript:alert(1)', state: 'open' }] })).status, 200);
@@ -205,22 +207,37 @@ async function main() {
     assert.equal((await post('/api/mission/STALLED_ONE/session', { pid: await deadPid() })).status, 200);
     const needsBoard = await postBoard(port, SECRET, { title: 'Needs board', mission: 'NEEDS_ONE',
       blocks: [{ kind: 'question', prompt: 'Which?', widget: 'single', options: [{ label: 'A' }, { label: 'B' }] }] });
+    // Retired (ADR 147), each with a round still asking and its session gone: one with a PR
+    // open, one with its only PR merged and its waitingOn left from before.
+    const retiredAt = '2026-11-03T15:45:01Z';
+    for (const [key, number, fact] of [['RETIRED_OPEN', 21, 'open'], ['RETIRED_DONE', 22, 'merged']]) {
+      assert.equal((await post(`/api/mission/${key}`, { title: key, state: 'working', phase: 'landing', waitingOn: 'round 3', retiredAt,
+        prs: [{ repo: 'service', number, url: `https://github.com/o/service/pull/${number}` }] })).status, 200);
+      assert.equal((await post(`/api/mission/${key}/session`, { pid: await deadPid() })).status, 200);
+      assert.equal((await post(`/api/mission/${key}/facts`, { prs: [{ repo: 'service', number, state: fact, head: 'a1b2c3' }] })).status, 200);
+      await postBoard(port, SECRET, { title: `${key} board`, mission: key,
+        blocks: [{ kind: 'question', prompt: 'Import?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] }] });
+    }
 
     const expected = {
       'needs-you': ['NEEDS_ONE'],
       working: ['WORKING_ONE', 'WORKING_TWO'],
-      waiting: ['QUEUED_ONE', 'WAITING_ONE'],
+      waiting: ['QUEUED_ONE', 'RETIRED_OPEN', 'WAITING_ONE'],
       stalled: ['STALLED_ONE'],
       released: ['RELEASED_ONE'],
     };
 
-    await check('each mission shows in its derived state\'s column, queued under waiting, on first paint and once live', async () => {
+    await check('each mission shows in its derived state\'s column, queued and retired with open work under waiting, retired with none nowhere, on first paint and once live', async () => {
       const page = await rawRequest(port, 'GET', '/', { headers: { [SECRET_HEADER]: SECRET } });
       const served = parseHTML(page.body);
       assert.deepEqual(columns(served), expected);
       assert.deepEqual(served.querySelectorAll('h2.mission-col-head span.mission-badge').map(n => n.textContent),
         ['Needs you', 'Working', 'Waiting', 'Stalled', 'Released'], 'the last column reads Released (ADR 130)');
       assert.equal(cardFor(served, 'QUEUED_ONE').querySelector('span.mission-tag').textContent, 'Queued');
+      const retired = cardFor(served, 'RETIRED_OPEN');
+      assert.deepEqual([retired.querySelector('span.mission-tag').textContent, retired.querySelector('span.mission-tag').getAttribute('title')],
+        ['Retired', `Retired ${retiredAt}`], 'a retired card is tagged so, the time in its tooltip');
+      assert.equal(retired.querySelector('p[data-gone]'), null, 'its session is expected to be gone, so the card never says it went');
       assert.equal(served.querySelector('p.empty-state'), null, 'no empty state once a mission exists');
 
       const tab = await openMissionsTab();
@@ -238,7 +255,8 @@ async function main() {
         assert.deepEqual(prs.map(p => [p.textContent, p.getAttribute('data-state'), p.getAttribute('title')]), [
           ['✓service #12', 'green', 'service #12: green'],
           ['✕service #13', 'red', 'service #13: red'],
-        ], 'each PR shows its state from the facts, the session\'s green on #13 left unread');
+          ['⊘service #14', 'closed', 'service #14: closed'],
+        ], 'each PR shows its state from the facts, the session\'s green on #13 left unread, #14 closed without merging');
         const odd = cardFor(tab.document, 'WAITING_ONE').querySelector('.mission-pr');
         assert.deepEqual([odd.tagName, odd.getAttribute('href'), odd.textContent, odd.getAttribute('data-state')], ['SPAN', null, '○admin #7', 'checking'],
           'a url that is not a web address is shown, never linked, and with no fact yet the PR is checking');

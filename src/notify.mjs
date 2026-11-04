@@ -295,9 +295,10 @@ export function notifyBoundary(phase, settings) {
  * which has no way to serve a click -- degrades to a banner that cannot be clicked,
  * exactly as the clone install does permanently (criterion 19).
  *
- * `deadlineAt` is the round's own `awaitDeadline` (epoch ms). It becomes the spawned
- * process's self-imposed lifetime, because a wait that lapses fires no event a child
- * could be told about; it is a backstop, not the mechanism. The caller is the owner and
+ * `deadlineAt` is the round's own `awaitDeadline` (epoch ms), as stored when the banner is
+ * raised, so a deadline the reviewer's activity moved (ADR 145) is the one it gets. It
+ * becomes the spawned process's self-imposed lifetime, because a wait that lapses fires
+ * no event a child could be told about; it is a backstop, not the mechanism. The caller is the owner and
  * kills it earlier -- when the reviewer returns to the board, when the round is
  * answered, and when the daemon itself stops (criterion 15).
  *

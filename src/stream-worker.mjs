@@ -12,11 +12,18 @@
 // tab when the lock frees (the tab is gone), on its `pagehide`, or after a long silence,
 // and beats the daemon for every tab it holds. The daemon drops a Watcher whose beats stop
 // (src/browser-stream.mjs), so the stranded rule still sees a closed tab at once.
+//
+// The worker answers every hello and beat, and a tab whose worker has stopped answering
+// opens a fresh one: Chrome tells a tab nothing when its worker ends or crashes, and a tab
+// left on a dead port hears no push again, a round answered elsewhere included. A worker
+// whose script will not load (its URL gone with a daemon update) does say so, with an
+// 'error', and the tab then opens a stream of its own.
 
 import { createHash } from 'node:crypto';
 
 /** Opens this page's stream: through the browser's shared worker where there is one, else
- * an EventSource of its own on `opts.fallback`, as every page did before ADR 144. Answers
+ * an EventSource of its own on `opts.fallback`, as every page did before ADR 144, and as a
+ * tab does once its worker's script fails to load. Answers
  * an object whose `addEventListener(name, fn)` hears the same events, `fn({ data })` with
  * `data` the event's JSON text: 'open' each time the stream (re)connects (for a board tab,
  * once its Watcher exists), then the board's or the daemon's own events.
@@ -29,30 +36,72 @@ export function openSharedStream(opts) {
   // whatever the node process running it exposes (QUIRKS.md, the new Function harness).
   var Shared = window.SharedWorker;
   if (!opts.worker || typeof Shared !== 'function') return new EventSource(opts.fallback);
-  var worker;
-  try {
-    worker = new Shared(opts.worker, { name: 'claude-board-stream' });
-  } catch (e) {
-    return new EventSource(opts.fallback);
-  }
   var listeners = {};
-  var port = worker.port;
+  var port = null;
+  // The stream of its own a tab opens once its worker's script will not load.
+  var own = null;
+  // Hellos and beats said on this port, and the worker's answers heard on it: the worker
+  // answers each, in order, so `answered` past n means the n-th one was answered.
+  var said = 0;
+  var answered = 0;
+  // `said` as the last beat left it: one of those still unanswered at the next beat is a
+  // full interval old. One said since, the beat a tab says on showing again, is not.
+  var due = 0;
+  function connect() {
+    var worker;
+    try {
+      worker = new Shared(opts.worker, { name: 'claude-board-stream' });
+    } catch (e) {
+      return false;
+    }
+    var mine = worker.port;
+    port = mine;
+    said = 0;
+    answered = 0;
+    due = 0;
+    // Fired when the script fails to load: a 404 once a daemon update renamed it, which a
+    // fresh worker of the same URL would only hit again. A worker that ran and ended says
+    // nothing; the beats find that one.
+    worker.addEventListener('error', function () {
+      if (port === mine && !answered) ownStream();
+    });
+    mine.onmessage = function (ev) {
+      var m = ev.data;
+      if (!m) return;
+      if (m.type === 'ack') { answered++; return; }
+      if (m.type !== 'event') return;
+      (listeners[m.event] || []).forEach(function (fn) {
+        try { fn({ data: m.data }); } catch (e) { /* one listener's throw never silences the rest */ }
+      });
+    };
+    mine.start();
+    return true;
+  }
+  function ownStream() {
+    if (own) return;
+    try { port.close(); } catch (e) { /* already gone */ }
+    own = new EventSource(opts.fallback);
+    for (var name in listeners) listeners[name].forEach(function (fn) { own.addEventListener(name, fn); });
+  }
+  if (!connect()) return new EventSource(opts.fallback);
   var tab = Math.random().toString(36).slice(2) + Date.now().toString(36);
   var lockName = 'claude-board-tab-' + tab;
   var locks = window.navigator && window.navigator.locks;
   var hasLocks = !!locks && typeof locks.request === 'function';
-  port.onmessage = function (ev) {
-    var m = ev.data;
-    if (!m || m.type !== 'event') return;
-    (listeners[m.event] || []).forEach(function (fn) {
-      try { fn({ data: m.data }); } catch (e) { /* one listener's throw never silences the rest */ }
-    });
-  };
-  port.start();
   function say(type) {
+    if (own) return;
+    if (type === 'hello' || type === 'beat') said++;
     port.postMessage({ type: type, tab: tab, board: opts.board || null, held: !!opts.held, lock: hasLocks ? lockName : null });
   }
   function hello() { say('hello'); }
+  // The same URL and name start a fresh worker once the old one is gone, and its hello
+  // registers this tab there: the tab hears 'open' and re-reads what it missed. A worker
+  // that was only slow is the same worker again, and takes the tab back.
+  function reopen() {
+    try { port.close(); } catch (e) { /* already gone */ }
+    if (connect()) hello();
+    else ownStream();
+  }
   // The worker waits on this lock to learn the tab is gone, so the tab holds it before it
   // says hello: a worker asking first would be granted it and drop the tab at once.
   if (hasLocks) {
@@ -63,12 +112,35 @@ export function openSharedStream(opts) {
   } else {
     hello();
   }
-  setInterval(function () { say('beat'); }, 5000);
-  window.addEventListener('pagehide', function () { port.postMessage({ type: 'bye', tab: tab }); });
+  // A worker answers within a moment, so a hello or beat said by the last beat and still
+  // unanswered at this one means the worker is gone. The test is that old message's, not
+  // any: Chrome runs a hidden tab's overdue beat the moment it shows again, before the
+  // answer to the beat said on showing has landed, and a live worker taken for gone drops
+  // the tab and registers it again, its Watcher leaving the board and coming back.
+  setInterval(function () {
+    if (own) return;
+    if (answered < due) reopen();
+    else say('beat');
+    due = said;
+  }, 5000);
+  // A tab shown again asks at once rather than at its next beat, which Chrome runs once a
+  // minute in a tab hidden for five, and gives that beat two seconds.
+  var doc = window.document;
+  if (doc && typeof doc.addEventListener === 'function') {
+    doc.addEventListener('visibilitychange', function () {
+      if (own || doc.visibilityState !== 'visible') return;
+      say('beat');
+      var asked = port;
+      var mark = said;
+      setTimeout(function () { if (!own && port === asked && answered < mark) reopen(); }, 2000);
+    });
+  }
+  window.addEventListener('pagehide', function () { if (!own) port.postMessage({ type: 'bye', tab: tab }); });
   window.addEventListener('pageshow', function (ev) { if (ev.persisted) hello(); });
   return {
     addEventListener: function (name, fn) {
       (listeners[name] = listeners[name] || []).push(fn);
+      if (own) own.addEventListener(name, fn);
     },
   };
 }
@@ -194,6 +266,8 @@ function streamWorker(config) {
     port.onmessage = function (ev) {
       var m = ev.data;
       if (!m || typeof m.tab !== 'string') return;
+      // Answered first, so a tab hears its worker is alive however the rest goes.
+      if (m.type === 'hello' || m.type === 'beat') port.postMessage({ type: 'ack' });
       // A beat from a tab this worker no longer holds (dropped for silence while the
       // machine slept) registers it again, so a live tab never stays dropped.
       if (m.type === 'hello' || (m.type === 'beat' && !tabs[m.tab])) {

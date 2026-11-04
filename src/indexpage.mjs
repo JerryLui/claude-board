@@ -1911,7 +1911,8 @@ export function filterThreads(threads, query) {
  * server renders the first paint with it and indexScript carries its source to repaint
  * from every later fetch, so the two can never draw a card differently.
  *
- * Five columns by derived state (`view`), queued shown under waiting. A card's Fire or
+ * Five columns by derived state (`view`), queued shown under waiting with its tag; a
+ * retired mission's card is tagged Retired, under waiting unless released (ADR 147). A card's Fire or
  * Merge button exists only while `actions` holds that kind, which the daemon fills only
  * from a round still waiting on the PM. Fire carries what a click submits; Merge is a
  * link to the brief at its merge question, and the summary shows whole beside it. Stop
@@ -1940,8 +1941,8 @@ function missionsParts(overview, ui) {
   // carries the fold that shows it whole.
   var FOLD_TITLE_CHARS = 30;
   // A PR's state is the view's, from GitHub at its head commit; 'checking' (no fact yet)
-  // takes the open ring.
-  var PR_MARKS = { green: '✓', merged: '✓', red: '✕', open: '○', draft: '○' };
+  // takes the open ring, and one closed without merging the struck one.
+  var PR_MARKS = { green: '✓', merged: '✓', red: '✕', open: '○', draft: '○', closed: '⊘' };
   var STOP_ICON = '<svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="1.8"/><line x1="4.7" y1="4.7" x2="15.3" y2="15.3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
   var data = overview || {};
   var missions = Array.isArray(data.missions) ? data.missions : [];
@@ -2084,7 +2085,9 @@ function missionsParts(overview, ui) {
     out += moreFold(key, m.summary || m.waitingOn || m.next || String(title).length > FOLD_TITLE_CHARS);
     out += '</div>';
 
-    var foot = m.view === 'queued' ? '<span class="mission-tag">Queued</span>' : '';
+    // A retired mission is listed only while it has open work (ADR 147).
+    var foot = m.retired ? '<span class="mission-tag mission-retired" title="' + esc('Retired ' + m.retiredAt) + '">Retired</span>'
+      : m.view === 'queued' ? '<span class="mission-tag">Queued</span>' : '';
     var prs = Array.isArray(m.prs) ? m.prs : [];
     for (var p = 0; p < prs.length; p++) {
       var pr = prs[p];

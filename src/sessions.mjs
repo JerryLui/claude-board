@@ -28,7 +28,7 @@
 // start time, so it never inherits a round or revives a card.
 
 import { randomBytes } from 'node:crypto';
-import { CARD_ORDER_KINDS, roundWantsAnswer, sameStart } from './missions.mjs';
+import { CARD_ORDER_KINDS, roundWantsAnswer, sameStart, sessionsMovedOn } from './missions.mjs';
 import { questionBlocks } from './badge.mjs';
 import { folderName } from './indexpage.mjs';
 
@@ -397,6 +397,15 @@ export function boardLink(board) {
   };
 }
 
+/** The ids mission record `m` ties session `s` by: its session's and the one it names as
+ * ended, left or not, that are `s`'s id or the id its job id is the first 8 characters of. */
+function tiesOf(s, m) {
+  const ms = m.session;
+  if (!isObject(ms)) return [];
+  return [ms.id, isObject(ms.ended) ? ms.ended.id : null]
+    .filter(id => typeof id === 'string' && id && (id === s.id || (!!s.jobId && id.slice(0, 8) === s.jobId)));
+}
+
 const sameProcess = (s, ref) => s.pid != null && s.pid === ref.pid && sameStart(s.procStart, ref.procStart);
 
 /** `/word` at the head of a session's name (its first prompt), else null: the slash
@@ -413,7 +422,11 @@ export function commandOf(name) {
  * its pid, or its job id being a held id's first 8 characters (a background job's id is
  * its session's short form); or when it posted a board that belongs to a mission holding
  * only a launch's reservation (a launch reserves a session before it knows its pid or id).
- * A board of a mission bound by id holds no one: the session that posted it may have left. `missions` are the stored
+ * A board of a mission bound by id holds no one: the session that posted it may have left.
+ * Nor is a blocked background job with no process a tab once it is tied to a mission and
+ * every mission it is tied to has moved on from it (src/missions.mjs `sessionsMovedOn`:
+ * released, or another session holds it), tied by its id or its job id as above, its
+ * session having left that mission or not: a job left behind asks for nothing (ADR 147). `missions` are the stored
  * records, every one, retired or not; `boards` are `boardLink`s of every board in the
  * store. A card reads:
  *
@@ -441,7 +454,13 @@ export function deriveTabs({ sessions, missions = [], boards = [] }) {
   }
   const heldJobs = new Set([...held.ids].map(id => id.slice(0, 8)));
   const isMissions = s => held.ids.has(s.id) || (s.pid != null && held.pids.has(s.pid)) || (s.jobId && heldJobs.has(s.jobId));
-  const tabs = sessions.filter(s => !isMissions(s));
+  const movedOn = new Map(missions.filter(Boolean).map(m => [m, sessionsMovedOn(m)]));
+  const leftBehind = s => {
+    if (s.kind !== 'bg' || s.status !== 'blocked' || s.pid != null) return false;
+    const ties = [...movedOn.keys()].map(m => [m, tiesOf(s, m)]).filter(([, ids]) => ids.length > 0);
+    return ties.length > 0 && ties.every(([m, ids]) => ids.every(id => movedOn.get(m).includes(id)));
+  };
+  const tabs = sessions.filter(s => !isMissions(s) && !leftBehind(s));
   const rounds = new Map(tabs.map(t => [t.id, []]));
   for (const link of links) {
     if (link.mission != null) continue;

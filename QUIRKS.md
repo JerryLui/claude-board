@@ -1898,10 +1898,11 @@ directory, routinely, on a stock Mac. `src/resolve.mjs` compares `dev`+`ino` ins
 The shim and the daemon both read `CLAUDE_BOARD_TIMEOUT_MS` and default to the same 40
 minutes, and only the daemon's side of that race does anything: its timeout branch is
 what broadcasts `awaitExpired`, closes the lapsed round and returns the timeout packet.
-The shim wins that race by default twice over. Its deadline starts at `blockingWait`
-entry while the daemon's starts after connect and parse, and `waitForRound`
-(`src/server.mjs`) polls the store every 120ms, so the daemon can only notice its own
-deadline at the next tick after it. A margin sized for request latency is therefore not
+The shim used to win that race by default twice over: its deadline started at
+`blockingWait` entry while the daemon's started after connect and parse, and
+`waitForRound` (`src/server.mjs`) polls the store every 120ms, so the daemon can only
+notice its own deadline at the next tick after it. Since ADR 145 both wait to the round's
+stored deadline, so the first half is gone and the poll interval is the whole race. A margin sized for request latency is therefore not
 enough: `WAIT_GRACE_MS` (`bin/mcp.mjs`) is floored at 250ms for the poll interval, not
 for the network. If you shorten the poll interval or add a second waiter, that floor is
 the thing to re-check — and the symptom of getting it wrong is silent, since both sides
@@ -2287,6 +2288,19 @@ chrome band; if that ever surfaces, the fix is this same resend, not a broadcast
 
 Traps that have bitten once. A second bite moves the entry up into the section it belongs to.
 
+- **A SharedWorker that ends tells its tabs nothing.** Chrome 155 headless: `Target.closeTarget`
+  on the stream worker fired no `error` on the tab's `SharedWorker` and no `close` on its port
+  (`'onclose' in port` is false), and the tab went on posting into the dead port, deaf to every
+  push. A tab learns its worker is gone only from an answer that stops coming (the `ack` in
+  `src/stream-worker.mjs`); `new SharedWorker` with the same URL and name then starts a fresh one.
+  One whose script fails to load (a 404) does say so: Chrome 155 fires a plain `error` Event at
+  the `SharedWorker` a few ms on.
+- **Every `Target.createTarget` tab opens in the one headless window, the newest in front.** The
+  others read `visibilityState` 'hidden' and `Target.activateTarget` brings one forward, which is
+  how a check hides a tab and shows it again (`show` in `test/browser-check-answered-tabs.mjs`).
+  `Page.setWebLifecycleState { state: 'frozen' }` on a hidden tab holds its own tasks, a port
+  message included, until 'active', while `Runtime.evaluate` still answers in it.
+
 - **Chrome's media emulation ignores a 'hover' feature.** Chrome 154 headless:
   `Emulation.setEmulatedMedia` with `{ name: 'hover', value: 'none' }` returns no error and
   `matchMedia('(hover: none)')` stays false. `Emulation.setTouchEmulationEnabled` with
@@ -2312,6 +2326,17 @@ Traps that have bitten once. A second bite moves the entry up into the section i
   Cmd (4), Shift (8) and Alt (1) still fire `click`. A control that must answer a Ctrl press
   listens for `contextmenu` with `ctrlKey` and `button === 0` (`onMissionsContextmenu`,
   `src/indexpage.mjs`).
+
+- **A synthetic key with no character opens chrome://help.** Chrome 155 headless on a Mac: an
+  `Input.dispatchKeyEvent` `rawKeyDown` Escape carrying a `nativeVirtualKeyCode` (27 or the Mac's
+  own 53) and no `text` opens a `chrome://help` tab in front about 30ms later, on every press, the
+  page's keydown handler having run. With no native code, with `text: '\u001b'`, or with the
+  page calling `preventDefault`, it opens nothing. The tab in front blurs the driven one and
+  hides it: a control shown only on `:focus-within` hides with the focus on it, and Chrome's
+  focus fixup can move the focus to `body` before the window takes it back, so a focus read
+  after the press flakes (`test/browser-check-missions.mjs`'s Escape row, 2026-11-04). Send a key
+  as a Mac keyboard does, its own key code and character (`KEYS` there), and count the page
+  targets after a press when a row reads focus.
 
 - **A stage loaded inside `withFrameClock` reports its own fixture height on every turn of the
   clock.** `loadSrcdoc()` under the clock books the real `stageAgentScript`'s first report, so the
@@ -2509,3 +2534,18 @@ Traps that have bitten once. A second bite moves the entry up into the section i
   leaving, and so may a `Page.getNavigationHistory` read in the gap. Send Enter as its key-down
   alone, and tolerate that one error on the press and on the read
   (`test/browser-check-missions.mjs`'s `landedAt`, `pressKey` and its card-click row).
+
+- **A full-page shot of a scrolling board paints the send bar and the pager over its foot.**
+  `Page.captureScreenshot` with `captureBeyondViewport` and a clip taller than the window lays the
+  page out at the window's height, so the fixed send bar and round pager land over whatever sits at
+  the window's foot, here the last compare card's pictures. Open the tab taller than the board and
+  clip to the last card's bottom (`test/browser-check-compare-head.mjs`'s `--shot`).
+
+- **A deadline kept alive by reports every 100 ms lapses on a slow runner.** A check that held a
+  moving round's deadline past the wait ceiling with `activity` reports every 100-150 ms against
+  a 600 ms wait went red on a macOS CI runner (Node 24, 2026-11-04): one stall longer than the
+  wait let the stored deadline pass, so the deadline, not the ceiling, ended the wait, 2 ms short.
+  Give the deadline seconds past the ceiling instead: a wait of 20-40 s under a 3 s
+  `CLAUDE_BOARD_WAIT_CEILING_MS` and one report that moves it (the ceiling cases in
+  `test/check-http.mjs` and `test/check-mcp.mjs`). The move must clear the minimum, a fortieth
+  of a short wait (`deadlineMoveMinMs`, `src/server.mjs`).

@@ -30,14 +30,14 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import http from 'node:http';
 import { SECRET_HEADER } from '../src/secret.mjs';
-import { recoveryCommand } from '../src/handoff.mjs';
+import { recoveryCommand, shellQuote, WAIT_CEILING_MS, WATCH_INTERVAL_MS } from '../src/handoff.mjs';
 import { startServer } from '../src/server.mjs';
 // The delivery ledger's own field name, read from the product rather than restated: the
 // `read` checks below assert that reading a board never writes one.
 import { ANSWERS_DELIVERED } from '../src/board.mjs';
 import { runCheck } from './run.mjs';
 import {
-  check, runMain, repoRoot, sleep, withTimeout, freePort, secretHome, writeHeaders, rawGet,
+  check, runMain, repoRoot, sleep, withTimeout, withEnv, freePort, secretHome, writeHeaders, rawGet,
   spawnShim, makeOpenRecorder,
 } from './support.mjs';
 
@@ -50,6 +50,10 @@ const daemonBin = path.join(repoRoot, 'bin', 'daemon.mjs');
 // require it. No CLAUDE_BOARD_HOME goes with it: each daemon and shim below is handed its
 // own.
 const { home: secretDir, secret: SECRET } = secretHome('claude-board-secret-', { secret: 'e'.repeat(64), setHome: false });
+
+// Out of reach, as test/run.mjs pushes it for the whole suite, so this file run alone
+// raises no real banner for the awaited rounds it posts and walks away from.
+process.env.CLAUDE_BOARD_STRANDED_GRACE_MS ??= String(24 * 60 * 60 * 1000);
 
 function listBoardIds(home) {
   const dir = path.join(home, 'boards');
@@ -191,6 +195,45 @@ function startHostileDaemon({ boardId, url, waitStatus = 'submitted' }) {
   });
   return new Promise(resolve => {
     srv.listen(0, '127.0.0.1', () => resolve({ port: srv.address().port, close: () => srv.close() }));
+  });
+}
+
+/** A daemon from before ADR 145: it answers a board post with no `awaitDeadline`, holds
+ * every `/wait` open without ever answering, and has no `read` route, so the shim has no
+ * stored deadline to follow and nobody to end the wait for it. Records each post's body. */
+function startSilentWaitDaemon({ boardId = 'b_silent' } = {}) {
+  const posts = [];
+  const held = new Set();
+  const send = (res, status, obj) => {
+    const body = JSON.stringify(obj);
+    res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body) });
+    res.end(body);
+  };
+  const srv = http.createServer((req, res) => {
+    const u = new URL(req.url, 'http://internal');
+    if (req.method === 'POST' && u.pathname === '/api/board') {
+      const chunks = [];
+      req.on('data', c => chunks.push(c));
+      req.on('end', () => {
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        posts.push(body);
+        send(res, 200, { boardId, thread: 'th_silent', round: posts.length, url: `/b/${boardId}`, clients: 0, awaited: true });
+      });
+      return;
+    }
+    if (req.method === 'GET' && u.pathname.endsWith('/wait')) {
+      held.add(res);
+      res.on('close', () => held.delete(res));
+      return;
+    }
+    return send(res, 404, { error: 'not found' });
+  });
+  return new Promise(resolve => {
+    srv.listen(0, '127.0.0.1', () => resolve({
+      port: srv.address().port,
+      posts,
+      close: () => { for (const res of held) res.destroy(); srv.close(); },
+    }));
   });
 }
 
@@ -619,14 +662,14 @@ async function main() {
 
   await check('when both processes share one cap -- what a shipped install has -- the DAEMON times out first and records that the wait died', async () => {
     // The shim and the daemon read the same CLAUDE_BOARD_TIMEOUT_MS and default to
-    // the same 40 minutes; install.sh writes it to neither. The shim's deadline
-    // starts at blockingWait entry and the daemon's only after connect and parse, so
+    // the same 40 minutes; install.sh writes it to neither. The shim used to start its
+    // deadline at blockingWait entry and the daemon only after connect and parse, so
     // the shim always won by the request latency, aborted, and the daemon returned
     // early on a dead client -- leaving its entire timeout branch (the expiry
     // broadcast, the round closure, the timeout packet's own drain) unreachable in
-    // every shipped configuration. The check above deliberately runs a 150ms shim
-    // against a 40-minute daemon, which is the one arrangement where the shim SHOULD
-    // win; this is the shipped one, and the closed round on disk is the proof.
+    // every shipped configuration. Since ADR 145 both wait to the round's stored
+    // deadline and the shim's grace past it is what lets the daemon fire first; this is
+    // the shipped arrangement, and the closed round on disk is the proof.
     const dhome = tempHome('shared-cap');
     const dport = await freePort();
     const daemon = await startDaemonProcess(dport, dhome, { CLAUDE_BOARD_TIMEOUT_MS: '400' });
@@ -697,25 +740,196 @@ async function main() {
 
   // --- wall-clock timeout: explicit no-response, not a hang ---------------
 
-  await check('the wall-clock cap returns an explicit timeout status rather than hanging', async () => {
-    const timeoutClient = spawnShim({ ...baseEnv, CLAUDE_BOARD_TIMEOUT_MS: '150', CLAUDE_BOARD_PROGRESS_MS: '40' });
-    const start = Date.now();
-    // Must carry a question block: a content-only round now returns as soon as the post
-    // succeeds and never reaches the wait this test means to exercise.
-    const res = await timeoutClient.request('tools/call', {
-      name: 'ask',
-      arguments: { title: 'Timeout check', blocks: [{ kind: 'markdown', text: '# never answered' }, QUESTION] },
+  await check('against a daemon that reports no deadline and never answers the wait, every post still declares movingDeadline and the shim ends each wait at its own fixed cap, an explicit timeout rather than a hang', async () => {
+    // A daemon from before ADR 145 stamps no deadline the shim could follow and never
+    // moves one, so the shim's own cap is the only end the wait has.
+    const silent = await startSilentWaitDaemon();
+    const timeoutClient = spawnShim({ ...baseEnv, CLAUDE_BOARD_PORT: String(silent.port), CLAUDE_BOARD_TIMEOUT_MS: '150', CLAUDE_BOARD_PROGRESS_MS: '40' });
+    try {
+      for (const title of ['Timeout check', 'Timeout check, round 2']) {
+        const start = Date.now();
+        // Must carry a question block: a content-only round returns as soon as the post
+        // succeeds and never reaches the wait this test means to exercise.
+        const res = await withTimeout(timeoutClient.request('tools/call', {
+          name: 'ask',
+          arguments: { title, blocks: [{ kind: 'markdown', text: '# never answered' }, QUESTION] },
+        }), 5000, `timed out after 5000ms: "${title}" must end at the shim's cap`);
+        const elapsed = Date.now() - start;
+
+        assert.ok(elapsed >= 150, `not before the cap: ${elapsed}ms`);
+        const result = res.result;
+        assert.equal(result.isError, false);
+        assert.equal(result.status, 'timeout');
+        assert.match(result.content[0].text, /no response/i);
+        assert.ok(result.url, 'timeout result must still carry the board URL to recover the tab');
+      }
+      assert.deepEqual(silent.posts.map(p => [Boolean(p.boardId), p.movingDeadline]), [[false, true], [true, true]],
+        'the thread-creating post and the push into the board both declare that the wait follows the stored deadline');
+    } finally {
+      timeoutClient.close();
+      silent.close();
+    }
+  });
+
+  await check('a Claude Code shim\'s timeout packet names the answer watch on its round, on the shim\'s cap and the daemon\'s, and the command as named collects a late Send; a Codex shim\'s names none (ADR 146)', async () => {
+    const watchCommand = (atPort, { board, round }) =>
+      `CLAUDE_BOARD_PORT=${atPort} node ${shellQuote(path.join(repoRoot, 'bin', 'watch.mjs'))} --board ${board} --round ${round}`;
+    const clients = {
+      'Claude Code': {},
+      'a Claude Code background session': { CLAUDE_BOARD_CLIENT: 'background' },
+      Codex: { CLAUDE_CODE_ENTRYPOINT: undefined, CLAUDE_BOARD_CLIENT: 'codex' },
+    };
+    const timedOut = async (env, title) => {
+      const shim = spawnShim({ ...baseEnv, ...env });
+      try {
+        const res = await withTimeout(shim.request('tools/call', { name: 'ask', arguments: { title, blocks: [QUESTION] } }),
+          5000, `timed out after 5000ms: "${title}" must end unanswered`);
+        assert.equal(res.result.status, 'timeout', `setup: ${title}`);
+        return res.result;
+      } finally {
+        shim.close();
+      }
+    };
+
+    // The shim's own cap: a daemon that reports no deadline and never answers the wait.
+    const silent = await startSilentWaitDaemon();
+    try {
+      for (const [client, env] of Object.entries(clients)) {
+        const result = await timedOut({ ...env, CLAUDE_BOARD_PORT: String(silent.port), CLAUDE_BOARD_TIMEOUT_MS: '150' }, `${client}, shim cap`);
+        if (client === 'Codex') {
+          assert.equal('watch' in result, false, 'a Codex packet names no watch: nothing wakes a Codex session when a call ends');
+          assert.doesNotMatch(result.content[0].text, /watch\.mjs/);
+        } else {
+          assert.equal(result.watch, watchCommand(silent.port, result), `${client}, shim cap`);
+          // Claims no duration, since the ceiling may be what ended it, and states the watch's
+          // poll and bound as bin/watch.mjs holds them.
+          assert.equal(result.content[0].text,
+            `No response before the round's wait ran out. Explicit no-response, not a hang. Board is still open at ` +
+            `${result.url} — reopen it or post a fresh round to continue.\nAnswer watch: run \`${result.watch}\` as one ` +
+            `background call, then end the turn. It checks every ${WATCH_INTERVAL_MS / 1000} s for ` +
+            `${WAIT_CEILING_MS / 3_600_000} hours and exits once this round is sent, printing its answers; act on them ` +
+            `once, as this round's.`, `${client}: the text names the command too`);
+        }
+      }
+    } finally {
+      silent.close();
+    }
+
+    // The daemon's cap: the in-process daemon's own timeout packet, on a 300 ms wait.
+    await withEnv({ CLAUDE_BOARD_TIMEOUT_MS: '300' }, async () => {
+      const results = {};
+      for (const [client, env] of Object.entries(clients)) {
+        results[client] = await timedOut({ ...env, CLAUDE_BOARD_TIMEOUT_MS: '300' }, `${client}, daemon cap`);
+        assert.equal(results[client].answers[0].status, 'unanswered', `setup: ${client} holds the daemon's own packet`);
+      }
+      assert.equal('watch' in results.Codex, false);
+      for (const client of ['Claude Code', 'a Claude Code background session']) {
+        assert.equal(results[client].watch, watchCommand(port, results[client]), `${client}, daemon cap`);
+        assert.ok(results[client].content[0].text.includes(results[client].watch));
+      }
+
+      // Run as a session's background call runs it: through a shell, from anywhere.
+      const { board } = results['Claude Code'];
+      const watcher = spawn('/bin/sh', ['-c', results['Claude Code'].watch], {
+        cwd: tempHome('watch-cwd'),
+        env: { ...process.env, CLAUDE_BOARD_WATCH_INTERVAL_MS: '100' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let out = '';
+      watcher.stdout.on('data', c => { out += c; });
+      const exited = new Promise(resolve => watcher.on('close', resolve));
+      try {
+        await sleep(300);
+        const sent = await fetch(`${base}/api/board/${board}/submit`, {
+          method: 'POST',
+          headers: writeHeaders(SECRET),
+          body: JSON.stringify({ round: 1, action: 'send', answers: [{ id: 'q1', status: 'answered', choice: 'No', note: 'late' }], comments: [] }),
+        });
+        assert.equal(sent.status, 200, 'setup: the late Send lands');
+        assert.equal(await withTimeout(exited, 5000, 'timed out after 5000ms: the watch must end on the Send'), 0);
+        assert.deepEqual(JSON.parse(out).answers.map(a => [a.round, a.choice, a.note]), [[1, 'No', 'late']]);
+      } finally {
+        watcher.kill('SIGKILL');
+      }
     });
-    const elapsed = Date.now() - start;
+  });
 
-    assert.ok(elapsed < 5000, `timeout must return promptly, took ${elapsed}ms`);
-    const result = res.result;
-    assert.equal(result.isError, false);
-    assert.equal(result.status, 'timeout');
-    assert.match(result.content[0].text, /no response/i);
-    assert.ok(result.url, 'timeout result must still carry the board URL to recover the tab');
+  await check('a report during the wait moves the round\'s deadline and the shim follows it: the call ends at the moved deadline with the daemon\'s timeout packet, progress running throughout', async () => {
+    await withEnv({ CLAUDE_BOARD_TIMEOUT_MS: '3000' }, async () => {
+      const knownIds = listBoardIds(home);
+      const movingClient = spawnShim({ ...baseEnv, CLAUDE_BOARD_TIMEOUT_MS: '3000', CLAUDE_BOARD_PROGRESS_MS: '200' });
+      try {
+        const start = Date.now();
+        const call = movingClient.request('tools/call', {
+          name: 'ask',
+          arguments: { title: 'Moving deadline', blocks: [QUESTION] },
+          _meta: { progressToken: 'tok-moving' },
+        });
+        const boardId = await waitForNewBoardFile(home, knownIds, 5000);
+        const minted = JSON.parse(readFileSync(path.join(home, 'boards', `${boardId}.json`), 'utf8')).rounds[0];
+        assert.equal(minted.movingDeadline, true, 'setup: the shim declared it, so the round may move');
+        await sleep(Math.max(0, Date.parse(minted.postedAt) + 1000 - Date.now()));
+        const report = await fetch(`${base}/api/board/${boardId}/activity`, {
+          method: 'POST', headers: writeHeaders(SECRET), body: JSON.stringify({ round: 1 }),
+        }).then(r => r.json());
+        assert.equal(report.moved, true, 'setup: the report lands inside the minted wait');
+        const moved = Date.parse(report.awaitDeadline);
+        assert.ok(moved > Date.parse(minted.awaitDeadline), 'setup: the deadline moved later');
 
-    timeoutClient.close();
+        const res = await withTimeout(call, 10000, 'timed out after 10000ms: the call must end at the moved deadline');
+        const endedAt = Date.now();
+        const result = res.result;
+        assert.equal(result.status, 'timeout');
+        assert.ok(endedAt >= moved, `the call outlives the minted deadline and ends at the moved one: ${moved - endedAt}ms early`);
+        assert.equal(result.answers.length, 1, 'the daemon\'s own timeout packet, carrying the unanswered question, not the shim cutting the wait');
+        assert.equal(result.answers[0].status, 'unanswered');
+
+        const progress = movingClient.notifications
+          .filter(n => n.method === 'notifications/progress' && n.params.progressToken === 'tok-moving')
+          .map(n => n.params);
+        const mintedAt = Date.parse(minted.awaitDeadline) - start;
+        assert.ok(progress.some(p => p.progress > mintedAt), 'progress goes on past the minted deadline');
+        assert.ok(progress[progress.length - 1].total > progress[0].total, `the progress total follows the moved deadline: ${progress[0].total} -> ${progress[progress.length - 1].total}`);
+      } finally {
+        movingClient.close();
+      }
+    });
+  });
+
+  await check('a wait whose deadline the reviewer moved past the shim\'s start plus the ceiling ends on the daemon\'s timeout packet, carrying the unanswered question, not an empty one of the shim\'s', async () => {
+    // The daemon's ceiling starts at its /wait entry, after the shim's start, so the shim
+    // has to outlive it by its grace for the daemon's packet to be the one that arrives. A
+    // 40 s wait under a 3 s ceiling: the moved deadline stands far past the ceiling, and
+    // the grace (5% of the wait) is 2 s, which no runner's poll lag eats. A minute's
+    // minimum move scales to 1 s on that wait, which a report 1.5 s in clears.
+    const env = { CLAUDE_BOARD_TIMEOUT_MS: '40000', CLAUDE_BOARD_WAIT_CEILING_MS: '3000', CLAUDE_BOARD_ACTIVITY_MIN_MS: '50' };
+    await withEnv(env, async () => {
+      const knownIds = listBoardIds(home);
+      const ceilingClient = spawnShim({ ...baseEnv, ...env });
+      try {
+        const start = Date.now();
+        const call = ceilingClient.request('tools/call', { name: 'ask', arguments: { title: 'Ceiling', blocks: [QUESTION] } });
+        const boardId = await waitForNewBoardFile(home, knownIds, 5000);
+        const minted = JSON.parse(readFileSync(path.join(home, 'boards', `${boardId}.json`), 'utf8')).rounds[0];
+        await sleep(Math.max(0, Date.parse(minted.postedAt) + 1500 - Date.now()));
+        const report = await fetch(`${base}/api/board/${boardId}/activity`, {
+          method: 'POST', headers: writeHeaders(SECRET), body: JSON.stringify({ round: 1 }),
+        }).then(r => r.json());
+        assert.equal(report.moved, true, 'setup: the report lands inside the wait and moves the deadline');
+
+        const res = await withTimeout(call, 15000, 'timed out after 15000ms: the call must end at the ceiling');
+        const endedAt = Date.now();
+        const result = res.result;
+        assert.equal(result.status, 'timeout');
+        assert.ok(endedAt - start >= 3000, `not before the ceiling: ${endedAt - start}ms`);
+        assert.ok(Date.parse(report.awaitDeadline) > endedAt,
+          `setup: the moved deadline stands past the ceiling (${Date.parse(report.awaitDeadline) - endedAt}ms ahead)`);
+        assert.deepEqual(result.answers.map(a => a.status), ['unanswered'],
+          'the daemon\'s own timeout packet, carrying the unanswered question, not the shim cutting the wait');
+      } finally {
+        ceilingClient.close();
+      }
+    });
   });
 
   // --- unreachable daemon: names the revive command, writes nothing ------

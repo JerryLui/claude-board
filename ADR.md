@@ -42,7 +42,7 @@ link where it is worth reading.
 | 44 | ["A page board is never sent" is a browser rule, not a daemon rule](.agents/adr/0044-page-board-is-never-sent-is-a-browser.md) | 2026-08-07 | narrowed by 45 |
 | 45 | [A page board may be awaited, and the caller declares it](.agents/adr/0045-page-board-may-be-awaited-and-the-caller.md) | 2026-08-07 | narrows 35 and 44; completed by 50 |
 | 46 | [Commenting exists only where someone is waiting](.agents/adr/0046-commenting-exists-only-where-someone-is-waiting.md) | 2026-08-07 | narrows 35; widened by 98, 101 |
-| 47 | [The wait is 40 minutes, for every round, and the page shows what is left](.agents/adr/0047-wait-is-40-minutes-for-every-round-and.md) | 2026-08-07 | accepted |
+| 47 | [The wait is 40 minutes, for every round, and the page shows what is left](.agents/adr/0047-wait-is-40-minutes-for-every-round-and.md) | 2026-08-07 | narrowed by 145, 146 |
 | 50 | [A wait that dies is recorded on the round](.agents/adr/0050-wait-that-dies-is-recorded-on-the-round.md) | 2026-08-08 | completes 45 |
 | 55 | [A stranded round is announced, not opened onto](.agents/adr/0055-stranded-round-is-announced-not-opened-onto.md) | 2026-08-09 | narrows 4; widened by 58; narrowed by 74; narrowed by 91; widened by 92 |
 | 56 | [The launcher may compose a notification body, behind a filter](.agents/adr/0056-launcher-may-compose-a-notification-body-behind-a.md) | 2026-08-09 | narrows 19; widened by 128 |
@@ -93,7 +93,7 @@ link where it is worth reading.
 | 104 | [A shape change reloads the page; values patch in place](.agents/adr/0104-a-shape-change-reloads-values-patch-in-place.md) | 2026-08-12 | relates to 103 |
 | 105 | [The pomodoro ships off](.agents/adr/0105-the-pomodoro-ships-off.md) | 2026-08-12 | narrows 103; relates to 68, 84, 90 |
 | 106 | [Off silences even a Suppressed board's Banner](.agents/adr/0106-off-silences-even-a-suppressed-boards-banner.md) | 2026-08-14 | narrows 92 |
-| 107 | [Answers a packet never carried ride the next packet](.agents/adr/0107-answers-a-packet-never-carried-ride-the-next-packet.md) | 2026-08-17 | widens 35; relates to 50, 115 |
+| 107 | [Answers a packet never carried ride the next packet](.agents/adr/0107-answers-a-packet-never-carried-ride-the-next-packet.md) | 2026-08-17 | widens 35; relates to 50, 115; widened by 146 |
 | 108 | [The board lends its engine to a marked stage](.agents/adr/0108-the-board-lends-its-engine-to-a-marked-stage.md) | 2026-08-19 | widens 95; relates to 70 |
 | 109 | [The positions payload is answered in frame viewport coordinates](.agents/adr/0109-positions-are-answered-in-frame-viewport-coordinates.md) | 2026-08-20 | relates to 99 |
 | 110 | [A question's context is one panel, and long prose folds](.agents/adr/0110-a-questions-context-is-one-panel-and-long-prose-folds.md) | 2026-09-03 | widens 26; relates to 28, 111; widened by 119; amended by 133 |
@@ -117,15 +117,18 @@ link where it is worth reading.
 | 128 | [Mission changes speak once a minute, from a read-only watch](.agents/adr/0128-mission-changes-speak-once-a-minute-from-a-read-only-watch.md) | 2026-10-28 | widens 56; relates to 71, 72, 94, 106; amended by 130 |
 | 129 | [A mission's session is live while bound and not gone](.agents/adr/0129-a-missions-session-is-live-while-bound-and-not-gone.md) | 2026-10-28 | relates to 123, 125; amended by 140, 141 |
 | 130 | [A mission's last state is released, and landed records migrate](.agents/adr/0130-a-missions-last-state-is-released.md) | 2026-10-28 | amends 123, 128; relates to 124, 129 |
-| 131 | [Sessions reach the board over a route, held in memory](.agents/adr/0131-sessions-reach-the-board-over-a-route-held-in-memory.md) | 2026-10-29 | relates to 5, 123, 125, 128, 129; amended by 141 |
+| 131 | [Sessions reach the board over a route, held in memory](.agents/adr/0131-sessions-reach-the-board-over-a-route-held-in-memory.md) | 2026-10-29 | relates to 5, 123, 125, 128, 129; amended by 141, 147 |
 | 132 | [Any block may carry card fields](.agents/adr/0132-any-block-may-carry-card-fields.md) | 2026-10-29 | relates to 133 |
 | 133 | [Every block is a titled card, with no type caption](.agents/adr/0133-every-block-is-a-titled-card-with-no-type-caption.md) | 2026-10-29 | amends 110; relates to 28, 132 |
 | 134 | [Send covers the page on screen, and needs you reads a board's newest asking round](.agents/adr/0134-send-covers-the-page-on-screen.md) | 2026-10-29 | narrows 123, 125; relates to 42, 114 |
 | 137 | [Mission cards are as tall as their text, and Boards is one grouped list](.agents/adr/0137-mission-cards-as-tall-as-their-text-and-boards-one-grouped-list.md) | 2026-10-29 | replaces 135; amends 124; relates to 123, 125, 133; narrowed by 142 |
 | 138 | [Round pages are one centred 1100px column, in Linear's card density](.agents/adr/0138-round-pages-one-centred-1100px-column-in-linear-card-density.md) | 2026-10-29 | replaces 136; narrows 121, 122; relates to 26, 110, 120, 133, 137 |
 | 139 | [Inter is bundled, and "no web fonts and no external assets" narrows to "no external assets"](.agents/adr/0139-inter-is-bundled-no-external-assets-only.md) | 2026-10-29 | relates to 62, 70, 95, 137, 138 |
-| 140 | [A mission card reads from facts: an open round ahead of stalled, PR states from GitHub, a gone session said](.agents/adr/0140-a-mission-card-reads-from-facts.md) | 2026-10-30 | amends 123, 129; relates to 125, 128, 134 |
+| 140 | [A mission card reads from facts: an open round ahead of stalled, PR states from GitHub, a gone session said](.agents/adr/0140-a-mission-card-reads-from-facts.md) | 2026-10-30 | amends 123, 129; relates to 125, 128, 134; amended by 147 |
 | 141 | [A session joins its mission by its own id, one at a time, and takes the PM's orders](.agents/adr/0141-a-session-joins-its-mission-by-its-own-id.md) | 2026-10-30 | amends 123, 129, 131; relates to 125, 126 |
 | 142 | [A card's Merge opens the brief at its merge question, and answers nothing](.agents/adr/0142-a-cards-merge-opens-the-brief-at-its-merge-question.md) | 2026-10-30 | narrows 125, 137; relates to 134 |
 | 143 | [A reinstall fails on a refused read under ~/Documents, after registering](.agents/adr/0143-a-reinstall-fails-on-a-refused-read-under-documents.md) | 2026-10-30 | relates to 15, 100 |
 | 144 | [A browser shares one stream, and its tabs are Watchers by beats](.agents/adr/0144-a-browser-shares-one-stream-and-beats-for-its-tabs.md) | 2026-11-02 | relates to 55, 58, 73, 87 |
+| 145 | [The reviewer's activity restarts the wait, for a shim that follows the stored deadline](.agents/adr/0145-the-reviewers-activity-restarts-the-wait.md) | 2026-11-04 | narrows 47; relates to 50, 57, 74, 144 |
+| 146 | [A Claude Code session whose wait ended keeps an answer watch on the round, and the watch spends it](.agents/adr/0146-a-timed-out-round-keeps-an-answer-watch-that-spends-it.md) | 2026-11-04 | narrows 47; widens 107; relates to 115, 145 |
+| 147 | [A retired mission asks nothing and leaves the lists once its work is done; a blocked job its mission moved on from is no card](.agents/adr/0147-a-retired-mission-asks-nothing-and-a-left-behind-job-is-no-card.md) | 2026-11-04 | amends 131, 140; relates to 123, 128, 141 |

@@ -7,13 +7,15 @@
 // every field a caller may write is on `MISSION_FIELDS`, typed and capped below, and
 // anything else is refused rather than stored.
 //
-// What a reader sees is a view, derived on every read and never stored: a mission whose
-// board's newest round still waits on an answer reads needs-you, ahead of everything but
-// released; else a session whose process is gone, a reservation no process bound within
-// `UNBOUND_GRACE_MS`, or a working one silent past `STALL_SILENCE_MS`, reads stalled, and a
-// gone one also carries `gone: { lastSeenAt }`. A session the session watcher's latest
-// snapshot lists counts as heard from at the snapshot's time (ADR 36), and one it lists after
-// a `/clear` or a resume no launch made carries `rejoin: { reason, since, id }`. A PR's state
+// What a reader sees is a view, derived on every read and never stored: a released mission
+// reads released, and a retired one (its `retiredAt` set) waiting, no list showing it once
+// its PRs are merged or closed and no release step waits (ADR 147); else a mission whose
+// board's newest round still waits on an answer reads needs-you; else a session whose process is
+// gone, a reservation no process bound within `UNBOUND_GRACE_MS`, or a working one silent
+// past `STALL_SILENCE_MS`, reads stalled, and a gone one also carries `gone: { lastSeenAt }`.
+// A session the session watcher's latest snapshot lists counts as heard from at the
+// snapshot's time (ADR 36), and one it lists after a `/clear` or a resume no launch made
+// carries `rejoin: { reason, since, id }`. A PR's state
 // and head commit are the facts the session watcher read from GitHub (`recordPrFacts`),
 // never the session's own words. The derivation needs the board store, a process table and
 // that snapshot, which is why it is computed here and not written by whoever last touched
@@ -28,8 +30,11 @@ export { SAFE_MISSION_KEY, assertMissionKey, MISSION_RETENTION_MS };
 
 export const PHASES = ['grill', 'direct', 'landing'];
 export const STORED_STATES = ['needs-you', 'working', 'waiting', 'queued', 'released'];
-/** A PR's state as the session watcher reads it from GitHub at the PR's head commit. */
-export const PR_STATES = ['draft', 'open', 'green', 'red', 'merged'];
+/** A PR's state as the session watcher reads it from GitHub at the PR's head commit,
+ * `closed` being one closed without merging. */
+export const PR_STATES = ['draft', 'open', 'green', 'red', 'merged', 'closed'];
+/** The states that end a PR: neither is open work (ADR 147). */
+const PR_ENDED = ['merged', 'closed'];
 /** A listed PR's state in the view before the first fact for it arrives. */
 export const PR_CHECKING = 'checking';
 /** What an order asks: a card's Stop or comment (`CARD_ORDER_KINDS`, the only kinds a card or
@@ -409,18 +414,38 @@ export function missionActions(m, { home = boardHome() } = {}) {
   return actionsOf(linkedBoards(m, home));
 }
 
+/** `m` carries a retired time: its `retiredAt` parses (ADR 147). */
+function isRetired(m) {
+  return Number.isFinite(Date.parse(m.retiredAt));
+}
+
+/** Work still open on `m`: a PR it lists that GitHub has read neither merged nor closed, a
+ * PR with no fact yet counting as open, or a release step waiting, its `next` naming one
+ * (`release: ...`).
+ * What it last waited on is not open work: a stale `waitingOn` is what made a retired
+ * mission read as asking (ADR 147). */
+function hasOpenWork(m) {
+  const ended = new Set((m.prFacts || []).filter(f => PR_ENDED.includes(f.state)).map(prKey));
+  return (m.prs || []).some(pr => !ended.has(prKey(pr))) || (typeof m.next === 'string' && m.next.startsWith('release:'));
+}
+
 function viewState(m, linked, now, isAlive, listed) {
   if (m.state === 'released') return 'released';
+  // A retired mission asks nothing and is expected to stop, whatever its rounds or its
+  // session do: it waits on its open work, if any (ADR 147).
+  if (isRetired(m)) return 'waiting';
   if (boardsNeedYou(linked())) return 'needs-you';
   if (sessionStalled(m, now, isAlive, listed)) return 'stalled';
   return m.state;
 }
 
 /** `{ lastSeenAt }` while the session bound or reserved on `m` is gone (`sessionGone`) and
- * the mission has not recorded its end, `lastSeenAt` being its last heartbeat; else null. */
+ * the mission has neither recorded its end nor retired, `lastSeenAt` being its last
+ * heartbeat; else null. A retired mission's session is expected to stop, as a finished
+ * one's is, so its card never says it went (ADR 147). */
 function goneOf(m, now, isAlive, listed) {
   const s = currentSession(m);
-  if (!s || sessionFinished(m) || !sessionGone(s, now, isAlive, listingOf(s, listed))) return null;
+  if (!s || sessionFinished(m) || isRetired(m) || !sessionGone(s, now, isAlive, listingOf(s, listed))) return null;
   return { lastSeenAt: s.seenAt ?? s.startedAt ?? null };
 }
 
@@ -467,16 +492,18 @@ function aliveOnce(isAlive) {
   };
 }
 
-/** The column `m` shows in: released stays released; then a board's round waiting on the
- * PM, whatever its session is doing; then a stalled session; else the stored state. */
+/** The column `m` shows in: released stays released; a retired mission waits; then a
+ * board's round waiting on the PM, whatever its session is doing; then a stalled session;
+ * else the stored state. */
 export function deriveState(m, { home = boardHome(), now = Date.now(), isAlive = pidAlive, listed = null } = {}) {
   return viewState(m, () => linkedBoards(m, home), now, isAlive, listed);
 }
 
 /** The record as a reader gets it: every stored field, `prs` with each PR's facts
- * (`prsOf`), plus `view` (the derived state), `gone` (`goneOf`), `live` (a session holds
- * the mission, `hasLiveSession`), `listedAt` (the time of the snapshot that lists its bound
- * session, the heard-from time beside its own `session.seenAt`, else null), `rejoin`
+ * (`prsOf`), plus `view` (the derived state), `retired` (its `retiredAt` parses), `gone`
+ * (`goneOf`), `live` (a session holds the mission, `hasLiveSession`), `listedAt` (the time
+ * of the snapshot that lists its bound session, the heard-from time beside its own
+ * `session.seenAt`, else null), `rejoin`
  * (`rejoinOf`) and `actions` (`missionActions`). `listed` is the session watcher's latest
  * snapshot, null while it reads down: then only heartbeats count, as before it. */
 export function missionView(m, { home = boardHome(), now = Date.now(), isAlive = pidAlive, listed = null } = {}) {
@@ -487,6 +514,7 @@ export function missionView(m, { home = boardHome(), now = Date.now(), isAlive =
     ...m,
     prs: prsOf(m),
     view: viewState(m, () => linked, now, alive, listed),
+    retired: isRetired(m),
     gone: goneOf(m, now, alive, listed),
     live: hasLiveSession(m, now, alive, listed),
     listedAt: listing ? iso(listing.at) : null,
@@ -495,13 +523,16 @@ export function missionView(m, { home = boardHome(), now = Date.now(), isAlive =
   };
 }
 
+/** The launch caps' counts: the missions a live session holds, and those of them working. */
 function liveCounts(views) {
   const live = { working: 0, alive: 0 };
   for (const v of views) {
     if (!v.live) continue;
     live.alive += 1;
-    // A live session reading stalled is one silent while working: it still works.
-    if (v.view === 'working' || v.view === 'stalled') live.working += 1;
+    // The stored state, not the view: a live session stored working still works when it
+    // reads stalled (silent) or waiting (retired, ADR 147). One whose round waits on the PM
+    // holds no working slot.
+    if (v.state === 'working' && v.view !== 'needs-you') live.working += 1;
   }
   return live;
 }
@@ -514,11 +545,13 @@ function releasedLongAgo(m, now) {
 
 /** `GET /api/missions`: the views, newest change first, with per-column counts over the
  * missions listed and `live` counts over every mission. A released mission is listed until
- * `RELEASED_VISIBLE_MS` after it was released, or always with `all`. `records` are the
- * stored records when the caller has read them already (src/missions-cache.mjs). */
+ * `RELEASED_VISIBLE_MS` after it was released, or always with `all`. A retired mission with
+ * no open work is never listed, `all` or not (ADR 147): only a read by key answers it.
+ * `records` are the stored records when the caller has read them already
+ * (src/missions-cache.mjs). */
 export function missionsOverview({ home = boardHome(), now = Date.now(), all = false, isAlive = pidAlive, records = null, listed = null } = {}) {
   const views = (records ?? listMissions(home)).map(m => missionView(m, { home, now, isAlive, listed }));
-  const missions = (all ? views : views.filter(v => !releasedLongAgo(v, now)))
+  const missions = views.filter(v => !(v.retired && !hasOpenWork(v)) && (all || !releasedLongAgo(v, now)))
     .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
   const counts = { needsYou: 0, working: 0, waiting: 0, stalled: 0, released: 0, queued: 0 };
   for (const v of missions) counts[v.view === 'needs-you' ? 'needsYou' : v.view] += 1;
@@ -743,6 +776,20 @@ export function endedHere(m, ref) {
 export function boundTo(m, ref) {
   const s = m && currentSession(m);
   return !!s && !isReservation(s) && sessionMatches(s, ref);
+}
+
+/** The session ids `m` records, its session's and the one it names as ended, left or not,
+ * that it has moved on from: every one once it is released, else each but the id bound now
+ * while another id holds it (ADR 147). A launch's bare reservation is no other session yet
+ * (`mission-launch --resume <id>` reserves before that id binds again), so with it, with no
+ * session now (one left, or a launch queued) or with one bound by its pid alone, none. */
+export function sessionsMovedOn(m) {
+  const s = m && m.session;
+  if (!s || typeof s !== 'object') return [];
+  const ids = [s.id, s.ended?.id].filter(id => typeof id === 'string' && id);
+  if (m.state === 'released') return ids;
+  const current = currentSession(m);
+  return current?.id != null ? ids.filter(id => id !== current.id) : [];
 }
 
 /** `ref` is the session `ended` names resumed in a new process, not that process lingering:

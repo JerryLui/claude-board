@@ -228,6 +228,30 @@ for (const [rule, { patterns }] of Object.entries(ROUND_RULES)) {
   check(`the manual states that ${rule}`, () => statesAll(patterns)(prose));
 }
 
+// --- a wait that ends unanswered (ADR 146) -----------------------------------------------
+// The shim's timeout text names the watch's command; what a session does with it, and with
+// the late answer it wakes on, is written here and nowhere else.
+const TIMEOUT_RULES = {
+  'a timed-out round is watched by one background call': {
+    patterns: [/run that command as one background call and end the turn/i],
+    lost: ['the watch rule', /run that command as one background call/g],
+  },
+  'a late answer is acted on once, as its round\'s': {
+    patterns: [
+      /act on its answers and comments once, as that round's/i,
+      /skip it when `delivered` is `true` or you already acted on that round/i,
+    ],
+    lost: ['the once rule', /once, as that round's/g],
+  },
+  'a late pick against built work goes to the user, undoing nothing': {
+    patterns: [/a late pick that differs from a default already built, fired or merged goes to the user as a question: undo nothing on your own/i],
+    lost: ['the late-pick rule', /goes to the user as a question/g],
+  },
+};
+for (const [rule, { patterns }] of Object.entries(TIMEOUT_RULES)) {
+  check(`the manual states that ${rule}`, () => statesAll(patterns)(prose));
+}
+
 // --- the boundary, and the one rule guarding it -----------------------------------
 // ADR 69: `fresh` is checked by the generic battery above (it is a real schema argument,
 // so the manual has to name it), but WHEN to pass it cannot be. Nothing can detect a
@@ -326,7 +350,7 @@ check('the commenting-rule absence check fails if PROTOCOL.md regains the old cl
   fails(promisesNoWiderRule, protocol.replace(marker,
     "so every option's whole-block comment button still works regardless of kind (it\nrenders in the parent document, not the iframe)."));
 });
-for (const [kind, rules] of [['artifact', ARTIFACT_RULES], ['round', ROUND_RULES]]) {
+for (const [kind, rules] of [['artifact', ARTIFACT_RULES], ['round', ROUND_RULES], ['timeout', TIMEOUT_RULES]]) {
   for (const { patterns, lost: [what, pattern] } of Object.values(rules)) {
     check(`the ${kind}-rule checks fail on prose that lost ${what}`, () => {
       fails(statesAll(patterns), drifted(pattern));

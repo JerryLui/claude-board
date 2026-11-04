@@ -48,6 +48,7 @@ import {
   roundPageLabel, roundNumberLabel, isPageRound, roundHasCommentable,
   questionBlocks, roundIsAwaited,
   roundIsAwaitedOpen, roundIsCurrentlyAwaited, roundCountdownText, pageBoardPillMeta,
+  roundDeadlineMoves,
   ROUND_COUNTDOWN_TITLE, PILL_READONLY_TITLE, ROUND_OPEN_UNAWAITED_TITLE, PILL_SUBMITTED_TITLE,
   PAGE_SEND_EXPIRED_LABEL, PAGE_SEND_EXPIRED_TITLE, ANSWER_CHIP_LABEL,
 } from './badge.mjs';
@@ -62,6 +63,7 @@ import { palettes } from './styles.mjs';
 // src/assets.mjs import the name from there rather than from each other.
 import { MERMAID_ASSET } from './vendor/mermaid/index.mjs';
 import { openSharedStream, STREAM_WORKER_URL } from './stream-worker.mjs';
+import { activityMinMs } from './activity.mjs';
 
 // Mermaid variable -> CSS token, read at call time from the live computed style
 // rather than hardcoded a second time in the client script below. 'background'
@@ -298,8 +300,9 @@ export const ui = `
   // does, since every line here runs synchronously at IIFE start). Real
   // functions, not a hand-written twin: badge.mjs's own header comment is what
   // explains why only THIS file may ever call roundIsCurrentlyAwaited/
-  // roundCountdownText/pageBoardPillMeta with a real clock -- src/render.mjs
-  // never does, so a rendered page stays a pure function of its board JSON.
+  // roundCountdownText/pageBoardPillMeta/roundDeadlineMoves with a real clock --
+  // src/render.mjs never does, so a rendered page stays a pure function of its
+  // board JSON.
   var ROUND_COUNTDOWN_TITLE = ${JSON.stringify(ROUND_COUNTDOWN_TITLE)};
   var PILL_READONLY_TITLE = ${JSON.stringify(PILL_READONLY_TITLE)};
   var ROUND_OPEN_UNAWAITED_TITLE = ${JSON.stringify(ROUND_OPEN_UNAWAITED_TITLE)};
@@ -310,6 +313,10 @@ export const ui = `
   var roundIsCurrentlyAwaited = ${roundIsCurrentlyAwaited.toString()};
   var roundCountdownText = ${roundCountdownText.toString()};
   var pageBoardPillMeta = ${pageBoardPillMeta.toString()};
+  // ADR 145: the same gate the daemon's activity route applies, spliced here
+  // rather than hand-copied so the page and the route can never quietly
+  // disagree about which rounds take an activity report.
+  var roundDeadlineMoves = ${roundDeadlineMoves.toString()};
 
   function seedAnswers(blockIds, boardData) {
     blockIds.forEach(function (id) {
@@ -3837,6 +3844,7 @@ export const ui = `
       c.classList.toggle('selected', c === card);
     });
     updateQuestionsLeftPill();
+    reportActivity(card);
   }
 
   // --- the fold: a long prose item is clipped with a Show more control ---------
@@ -3916,6 +3924,7 @@ export const ui = `
         b.classList.toggle('selected', b === btn);
       });
       updateQuestionsLeftPill();
+      reportActivity(btn);
     });
   });
 
@@ -3936,6 +3945,7 @@ export const ui = `
       selections[qid] = arr;
       btn.classList.toggle('selected', idx === -1);
       updateQuestionsLeftPill();
+      reportActivity(btn);
     });
   });
 
@@ -4003,6 +4013,7 @@ export const ui = `
       if (readonly) return;
       selections[qid] = ta.value;
       updateQuestionsLeftPill();
+      reportActivity(ta);
     });
   });
 
@@ -4041,6 +4052,7 @@ export const ui = `
       selections[qid] = rankOrder(list);
       renumberRankList(list);
       updateQuestionsLeftPill();
+      reportActivity(list);
     });
     list.addEventListener('dragover', function (ev) {
       if (readonly || !dragging) return;
@@ -4061,6 +4073,7 @@ export const ui = `
     ta.addEventListener('input', function () {
       if (readonly) return;
       notes[qid] = ta.value;
+      reportActivity(ta);
     });
   });
 
@@ -4081,6 +4094,7 @@ export const ui = `
       deferred[qid] = !deferred[qid];
       btn.classList.toggle('active', !!deferred[qid]);
       updateQuestionsLeftPill();
+      reportActivity(btn);
     });
   });
 
@@ -4146,6 +4160,7 @@ export const ui = `
       } else {
         pendingComments.push({ id: nextPendingId++, blockId: blockId, anchor: anchor, text: text });
       }
+      reportActivity(form);
       // The whole layer is re-rendered rather than one pin appended, so the
       // provisional numbers stay consistent as more comments queue up behind this
       // one; refreshPins rebuilds the list entries the same way, so editing in
@@ -5813,7 +5828,7 @@ export const ui = `
     fetch('/api/board/' + boardId + '/submit', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ action: action, round: currentRound, answers: answers, comments: comments }),
+      body: JSON.stringify({ action: action, round: currentRound, answers: answers, comments: comments, stages: 'held' }),
     }).then(function (r) {
       // 409 is not an error: it means this round was already sent (a second tab,
       // or a double click that beat the disable). The right response is the same
@@ -5853,6 +5868,7 @@ export const ui = `
       // rather than joined by the server-numbered copies of the same comments.
       // A comment that stayed behind keeps its provisional pin.
       pendingComments = pendingComments.filter(function (c) { return comments.indexOf(c) === -1; });
+      applyOwnSend(result);
       refreshPins(document);
       clearPendingMark();
       if (sendStatus) {
@@ -5866,6 +5882,21 @@ export const ui = `
       // unless a flip mid-flight left a page Send cannot answer on screen.
       setSendBarEnabled(currentPageSendable());
     });
+  }
+
+  /** The tab that sent closes its round from its own Send's answer: 'stages: held' in
+   * the body asks the daemon to answer with the 'submitted' push this tab's stream
+   * carries, which a browser whose stream worker ended never delivers (ADR 144), so
+   * without it the sending tab showed its round open until the worker came back, two
+   * beats on. Applied only while this tab still has the round unsent: whatever told it
+   * otherwise (the push, a catch-up) came after the Send, so its board is the newer.
+   * An answer carrying no round (a daemon from before) leaves the push to close it. */
+  function applyOwnSend(result) {
+    var sent = result && result.submitted;
+    if (!sent || !sent.board || typeof sent.round !== 'number') return;
+    var round = roundEntry(sent.round);
+    if (round && round.status === 'sent') return;
+    applySubmittedPush(sent);
   }
 
   if (sendBtn) {
@@ -5966,7 +5997,7 @@ export const ui = `
     fetch('/api/board/' + boardId + '/submit', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ action: action, round: roundN, answers: [], comments: mine }),
+      body: JSON.stringify({ action: action, round: roundN, answers: [], comments: mine, stages: 'held' }),
     }).then(function (r) {
       // 409: already sent, by another tab or a double click that beat the
       // disable above -- not an error, and the live 'submitted' push (already
@@ -5978,6 +6009,7 @@ export const ui = `
     }).then(function (result) {
       if (result && result.alreadySent) return;
       pendingComments = pendingComments.filter(function (c) { return c.blockId !== blockId; });
+      applyOwnSend(result);
       refreshPins(document);
       clearPendingMark();
     }).catch(function () {
@@ -6526,6 +6558,88 @@ export const ui = `
   window.addEventListener('focus', function () { clearPendingMark(); reportAttended(); maybeJumpToStrandedRound(); });
   window.addEventListener('blur', function () { reportAttended(); });
 
+  // --- Activity report: the reviewer's work on a round restarts its wait -------
+  //
+  // ADR 145: a round posted by a shim that follows the moving deadline carries
+  // 'movingDeadline', and on such a round each pick, typed answer or note, and
+  // saved comment tells the daemon, which moves 'awaitDeadline' to a full wait
+  // from now. Only what the reviewer does ON the round counts, never focus,
+  // visibility or scroll: a focused tab left on a screen overnight would hold
+  // the session's wait for good, so none of the listeners above reports here.
+  //
+  // At most one report per round every ACTIVITY_GAP_MS: the first change sends
+  // at once, and a change inside the window books one report at its end, which
+  // carries every later change in it too (the daemon reads no payload but the
+  // round). The route refuses a report under ACTIVITY_MIN_MS after the last it
+  // took, the daemon's own value spliced in here (src/activity.mjs), so a
+  // daemon run with a longer one never refuses the report that carries a
+  // burst's last change; the margin is for a report that reaches the daemon
+  // faster than the one before it. A failed or refused report is dropped, not
+  // retried: the next change reports again.
+  var ACTIVITY_MIN_MS = ${JSON.stringify(activityMinMs())};
+  var ACTIVITY_GAP_MS = ACTIVITY_MIN_MS + 250;
+  var activitySentAt = {};
+  var activityBooked = {};
+
+  /** The round 'el' sits in, else the page on screen. */
+  function activityRound(el) {
+    var section = el && el.closest ? el.closest('.round') : null;
+    var n = section ? parseInt(section.getAttribute('data-round'), 10) : NaN;
+    return isFinite(n) ? n : currentRound;
+  }
+
+  /** roundDeadlineMoves (badge.mjs, ADR 145), the same gate the daemon's
+   * activity route applies: open, awaited, short of its deadline, and posted
+   * to follow the moving deadline. A round posted by an older shim keeps its
+   * fixed wait, so its page never reports. */
+  function roundTakesActivity(n) {
+    return roundDeadlineMoves(roundEntry(n), Date.now());
+  }
+
+  function reportActivity(el) {
+    if (readonly) return;
+    var n = activityRound(el);
+    if (!roundTakesActivity(n) || activityBooked[n]) return;
+    var wait = (activitySentAt[n] || 0) + ACTIVITY_GAP_MS - Date.now();
+    if (wait <= 0) {
+      sendActivity(n);
+      return;
+    }
+    activityBooked[n] = true;
+    var timer = setTimeout(function () {
+      activityBooked[n] = false;
+      if (roundTakesActivity(n)) sendActivity(n);
+    }, wait);
+    if (timer && typeof timer.unref === 'function') timer.unref();
+  }
+
+  function sendActivity(n) {
+    activitySentAt[n] = Date.now();
+    fetch('/api/board/' + boardId + '/activity', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ round: n }),
+    }).then(function (r) {
+      return r.ok ? r.json() : null;
+    }).then(function (result) {
+      // The reporting tab takes the new deadline off its own answer, so its
+      // countdown moves even when the 'deadline' event is slow or lost.
+      if (result) applyDeadline(result.round, result.awaitDeadline);
+    }).catch(function () { /* dropped: the next change reports again */ });
+  }
+
+  /** Takes a moved deadline into this tab's copy of the board and repaints the
+   * countdown from it. Forward only: a deadline moves later on every report,
+   * so an earlier one is an answer or an event overtaken by a newer one. */
+  function applyDeadline(n, deadline) {
+    var r = roundEntry(n);
+    var at = typeof deadline === 'string' ? Date.parse(deadline) : NaN;
+    if (!r || !isFinite(at)) return;
+    if (r.awaitDeadline && Date.parse(r.awaitDeadline) >= at) return;
+    r.awaitDeadline = deadline;
+    refreshAwaitDisplay();
+  }
+
   // --- SSE: a follow-up round pushes into this already-open tab ---------------
   //
   // "Open once, then badge" / "Always on under launchd":
@@ -6616,6 +6730,8 @@ export const ui = `
   // from "how many are outstanding" -- see resync() below.
   var resyncIssued = 0;
   var resyncNewest = 0;
+  // The rounds whose 'submitted' payload this tab has applied (applySubmittedPush).
+  var submittedApplied = {};
 
   // --- a push leaves a stage it does not change alone (ADR 122) -----------------
   //
@@ -7042,6 +7158,11 @@ export const ui = `
   }
 
   function applySubmittedPush(data) {
+    // A round is sent once (the daemon's 409), so its sent record is applied once: from
+    // this tab's own Send's answer (applyOwnSend) or its stream's push, whichever lands
+    // first, the two built from the one board.
+    if (submittedApplied[data.round]) return;
+    submittedApplied[data.round] = true;
     pushGeneration++; // see applyRoundPush above, and resync below
     lensClose(); // see applyRoundPush above
     stageLensClose();
@@ -7197,6 +7318,10 @@ export const ui = `
 
   function applyResync(fresh, doc) {
     var patch = computeBoardPatch(board, fresh);
+    // A deadline moved while this tab's stream was down (ADR 145): the snapshot
+    // is the only place this tab hears of it, and a patch that changes no block
+    // returns below without ever taking the fresh rounds.
+    (fresh.rounds || []).forEach(function (r) { applyDeadline(r.n, r.awaitDeadline); });
     // Ahead of the patch's own early return (that return is what swallowed this)
     // and after computeBoardPatch has read the OLD board -- see the two functions
     // just above.
@@ -7252,7 +7377,7 @@ export const ui = `
       // (roundsClosedUnsent above), while we were away.
       board = fresh;
       clearFieldState(patch.changedBlockIds);
-      patch.roundsNowSent.forEach(markRoundHistory);
+      applySentRounds(patch.roundsNowSent, fresh, doc);
       // The pager states everything this branch changed -- the badge, the dot
       // on a round that no longer owes an answer, and the send bar, which a
       // round going sent while this client was away must take away even though
@@ -7282,7 +7407,25 @@ export const ui = `
       });
       if (html) applyRoundPush({ round: n, mode: 'amend', board: fresh, html: html });
     });
+    // After the replays: each diffs this tab's board against the snapshot, which
+    // takes the board to it, so a sent round applied first would leave them nothing
+    // to diff. The replay marks such a round history; this swaps in its record.
+    applySentRounds(patch.roundsNowSent, fresh, doc);
     refreshPins(document);
+  }
+
+  /** The rounds a snapshot says went sent while this tab was not listening, taken on
+   * as the 'submitted' push it missed would have brought each (applySubmittedPush):
+   * the page's render of a round is the markup that push carries, from the same
+   * board, its stages held alike, so the record shows the answers that went out
+   * rather than this tab's own fields. Once per round, whichever of the three
+   * (this, the push, this tab's own Send's answer) comes first. */
+  function applySentRounds(sent, fresh, doc) {
+    sent.forEach(function (n) {
+      var freshSection = doc.querySelector('.round[data-round="' + n + '"]');
+      if (freshSection) applySubmittedPush({ round: n, board: fresh, html: freshSection.outerHTML });
+      else markRoundHistory(n);
+    });
   }
 
   function resync() {
@@ -7333,6 +7476,9 @@ export const ui = `
       var node = doc.querySelector('script#board-data[type="application/json"]');
       if (!node) return;
       applyResync(JSON.parse(node.textContent), doc);
+      // The catch-up replays what it missed through the push paths, and each counts
+      // itself a push; none is a live one, so a fresher catch-up in the air still lands.
+      pushGeneration = generation;
       // On every path through it, the ones that change nothing included: a fill that
       // failed before the stream dropped is tried again on its reconnect.
       fillHeldStages();
@@ -7388,6 +7534,13 @@ export const ui = `
     // than guessed at -- one path for both, since a re-read on a wait that merely
     // lapsed diffs to nothing and applyResync returns without touching the DOM.
     es.addEventListener('awaitExpired', function () { refreshAwaitDisplay(); resync(); });
+    // ADR 145: a report from any tab of this board moved a round's deadline.
+    es.addEventListener('deadline', function (ev) {
+      try {
+        var moved = JSON.parse(ev.data);
+        applyDeadline(moved.round, moved.awaitDeadline);
+      } catch (e) { /* malformed; the next resync carries the deadline */ }
+    });
   }
 })();
 `;

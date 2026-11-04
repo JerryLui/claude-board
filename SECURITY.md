@@ -352,7 +352,8 @@ reaches what holding a board's stream already does), all in
 what keeps a route added later secret-only until someone widens it deliberately. The set reaches
 further than the name suggests: a browser holding only the cookie drives the whole pomodoro clock
 — every duration along with the notify toggle, the round-banner level, and the Master switch (`enabled`) — reports a
-board Attended or not, and prunes the store.
+board Attended or not, reports the reviewer's activity on a round (which moves a waiting round's deadline later, ADR 145,
+and answers nothing), and prunes the store.
 
 The `attended` report and the round-banner level are why each of them has to be authenticated at
 all, and they are not the same

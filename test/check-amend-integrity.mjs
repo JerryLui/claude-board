@@ -22,10 +22,11 @@
 //        replaces a question takes this tab's answer to the old one with it; a
 //        'submitted' push renders what was SUBMITTED rather than the receiving
 //        tab's own unsent draft, nested questions included; a resync answered
-//        after a live push is dropped rather than applied backwards over it; a
-//        resync that missed nothing leaves the page alone, and one that missed a
-//        Send or a whole round catches up on it; and an amend to a page board
-//        renders the same markup a reload does.
+//        after a live push is dropped rather than applied backwards over it, and
+//        one behind an older catch-up that took on a Send still lands; a resync
+//        that missed nothing leaves the page alone, and one that missed a Send or a
+//        whole round catches up on it, a Send as the record of what was sent; and
+//        an amend to a page board renders the same markup a reload does.
 
 import assert from 'node:assert/strict';
 import { createBoard, addRound, amendRound, applySubmit, abandonOpenRounds, resolveComments } from '../src/board.mjs';
@@ -478,17 +479,57 @@ await checkAsync('of two catch-ups in flight, the older one answering last is dr
   assert.equal(countdown.textContent, '', 'and the closed board stays closed');
 });
 
+// The other order: the older sibling answers first and catches up on a missed Send,
+// which it applies through the push path. That is no live push, so the fresher
+// sibling behind it, which also read the round posted after the Send, still lands.
+
+await checkAsync('of two catch-ups in flight, the fresher one answering after an older one that caught up on a missed Send still lands (ablation: delete resync\'s pushGeneration restore and the round posted between the two reads never shows)', async () => {
+  const q = n => ({ kind: 'question', prompt: `Q${n}: pick one`, widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] });
+  const board = createBoard({ title: 'A Send, then a round', blocks: [q(1)] });
+  const { document, es } = loadBoardWithEventSource(renderBoardPage(board));
+  applySubmit(board, { action: 'send', answers: [{ id: board.blocks[0].id, status: 'answered', choice: 'Yes', note: '' }], comments: [] }, 1);
+  const sentPage = renderBoardPage(board);
+  addRound(board, { blocks: [q(2)] });
+  const freshPage = renderBoardPage(board);
+
+  const originalFetch = globalThis.fetch;
+  const originalParser = globalThis.DOMParser;
+  const pending = [];
+  globalThis.fetch = () => new Promise(resolve => pending.push(resolve));
+  globalThis.DOMParser = class { parseFromString(text) { return parseHTML(text); } };
+  try {
+    es.dispatch('awaitExpired', JSON.stringify({ round: 1 }));
+    es.dispatch('awaitExpired', JSON.stringify({ round: 1 }));
+    assert.equal(pending.length, 2, 'setup: one catch-up per nudge, both in the air at once');
+
+    pending[0]({ ok: true, status: 200, text: async () => sentPage }); // the older answers first
+    await flush(1);
+    assert.equal(document.querySelector('.round[data-round="1"]').getAttribute('data-round-status'), 'sent',
+      'setup: the older catch-up took on the Send');
+
+    pending[1]({ ok: true, status: 200, text: async () => freshPage });
+    await flush(1);
+  } finally {
+    globalThis.fetch = originalFetch;
+    globalThis.DOMParser = originalParser;
+  }
+
+  const round2 = document.querySelector('.round[data-round="2"]');
+  assert.ok(round2 && round2.querySelector('.question-block'), 'the round the fresher catch-up read must land');
+});
+
 // --- what a reconnect catches up on, and what it leaves alone ---------------
 //
 // 'open' fires on the first connection and on every reconnect, and the stream has
 // no replay, so each one re-reads the board and diffs it. Three outcomes, driven
 // in order on one tab: nothing was missed (the page, an open lens included, is
 // left exactly as it was -- a network blip must not close what the reviewer is
-// reading); a Send landed while away (that round collapses into history, with no
-// block changing, the status-only branch); a whole round arrived while away (it
-// lands as the new page it would have been).
+// reading); a Send landed while away (that round becomes the sent record a
+// 'submitted' push would have brought, the answer that went out picked rather than
+// this tab's own draft, with no block changing, the status-only branch); a whole
+// round arrived while away (it lands as the new page it would have been).
 
-await checkAsync('a reconnect that missed nothing leaves an open lens open, one that missed a Send collapses that round into history, and one that missed a round lands it (ablation: delete applyResync\'s nothing-missed return, its status-only markRoundHistory, or its new-round replay)', async () => {
+await checkAsync('a reconnect that missed nothing leaves an open lens open, one that missed a Send shows that round as the sent record, the answer sent from another tab picked over this tab\'s draft, and one that missed a round lands it (ablation: delete applyResync\'s nothing-missed return, mark its status-only rounds history in place, or delete its new-round replay)', async () => {
   const board = createBoard({
     title: 'Away',
     blocks: [
@@ -512,11 +553,21 @@ await checkAsync('a reconnect that missed nothing leaves an open lens open, one 
       'the catch-up must re-read this board\'s own page, with the stages this tab holds left out (ADR 122)');
     assert.ok(document.querySelector('.stage-lens-frame'), 'a reconnect that missed nothing must not close the lens the reviewer has open');
 
-    applySubmit(board, { action: 'send', answers: [], comments: [] }, 1);
+    // This tab's own draft, never sent: the other tab answers differently.
+    const qid = board.blocks[0].id;
+    const choices = () => Array.from(document.querySelector(`.question-block[data-block-id="${qid}"]`).querySelectorAll('.choice-single'));
+    choices().find(el => el.getAttribute('data-choice') === 'No').dispatchEvent(new StandInEvent('click'));
+    assert.deepEqual(choices().filter(el => el.classList.contains('selected')).map(el => el.getAttribute('data-choice')), ['No'],
+      'setup failure: the draft choice was not recorded');
+    applySubmit(board, { action: 'send', answers: [{ id: qid, status: 'answered', choice: 'Yes', note: 'sent from the other tab' }], comments: [] }, 1);
     served = renderBoardPage(board);
     await reconnect();
     assert.equal(document.querySelector('.round[data-round="1"]').classList.contains('round-history'), true,
       'a round sent from another tab while this one was away must collapse into history on the catch-up');
+    assert.deepEqual(choices().filter(el => el.classList.contains('selected')).map(el => el.getAttribute('data-choice')), ['Yes'],
+      'the caught-up record must show the choice that was sent, not this tab\'s own draft');
+    assert.equal(document.querySelector(`textarea[data-note-for="${qid}"]`).textContent, 'sent from the other tab',
+      'the caught-up record must show the note that was sent');
 
     addRound(board, { blocks: [{ kind: 'question', prompt: 'Q2: and another', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] }] });
     served = renderBoardPage(board);
@@ -527,6 +578,42 @@ await checkAsync('a reconnect that missed nothing leaves an open lens open, one 
     globalThis.fetch = originalFetch;
     globalThis.DOMParser = originalParser;
   }
+});
+
+// A laptop asleep through the Send and the agent's next round misses both, so one
+// catch-up replays the new round and takes on the sent one in the same pass.
+
+await checkAsync('a reconnect that missed a Send and the round posted after it lands the new round and shows the sent one as its record, the answer sent from another tab picked over this tab\'s draft (ablation: delete applyResync\'s applySentRounds after its replays)', async () => {
+  const board = createBoard({
+    title: 'Asleep through two',
+    blocks: [{ kind: 'question', prompt: 'Q1: pick one', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] }],
+  });
+  const qid = board.blocks[0].id;
+  const { document, es } = loadBoardWithEventSource(renderBoardPage(board));
+  const choices = () => Array.from(document.querySelector(`.question-block[data-block-id="${qid}"]`).querySelectorAll('.choice-single'));
+  choices().find(el => el.getAttribute('data-choice') === 'No').dispatchEvent(new StandInEvent('click'));
+  applySubmit(board, { action: 'send', answers: [{ id: qid, status: 'answered', choice: 'Yes', note: 'sent before the next round' }], comments: [] }, 1);
+  addRound(board, { blocks: [{ kind: 'question', prompt: 'Q2: and another', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] }] });
+  const served = renderBoardPage(board);
+  const originalFetch = globalThis.fetch;
+  const originalParser = globalThis.DOMParser;
+  globalThis.fetch = async () => ({ ok: true, status: 200, text: async () => served });
+  globalThis.DOMParser = class { parseFromString(text) { return parseHTML(text); } };
+  try {
+    es.dispatch('open', '');
+    await flush(1);
+  } finally {
+    globalThis.fetch = originalFetch;
+    globalThis.DOMParser = originalParser;
+  }
+
+  const round2 = document.querySelector('.round[data-round="2"]');
+  assert.ok(round2 && round2.querySelector('.question-block'), 'the round posted after the Send must land');
+  assert.equal(document.querySelector('.round[data-round="1"]').getAttribute('data-round-status'), 'sent', 'round 1 must read sent');
+  assert.deepEqual(choices().filter(el => el.classList.contains('selected')).map(el => el.getAttribute('data-choice')), ['Yes'],
+    'the caught-up record must show the choice that was sent, not this tab\'s own draft');
+  assert.equal(document.querySelector(`textarea[data-note-for="${qid}"]`).textContent, 'sent before the next round',
+    'the caught-up record must show the note that was sent');
 });
 
 // --- an abandoned board, on an ORDINARY board's surface ----------------------
