@@ -675,7 +675,10 @@ same thread returns, once** — and both are additive: they append to the array 
 built, are told apart by the `round` every entry carries, and change nothing about the packet's
 shape, so a consumer that has never heard of either keeps working unread. "Once" means committed
 as delivered only after the response has actually left the daemon, so a dropped connection
-re-delivers rather than loses, and what has been delivered is never sent again. They ride whatever
+re-delivers rather than loses, and what has been delivered is never sent again. From the read
+to that commit the response holds the rounds it carries: any other response on the board in that
+window, a packet or a collect, leaves them to it, and they are owed again only if it closes
+unsent. They ride whatever
 packet comes next, `timeout` and `abandoned` included. `GET /api/board/:id/read` is not a packet
 and marks nothing (ADR 115), so what it returned is still owed: the same entry can ride a later
 packet too, and the `round` every entry carries is what tells a caller it is looking at an answer
@@ -1513,8 +1516,10 @@ carries them. A board with no ledger yet adopts its other sent rounds into it on
 next packet would. `delivered: true` says a packet had already carried the round, the thread's
 next one through the second exception under "Packet", so its session acted on it there: for a
 round that asked something it reads `answersDelivered`, and for one that asked nothing, whether
-each of its comments (at least one) was already delivered. A response that never leaves spends
-nothing, and the round stays owed.
+each of its comments (at least one) was already delivered. It is also `true`, with nothing spent,
+while a packet that read the round first is still leaving with it, and a packet built while a
+collect holds the round carries none of it, so the two never both hand it out. A response that
+never leaves spends nothing, and the round stays owed.
 
 Secret-only, like every write off the cookie lists: a browser holding the cookie gets 401 and
 spends nothing.
