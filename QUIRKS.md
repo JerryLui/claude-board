@@ -2540,3 +2540,12 @@ Traps that have bitten once. A second bite moves the entry up into the section i
   page out at the window's height, so the fixed send bar and round pager land over whatever sits at
   the window's foot, here the last compare card's pictures. Open the tab taller than the board and
   clip to the last card's bottom (`test/browser-check-compare-head.mjs`'s `--shot`).
+
+- **A deadline kept alive by reports every 100 ms lapses on a slow runner.** A check that held a
+  moving round's deadline past the wait ceiling with `activity` reports every 100-150 ms against
+  a 600 ms wait went red on a macOS CI runner (Node 24, 2026-11-04): one stall longer than the
+  wait let the stored deadline pass, so the deadline, not the ceiling, ended the wait, 2 ms short.
+  Give the deadline seconds past the ceiling instead: a wait of 20-40 s under a 3 s
+  `CLAUDE_BOARD_WAIT_CEILING_MS` and one report that moves it (the ceiling cases in
+  `test/check-http.mjs` and `test/check-mcp.mjs`). The move must clear the minimum, a fortieth
+  of a short wait (`deadlineMoveMinMs`, `src/server.mjs`).
