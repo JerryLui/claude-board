@@ -6,6 +6,7 @@
 
 import assert from 'node:assert/strict';
 import { createBoard } from '../src/board.mjs';
+import { sessionsMovedOn } from '../src/missions.mjs';
 import { boardLink, createSessionList, deriveTabs, DEFAULT_INTERVAL_MS, MAX_SESSIONS, MAX_NAME_CHARS } from '../src/sessions.mjs';
 import { check, runMain } from './support.mjs';
 
@@ -272,7 +273,6 @@ async function main() {
         blocked('a0000002-other-id', { jobId: 'a0000002' }),
         blocked('a0000003-bound-released'),
         blocked('a0000004-taken-over'),
-        blocked('a0000005-relaunched'),
         blocked('b0000001-left-open'),
         blocked('b0000002-untied'),
         blocked('b0000003-live', { pid: 5400, procStart: '2026-10-29T10:00:00Z' }),
@@ -285,7 +285,6 @@ async function main() {
         left({ id: 'a0000002-record-id' }),
         { key: 'BOUND', state: 'released', session: { id: 'a0000003-bound-released', pid: 5200, startedAt: at, seenAt: at } },
         { key: 'HELD', state: 'working', session: { id: 'another', pid: 5300, startedAt: at, seenAt: at, ended: { id: 'a0000004-taken-over' } } },
-        { key: 'RESERVED', state: 'working', session: { startedAt: at, seenAt: at, ended: { id: 'a0000005-relaunched' } } },
         left({ id: 'b0000001-left-open' }, 'waiting'),
         left({ pid: 5400, id: 'b0000003-live' }),
         left({ pid: 5600, id: 'b0000004-tab-left' }),
@@ -301,6 +300,18 @@ async function main() {
       ['b0000005-two-ties', 'needs-you'],
       ['b0000004-tab-left', 'waiting'],
     ]);
+  });
+
+  await check('a launch\'s bare reservation is no other session: a mission holding only one has moved on from no one, the job it resumes moved on from once another id binds or the mission is released (ADR 147)', () => {
+    const at = '2026-10-29T11:00:00Z';
+    const job = 'c0000001-resumed';
+    // `mission-launch --resume <id>` reserves the mission before the resumed session binds.
+    const reserved = { key: 'RESUMING', state: 'working', session: { startedAt: at, seenAt: at, ended: { id: job } } };
+    const bound = id => ({ ...reserved, session: { ...reserved.session, id, pid: 5700 } });
+    assert.deepEqual(sessionsMovedOn(reserved), [], 'the reservation holds the job for its resume');
+    assert.deepEqual(sessionsMovedOn(bound(job)), [], 'the job resumed under its own id is still the mission\'s');
+    assert.deepEqual(sessionsMovedOn(bound('another')), [job], 'another id bound: the job is left behind');
+    assert.deepEqual(sessionsMovedOn({ ...reserved, state: 'released' }), [job], 'released: the job is left behind');
   });
 }
 

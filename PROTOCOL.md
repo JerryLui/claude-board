@@ -1841,7 +1841,7 @@ knows its pid or id). A session that left its mission (`session: { ended, leftAt
 again, a board it posted while bound staying the mission's (ADR 141). A blocked `bg` session with
 no `pid` is no tab either when its `id`, or the id its `jobId` is the first 8 characters of, is a
 mission's `session.id` or `session.ended.id`, left or not, and every mission naming it so is
-`released` or held by another `id` or a launch's reservation (ADR 147). `folder` is the cwd's last segment; `command` the name's leading `/word`, else null. `state` is `needs-you` while a
+`released` or held by another `id`; a launch's bare reservation is no other `id` yet (ADR 147). `folder` is the cwd's last segment; `command` the name's leading `/word`, else null. `state` is `needs-you` while a
 round that wants its answer (open and asking, as a mission's needs-you reads a round, but any
 round of the board, not only its newest) sits on a board of no mission whose
 `session.id` is the tab's, or whose `session.id` is null or names no listed session, with the tab's
