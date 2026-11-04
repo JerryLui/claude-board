@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Answering a waiting round restarts its 40-minute wait (ADR 145)**: each answer pick, typed
+  note or saved comment on a round a session is waiting on now moves that round's deadline to a
+  full 40 minutes from that moment, both on the page's own countdown and in the session's wait. A
+  round that draws none of that activity still ends 40 minutes after it was posted, as before. A
+  session already waiting when the update ships keeps its original fixed 40-minute deadline,
+  unaffected.
+
 - **A retired mission stops asking**: a mission carrying a retired time never shows under Needs
   you or Stalled again, whatever its last rounds or its last "waiting on" say. While it still has
   an unmerged PR or a release step waiting, its card sits under Waiting with a Retired tag; once it
