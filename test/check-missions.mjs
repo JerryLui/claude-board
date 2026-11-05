@@ -332,7 +332,7 @@ async function main() {
       seed(dir, `W${i}`, { session: { pid: 1000 + i, startedAt: iso(now), seenAt: iso(now) } });
     }
     assert.deepEqual(launchMission('UNDER_CAP', { phase: 'direct' }, { home: dir, now, isAlive: alive }), { launch: true });
-    // UNDER_CAP's reserved session is the sixth working one.
+    // UNDER_CAP's reserved session is the eighth working one.
     const answer = launchMission('OVER_CAP', { phase: 'direct', prompt: '/direct X', login: 'work' }, { home: dir, now, isAlive: alive });
     assert.deepEqual(answer, { queued: true });
     const queued = readMission('OVER_CAP', dir);
@@ -340,7 +340,7 @@ async function main() {
     assert.equal(queued.session, null, 'a queued mission has no session');
     assert.deepEqual(queued.queue, { phase: 'direct', prompt: '/direct X', login: 'work', at: iso(now) });
     const overview = missionsOverview({ home: dir, now, isAlive: alive });
-    assert.deepEqual(overview.live, { working: MAX_WORKING, alive: MAX_WORKING });
+    assert.deepEqual(overview.live, { working: 8, alive: 8 });
     assert.equal(overview.counts.queued, 1);
   });
 
@@ -366,13 +366,13 @@ async function main() {
     const dir = scratchHome('alive-cap');
     const now = Date.now();
     const alive = () => true;
-    for (let i = 0; i < MAX_WORKING - 1; i++) {
+    for (let i = 0; i < MAX_WORKING - 2; i++) {
       seed(dir, `W${i}`, { session: { pid: 1000 + i, startedAt: iso(now), seenAt: iso(now) } });
     }
-    for (let i = 0; i < MAX_ALIVE - MAX_WORKING; i++) {
+    for (let i = 0; i < MAX_ALIVE - MAX_WORKING + 1; i++) {
       seed(dir, `P${i}`, { state: 'waiting', session: { pid: 2000 + i, startedAt: iso(now), seenAt: iso(now - minutes(600)) } });
     }
-    assert.deepEqual(missionsOverview({ home: dir, now, isAlive: alive }).live, { working: MAX_WORKING - 1, alive: MAX_ALIVE - 1 });
+    assert.deepEqual(missionsOverview({ home: dir, now, isAlive: alive }).live, { working: 6, alive: 11 });
     assert.deepEqual(launchMission('TWELFTH', { phase: 'grill' }, { home: dir, now, isAlive: alive }), { launch: true });
     assert.deepEqual(launchMission('THIRTEENTH', { phase: 'grill' }, { home: dir, now, isAlive: alive }), { queued: true });
   });
@@ -765,7 +765,7 @@ async function main() {
     assert.equal(overview.missions.find(m => m.key === 'ASKING').view, 'needs-you');
     assert.deepEqual(overview.live, { working: MAX_WORKING - 1, alive: MAX_WORKING + 1 });
     assert.deepEqual(launchMission('NEXT', { phase: 'direct' }, { home: dir, now, isAlive: alive }), { launch: true },
-      'five working and two waiting on the PM leave a working slot');
+      'seven working and two waiting on the PM leave a working slot');
   });
 
   await check('needs you and the card\'s Fire come only from a board\'s newest round: an older page left asking holds neither', () => {
