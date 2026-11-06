@@ -52,12 +52,12 @@ bodyless ones.
 
 #### Another local process asking the daemon to read a file for you
 
-Creating a board is the one route that resolves a path. Without a gate on it, any process that
-could open a socket to the port could post a board naming any directory and read the result back
-off the served page — with the daemon's privileges, not its own. So that route requires a local
-secret, sent in a request header by the session's own MCP shim; the credential is what keeps "can
-reach the port" from meaning "can spend the daemon's grants". `PROTOCOL.md` "The local secret"
-carries the file's path, mode and generation.
+Creating a board and minting a sign-in link are the two routes that resolve a path. Without a gate
+on the first, any process that could open a socket to the port could post a board naming any
+directory and read the result back off the served page, with the daemon's privileges, not its own.
+So both routes require a local secret, sent in a request header, by the session's own MCP shim for
+a board; the credential is what keeps "can reach the port" from meaning "can spend the daemon's
+grants". `PROTOCOL.md` "The local secret" carries the file's path, mode and generation.
 
 Be precise about who that stops. It bounds callers that can reach loopback but **cannot
 read your home directory** — a sandboxed process, a container publishing on host
