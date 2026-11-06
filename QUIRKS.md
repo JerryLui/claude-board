@@ -2288,6 +2288,15 @@ chrome band; if that ever surfaces, the fix is this same resend, not a broadcast
 
 Traps that have bitten once. A second bite moves the entry up into the section it belongs to.
 
+- **`yarn check` runs none of the checks.** Under yarn 1 it is yarn's own integrity built-in, which
+  beats the `check` script in `package.json`: "success Folder in sync.", exit 0, in 0.02 seconds.
+  `node test/run.mjs` (or `yarn run check`) is the suite.
+
+- **A run from inside a Claude Code session goes red in `check-mcp` and `check-boundary`.** The
+  session exports `CLAUDE_BOARD_OPEN_CMD` and `CLAUDE_BOARD_CLIENT`, the checks' spawned shims inherit
+  them, and every "opens its tab" row fails with `0 !== 1`. `env -u CLAUDE_BOARD_OPEN_CMD -u
+  CLAUDE_BOARD_CLIENT node test/run.mjs` is green.
+
 - **A SharedWorker that ends tells its tabs nothing.** Chrome 155 headless: `Target.closeTarget`
   on the stream worker fired no `error` on the tab's `SharedWorker` and no `close` on its port
   (`'onclose' in port` is false), and the tab went on posting into the dead port, deaf to every
