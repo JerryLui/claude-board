@@ -32,6 +32,7 @@ packet's `resolved`, redundant beside `lost`) is the shape of that exception.
 | `src/stranded.mjs` | the stranded rule: a board no Watcher is looking at, carrying an awaited round or a Suppressed board's own first round, gets one banner per absence, after a grace. Persistence, grace timers and the click-serving child's lifecycle, all behind `createStrandedWatch` |
 | `src/secret.mjs` | the two credentials: the local secret and the browser session cookie derived from it, shared by the daemon and the shim |
 | `src/handoff.mjs` | single-use, seconds-lived browser handoffs, and `recoveryCommand()` |
+| `src/signin-link.mjs` | the sign-in link: its store, the checks on what it may start, the detached start, its two pages |
 | `src/ui.mjs` | client-side script for the board page, exported as a string |
 | `src/styles.mjs` | page CSS, exported as a string |
 | `src/theme.mjs` | client-side theme selection: storage key, `THEME_CHANGE_EVENT`, the pre-paint boot script, the control's markup |
@@ -755,6 +756,9 @@ GET  /api/probe/documents           { ok: true } or { ok: false, code } -- wheth
                                     it after the health gate). A code, never a name
 GET  /auth/:token                   consume a handoff -> 302 + Set-Cookie  (open by necessity)
 POST /api/handoff                   { boardId? } -> { token, expiresAt, ttlMs }
+GET  /signin/:token                 consume a sign-in link, start the sign-in browser -> a plain
+                                    page, no cookie  (open: it grants nothing)
+POST /api/signin-link               { app, recipe } -> { url }  (secret only)
 POST /api/board                     post a board or a round into a live thread
                                     -> { boardId, thread, round, url, clients, suppressed,
                                     awaited, awaitDeadline }, plus { answers, comments } on a
@@ -921,7 +925,7 @@ why a local secret exists at all.
 
 ## The browser session cookie
 
-**Every route but `GET /api/health`, `GET /auth/:token` and `GET /b/mermaid-<hash>.js` requires a
+**Every route but `GET /api/health`, `GET /auth/:token`, `GET /signin/:token` and `GET /b/mermaid-<hash>.js` requires a
 credential**, reads
 included -- except `GET /api/board/:id/wait`, which this cookie alone never satisfies (secret
 only, above). The browser cannot read a 0600 file, so it holds this instead:
@@ -995,6 +999,40 @@ URL and the returned token rather than trusting anything in the response body.
 opens the browser. `--print` emits the URL instead, for a second profile or a different browser;
 an optional board id argument lands on that board rather than the index. `src/handoff.mjs`
 `recoveryCommand()` is the single source of that string.
+
+## Starting a sign-in
+
+A link that starts a sign-in browser on the machine running the daemon, for a person who is not at
+a terminal. It logs nobody into the board: the person still signs in, in that browser.
+
+```
+POST /api/signin-link   { app, recipe }  (secret required)  -> { url }
+GET  /signin/<token>    200 page: the sign-in browser is opening. No Set-Cookie
+```
+
+`POST /api/signin-link` takes the secret only, like `/api/handoff`. `app` must match
+`^[a-z][a-z0-9-]*$` and `recipe` must be an absolute path to an existing file. `url` is
+`http://127.0.0.1:<port>/signin/<token>`, the daemon's own port whatever `Host` the request carried.
+
+| Status | Body | Meaning |
+|---|---|---|
+| 200 | `{ url }` | minted |
+| 400 | `{ error }` | a bad `app` or `recipe`, or the sign-in script is absent |
+| 401 | none | no secret; the session cookie counts as none here |
+| 415 | `{ error }` | the body is not `application/json` |
+| 429 | `{ error }` | 32 links are already unused; nothing was minted |
+
+`GET /signin/<token>` consumes the token and starts, detached and with no shell,
+`node <script> signin <app> --recipe <recipe>`. Its output is discarded; a non-zero exit logs the
+app and the code. `<script>` is `CLAUDE_BOARD_SIGNIN_SCRIPT`, or
+`~/.claude/scripts/ui-evidence/capture.mjs` without it, and the launcher does not pass that variable
+through. A used or unknown token, or one whose script or recipe has gone since the mint, answers
+410 and one page saying the link is spent and to type the sign-in command instead. Neither page
+carries the token, and neither sets a cookie.
+
+The link has no expiry: it is good until it is used or the daemon restarts, and it is never written
+to disk. It is a store of its own, so `/auth/<token>` never honours one and `/signin/<token>` never
+honours a handoff. SECURITY.md "The sign-in link" says why it needs no 30 seconds.
 
 ## Refusing a caller with no credential
 

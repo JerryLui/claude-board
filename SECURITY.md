@@ -318,8 +318,8 @@ asked of that one descriptor rather than of the name again.
 
 #### Another local process reading your boards, or forging an answer on one
 
-Every route but `GET /api/health`, `GET /auth/<token>` and `GET /b/mermaid-<hash>.js` requires a
-credential — the index, a board
+Every route but `GET /api/health`, `GET /auth/<token>`, `GET /signin/<token>` and
+`GET /b/mermaid-<hash>.js` requires a credential — the index, a board
 page, archive search, the blocking wait and the event stream alike. Not every one of those
 accepts the *same* credential, though: `GET /api/board/:id/wait` also writes — `handleWait`
 persists the board on its timeout branch and spends undelivered comments on every branch — so
@@ -328,7 +328,8 @@ it is gated exactly like a write, the secret only, never the cookie alone.
 nothing, but its caller is a tool and never a page, and the session cookie is exactly the
 credential a cross-origin GET could ride in on. Every other route in that list accepts either.
 (`/auth/<token>` is the route that *hands out* the credential, so it cannot require one; it is
-protected by the token being unguessable, single-use and seconds-lived. The third open route is the vendored mermaid
+protected by the token being unguessable, single-use and seconds-lived. `/signin/<token>` hands out
+nothing at all: see [The sign-in link](#the-sign-in-link). The last open route is the vendored mermaid
 engine, and only that one name shape: the caller is a board page's own `html` stage, which is
 sandboxed with no `allow-same-origin` and so holds no credential by construction, and what the
 route hands back is a third-party library's public bytes under a name that is a digest of
@@ -340,6 +341,38 @@ before you rely on it — see "Any other HTTP server on your machine" under [Kno
 unclosed](#known-and-unclosed).** Nothing you can bookmark carries a credential. If a
 browser ends up holding nothing — cleared cookies, a second profile, a different browser —
 the refusal page names one command that fixes it: `node bin/authorize.mjs` from your clone.
+
+#### The sign-in link
+
+`GET /signin/<token>` is the one token in a URL with no lifetime, and the handoff's 30 seconds
+are the reason that needs saying. A handoff is short because what it hands out is a credential:
+whoever redeems it reads every board and can answer any open round, for 30 days. A sign-in link
+logs nobody in. Its token lives in a store of its own that `/auth/<token>` never reads, the route
+sets no cookie, and all a click does is start one command, which opens a browser on the Mac
+running the daemon, where a person still has to sign in. Whoever spends a link they should not
+hold gets a sign-in window on your screen and no session on the board. It also waits on something
+a handoff does not: a handoff covers a browser launching, this covers a person reading a chat and
+coming to the machine, which 30 seconds would not reach.
+
+What bounds it instead:
+
+- **One use.** The token is deleted before anything starts. Used and unknown read as one page.
+- **Memory only.** It is never written to disk, a log line, a board or a card, and a daemon
+  restart voids every unused link. Persisting it is what the handoff's design refuses, and the
+  same refusal holds here.
+- **A cap.** At most 32 unused links. Past that a mint is refused, never made room for, so a link
+  already handed out stays good.
+- **The secret to mint.** The session cookie is refused, so a browser cannot mint one.
+- **A fixed command.** The caller names an app (`^[a-z][a-z0-9-]*$`) and an absolute path to an
+  existing file, and neither reaches a shell. The script is not the caller's to name:
+  `CLAUDE_BOARD_SIGNIN_SCRIPT` is not on the launcher's allowlist, so under the bundle it is always
+  `~/.claude/scripts/ui-evidence/capture.mjs` from the compiled-in `HOME`. The variable reaches only
+  a daemon run out of a clone, as the checks do.
+
+The mint checks the recipe path with the daemon's grants, so the secret's holder learns whether a
+file exists. It reads none of it back, which is less than `POST /api/board` gives the same caller.
+The residual risks are under [Known and unclosed](#known-and-unclosed) and [Not defended, by
+design](#not-defended-by-design).
 
 #### What the cookie may write
 
@@ -540,6 +573,14 @@ gate. A payload digest compiled into the launcher and checked before `execve` wo
 this; it is **not implemented, and not planned** — the risk is accepted as it stands.
 Do not read it as a fix in progress.
 
+**A sign-in runs a script the bundle does not sign.** The command `GET /signin/<token>` starts is a
+child of the daemon, so it runs under the daemon's TCC identity, and the script lives under `~/.claude`,
+writable by any process running as you, one TCC has refused included. Such a process can read the
+secret too, so it can rewrite the script, mint a link, follow it, and run its own code under the
+Documents grant with no restart. That is the reach of the payload entry above by a shorter road,
+not a new class of hole. A digest of the script checked before the spawn would close it; it is
+**not implemented**.
+
 **`DYLD_INSERT_LIBRARIES` on the launcher's own load is untouched by any of this.** The
 `execve`-built environment governs what the launcher hands *node*; it has no say over
 what launchd hands the *launcher*, one hop earlier, because dyld reads its own family of
@@ -624,6 +665,14 @@ continuously *and* win the race against the browser already fetching it, and if 
 learns nothing — an already-used token is refused exactly like an expired or invented one.
 That is a narrow race, not an eliminated one. It is also inside the boundary above: such a
 process could read the secret file instead.
+
+**A sign-in link waiting in a chat transcript.** The link reaches you through a session, so until
+it is used its token sits in the Master Chief's chat transcript, on disk and with the model
+provider, which is the one place it is not kept out of. Anything on this machine that can read the
+transcript can spend it, and nothing off it can reach the port. What that buys is a sign-in window
+you did not ask for, not a session, and a real link that then reads as spent, where the typed
+command still works. It lasts until the link is used or the daemon restarts; there is no clock on
+it, deliberately (see [The sign-in link](#the-sign-in-link)).
 
 **An archived board.** `pages/<boardId>.html` opens from disk with no credential at all,
 with the three shared files beside it (mermaid joined ui/styles, ADR 70); the gate is on
