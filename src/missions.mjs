@@ -48,7 +48,7 @@ export const MISSION_FIELDS = ['title', 'cwd', 'phase', 'state', 'summary', 'wai
 
 /** At most this many sessions work at once, and at most `MAX_ALIVE` are alive; past either,
  * a launch queues. A session waiting on the PM is alive but not working. */
-export const MAX_WORKING = 6;
+export const MAX_WORKING = 8;
 export const MAX_ALIVE = 12;
 
 /** A working session silent this long reads stalled. */

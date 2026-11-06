@@ -1713,7 +1713,7 @@ taken and stored as `released`; a record stored `landed` is rewritten as `releas
 POST /api/mission/:key/launch       { phase, login?, prompt? }
        -> { launch: true }          a session is reserved ({ startedAt, seenAt } now), and the
                                     mission moves to `working` in `phase`
-       -> { queued: true }          six missions' sessions working or twelve alive, the others
+       -> { queued: true }          eight missions' sessions working or twelve alive, the others
                                     counted: state `queued`, `queue` holding the launch
        -> 409 { error: 'live', session, silent? }
 ```

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Eight sessions can work at once, up from six (ADR 148)**: a mission launch now queues past eight
+  sessions working; the limit of twelve alive is unchanged.
 - **Answering a waiting round restarts its 40-minute wait (ADR 145)**: each answer pick, typed
   note or saved comment on a round a session is waiting on now moves that round's deadline to a
   full 40 minutes from that moment, both on the page's own countdown and in the session's wait. A
