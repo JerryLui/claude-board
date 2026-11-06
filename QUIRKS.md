@@ -2292,11 +2292,6 @@ Traps that have bitten once. A second bite moves the entry up into the section i
   beats the `check` script in `package.json`: "success Folder in sync.", exit 0, in 0.02 seconds.
   `node test/run.mjs` (or `yarn run check`) is the suite.
 
-- **A run from inside a Claude Code session goes red in `check-mcp` and `check-boundary`.** The
-  session exports `CLAUDE_BOARD_OPEN_CMD` and `CLAUDE_BOARD_CLIENT`, the checks' spawned shims inherit
-  them, and every "opens its tab" row fails with `0 !== 1`. `env -u CLAUDE_BOARD_OPEN_CMD -u
-  CLAUDE_BOARD_CLIENT node test/run.mjs` is green.
-
 - **A SharedWorker that ends tells its tabs nothing.** Chrome 155 headless: `Target.closeTarget`
   on the stream worker fired no `error` on the tab's `SharedWorker` and no `close` on its port
   (`'onclose' in port` is false), and the tab went on posting into the dead port, deaf to every
@@ -2526,12 +2521,6 @@ Traps that have bitten once. A second bite moves the entry up into the section i
   `overflow-y: scroll` (true width 1429), so the centred `--doc-w` wash overflowed by half the
   difference and the page scrolled sideways 6px. Re-measure on the root's `ResizeObserver` and on
   `load`, not only on `resize`.
-- **`test/check-mcp.mjs` fails 7 tab-opening checks when run inside an agent session.** The
-  session's environment carries `CLAUDE_BOARD_OPEN_CMD`, `CLAUDE_MISSION`, `CLAUDE_BOARD_CLIENT`
-  and `CLAUDE_CODE_ENTRYPOINT`, which the shim reads, so a check expecting a tab to open, or the
-  guard to refuse, sees the session's answer instead (2026-10-29). Run it as
-  `env -u CLAUDE_BOARD_OPEN_CMD -u CLAUDE_MISSION -u CLAUDE_BOARD_CLIENT -u CLAUDE_CODE_ENTRYPOINT node test/check-mcp.mjs`.
-  `test/check-boundary.mjs` fails 6 rows the same way, on `main` too.
 - **Headless Chromium does not paint a sandboxed stage frame wholly below the first screen in a
   full-page screenshot.** The frame is captured blank, so a before/after compare low on a long
   board looked empty although it rendered once scrolled into view (2026-10-29). Before a

@@ -4083,7 +4083,7 @@ async function main() {
     const { boardId } = await postBoard(port, SECRET, { title: 'A board to post oversized bodies at', blocks: [{ kind: 'markdown', text: 'target' }] });
     const body = `{}${' '.repeat(25_000_000)}`;
     for (const route of [
-      '/api/handoff', `/api/board/${boardId}/submit`, `/api/board/${boardId}/attended`,
+      '/api/handoff', '/api/signin-link', `/api/board/${boardId}/submit`, `/api/board/${boardId}/attended`,
       '/api/pomodoro/settings', '/api/pomodoro/preview', '/api/store/prune',
     ]) {
       const before = storeListing();
