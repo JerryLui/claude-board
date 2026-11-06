@@ -13,16 +13,16 @@
 // never as an enumeration of the routes that need them: a route added later is gated by
 // default rather than by whoever adds it remembering. The exception list for (4) is
 // `GET /api/health` (install.sh polls it with plain curl to decide whether the service
-// came up, and it reveals only a version string, an opaque daemon identity — see
-// DAEMON_ID — and the process pid), `GET /auth/<token>`, which is the route that
-// HANDS OUT the credential and so cannot require it, and `GET /signin/<token>`, which
-// grants nothing (src/signin-link.mjs).
+// came up, and it reveals only a version string, an opaque daemon identity (DAEMON_ID)
+// and the process pid), `GET /auth/<token>`, which is the route that HANDS OUT the
+// credential and so cannot require it, `GET /signin/<token>`, which grants nothing
+// (src/signin-link.mjs), and the vendored mermaid file. `isOpenRoute` is the list.
 //
 // A credential is one of exactly two things (src/secret.mjs):
 //
 //   * the local secret, in the `x-claude-board-secret` header. The shim holds it,
-//     because it can read a 0600 file. Only this one may create a board, which is the
-//     only route that resolves a file.
+//     because it can read a 0600 file. Only this one may create a board or mint a
+//     sign-in link, the only routes that resolve a file.
 //   * the session cookie, derived from the secret, which a browser gets by following a
 //     single-use handoff (src/handoff.mjs). It reads boards and answers them, and is
 //     refused in the secret header, so it can never resolve a file.
@@ -645,9 +645,9 @@ function isCookieWrite(parts) {
  *
  *  - the secret itself, in the `x-claude-board-secret` header. That is the shim, and it
  *    is what EVERY write except `submit`/`attended` and the pomodoro actions below
- *    demands — including `POST /api/board`, the only route that resolves a file, and
- *    `POST /api/handoff`, which mints browser credentials and so must never be
- *    reachable with one.
+ *    demands — including `POST /api/board` and `POST /api/signin-link`, the only routes
+ *    that resolve a file, and `POST /api/handoff`, which mints browser credentials and
+ *    so must never be reachable with one.
  *  - the session cookie an authorized browser holds, accepted on submit, and — as of
  *    the pomodoro slice — on `ensure`/`pause`/`resume`/`reset`/`settings` too. The index
  *    page's switch is a browser holding only the cookie: under the old rule it could
@@ -3445,7 +3445,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
         return;
       }
 
-      // Gate 4: the read gate. Everything except the two open routes above needs a
+      // Gate 4: the read gate. Everything but `isOpenRoute`'s list needs a
       // credential — index, board page, search, /wait and the SSE stream alike. Unlike
       // the write refusal this one carries a body, because the caller it most often
       // refuses is a human looking at a tab, not a program: see sendCredentialRefusal.
