@@ -124,6 +124,17 @@ async function main() {
     await waitFor(() => startedRuns().some(run => run.argv[2] === 'host-guard'), { what: 'the host-guard run' });
   });
 
+  await check('another site cannot spend a link: it reads as spent and the link stays good', async () => {
+    const link = await mint({ app: 'cross-site' });
+    for (const headers of [{ 'sec-fetch-site': 'cross-site' }, { 'sec-fetch-site': 'same-site' }, { origin: 'http://evil.example' }]) {
+      const res = await request('GET', link, { headers });
+      assert.equal(res.status, 410, JSON.stringify(headers));
+      assert.ok(res.body.includes(SPENT_PAGE), res.body);
+    }
+    assert.equal((await request('GET', link, { headers: { 'sec-fetch-site': 'none' } })).status, 200);
+    await waitFor(() => startedRuns().some(run => run.argv[2] === 'cross-site'), { what: 'the cross-site run' });
+  });
+
   await check('the first click starts the script once, detached, with exactly the command', async () => {
     const link = await mint();
     const res = await request('GET', link);

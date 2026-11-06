@@ -1600,10 +1600,11 @@ function handleAuthHandoff(req, res, token, handoffs, secret, pathname) {
  *
  * The GET is the only reader of `signins`, and `/auth` never reads it, so a sign-in token
  * can never set the cookie. `no-store`, so a reload asks again and reads as spent rather
- * than repeating a page that says a browser is opening. */
+ * than repeating a page that says a browser is opening. Another site's request reads as
+ * spent and leaves the token good, so a page holding a leaked link cannot use it up. */
 async function handleSigninLink(req, res, parts, signins) {
   if (req.method === 'GET') {
-    const entry = HANDOFF_TOKEN_RE.test(parts[1]) ? signins.consume(parts[1]) : null;
+    const entry = isSameOriginRead(req) && HANDOFF_TOKEN_RE.test(parts[1]) ? signins.consume(parts[1]) : null;
     const started = entry && !signinRefusal(entry.target) && await startSignin(entry.target);
     return sendHtml(res, started ? 200 : 410, started ? SIGNIN_STARTED_PAGE : SIGNIN_SPENT_PAGE, { 'cache-control': 'no-store' });
   }
