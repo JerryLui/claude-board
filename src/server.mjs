@@ -645,7 +645,7 @@ function isCookieWrite(parts) {
  *
  *  - the secret itself, in the `x-claude-board-secret` header. That is the shim, and it
  *    is what EVERY write except `submit`/`attended` and the pomodoro actions below
- *    demands — including `POST /api/board` and `POST /api/signin-link`, the only routes
+ *    demands, including `POST /api/board` and `POST /api/signin-link`, the only routes
  *    that resolve a file, and `POST /api/handoff`, which mints browser credentials and
  *    so must never be reachable with one.
  *  - the session cookie an authorized browser holds, accepted on submit, and — as of

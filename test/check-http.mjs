@@ -2800,7 +2800,7 @@ async function main() {
     assert.equal(readBoard(cid, home).answers[qid].note, 'from the page');
 
     // The session cookie reads and answers. It is refused in the secret header, so it
-    // can never reach the one route that resolves a file.
+    // can never reach the routes that resolve a file.
     const token = cookie.split('=')[1];
     const asSecret = await rawRequest(port, 'POST', '/api/board', {
       headers: { 'content-type': 'application/json', [SECRET_HEADER]: token },
@@ -2812,7 +2812,7 @@ async function main() {
       headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${port}`, 'sec-fetch-site': 'same-origin', cookie },
       body: JSON.stringify({ title: 'Escalation attempt 2', cwd: home, blocks: [{ kind: 'markdown', text: '# no' }] }),
     });
-    assert.equal(asBoardPost.status, 401, 'nor to create a board — the route that resolves a file stays behind the secret alone');
+    assert.equal(asBoardPost.status, 401, 'nor to create a board: the routes that resolve a file stay behind the secret alone');
   });
 
   await check('S1: a cross-origin-shaped GET /wait carrying only the cookie is refused, and drains nothing', async () => {
