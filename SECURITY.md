@@ -319,7 +319,7 @@ asked of that one descriptor rather than of the name again.
 #### Another local process reading your boards, or forging an answer on one
 
 Every route but `GET /api/health`, `GET /auth/<token>`, `GET /signin/<token>` and
-`GET /b/mermaid-<hash>.js` requires a credential — the index, a board
+`GET /b/mermaid-<hash>.js` requires a credential: the index, a board
 page, archive search, the blocking wait and the event stream alike. Not every one of those
 accepts the *same* credential, though: `GET /api/board/:id/wait` also writes — `handleWait`
 persists the board on its timeout branch and spends undelivered comments on every branch — so
@@ -577,11 +577,13 @@ Do not read it as a fix in progress.
 
 **A sign-in runs a script the bundle does not sign.** The command `GET /signin/<token>` starts is a
 child of the daemon, so it runs under the daemon's TCC identity, and the script lives under `~/.claude`,
-writable by any process running as you, one TCC has refused included. Such a process can read the
+writable by any process running as you, one TCC has refused included. The headed Chromium it opens
+runs under the same chain, with the Google and BankID pages it loads. Such a process can read the
 secret too, so it can rewrite the script, mint a link, follow it, and run its own code under the
-Documents grant with no restart. That is the reach of the payload entry above by a shorter road,
-not a new class of hole. A digest of the script checked before the spawn would close it; it is
-**not implemented**.
+Documents grant with no restart. That is the reach of the payload entry above by a shorter road.
+Unlike that entry this one is **open, not accepted**: whether to accept it or to start the sign-in
+outside the bundle's identity is undecided. A digest of the script checked before the spawn would
+close it; it is not implemented.
 
 **`DYLD_INSERT_LIBRARIES` on the launcher's own load is untouched by any of this.** The
 `execve`-built environment governs what the launcher hands *node*; it has no say over
@@ -627,7 +629,9 @@ board URLs. That has not been done. What is done instead is bounding it:
   (`/api/board/:id/events`) established before the rotation keeps receiving every later
   round and every submitted answer for that board, and an in-flight `/wait` still returns
   its packet. Both last until the daemon restarts. If you are rotating because a cookie
-  leaked, restart the daemon too — `launchctl kickstart -k gui/$(id -u)/claude-board`.
+  leaked, restart the daemon too — `launchctl kickstart -k gui/$(id -u)/claude-board`. That restart
+  is also what ends an unused sign-in link: the click holds no credential, so a link survives a
+  rotation, or the secret's deletion, until it is used or the daemon restarts.
 
 If you run other services on loopback and this matters to you, use a separate browser
 profile for boards.
