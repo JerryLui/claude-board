@@ -52,18 +52,38 @@ export function signinRefusal({ app, recipe }) {
   return null;
 }
 
-/** Start the command, detached so a daemon restart leaves the PM's sign-in running.
- * Resolves whether it started. An argument array, never a shell, and no token in it. */
+/** How long a click waits before it says the browser is opening. What cannot start (an app
+ * with no sign-in, a recipe that no longer parses, a Chromium that cannot launch) exits inside
+ * this; what lives past it is a browser on its way. */
+const EARLY_EXIT_MS = 2000;
+
+/** Start the command, detached so a daemon restart leaves the PM's sign-in running. Resolves
+ * false on a spawn that fails, thrown or emitted, or a non-zero exit inside the wait, and true
+ * otherwise. An argument array, never a shell, and no token in it.
+ *
+ * Its stderr is the daemon's own descriptor, so a line the run writes after a click (a profile
+ * it could not remove) lands in the daemon's log. Inherited, not piped: a pipe would end with
+ * this daemon and leave a surviving run writing to nothing. */
 export function startSignin({ app, recipe }) {
   return new Promise(resolve => {
-    const child = spawn(process.execPath, [signinScript(), 'signin', app, '--recipe', recipe], { detached: true, stdio: 'ignore' });
-    child.once('error', () => resolve(false));
+    const failed = reason => {
+      console.error(`claude-board: the sign-in for ${app} could not start: ${reason}`);
+      resolve(false);
+    };
+    let child;
+    try {
+      child = spawn(process.execPath, [signinScript(), 'signin', app, '--recipe', recipe], { detached: true, stdio: ['ignore', 'ignore', 'inherit'] });
+    } catch (err) {
+      return failed(err.message);
+    }
+    child.once('error', err => failed(err.message));
     child.once('spawn', () => {
       child.unref();
-      resolve(true);
+      setTimeout(() => resolve(true), EARLY_EXIT_MS);
     });
-    child.once('exit', code => {
-      if (code) console.error(`claude-board: the sign-in for ${app} exited with code ${code}`);
+    child.once('exit', (code, signal) => {
+      if (code !== 0) console.error(`claude-board: the sign-in for ${app} exited with ${signal ?? `code ${code}`}`);
+      resolve(code === 0);
     });
   });
 }

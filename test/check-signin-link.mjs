@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { MAX_SIGNIN_LINKS } from '../src/signin-link.mjs';
+import { MAX_SIGNIN_LINKS, startSignin } from '../src/signin-link.mjs';
 import { SESSION_COOKIE } from '../src/secret.mjs';
 import { check, freePort, listFiles, rawRequest, readJsonLines, repoRoot, runMain, secretHome, sessionCookieHeader, waitFor, waitForHealthy, writeHeaders } from './support.mjs';
 
@@ -22,8 +22,12 @@ writeFileSync(recipe, '# a recipe\n');
 writeFileSync(script, `
 import { appendFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+const app = process.argv[3];
+console.error('stderr of ' + app);
+if (app === 'dies-at-once') process.exit(1);
 const pgid = Number(spawnSync('ps', ['-o', 'pgid=', '-p', String(process.pid)], { encoding: 'utf8' }).stdout);
 appendFileSync(${JSON.stringify(started)}, JSON.stringify({ node: process.execPath, argv: process.argv.slice(1), pid: process.pid, pgid }) + '\\n');
+if (app === 'stays-up') setTimeout(() => {}, 30000);
 `);
 
 const port = await freePort();
@@ -71,6 +75,8 @@ async function mint(over) {
 }
 
 const startedRuns = () => readJsonLines(started);
+const STARTED_PAGE = '<h1>The sign-in browser is opening</h1>\n<p>It opens on the Mac running the board. Finish signing in there; you can close this tab.</p>';
+const SPENT_PAGE = '<h1>This sign-in link is spent</h1>\n<p>It was already used, the board has restarted, or the sign-in could not start. Type the sign-in command your session named in a terminal instead, or ask it for a new link.</p>';
 
 /** A link for `app`, clicked, and its run on record. Everything an earlier click started has
  * landed by then, so a run count taken after this is a settled one. */
@@ -124,8 +130,7 @@ async function main() {
     assert.equal(res.status, 200);
     assert.match(res.headers['content-type'], /^text\/html/);
     assert.equal(res.headers['cache-control'], 'no-store');
-    assert.match(res.body, /The sign-in browser is opening/);
-    assert.match(res.body, /Finish signing in there/);
+    assert.ok(res.body.includes(STARTED_PAGE), res.body);
     assert.ok(!res.body.includes(tokens.at(-1)), 'the page does not repeat the token');
 
     await waitFor(() => startedRuns().some(run => run.argv[2] === 'demo-app2'), { what: 'the run' });
@@ -140,8 +145,7 @@ async function main() {
     assert.equal(unknown.status, 410);
     assert.equal(unknown.body, replay.body, 'used and unknown read the same');
     assert.equal((await request('GET', '/signin/not-a-token')).body, replay.body);
-    assert.match(replay.body, /This sign-in link is spent/);
-    assert.match(replay.body, /Type the sign-in command your session named in a terminal/);
+    assert.ok(replay.body.includes(SPENT_PAGE), replay.body);
     assert.ok(!replay.body.includes(tokens.at(-1)), 'the spent page holds no token');
 
     await settleOn('after-replay');
@@ -169,13 +173,41 @@ async function main() {
     assert.ok(!startedRuns().some(run => run.argv[2] === 'gone-recipe'));
   });
 
+  await check('a sign-in that dies at once reads as spent, never as opening', async () => {
+    const res = await request('GET', await mint({ app: 'dies-at-once' }));
+    assert.equal(res.status, 410);
+    assert.ok(res.body.includes(SPENT_PAGE), res.body);
+  });
+
+  await check('a sign-in still running past the wait reads as opening', async () => {
+    const res = await request('GET', await mint({ app: 'stays-up' }));
+    assert.equal(res.status, 200);
+    assert.ok(res.body.includes(STARTED_PAGE), res.body);
+    await waitFor(() => startedRuns().some(run => run.argv[2] === 'stays-up'), { what: 'the stays-up run' });
+    process.kill(startedRuns().find(run => run.argv[2] === 'stays-up').pid);
+  });
+
+  await check("a run's stderr reaches the daemon's output, a clean exit's warning as much as a failure's", async () => {
+    await settleOn('warns-and-exits-0');
+    for (const app of ['dies-at-once', 'warns-and-exits-0']) await waitFor(() => daemonOutput.includes(`stderr of ${app}`), { what: `the stderr of ${app}` });
+  });
+
+  await check('a spawn that fails, thrown or emitted, answers false', async () => {
+    assert.equal(await startSignin({ app: 'thrown', recipe: 'nul\0' }), false, 'node throws on a NUL in an argument');
+    const node = process.execPath;
+    process.execPath = path.join(work, 'no-such-node');
+    const emitted = startSignin({ app: 'emitted', recipe });
+    process.execPath = node;
+    assert.equal(await emitted, false, 'a missing binary is an error event');
+  });
+
   await check('a restart voids an unused link', async () => {
     const link = await mint({ app: 'unused' });
     await stopDaemon();
     await startDaemon();
     const res = await request('GET', link);
     assert.equal(res.status, 410);
-    assert.match(res.body, /This sign-in link is spent/);
+    assert.ok(res.body.includes(SPENT_PAGE), res.body);
     await settleOn('after-restart');
     assert.ok(!startedRuns().some(run => run.argv[2] === 'unused'));
   });

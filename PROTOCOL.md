@@ -1023,12 +1023,14 @@ GET  /signin/<token>    200 page: the sign-in browser is opening. No Set-Cookie
 | 429 | `{ error }` | 32 links are already unused; nothing was minted |
 
 `GET /signin/<token>` consumes the token and starts, detached and with no shell,
-`node <script> signin <app> --recipe <recipe>`. Its output is discarded; a non-zero exit logs the
-app and the code. `<script>` is `CLAUDE_BOARD_SIGNIN_SCRIPT`, or
+`node <script> signin <app> --recipe <recipe>`, then waits up to 2 seconds before answering. Its
+stdout is discarded and its stderr is the daemon's, so it lands in the daemon's log; a non-zero exit
+also logs the app and the code. `<script>` is `CLAUDE_BOARD_SIGNIN_SCRIPT`, or
 `~/.claude/scripts/ui-evidence/capture.mjs` without it, and the launcher does not pass that variable
-through. A used or unknown token, or one whose script or recipe has gone since the mint, answers
-410 and one page saying the link is spent and to type the sign-in command instead. Neither page
-carries the token, and neither sets a cookie.
+through. A used or unknown token, one whose script or recipe has gone since the mint, or a run that
+fails to spawn or exits non-zero inside the wait answers 410 and one page saying the link is spent
+and to type the sign-in command instead. A run that fails later has already answered 200. Neither
+page carries the token, and neither sets a cookie.
 
 The link has no expiry: it is good until it is used or the daemon restarts, and it is never written
 to disk. It is a store of its own, so `/auth/<token>` never honours one and `/signin/<token>` never

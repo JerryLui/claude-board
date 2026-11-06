@@ -369,6 +369,10 @@ What bounds it instead:
   `~/.claude/scripts/ui-evidence/capture.mjs` from the compiled-in `HOME`. The variable reaches only
   a daemon run out of a clone, as the checks do.
 
+The run's stderr goes to the daemon's owner-only log, so a Google profile it could not remove is on
+record there, along with the URLs its fence refused. The token is not among them: the command is
+never given it.
+
 The mint checks the recipe path with the daemon's grants, so the secret's holder learns whether a
 file exists. It reads none of it back, which is less than `POST /api/board` gives the same caller.
 The residual risks are under [Known and unclosed](#known-and-unclosed) and [Not defended, by
