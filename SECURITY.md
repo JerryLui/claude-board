@@ -125,8 +125,8 @@ and worth stating on its own terms.
 
 What it does *not* widen, as a client of the daemon: it binds no port, listens on
 nothing, and is unreachable from the network, from a web page and from another local
-process. It resolves no path and creates no board, which is the one route that spends the
-Documents grant, so nothing it can do reaches *that* grant. Every route it uses
+process. It resolves no path, creates no board and starts no sign-in, the two routes that
+spend the Documents grant, so nothing it can do reaches *that* grant. Every route it uses
 is one the browser cookie already reaches (`POMODORO_COOKIE_ACTIONS`, plus the reads),
 which is why the feature added no API for it. And its secret path is derived from `HOME`
 rather than read from `CLAUDE_BOARD_SECRET_FILE` — that variable is kept out of this
