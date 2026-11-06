@@ -629,9 +629,9 @@ board URLs. That has not been done. What is done instead is bounding it:
   (`/api/board/:id/events`) established before the rotation keeps receiving every later
   round and every submitted answer for that board, and an in-flight `/wait` still returns
   its packet. Both last until the daemon restarts. If you are rotating because a cookie
-  leaked, restart the daemon too — `launchctl kickstart -k gui/$(id -u)/claude-board`. That restart
-  is also what ends an unused sign-in link: the click holds no credential, so a link survives a
-  rotation, or the secret's deletion, until it is used or the daemon restarts.
+  leaked, restart the daemon too — `launchctl kickstart -k gui/$(id -u)/claude-board`.
+  That restart is also what ends an unused sign-in link: the click holds no credential, so a link
+  survives a rotation, or the secret's deletion, until it is used or the daemon restarts.
 
 If you run other services on loopback and this matters to you, use a separate browser
 profile for boards.

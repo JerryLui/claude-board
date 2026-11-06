@@ -3412,8 +3412,9 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
   // for the operator's log, not a gate, and every gate below re-reads.
   if (!currentSecret()) {
     console.error(
-      `claude-board: no local secret at ${secretPath()} — every request except /api/health will be ` +
-      `refused with 401, reads included: the session cookie a browser holds is derived from the ` +
+      `claude-board: no local secret at ${secretPath()}. Every request except /api/health, a ` +
+      `/signin/<token> link and the vendored mermaid file will be refused with 401, reads ` +
+      `included: the session cookie a browser holds is derived from the ` +
       `secret, so with no secret there is no credential to accept. Run ./install.sh from the ` +
       `claude-board repository to generate one; an existing secret is never rotated.`
     );
