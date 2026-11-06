@@ -16,15 +16,12 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { createHandoffStore } from './handoff.mjs';
 
-/** Unused links a daemon holds. Links never expire, so this is the only thing that stops
- * a loop growing the store for the life of the process; a mint past it is refused, never
- * made room for, because a link already handed out stays good until it is used. */
-export const MAX_SIGNIN_LINKS = 32;
+const SAFE_APP = /^[a-z][a-z0-9-]{0,63}$/;
 
-const SAFE_APP = /^[a-z][a-z0-9-]*$/;
-
+/** No count limit: a link handed out stays good until it is used, so a mint never makes room,
+ * and only the secret's holder mints. `SAFE_APP`'s length bounds what one link can hold. */
 export function createSigninStore() {
-  return createHandoffStore({ ttlMs: Infinity, maxLive: MAX_SIGNIN_LINKS });
+  return createHandoffStore({ ttlMs: Infinity });
 }
 
 /** Absent from bin/launcher.c's passthrough list on purpose: under the launcher this is
@@ -47,7 +44,7 @@ function isFile(file) {
  * then should read as a link that failed, not as a browser that never comes. */
 export function signinRefusal({ app, recipe }) {
   if (!isFile(signinScript())) return 'the sign-in script is not installed on this machine';
-  if (typeof app !== 'string' || !SAFE_APP.test(app)) return 'app must match ^[a-z][a-z0-9-]*$';
+  if (typeof app !== 'string' || !SAFE_APP.test(app)) return `app must match ${SAFE_APP.source}`;
   if (typeof recipe !== 'string' || !path.isAbsolute(recipe) || !isFile(recipe)) return 'recipe must be an absolute path to an existing file';
   return null;
 }

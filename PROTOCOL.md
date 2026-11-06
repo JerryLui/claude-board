@@ -1011,7 +1011,7 @@ GET  /signin/<token>    200 page: the sign-in browser is opening. No Set-Cookie
 ```
 
 `POST /api/signin-link` takes the secret only, like `/api/handoff`. `app` must match
-`^[a-z][a-z0-9-]*$` and `recipe` must be an absolute path to an existing file. `url` is
+`^[a-z][a-z0-9-]{0,63}$` and `recipe` must be an absolute path to an existing file. `url` is
 `http://127.0.0.1:<port>/signin/<token>`, the daemon's own port whatever `Host` the request carried.
 
 | Status | Body | Meaning |
@@ -1020,7 +1020,6 @@ GET  /signin/<token>    200 page: the sign-in browser is opening. No Set-Cookie
 | 400 | `{ error }` | a bad `app` or `recipe`, or the sign-in script is absent |
 | 401 | none | no secret; the session cookie counts as none here |
 | 415 | `{ error }` | the body is not `application/json` |
-| 429 | `{ error }` | 32 links are already unused; nothing was minted |
 
 `GET /signin/<token>` consumes the token and starts, detached and with no shell,
 `node <script> signin <app> --recipe <recipe>`, then waits up to 2 seconds before answering. Its

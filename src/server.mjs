@@ -1616,9 +1616,8 @@ async function handleSigninLink(req, res, parts, signins) {
   const { app, recipe } = body || {};
   const refusal = signinRefusal({ app, recipe });
   if (refusal) return sendJson(res, 400, { error: refusal });
-  const minted = signins.mint({ app, recipe });
-  if (!minted) return sendJson(res, 429, { error: 'too many unused sign-in links; use the typed command' });
-  return sendJson(res, 200, { url: `http://127.0.0.1:${req.socket.localPort}/signin/${minted.token}` });
+  const { token } = signins.mint({ app, recipe });
+  return sendJson(res, 200, { url: `http://127.0.0.1:${req.socket.localPort}/signin/${token}` });
 }
 
 /** `threadBoards` is every board of `thread` in the store, oldest first, with `board`'s

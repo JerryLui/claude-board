@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { MAX_SIGNIN_LINKS, startSignin } from '../src/signin-link.mjs';
+import { startSignin } from '../src/signin-link.mjs';
 import { SESSION_COOKIE } from '../src/secret.mjs';
 import { check, freePort, listFiles, rawRequest, readJsonLines, repoRoot, runMain, secretHome, sessionCookieHeader, waitFor, waitForHealthy, writeHeaders } from './support.mjs';
 
@@ -98,7 +98,7 @@ async function main() {
 
   await check('a mint is refused for a bad app or recipe', async () => {
     const rows = [
-      { app: 'Upper' }, { app: '-flag' }, { app: '9lead' }, { app: 'a b' }, { app: 'app\n' }, { app: '' }, { app: 5 }, { app: undefined },
+      { app: 'a'.repeat(65) }, { app: 'Upper' }, { app: '-flag' }, { app: '9lead' }, { app: 'a b' }, { app: 'app\n' }, { app: '' }, { app: 5 }, { app: undefined },
       { recipe: 'relative.md' }, { recipe: path.join(work, 'missing.md') }, { recipe: work }, { recipe: `${recipe}\0` }, { recipe: 5 }, { recipe: undefined },
     ];
     for (const row of rows) {
@@ -212,17 +212,16 @@ async function main() {
     assert.ok(!startedRuns().some(run => run.argv[2] === 'unused'));
   });
 
-  await check(`unused links stop at ${MAX_SIGNIN_LINKS}, every one stays good, and a click frees a slot`, async () => {
-    const links = [];
-    for (let i = 0; i < MAX_SIGNIN_LINKS; i++) links.push(await mint({ app: 'capped' }));
-    assert.equal((await mintRequest()).status, 429);
-    assert.equal((await request('GET', links[0])).status, 200, 'the oldest link survives the refusal');
-    await mint({ app: 'capped' });
+  await check('a second mint for the same app leaves the first link good', async () => {
+    const app = 'a'.repeat(64);
+    const links = [await mint({ app }), await mint({ app })];
+    assert.notEqual(links[0], links[1]);
+    for (const link of links) assert.equal((await request('GET', link)).status, 200);
+    await waitFor(() => startedRuns().filter(run => run.argv[2] === app).length === 2, { what: 'both runs' });
   });
 
   await check('no token reaches the board data dir, the daemon output, or the started command', async () => {
     await stopDaemon();
-    assert.ok(tokens.length > MAX_SIGNIN_LINKS);
     const files = listFiles(home);
     assert.ok(files.length > 0, 'the data dir holds files to search');
     const written = [daemonOutput, readFileSync(started, 'utf8'), ...files.map(file => readFileSync(file, 'utf8'))].join('\n');

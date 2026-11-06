@@ -360,10 +360,8 @@ What bounds it instead:
 - **Memory only.** It is never written to disk, a log line, a board or a card, and a daemon
   restart voids every unused link. Persisting it is what the handoff's design refuses, and the
   same refusal holds here.
-- **A cap.** At most 32 unused links. Past that a mint is refused, never made room for, so a link
-  already handed out stays good.
 - **The secret to mint.** The session cookie is refused, so a browser cannot mint one.
-- **A fixed command.** The caller names an app (`^[a-z][a-z0-9-]*$`) and an absolute path to an
+- **A fixed command.** The caller names an app (`^[a-z][a-z0-9-]{0,63}$`) and an absolute path to an
   existing file, and neither reaches a shell. The script is not the caller's to name:
   `CLAUDE_BOARD_SIGNIN_SCRIPT` is not on the launcher's allowlist, so under the bundle it is always
   `~/.claude/scripts/ui-evidence/capture.mjs` from the compiled-in `HOME`. The variable reaches only
