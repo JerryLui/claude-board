@@ -578,12 +578,12 @@ Do not read it as a fix in progress.
 **A sign-in runs a script the bundle does not sign.** The command `GET /signin/<token>` starts is a
 child of the daemon, so it runs under the daemon's TCC identity, and the script lives under `~/.claude`,
 writable by any process running as you, one TCC has refused included. The headed Chromium it opens
-runs under the same chain, with the Google and BankID pages it loads. Such a process can read the
-secret too, so it can rewrite the script, mint a link, follow it, and run its own code under the
-Documents grant with no restart. That is the reach of the payload entry above by a shorter road.
+runs under the same chain, with the Google and BankID pages it loads. A process TCC has refused can
+read the secret too, so it can rewrite the script, mint a link, follow it, and run its own code under
+the Documents grant with no restart. That is the reach of the payload entry above by a shorter road.
 Unlike that entry this one is **open, not accepted**: whether to accept it or to start the sign-in
-outside the bundle's identity is undecided. A digest of the script checked before the spawn would
-close it; it is not implemented.
+outside the bundle's identity is undecided. Starting the sign-in from a separate launch agent with no
+grant would close it; it is not implemented.
 
 **`DYLD_INSERT_LIBRARIES` on the launcher's own load is untouched by any of this.** The
 `execve`-built environment governs what the launcher hands *node*; it has no say over
