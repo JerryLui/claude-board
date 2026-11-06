@@ -124,9 +124,9 @@ async function main() {
     await waitFor(() => startedRuns().some(run => run.argv[2] === 'host-guard'), { what: 'the host-guard run' });
   });
 
-  await check('another site cannot spend a link: it reads as spent and the link stays good', async () => {
+  await check('neither another site nor a prefetch can spend a link: it reads as spent and the link stays good', async () => {
     const link = await mint({ app: 'cross-site' });
-    for (const headers of [{ 'sec-fetch-site': 'cross-site' }, { 'sec-fetch-site': 'same-site' }, { origin: 'http://evil.example' }]) {
+    for (const headers of [{ 'sec-fetch-site': 'cross-site' }, { 'sec-fetch-site': 'same-site' }, { origin: 'http://evil.example' }, { 'sec-fetch-site': 'none', 'sec-purpose': 'prefetch;prerender' }, { 'sec-fetch-site': 'same-origin', purpose: 'prefetch' }]) {
       const res = await request('GET', link, { headers });
       assert.equal(res.status, 410, JSON.stringify(headers));
       assert.ok(res.body.includes(SPENT_PAGE), res.body);

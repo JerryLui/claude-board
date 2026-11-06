@@ -530,6 +530,13 @@ function isSameOriginRead(req) {
   return true;
 }
 
+/** True iff the browser sent this ahead of any click. `Sec-Purpose` is a list, so a
+ * prerender reads `prefetch;prerender`; `Purpose` is its older name. Such a fetch can carry
+ * `Sec-Fetch-Site: none` or `same-origin`, so the site check alone would pass it. */
+function isPrefetch(req) {
+  return [req.headers['sec-purpose'], req.headers.purpose].some(value => /\bprefetch\b/i.test(value));
+}
+
 /** The pomodoro writes a cookie-holding browser may perform, and NOT a moment more. A
  * NAMED closed set, never a `parts[1] === 'pomodoro'` prefix match, which would silently
  * hand the cookie every pomodoro write this file ever grows, including ones that should
@@ -1601,10 +1608,11 @@ function handleAuthHandoff(req, res, token, handoffs, secret, pathname) {
  * The GET is the only reader of `signins`, and `/auth` never reads it, so a sign-in token
  * can never set the cookie. `no-store`, so a reload asks again and reads as spent rather
  * than repeating a page that says a browser is opening. Another site's request reads as
- * spent and leaves the token good, so a page holding a leaked link cannot use it up. */
+ * spent and leaves the token good, so a page holding a leaked link cannot use it up. A
+ * prefetch reads the same way, so only a click starts the sign-in. */
 async function handleSigninLink(req, res, parts, signins) {
   if (req.method === 'GET') {
-    const entry = isSameOriginRead(req) && HANDOFF_TOKEN_RE.test(parts[1]) ? signins.consume(parts[1]) : null;
+    const entry = isSameOriginRead(req) && !isPrefetch(req) && HANDOFF_TOKEN_RE.test(parts[1]) ? signins.consume(parts[1]) : null;
     const started = entry && !signinRefusal(entry.target) && await startSignin(entry.target);
     return sendHtml(res, started ? 200 : 410, started ? SIGNIN_STARTED_PAGE : SIGNIN_SPENT_PAGE, { 'cache-control': 'no-store' });
   }

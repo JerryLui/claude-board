@@ -679,11 +679,12 @@ transcript can spend it. Nothing off the machine connects to the port, but a pag
 renders here can send it a GET, and the `Host` check passes that, so a leaked token needs a second
 check: the route refuses a `Sec-Fetch-Site` of another site and leaves the token unspent. A click
 from a terminal or a desktop app sends `none` and passes. A link in a web chat reads as cross-site,
-gets the spent page and stays good for a click from elsewhere. The header is the browser's word, so
-this stops a web page and not a local process. What spending it buys is a sign-in window you did
-not ask for, not a session, and a real link that then reads as spent, where the typed command still
-works. It lasts until the link is used or the daemon restarts; there is no clock on it, deliberately
-(see [The sign-in link](#the-sign-in-link)).
+gets the spent page and stays good for a click from elsewhere. A browser's own prefetch can send
+`none` or `same-origin`, so a `Sec-Purpose` or `Purpose` naming prefetch gets that page too and
+spends nothing. The header is the browser's word, so this stops a web page and not a local process.
+What spending it buys is a sign-in window you did not ask for, not a session, and a real link that
+then reads as spent, where the typed command still works. It lasts until the link is used or the
+daemon restarts; there is no clock on it, deliberately (see [The sign-in link](#the-sign-in-link)).
 
 **An archived board.** `pages/<boardId>.html` opens from disk with no credential at all,
 with the three shared files beside it (mermaid joined ui/styles, ADR 70); the gate is on

@@ -1029,9 +1029,9 @@ also logs the app and the code. `<script>` is `CLAUDE_BOARD_SIGNIN_SCRIPT`, or
 through. A used or unknown token, one whose script or recipe has gone since the mint, or a run that
 fails to spawn or exits non-zero inside the wait answers 410 and one page saying the link is spent
 and to type the sign-in command instead. A run that fails later has already answered 200. A request
-another site sent (`Sec-Fetch-Site` other than `none` or `same-origin`, or a foreign `Origin`) gets
-that same 410 and leaves the token unspent. Neither page carries the token, and neither sets a
-cookie.
+another site sent (`Sec-Fetch-Site` other than `none` or `same-origin`, or a foreign `Origin`), or a
+browser's prefetch (`Sec-Purpose` or `Purpose` naming it), gets that same 410 and leaves the token
+unspent. Neither page carries the token, and neither sets a cookie.
 
 The link has no expiry: it is good until it is used or the daemon restarts, and it is never written
 to disk. It is a store of its own, so `/auth/<token>` never honours one and `/signin/<token>` never
