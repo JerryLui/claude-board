@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **A screen run's sign-in can be a link**: a session can now mint a one-time link that, clicked,
+  opens the sign-in browser on the Mac running the board; you still sign in there. It logs nobody
+  into the board, is good until used or until the board restarts, and lives only in memory. A used
+  link says so and points you at the typed command, which still works. The reasoning against the
+  30-second board link is in SECURITY.md.
 - **Eight sessions can work at once, up from six (ADR 148)**: a mission launch now queues past eight
   sessions working; the limit of twelve alive is unchanged.
 - **Answering a waiting round restarts its 40-minute wait (ADR 145)**: each answer pick, typed

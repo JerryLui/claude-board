@@ -26,6 +26,12 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { SECRET_HEADER, SESSION_COOKIE, sessionToken } from '../src/secret.mjs';
 
+// A run from inside a Claude Code session inherits these, and the shims the checks spawn read
+// them: a check that expects a tab to open sees the session's answer instead. A check that
+// means to set one passes it in its child's env.
+delete process.env.CLAUDE_BOARD_OPEN_CMD;
+delete process.env.CLAUDE_BOARD_CLIENT;
+
 // --- the check runner ---------------------------------------------------------------------
 
 let failures = 0;

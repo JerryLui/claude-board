@@ -13,15 +13,16 @@
 // never as an enumeration of the routes that need them: a route added later is gated by
 // default rather than by whoever adds it remembering. The exception list for (4) is
 // `GET /api/health` (install.sh polls it with plain curl to decide whether the service
-// came up, and it reveals only a version string, an opaque daemon identity — see
-// DAEMON_ID — and the process pid) and `GET /auth/<token>`, which is the route that
-// HANDS OUT the credential and so cannot require it.
+// came up, and it reveals only a version string, an opaque daemon identity (DAEMON_ID)
+// and the process pid), `GET /auth/<token>`, which is the route that HANDS OUT the
+// credential and so cannot require it, `GET /signin/<token>`, which grants nothing
+// (src/signin-link.mjs), and the vendored mermaid file. `isOpenRoute` is the list.
 //
 // A credential is one of exactly two things (src/secret.mjs):
 //
 //   * the local secret, in the `x-claude-board-secret` header. The shim holds it,
-//     because it can read a 0600 file. Only this one may create a board, which is the
-//     only route that resolves a file.
+//     because it can read a 0600 file. Only this one may create a board or mint a
+//     sign-in link, the only routes that resolve a file.
 //   * the session cookie, derived from the secret, which a browser gets by following a
 //     single-use handoff (src/handoff.mjs). It reads boards and answers them, and is
 //     refused in the secret header, so it can never resolve a file.
@@ -55,6 +56,7 @@ import { createBrowserStreams } from './browser-stream.mjs';
 import { STREAM_WORKER_FILE, STREAM_WORKER_SOURCE } from './stream-worker.mjs';
 import { readSecret, secretPath, secretMatches, sessionToken, sessionCookieMatches, SECRET_HEADER, SESSION_COOKIE, SESSION_MAX_AGE_S } from './secret.mjs';
 import { createHandoffStore, handoffTarget, recoveryCommand, HANDOFF_TOKEN_RE, DEFAULT_PORT, waitCeilingMs } from './handoff.mjs';
+import { createSigninStore, signinRefusal, startSignin, SIGNIN_STARTED_PAGE, SIGNIN_SPENT_PAGE } from './signin-link.mjs';
 import { createBoard, addRound, amendRound, abandonOpenRounds, applySubmit, buildPacket, roundAnswers, dropResolved, resolveComments, questionBlocks, SUPPRESSED, ANSWERS_DELIVERED, roundContentDrifted } from './board.mjs';
 import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, renderRefusalPage, boardForClient, holdStages, holdAllStages, stageShas, CSP, INDEX_CSP } from './render.mjs';
 import { buildThreadIndex, renderIndexPage, renderMissionsPage, renderThreadRows, folderName } from './indexpage.mjs';
@@ -528,6 +530,13 @@ function isSameOriginRead(req) {
   return true;
 }
 
+/** True iff the browser sent this ahead of any click. `Sec-Purpose` is a list, so a
+ * prerender reads `prefetch;prerender`; `Purpose` is its older name. Such a fetch can carry
+ * `Sec-Fetch-Site: none` or `same-origin`, so the site check alone would pass it. */
+function isPrefetch(req) {
+  return [req.headers['sec-purpose'], req.headers.purpose].some(value => /\bprefetch\b/i.test(value));
+}
+
 /** The pomodoro writes a cookie-holding browser may perform, and NOT a moment more. A
  * NAMED closed set, never a `parts[1] === 'pomodoro'` prefix match, which would silently
  * hand the cookie every pomodoro write this file ever grows, including ones that should
@@ -643,9 +652,9 @@ function isCookieWrite(parts) {
  *
  *  - the secret itself, in the `x-claude-board-secret` header. That is the shim, and it
  *    is what EVERY write except `submit`/`attended` and the pomodoro actions below
- *    demands — including `POST /api/board`, the only route that resolves a file, and
- *    `POST /api/handoff`, which mints browser credentials and so must never be
- *    reachable with one.
+ *    demands, including `POST /api/board` and `POST /api/signin-link`, the only routes
+ *    that resolve a file, and `POST /api/handoff`, which mints browser credentials and
+ *    so must never be reachable with one.
  *  - the session cookie an authorized browser holds, accepted on submit, and — as of
  *    the pomodoro slice — on `ensure`/`pause`/`resume`/`reset`/`settings` too. The index
  *    page's switch is a browser holding only the cookie: under the old rule it could
@@ -677,7 +686,7 @@ function isAuthorizedWrite(req, parts, secret) {
   return sessionCookieMatches(req.headers.cookie, secret);
 }
 
-/** The three GET routes that are reachable with no credential, and the reason each is.
+/** The four GET routes that are reachable with no credential, and the reason each is.
  *
  *  - `/api/health`: install.sh polls it with plain `curl` to decide whether the service
  *    actually came up, and gating it would make a fresh install report failure on a
@@ -692,6 +701,9 @@ function isAuthorizedWrite(req, parts, secret) {
  *  - `/auth/<token>`: the route that hands a browser its credential. Requiring one here
  *    would be a bootstrap loop. It is protected by the token being single-use, unguessable
  *    and seconds-lived instead (src/handoff.mjs).
+ *  - `/signin/<token>`: the link a person clicks in a browser that may hold nothing. It
+ *    grants nothing either: its token starts one sign-in browser, once, and sets no
+ *    cookie (src/signin-link.mjs).
  *  - `GET /b/mermaid-<hash>.js`, and NOTHING else under `/b/`: the vendored mermaid
  *    engine, for the one caller that structurally cannot hold the credential. A board
  *    page's html stage is sandboxed with no `allow-same-origin`, so it runs at an opaque
@@ -711,7 +723,7 @@ function isAuthorizedWrite(req, parts, secret) {
 function isOpenRoute(pathname, parts) {
   if (pathname === '/api/health') return true;
   if (parts[0] === 'b' && parts.length === 2 && MERMAID_ASSET_NAME.test(parts[1])) return true;
-  return parts[0] === 'auth' && parts.length === 2;
+  return (parts[0] === 'auth' || parts[0] === 'signin') && parts.length === 2;
 }
 
 /** True iff the refusal should be an HTML page rather than a status and a JSON line.
@@ -1586,6 +1598,35 @@ function handleAuthHandoff(req, res, token, handoffs, secret, pathname) {
     'content-length': '0',
   });
   res.end();
+}
+
+/** POST /api/signin-link and GET /signin/:token, the two halves of src/signin-link.mjs.
+ * The mint is gate 3's like the handoff's, the secret alone. The URL is built from the
+ * socket rather than the `Host` header, as `strandedTarget` above is: it travels through
+ * a chat to a browser, so it names this daemon and nothing a caller wrote.
+ *
+ * The GET is the only reader of `signins`, and `/auth` never reads it, so a sign-in token
+ * can never set the cookie. `no-store`, so a reload asks again and reads as spent rather
+ * than repeating a page that says a browser is opening. Another site's request reads as
+ * spent and leaves the token good, so a page holding a leaked link cannot use it up. A
+ * prefetch reads the same way, so only a click starts the sign-in. */
+async function handleSigninLink(req, res, parts, signins) {
+  if (req.method === 'GET') {
+    const entry = isSameOriginRead(req) && !isPrefetch(req) && HANDOFF_TOKEN_RE.test(parts[1]) ? signins.consume(parts[1]) : null;
+    const started = entry && !signinRefusal(entry.target) && await startSignin(entry.target);
+    return sendHtml(res, started ? 200 : 410, started ? SIGNIN_STARTED_PAGE : SIGNIN_SPENT_PAGE, { 'cache-control': 'no-store' });
+  }
+  let body;
+  try {
+    body = await readJsonBody(req);
+  } catch (err) {
+    return sendJson(res, err.status || 400, { error: err.status ? err.message : 'invalid JSON body' });
+  }
+  const { app, recipe } = body || {};
+  const refusal = signinRefusal({ app, recipe });
+  if (refusal) return sendJson(res, 400, { error: refusal });
+  const { token } = signins.mint({ app, recipe });
+  return sendJson(res, 200, { url: `http://127.0.0.1:${req.socket.localPort}/signin/${token}` });
 }
 
 /** `threadBoards` is every board of `thread` in the store, oldest first, with `board`'s
@@ -3362,6 +3403,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
   // boot-time reconciliation is startServer's job, exactly as it already was.
   const pomo = pomodoro || createPomodoro({ home });
   const handoffs = createHandoffStore();
+  const signins = createSigninStore();
   // Re-read PER REQUEST, not once at startup. SECURITY.md,
   // PROTOCOL.md, CHANGELOG.md and src/secret.mjs all name rotating the secret as THE way
   // to revoke every browser at once. With the value captured in a closure that was false
@@ -3378,8 +3420,9 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
   // for the operator's log, not a gate, and every gate below re-reads.
   if (!currentSecret()) {
     console.error(
-      `claude-board: no local secret at ${secretPath()} — every request except /api/health will be ` +
-      `refused with 401, reads included: the session cookie a browser holds is derived from the ` +
+      `claude-board: no local secret at ${secretPath()}. Every request except /api/health, a ` +
+      `/signin/<token> link and the vendored mermaid file will be refused with 401, reads ` +
+      `included: the session cookie a browser holds is derived from the ` +
       `secret, so with no secret there is no credential to accept. Run ./install.sh from the ` +
       `claude-board repository to generate one; an existing secret is never rotated.`
     );
@@ -3411,7 +3454,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
         return;
       }
 
-      // Gate 4: the read gate. Everything except the two open routes above needs a
+      // Gate 4: the read gate. Everything but `isOpenRoute`'s list needs a
       // credential — index, board page, search, /wait and the SSE stream alike. Unlike
       // the write refusal this one carries a body, because the caller it most often
       // refuses is a human looking at a tab, not a program: see sendCredentialRefusal.
@@ -3430,6 +3473,10 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
 
       if (req.method === 'POST' && url.pathname === '/api/handoff') {
         return await handleMintHandoff(req, res, handoffs);
+      }
+
+      if ((req.method === 'POST' && url.pathname === '/api/signin-link') || (req.method === 'GET' && parts[0] === 'signin' && parts.length === 2)) {
+        return await handleSigninLink(req, res, parts, signins);
       }
 
       // The two home views under one top bar: Missions at `/`, the board's home page,

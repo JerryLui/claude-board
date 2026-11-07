@@ -165,7 +165,8 @@ export function createHandoffStore({ ttlMs = null, now = Date.now, mintToken = (
     mint(target) {
       // Bounded by construction: every mint drops everything already expired, and a
       // handoff lives for seconds, so a process that hammers this route cannot grow the
-      // map past the number of mints it manages inside one TTL.
+      // map past the number of mints it manages inside one TTL. The sign-in store has no
+      // TTL, so none of that holds there (src/signin-link.mjs).
       prune();
       const token = mintToken();
       const expiresAt = now() + (ttlMs ?? handoffTtlMs());
