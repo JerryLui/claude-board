@@ -47,9 +47,10 @@ export const CARD_ORDER_KINDS = ['stop', 'comment'];
 export const MISSION_FIELDS = ['title', 'cwd', 'phase', 'state', 'summary', 'waitingOn', 'next', 'prs', 'handoff', 'fire', 'queue', 'retiredAt'];
 
 /** At most this many sessions work at once, and at most `MAX_ALIVE` are alive; past either,
- * a launch queues. A session waiting on the PM is alive but not working. */
-export const MAX_WORKING = 8;
-export const MAX_ALIVE = 12;
+ * a launch queues. A session waiting on the PM is alive but not working, and the PM's own
+ * tab holds no slot (`liveCounts`, ADR 149). */
+export const MAX_WORKING = 10;
+export const MAX_ALIVE = 14;
 
 /** A working session silent this long reads stalled. */
 export const STALL_SILENCE_MS = 15 * 60 * 1000;
@@ -523,11 +524,14 @@ export function missionView(m, { home = boardHome(), now = Date.now(), isAlive =
   };
 }
 
-/** The launch caps' counts: the missions a live session holds, and those of them working. */
-function liveCounts(views) {
+/** The launch caps' counts: the missions a live session holds, and those of them working.
+ * A mission held by a tab the PM runs, its bound session listed `interactive` in `listed`,
+ * holds no slot: the caps meter the background sessions the Master Chief launches (ADR 149).
+ * While the watcher reads down every live session counts. */
+function liveCounts(views, listed) {
   const live = { working: 0, alive: 0 };
   for (const v of views) {
-    if (!v.live) continue;
+    if (!v.live || listingOf(currentSession(v), listed)?.entry.kind === 'interactive') continue;
     live.alive += 1;
     // The stored state, not the view: a live session stored working still works when it
     // reads stalled (silent) or waiting (retired, ADR 147). One whose round waits on the PM
@@ -555,7 +559,7 @@ export function missionsOverview({ home = boardHome(), now = Date.now(), all = f
     .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
   const counts = { needsYou: 0, working: 0, waiting: 0, stalled: 0, released: 0, queued: 0 };
   for (const v of missions) counts[v.view === 'needs-you' ? 'needsYou' : v.view] += 1;
-  return { missions, counts, live: liveCounts(views), now: iso(now) };
+  return { missions, counts, live: liveCounts(views, listed), now: iso(now) };
 }
 
 /** `GET /api/mission/:key`: the view, or a 404. */
@@ -613,7 +617,7 @@ export function recordPrFacts(key, body, { home = boardHome(), now = Date.now() 
 /** `POST /api/mission/:key/launch`: the one check that keeps a mission to one live session.
  * A live session already bound throws a 409 carrying it, and `silent: true` when it reads
  * stalled by silence with its process alive. Past `MAX_WORKING` working or
- * `MAX_ALIVE` alive sessions across the other missions, the mission queues with its launch
+ * `MAX_ALIVE` alive sessions across the other missions (`liveCounts`), the mission queues with its launch
  * recorded in `queue` and answers `{ queued: true }`; else a session is reserved, the
  * mission moves to working in `phase`, and it answers `{ launch: true }`. */
 export function launchMission(key, body, { home = boardHome(), now = Date.now(), isAlive = pidAlive, listed = null } = {}) {
@@ -633,7 +637,7 @@ export function launchMission(key, body, { home = boardHome(), now = Date.now(),
   // may still run: its pid and id never bind the next one (`endedOf`).
   const ended = endedOf(m.session);
   const others = listMissions(home).filter(o => o.key !== key).map(o => missionView(o, { home, now, isAlive, listed }));
-  const live = liveCounts(others);
+  const live = liveCounts(others, listed);
   const at = iso(now);
   let answer;
   if (live.working >= MAX_WORKING || live.alive >= MAX_ALIVE) {

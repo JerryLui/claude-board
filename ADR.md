@@ -133,3 +133,4 @@ link where it is worth reading.
 | 146 | [A Claude Code session whose wait ended keeps an answer watch on the round, and the watch spends it](.agents/adr/0146-a-timed-out-round-keeps-an-answer-watch-that-spends-it.md) | 2026-11-04 | narrows 47; widens 107; relates to 115, 145 |
 | 147 | [A retired mission asks nothing and leaves the lists once its work is done; a blocked job its mission moved on from is no card](.agents/adr/0147-a-retired-mission-asks-nothing-and-a-left-behind-job-is-no-card.md) | 2026-11-04 | amends 131, 140; relates to 123, 128, 141 |
 | 148 | [At most eight sessions work at once, twelve alive](.agents/adr/0148-at-most-eight-sessions-work-at-once.md) | 2026-11-06 | amends 129 |
+| 149 | [Ten background sessions work at once, fourteen alive; the PM's tab holds no slot](.agents/adr/0149-ten-background-sessions-work-the-pms-tab-holds-no-slot.md) | 2026-11-09 | amends 129, 148 |

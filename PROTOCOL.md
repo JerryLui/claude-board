@@ -1734,7 +1734,8 @@ latest fact is neither `merged` nor `closed` (no fact yet counts as open), or a 
 `GET /api/mission/:key` still answers it until the prune deletes it, 30 days after `retiredAt`.
 `tabs` and `watcher` are "The session routes"' below. `counts` are per `view` over the
 missions listed, each tab added to its `state`'s count as the Missions view counts its cards; `live` counts every mission holding a
-live session, `working` including one that reads stalled. Secret or cookie.
+live session, `working` including one that reads stalled, save one whose bound session the
+watcher lists `interactive`: a tab the PM runs holds no slot (ADR 149). Secret or cookie.
 
 ```
 GET  /api/mission/:key              -> View; 404 { error } when absent. Secret only
@@ -1754,8 +1755,8 @@ taken and stored as `released`; a record stored `landed` is rewritten as `releas
 POST /api/mission/:key/launch       { phase, login?, prompt? }
        -> { launch: true }          a session is reserved ({ startedAt, seenAt } now), and the
                                     mission moves to `working` in `phase`
-       -> { queued: true }          eight missions' sessions working or twelve alive, the others
-                                    counted: state `queued`, `queue` holding the launch
+       -> { queued: true }          ten missions' sessions working or fourteen alive, the others
+                                    counted as `live` is: state `queued`, `queue` holding the launch
        -> 409 { error: 'live', session, silent? }
 ```
 

@@ -296,15 +296,16 @@ export function createSessionList({ now = Date.now, onChange = () => {} } = {}) 
     },
 
     /** The latest snapshot as the missions read a bound session's liveness from it
-     * (src/missions.mjs `missionView`, ADR 36): `{ at, sessions: [{ id, pid, procStart,
-     * since }] }`, `at` the snapshot's time and `since` when a snapshot first listed that
+     * (src/missions.mjs `missionView`, ADR 36) and a PM's tab from a background session
+     * (`liveCounts`, ADR 149): `{ at, sessions: [{ id, pid, procStart, kind, since }] }`,
+     * `at` the snapshot's time and `since` when a snapshot first listed that
      * session in that process, both in ms; null while the watcher reads down, or before its
      * first snapshot since the daemon started. */
     listed() {
       if (!isUp() || lastAt === null) return null;
       return {
         at: lastAt,
-        sessions: sessions.map(s => ({ id: s.id, pid: s.pid, procStart: s.procStart, since: firstListed.get(listKey(s)) ?? lastAt })),
+        sessions: sessions.map(s => ({ id: s.id, pid: s.pid, procStart: s.procStart, kind: s.kind, since: firstListed.get(listKey(s)) ?? lastAt })),
       };
     },
 

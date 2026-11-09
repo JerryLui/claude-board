@@ -332,7 +332,7 @@ async function main() {
       seed(dir, `W${i}`, { session: { pid: 1000 + i, startedAt: iso(now), seenAt: iso(now) } });
     }
     assert.deepEqual(launchMission('UNDER_CAP', { phase: 'direct' }, { home: dir, now, isAlive: alive }), { launch: true });
-    // UNDER_CAP's reserved session is the eighth working one.
+    // UNDER_CAP's reserved session is the last working slot.
     const answer = launchMission('OVER_CAP', { phase: 'direct', prompt: '/direct X', login: 'work' }, { home: dir, now, isAlive: alive });
     assert.deepEqual(answer, { queued: true });
     const queued = readMission('OVER_CAP', dir);
@@ -340,8 +340,31 @@ async function main() {
     assert.equal(queued.session, null, 'a queued mission has no session');
     assert.deepEqual(queued.queue, { phase: 'direct', prompt: '/direct X', login: 'work', at: iso(now) });
     const overview = missionsOverview({ home: dir, now, isAlive: alive });
-    assert.deepEqual(overview.live, { working: 8, alive: 8 });
+    assert.deepEqual(overview.live, { working: MAX_WORKING, alive: MAX_WORKING });
     assert.equal(overview.counts.queued, 1);
+  });
+
+  await check('a mission held by a tab the snapshot lists interactive holds no slot, a bg session still does, and every live session counts while the watcher reads down (ADR 149)', () => {
+    const dir = scratchHome('tab-no-slot');
+    const now = Date.now();
+    const alive = () => true;
+    for (let i = 0; i < MAX_WORKING - 2; i++) {
+      seed(dir, `W${i}`, { session: { pid: 1000 + i, startedAt: iso(now), seenAt: iso(now) } });
+    }
+    seed(dir, 'BG', { session: { pid: 3000, id: 'bg-job', startedAt: iso(now), seenAt: iso(now) } });
+    seed(dir, 'TAB', { session: { pid: 3001, id: 'pm-tab', startedAt: iso(now), seenAt: iso(now) } });
+    const listed = {
+      at: now,
+      sessions: [
+        { id: 'bg-job', pid: 3000, procStart: null, kind: 'bg', since: now },
+        { id: 'pm-tab', pid: 3001, procStart: null, kind: 'interactive', since: now },
+      ],
+    };
+    assert.deepEqual(missionsOverview({ home: dir, now, isAlive: alive }).live, { working: MAX_WORKING, alive: MAX_WORKING },
+      'the watcher down: the tab counts');
+    assert.deepEqual(missionsOverview({ home: dir, now, isAlive: alive, listed }).live, { working: MAX_WORKING - 1, alive: MAX_WORKING - 1 });
+    assert.deepEqual(launchMission('UNDER_CAP', { phase: 'direct' }, { home: dir, now, isAlive: alive, listed }), { launch: true });
+    assert.deepEqual(launchMission('OVER_CAP', { phase: 'direct' }, { home: dir, now, isAlive: alive, listed }), { queued: true });
   });
 
   await check('a retired mission whose session is still stored working holds a working slot, though its card counts under Waiting (ADR 147)', () => {
@@ -372,9 +395,9 @@ async function main() {
     for (let i = 0; i < MAX_ALIVE - MAX_WORKING + 1; i++) {
       seed(dir, `P${i}`, { state: 'waiting', session: { pid: 2000 + i, startedAt: iso(now), seenAt: iso(now - minutes(600)) } });
     }
-    assert.deepEqual(missionsOverview({ home: dir, now, isAlive: alive }).live, { working: 6, alive: 11 });
-    assert.deepEqual(launchMission('TWELFTH', { phase: 'grill' }, { home: dir, now, isAlive: alive }), { launch: true });
-    assert.deepEqual(launchMission('THIRTEENTH', { phase: 'grill' }, { home: dir, now, isAlive: alive }), { queued: true });
+    assert.deepEqual(missionsOverview({ home: dir, now, isAlive: alive }).live, { working: MAX_WORKING - 2, alive: MAX_ALIVE - 1 });
+    assert.deepEqual(launchMission('LAST_ALIVE', { phase: 'grill' }, { home: dir, now, isAlive: alive }), { launch: true });
+    assert.deepEqual(launchMission('OVER_ALIVE', { phase: 'grill' }, { home: dir, now, isAlive: alive }), { queued: true });
   });
 
   await check('a launch queued behind the cap ends the session it replaces: the mission holds no slot, dequeues on the next launch, and that pid cannot bind', () => {
