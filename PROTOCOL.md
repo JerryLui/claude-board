@@ -1724,7 +1724,7 @@ question block's id, and `choice` option 0's label, the one a click submits thro
 ```
 GET  /api/missions[?all=1]
        -> { missions: [View], tabs: [Tab], counts: { needsYou, working, waiting, stalled, released, queued },
-            live: { working, alive }, now, watcher: { up, lastAt } }
+            live: { working, alive }, slotFree, now, watcher: { up, lastAt } }
 ```
 
 Newest change first. A released mission is listed until 24 hours after `releasedAt`, or always with
@@ -1735,7 +1735,9 @@ latest fact is neither `merged` nor `closed` (no fact yet counts as open), or a 
 `tabs` and `watcher` are "The session routes"' below. `counts` are per `view` over the
 missions listed, each tab added to its `state`'s count as the Missions view counts its cards; `live` counts every mission holding a
 live session, `working` including one that reads stalled, save one whose bound session the
-watcher lists `interactive`: a tab the PM runs holds no slot (ADR 149). Secret or cookie.
+watcher lists `interactive` in its own process: a tab the PM runs holds no slot (ADR 149).
+`slotFree` is true while `live` sits under both caps, so a launch would not queue: a reader
+waiting for a slot reads it, never the numbers. Secret or cookie.
 
 ```
 GET  /api/mission/:key              -> View; 404 { error } when absent. Secret only
