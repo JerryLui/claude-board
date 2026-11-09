@@ -115,7 +115,7 @@ link where it is worth reading.
 | 126 | [A relay answers a round on the person's words, marked relayed](.agents/adr/0126-a-relay-answers-a-round-on-the-persons-words.md) | 2026-10-28 | relates to 114, 115, 125 |
 | 127 | [A background session passes the guard and opens no tab](.agents/adr/0127-a-background-session-passes-the-guard-and-opens-no-tab.md) | 2026-10-28 | widens 116 |
 | 128 | [Mission changes speak once a minute, from a read-only watch](.agents/adr/0128-mission-changes-speak-once-a-minute-from-a-read-only-watch.md) | 2026-10-28 | widens 56; relates to 71, 72, 94, 106; amended by 130 |
-| 129 | [A mission's session is live while bound and not gone](.agents/adr/0129-a-missions-session-is-live-while-bound-and-not-gone.md) | 2026-10-28 | relates to 123, 125; amended by 140, 141, 148 |
+| 129 | [A mission's session is live while bound and not gone](.agents/adr/0129-a-missions-session-is-live-while-bound-and-not-gone.md) | 2026-10-28 | relates to 123, 125; amended by 140, 141, 148, 149 |
 | 130 | [A mission's last state is released, and landed records migrate](.agents/adr/0130-a-missions-last-state-is-released.md) | 2026-10-28 | amends 123, 128; relates to 124, 129 |
 | 131 | [Sessions reach the board over a route, held in memory](.agents/adr/0131-sessions-reach-the-board-over-a-route-held-in-memory.md) | 2026-10-29 | relates to 5, 123, 125, 128, 129; amended by 141, 147 |
 | 132 | [Any block may carry card fields](.agents/adr/0132-any-block-may-carry-card-fields.md) | 2026-10-29 | relates to 133 |
@@ -132,4 +132,5 @@ link where it is worth reading.
 | 145 | [The reviewer's activity restarts the wait, for a shim that follows the stored deadline](.agents/adr/0145-the-reviewers-activity-restarts-the-wait.md) | 2026-11-04 | narrows 47; relates to 50, 57, 74, 144 |
 | 146 | [A Claude Code session whose wait ended keeps an answer watch on the round, and the watch spends it](.agents/adr/0146-a-timed-out-round-keeps-an-answer-watch-that-spends-it.md) | 2026-11-04 | narrows 47; widens 107; relates to 115, 145 |
 | 147 | [A retired mission asks nothing and leaves the lists once its work is done; a blocked job its mission moved on from is no card](.agents/adr/0147-a-retired-mission-asks-nothing-and-a-left-behind-job-is-no-card.md) | 2026-11-04 | amends 131, 140; relates to 123, 128, 141 |
-| 148 | [At most eight sessions work at once, twelve alive](.agents/adr/0148-at-most-eight-sessions-work-at-once.md) | 2026-11-06 | amends 129 |
+| 148 | [At most eight sessions work at once, twelve alive](.agents/adr/0148-at-most-eight-sessions-work-at-once.md) | 2026-11-06 | amends 129; amended by 149 |
+| 149 | [Ten background sessions work at once, fourteen alive; the PM's tab holds no slot](.agents/adr/0149-ten-background-sessions-work-the-pms-tab-holds-no-slot.md) | 2026-11-09 | amends 129, 148 |

@@ -73,7 +73,7 @@ async function main() {
     }
   });
 
-  await check('listed() answers the latest snapshot\'s time and each session\'s id and process with when a snapshot first listed it so, a /clear or a resume listed afresh; null before any snapshot and while the watcher reads down', () => {
+  await check('listed() answers the latest snapshot\'s time and each session\'s id, process and kind with when a snapshot first listed it so, a /clear or a resume listed afresh; null before any snapshot and while the watcher reads down', () => {
     const { clock, list } = rig();
     const first = session();
     try {
@@ -81,15 +81,15 @@ async function main() {
       list.replace({ intervalMs: 5_000, sessions: [first] });
       clock.t = T0 + 4_000;
       const cleared = session({ id: 'a1b2c3d4-0000-4000-8000-000000000002' });
-      const resumed = session({ id: 'a1b2c3d4-0000-4000-8000-000000000003', pid: 4343 });
+      const resumed = session({ id: 'a1b2c3d4-0000-4000-8000-000000000003', pid: 4343, kind: 'bg' });
       list.replace({ intervalMs: 5_000, sessions: [first, resumed] });
       clock.t = T0 + 8_000;
       list.replace({ intervalMs: 5_000, sessions: [cleared, { ...resumed, pid: 4444, procStart: '2026-10-29T12:00:07Z' }] });
       assert.deepEqual(list.listed(), {
         at: T0 + 8_000,
         sessions: [
-          { id: cleared.id, pid: 4242, procStart: first.procStart, since: T0 + 8_000 },
-          { id: resumed.id, pid: 4444, procStart: '2026-10-29T12:00:07Z', since: T0 + 8_000 },
+          { id: cleared.id, pid: 4242, procStart: first.procStart, kind: 'interactive', since: T0 + 8_000 },
+          { id: resumed.id, pid: 4444, procStart: '2026-10-29T12:00:07Z', kind: 'bg', since: T0 + 8_000 },
         ],
       });
       list.replace({ intervalMs: 5_000, sessions: [cleared] });
