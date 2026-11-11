@@ -1022,6 +1022,7 @@ function declareBoundary(session) {
   const abandoned = session.boardId;
   session.boardId = null;
   session.thread = null;
+  session.threadAdopted = false;
   session.url = null;
   // The abandoned board's first-post key with it: it names a round on a board this
   // conversation has walked away from, and the next post mints its own.
@@ -1189,6 +1190,8 @@ async function postThisRound(session, title, blocks, wait, fresh) {
       );
       session.boardId = posted.boardId;
       session.thread = posted.thread;
+      // Landed on its mission's board (ADR 150): the thread is that board's, not this session's.
+      session.threadAdopted = posted.moved === true;
       return posted;
     })();
     // Assigned synchronously, before the first await below: a concurrent `ask`
@@ -1263,6 +1266,12 @@ async function postThisRound(session, title, blocks, wait, fresh) {
     // the create branch above, and nothing on that branch can 404.
     if (err && err.statusCode === 404) {
       session.boardId = null;
+      // A thread taken from a mission's board is the folder of whichever session made that
+      // board: a board of this session's own in it would be refused as a retarget.
+      if (session.threadAdopted) {
+        session.thread = null;
+        session.threadAdopted = false;
+      }
       return postThisRound(session, title, blocks, wait);
     }
     throw err;
@@ -1272,6 +1281,7 @@ async function postThisRound(session, title, blocks, wait, fresh) {
   if (posted && typeof posted.boardId === 'string' && posted.boardId !== session.boardId) {
     session.boardId = posted.boardId;
     session.thread = posted.thread ?? null;
+    session.threadAdopted = true;
     session.createRequestId = null;
     return { posted, isFirstBoard: true };
   }
@@ -1388,7 +1398,9 @@ async function askTool(args, session, { sendProgress, cancelled }) {
   // Set only by declareBoundary, which a `fresh` ask and a mission join or leave call, and
   // only when there genuinely was a board: an ordinary ask, and a boundary in a conversation
   // that had no board, add nothing to their result.
-  const abandonedUrl = safeBoardUrl(session.pendingAbandon);
+  // Not when the post landed back on that very board (its mission's, ADR 150): it is this
+  // conversation's board still, and the daemon closed only this session's older rounds there.
+  const abandonedUrl = session.pendingAbandon !== posted.boardId ? safeBoardUrl(session.pendingAbandon) : null;
   const abandonedNote = abandonedUrl
     ? `Abandoned board: ${abandonedUrl} (the board this conversation left by a fresh ask or a mission join or leave, closed by this ask). ` +
       `Call read with that URL to collect any answer left on it.`
@@ -1767,7 +1779,7 @@ function sendProgressNotification(token, elapsedMs, totalMs, boardUrl) {
 // that minted it is gone, which clears both and starts the next one over. This process
 // outlives `/clear`, so the flag is the only thing that can tell those two apart.
 // Nothing call-scoped lives here (see askTool's comment).
-const session = { boardId: null, thread: null, url: null, creatingThread: null, createRequestId: null, pendingAbandon: null, missionKey: null };
+const session = { boardId: null, thread: null, threadAdopted: false, url: null, creatingThread: null, createRequestId: null, pendingAbandon: null, missionKey: null };
 
 /** In-flight `tools/call` requests by JSON-RPC id, so `notifications/cancelled` has
  * something to cancel. Without it a cancelled call leaks three things: the progress

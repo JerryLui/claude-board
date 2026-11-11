@@ -54,6 +54,27 @@ function folderWith(name, text) {
   return realpathSync(dir);
 }
 
+/** The real shim, run in `folder` under its own shell, so its parent process, the session it
+ * names, is not this one. `call` answers a tool call's result, refused on an error. */
+async function sessionShim(folder) {
+  const child = spawn('/bin/sh', ['-c', `"${process.execPath}" "${mcpBin}"; exit $?`], {
+    cwd: folder,
+    env: { ...process.env, CLAUDE_BOARD_HOME: home, CLAUDE_BOARD_PORT: String(port), CLAUDE_BOARD_NO_OPEN: '1', CLAUDE_CODE_ENTRYPOINT: 'cli' },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  children.add(child);
+  const shim = new McpClient(child);
+  await shim.request('initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'check-mission-board', version: '0' } });
+  shim.notify('notifications/initialized', {});
+  assert.ok(processStartUtc(child.pid), 'the shell\'s start reads');
+  const call = async (name, args) => {
+    const r = await shim.request('tools/call', { name, arguments: args });
+    assert.equal(r.result && r.result.isError, false, JSON.stringify(r));
+    return r.result;
+  };
+  return { child, shim, call };
+}
+
 async function main() {
   ({ server, port } = await startServer({ home, port: 0 }));
   base = `http://127.0.0.1:${port}`;
@@ -302,29 +323,15 @@ async function main() {
     const missionBoard = await ask(other, folder, [note('the other session\'s round')]);
     assert.equal((await leave('SHIM', 'other', other)).status, 200);
 
-    // Under its own shell, so the shim's parent process, the session it names, is not this one.
-    const child = spawn('/bin/sh', ['-c', `"${process.execPath}" "${mcpBin}"; exit $?`], {
-      cwd: folder,
-      env: { ...process.env, CLAUDE_BOARD_HOME: home, CLAUDE_BOARD_PORT: String(port), CLAUDE_BOARD_NO_OPEN: '1', CLAUDE_CODE_ENTRYPOINT: 'cli' },
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    children.add(child);
-    const shim = new McpClient(child);
+    const { child, shim, call } = await sessionShim(folder);
     try {
-      await shim.request('initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'check-mission-board', version: '0' } });
-      shim.notify('notifications/initialized', {});
-      const call = async (name, args) => {
-        const r = await shim.request('tools/call', { name, arguments: args });
-        assert.equal(r.result && r.result.isError, false, JSON.stringify(r));
-        return r.result.structuredContent;
-      };
-      assert.ok(processStartUtc(child.pid), 'the shell\'s start reads');
-      const askShim = async (blocks, extra = {}) => (await call('ask', { title: 'Shim round', blocks, ...extra })).boardId ?? null;
+      const askShim = (blocks, extra = {}) => call('ask', { title: 'Shim round', blocks, ...extra });
 
       await askShim([note('before the join')]);
       await call('mission', { action: 'join', key: 'SHIM', session: 'shim-session' });
       await askShim([note('after the join')]);
-      await askShim([note('after a /clear')], { fresh: true });
+      const fresh = await askShim([note('after a /clear')], { fresh: true });
+      assert.doesNotMatch(fresh.content[0].text, /Abandoned board/, 'a fresh ask landing back on the mission\'s board names no board abandoned');
       let rounds = readBoard(missionBoard.boardId, home).rounds;
       assert.deepEqual(rounds.map(r => [r.status, r.session.pid]), [['open', other.ref.pid], ['abandoned', child.pid], ['open', child.pid]]);
 
@@ -333,6 +340,34 @@ async function main() {
       rounds = readBoard(missionBoard.boardId, home).rounds;
       assert.deepEqual(rounds.map(r => r.status), ['open', 'abandoned', 'abandoned'], 'the leave closes the shim\'s rounds and no other');
       assert.equal(readMission('SHIM', home).boards.length, 1);
+    } finally {
+      shim.close();
+    }
+  });
+
+  await check('a shim that took its mission\'s board\'s thread, once that board is pruned and the mission released, makes a board of its own rather than one in that thread, which reads from another session\'s folder', async () => {
+    const first = sessionProcess();
+    const firstFolder = folderWith('pruned-first', 'x\n');
+    const shimFolder = folderWith('pruned-shim', 'x\n');
+    assert.equal((await join('PRUNED', 'pruned-first', first)).status, 200);
+    const missionBoard = await ask(first, firstFolder, [note('the mission\'s first round')]);
+    assert.equal((await leave('PRUNED', 'pruned-first', first)).status, 200);
+    const { shim, call } = await sessionShim(shimFolder);
+    try {
+      await call('ask', { title: 'Own', blocks: [note('before the join')] });
+      await call('mission', { action: 'join', key: 'PRUNED', session: 'pruned-shim' });
+      assert.equal((await call('ask', { title: 'Moved', blocks: [note('on the mission\'s board')] })).structuredContent.board, missionBoard.boardId);
+      const thread = readBoard(missionBoard.boardId, home).thread;
+      assert.equal((await post('/api/mission/PRUNED', { state: 'released' })).status, 200);
+      // The first session's own board in that thread, made after the prune.
+      const kept = await post('/api/board', { title: 'Kept', blocks: [note('kept')], cwd: firstFolder, thread, noWait: true });
+      assert.equal(kept.status, 200, JSON.stringify(kept.body));
+      rmSync(path.join(home, 'boards', `${missionBoard.boardId}.json`));
+
+      const own = (await call('ask', { title: 'After the prune', blocks: [note('a board of its own')] })).structuredContent.board;
+      const board = readBoard(own, home);
+      assert.notEqual(board.thread, thread);
+      assert.equal(board.cwd, shimFolder);
     } finally {
       shim.close();
     }
