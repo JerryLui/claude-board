@@ -1060,12 +1060,13 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, s
   // the process it names, or by the id the watcher's list holds for that process. A lookup
   // that fails links nothing, and the post goes on.
   let mission = namedMission;
+  // The id the watcher's list holds for the posting process, read once for every use below.
+  const sessionId = sessionRef && sessions ? sessions.matchId(sessionRef.pid, sessionRef.procStart) : null;
   // The posting session as the bindings match it, kept only when its binding was read.
   let postingSession = null;
   if (!mission && sessionRef && bindings) {
     try {
-      const id = sessions ? sessions.matchId(sessionRef.pid, sessionRef.procStart) : null;
-      const ref = { ...sessionRef, ...(id ? { id } : {}) };
+      const ref = { ...sessionRef, ...(sessionId ? { id: sessionId } : {}) };
       mission = bindings.binding(ref).key;
       postingSession = ref;
     } catch (err) {
@@ -1073,10 +1074,9 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, s
     }
   }
   // The posting session as a round records it (ADR 150): its process, and the id the
-  // watcher's list holds for that process.
-  const roundSession = sessionRef
-    ? { ...sessionRef, id: (postingSession && postingSession.id) || (sessions ? sessions.matchId(sessionRef.pid, sessionRef.procStart) : null) }
-    : null;
+  // watcher's list holds for that process. Every check of which rounds are this session's
+  // names it so, so a session resumed in a new process (the same id) still owns its rounds.
+  const roundSession = sessionRef ? { ...sessionRef, id: sessionId } : null;
   // One board per mission (ADR 150): a session bound to a mission posts on the mission's
   // board, whatever board it names, and a mission with none yet gets one at this round. A
   // session that posted elsewhere before it joined moves here, and the rounds it left open
@@ -1166,7 +1166,7 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, s
       const isRetry = Boolean(body.requestId) && board.lastRequestId === body.requestId;
       const drifted = isRetry && !!guarded && roundContentDrifted(board, guarded.n);
       if (isRetry && guarded && guarded.status === 'open'
-        && !roundWaitLapsed(guarded) && !drifted && roundOwnedBy(board, guarded, sessionRef)) {
+        && !roundWaitLapsed(guarded) && !drifted && roundOwnedBy(board, guarded, roundSession)) {
         // A retry is the session waiting on this round again, whether its response was
         // lost or the session gave up and asked the same thing: on a round whose deadline
         // moves, the wait restarts as an amend's does below (ADR 145). Without it the
@@ -1238,7 +1238,7 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, s
       // giver's worktree): a round's folder never moves, so it opens a round of its own.
       if (latestRound && latestRound.status === 'open' && latestAsksSomething
         && !roundWaitLapsed(latestRound) && !drifted
-        && body.fresh !== true && roundOwnedBy(board, latestRound, sessionRef)
+        && body.fresh !== true && roundOwnedBy(board, latestRound, roundSession)
         && (!ownFolder || roundFolder(board, cwd, true) === folderOfRound(board, latestRound))) {
         // The open round hasn't been sent yet: amend it in place rather than
         // minting round N+1.
@@ -1393,19 +1393,19 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, s
   // The session's id comes from the watcher's list, never from the post: a caller names
   // only a process, and the list says which session that process is (src/sessions.mjs
   // `bindBoardSession` for what a later post may change).
-  if (sessionRef) bindBoardSession(board, sessionRef, sessions ? sessions.matchId(sessionRef.pid, sessionRef.procStart) : null);
+  if (sessionRef) bindBoardSession(board, sessionRef, sessionId);
   // A `fresh` post that lands on a board already holding rounds (a mission's, ADR 150) is
   // the boundary itself: the rounds this session's last conversation left open there close
   // in this same write, and only those. The shim closes nothing on this board after it.
-  const freshClosed = body.fresh === true && pushMode === 'new-round' && sessionRef
-    ? abandonOpenRounds(board, { session: sessionRef, except: round })
+  const freshClosed = body.fresh === true && pushMode === 'new-round' && roundSession
+    ? abandonOpenRounds(board, { session: roundSession, except: round })
     : [];
   const html = renderBoardPage(board);
   writeBoard(board, home);
   writePage(board.id, html, home);
   for (const n of freshClosed) sse.broadcast(board.id, 'awaitExpired', { round: n });
   // The board this session moved away from keeps every other session's rounds open.
-  if (leftBoardId && sessionRef) closeRounds(leftBoardId, { session: sessionRef }, home, sse, stranded, stream, waiting);
+  if (leftBoardId && roundSession) closeRounds(leftBoardId, { session: roundSession }, home, sse, stranded, stream, waiting);
   // The link the mission records is the one this post's reply carries. A link that fails
   // (an unreadable or unwritable mission record) is warned and the post goes on: the
   // board is already written with this requestId, so a 500 here would send the shim's
@@ -2344,7 +2344,7 @@ async function handleWait(req, res, id, url, home, sse, stream, waiting) {
  *
  * Deliberately NOT `stranded.answered`: nobody answered anything, and that path is scoped
  * to one round number where this is about every open round at once. */
-async function handleAbandon(req, res, id, home, sse, stranded, stream, waiting) {
+async function handleAbandon(req, res, id, home, sse, stranded, stream, waiting, sessions) {
   // A body naming `session` closes only that session's rounds (ADR 150): a mission's board
   // is shared. No body closes every open round, as a shim from before it asks.
   let session = null;
@@ -2361,6 +2361,9 @@ async function handleAbandon(req, res, id, home, sse, stranded, stream, waiting)
       } catch (err) {
         return sendJson(res, 400, { error: err.message });
       }
+      // The id the watcher's list holds for that process, so a resumed session closes the
+      // rounds it posted before its resume.
+      session = { ...session, id: sessions ? sessions.matchId(session.pid, session.procStart) : null };
     }
   } else {
     req.resume();
@@ -3367,8 +3370,7 @@ function handOverMissionRounds(key, giver, taker, home) {
     const id = missionBoardId(key, { home });
     const board = id && readBoard(id, home);
     if (!board) return;
-    const ref = { id: taker.id ?? null, pid: taker.pid ?? null, procStart: taker.procStart ?? null };
-    if (handOverRounds(board, giver, ref).length === 0) return;
+    if (handOverRounds(board, giver, taker).length === 0) return;
     const html = renderBoardPage(board);
     writeBoard(board, home);
     writePage(board.id, html, home);
@@ -3845,7 +3847,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
           return await handleRelay(req, res, boardId, home, sse, stranded, streamHub, waitingCache);
         }
         if (req.method === 'POST' && action === 'abandon') {
-          return handleAbandon(req, res, boardId, home, sse, stranded, streamHub, waitingCache);
+          return await handleAbandon(req, res, boardId, home, sse, stranded, streamHub, waitingCache, sessions);
         }
         if (req.method === 'POST' && action === 'attended') {
           return await handleAttended(req, res, boardId, sse, stranded);

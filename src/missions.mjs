@@ -387,21 +387,21 @@ export function roundWantsAnswer(round, questions) {
  * the sessions that posted there, when it still wants an answer, the latest such. A
  * mission's board is shared (ADR 150), so one session's newer round never hides
  * another's question. An older page a session left open is answered from its own page
- * on the board, and never holds the mission there. */
+ * on the board, and never holds the mission there. Rounds are one session's by
+ * `sessionMatches`: its id, or its process to the second, so a resumed session or a start
+ * read with milliseconds is still one poster. A round from before rounds recorded their
+ * poster is the board's first poster's. */
 function waitingRound({ board, questions }) {
-  const newest = new Map();
-  for (const r of board.rounds || []) newest.set(roundPoster(r, board), r);
+  const newest = [];
+  for (const r of board.rounds || []) {
+    const poster = (r && r.session) || board.session || null;
+    const slot = newest.find(e => e.poster === poster || sessionMatches(e.poster, poster));
+    if (slot) slot.round = r;
+    else newest.push({ poster, round: r });
+  }
   let hit = null;
-  for (const r of newest.values()) if (roundWantsAnswer(r, questions) && (!hit || r.n > hit.n)) hit = r;
+  for (const { round: r } of newest) if (roundWantsAnswer(r, questions) && (!hit || r.n > hit.n)) hit = r;
   return hit;
-}
-
-/** Which session posted round `r` of `board`, as a key: its process, else its id. A round
- * from before rounds recorded it is the board's first poster's. */
-function roundPoster(r, board) {
-  const s = (r && r.session) || board.session;
-  if (!s) return '';
-  return s.pid != null ? `${s.pid}|${s.procStart}` : `id:${s.id}`;
 }
 
 function boardsNeedYou(linked) {

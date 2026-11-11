@@ -952,6 +952,9 @@ function mintAwait(blocks, round, wait, postedAt, awaitTimeoutMs, movingDeadline
   };
 }
 
+/** A session as a round records it: `{ pid, procStart, id }`, each null when unknown. */
+const sessionStamp = s => ({ pid: s.pid ?? null, procStart: s.procStart ?? null, id: s.id ?? null });
+
 /** What a round records of who posted it and from where (ADR 150): the posting session,
  * `{ pid, procStart, id }`, and the folder its file references read from. Stamped only on
  * a round a session posted; `folder` only when it is the board's own on round 1 or the
@@ -960,7 +963,7 @@ function mintAwait(blocks, round, wait, postedAt, awaitTimeoutMs, movingDeadline
 function roundStamp(session, folder, boardFolder) {
   if (!session) return {};
   return {
-    session: { pid: session.pid ?? null, procStart: session.procStart ?? null, id: session.id ?? null },
+    session: sessionStamp(session),
     ...(folder && folder !== boardFolder ? { cwd: folder } : {}),
   };
 }
@@ -1155,7 +1158,7 @@ export function handOverRounds(board, giver, taker) {
   for (const r of (board && board.rounds) || []) {
     if (r.status !== 'open' || !roundOwnedBy(board, r, giver)) continue;
     const from = (r.session && r.session.id) || giver.id || null;
-    r.session = { pid: taker.pid ?? null, procStart: taker.procStart ?? null, id: taker.id ?? null };
+    r.session = sessionStamp(taker);
     if (from) r.handedFrom = from;
     handed.push(r.n);
   }

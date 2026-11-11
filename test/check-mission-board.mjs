@@ -204,6 +204,26 @@ async function main() {
     assert.equal((await leave('REMOVED', 'removed-bound', bound)).status, 200);
   });
 
+  await check('a session resumed in a new process (the same id, as the watcher lists it) still owns its rounds: its next question amends its open one, and its scoped abandon closes it', async () => {
+    const before = sessionProcess();
+    const after = sessionProcess();
+    const folder = folderWith('resumed', 'x\n');
+    const listed = s => post('/api/sessions', { intervalMs: 30_000, sessions: [{ id: 'resumed', pid: s.ref.pid, procStart: s.ref.procStart, kind: 'interactive', jobId: null, cwd: folder, login: null, name: null, status: 'idle', reason: null }] });
+    try {
+      assert.equal((await listed(before)).status, 200);
+      assert.equal((await join('RESUMED', 'resumed', before)).status, 200);
+      const first = await ask(before, folder, [question('Before the resume?')]);
+      assert.equal((await listed(after)).status, 200);
+      const again = await ask(after, folder, [question('After it?')]);
+      assert.deepEqual([again.boardId, again.round], [first.boardId, 1]);
+      const closed = await post(`/api/board/${first.boardId}/abandon`, { session: after.ref });
+      assert.deepEqual([closed.status, closed.body.closed], [200, [1]]);
+      assert.equal((await leave('RESUMED', 'resumed', after)).status, 200);
+    } finally {
+      await post('/api/sessions', { intervalMs: 30_000, sessions: [] });
+    }
+  });
+
   await check('a round posts within one second on a mission board the size of the largest real mission\'s boards merged (34 rounds, 418 blocks, 4.4 MB)', async () => {
     const s = sessionProcess();
     const folder = folderWith('large', 'x\n');

@@ -800,21 +800,25 @@ async function main() {
       'seven working and two waiting on the PM leave a working slot');
   });
 
-  await check('needs you and the card\'s Fire come only from a board\'s newest round: an older page left asking holds neither', () => {
+  await check('needs you and the card\'s Fire come only from the newest round of each session on a board: an older page left asking holds neither, and one session is one poster by its id or its process start to the second', () => {
     const dir = scratchHome('newest-page');
     const now = Date.now();
     const fireQ = (id, round) => ({ id, kind: 'question', round, prompt: 'Fire?', widget: 'single', action: 'fire', options: [{ label: 'Fire /direct' }, { label: 'Not yet' }] });
-    const roundOf = (n, status) => ({ n, postedAt: iso(now), status, sentAt: status === 'sent' ? iso(now) : null, title: `p${n}` });
-    for (const [key, statuses, view, actionRounds] of [
+    const roundOf = (n, status, session) => ({ n, postedAt: iso(now), status, sentAt: status === 'sent' ? iso(now) : null, title: `p${n}`, ...(session ? { session } : {}) });
+    const at = (pid, procStart, id = null) => ({ pid, procStart, id });
+    for (const [key, statuses, view, actionRounds, sessions = []] of [
       ['OLDER_ASKS', ['open', 'sent'], 'working', []],
       ['NEWEST_ASKS', ['sent', 'open'], 'needs-you', [2]],
       ['BOTH_ASK', ['open', 'open'], 'needs-you', [2]],
+      ['START_IN_MS', ['open', 'sent'], 'working', [], [at(100, '2026-11-11T08:00:15Z'), at(100, '2026-11-11T08:00:15.400Z')]],
+      ['RESUMED_ID', ['open', 'sent'], 'working', [], [at(100, '2026-11-11T08:00:15Z', 'same'), at(200, '2026-11-11T09:30:00Z', 'same')]],
+      ['TWO_SESSIONS', ['open', 'sent'], 'needs-you', [1], [at(100, '2026-11-11T08:00:15Z', 'one'), at(200, '2026-11-11T08:00:15Z', 'two')]],
     ]) {
       const boardId = `b_${key.toLowerCase()}`;
       mkdirSync(path.join(dir, 'boards'), { recursive: true });
       writeFileSync(path.join(dir, 'boards', `${boardId}.json`), JSON.stringify({
         id: boardId, thread: 't', title: 'q', cwd: null, createdAt: iso(now), updatedAt: iso(now), state: 'open',
-        rounds: statuses.map((status, i) => roundOf(i + 1, status)),
+        rounds: statuses.map((status, i) => roundOf(i + 1, status, sessions[i])),
         blocks: statuses.map((_, i) => fireQ(`q${i + 1}`, i + 1)),
         answers: {}, comments: [],
       }));
