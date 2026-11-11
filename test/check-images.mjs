@@ -11,18 +11,23 @@
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync, existsSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
 import { startServer } from '../src/server.mjs';
 import { deleteBoard, pruneStore, readBoard } from '../src/store.mjs';
 import { MAX_IMAGE_BYTES, MAX_SEND_IMAGE_BYTES } from '../src/post-limit.mjs';
+import { parseHTML } from './dom-stand-in.mjs';
 import { check, runMain, secretHome, secretFetch, writeHeaders, spawnShim, withTimeout, sleep, postBoard, rawRequest } from './support.mjs';
 
 const { home, secret: SECRET } = secretHome('claude-board-images-', { secret: 'e'.repeat(64) });
 const fetch = secretFetch(SECRET);
 
-// A real 1x1 PNG and a real 1x1 GIF: two types, two different names.
+// A real 1x1 image of each allowed type, and the name each is stored under: the first 16
+// hex of its sha256 and its extension, written out, since boards already stored name
+// their images in that shape.
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
 const GIF = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
+const JPEG = Buffer.from('/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=', 'base64');
+const WEBP = Buffer.from('UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==', 'base64');
+const NAME = { png: 'c414cd0e204de974.png', gif: 'ef1955ae757c8b96.gif', jpg: '9650f149d622055c.jpg', webp: '86be52bdb7547413.webp' };
 const dataUrl = (type, bytes) => `data:image/${type};base64,${bytes.toString('base64')}`;
 /** A PNG-headed buffer of `size` bytes: the check reads the leading bytes and the size. */
 const pngOfSize = size => { const b = Buffer.alloc(size); PNG.copy(b, 0, 0, 8); return b; };
@@ -51,47 +56,48 @@ async function main() {
   base = `http://127.0.0.1:${port}`;
   shim = spawnShim({ CLAUDE_BOARD_HOME: home, CLAUDE_BOARD_PORT: String(port), CLAUDE_BOARD_NO_OPEN: '1', CLAUDE_CODE_ENTRYPOINT: 'cli', CLAUDE_BOARD_PROGRESS_MS: '80' });
 
-  let boardId, pngPath, gifPath;
+  let boardId, diagramId, pngPath, gifPath, jpgPath, webpPath;
 
-  await check('ask: a Send with an answer image and a comment image hands the agent each file\'s absolute path, stored beside the board', async () => {
+  await check('ask: a Send with answer images of PNG, JPEG and WebP and a GIF comment image hands the agent each file\'s absolute path, stored beside the board', async () => {
     const known = boardIds();
     const call = shim.request('tools/call', { name: 'ask', arguments: { title: 'Images', blocks: [{ kind: 'mermaid', text: 'flowchart LR\n  a --> b' }, QUESTION] } });
     boardId = await newBoardId(known);
-    const diagramId = readBoard(boardId, home).blocks[0].id;
+    diagramId = readBoard(boardId, home).blocks[0].id;
     const r = await submit(boardId, {
       round: 1,
-      answers: [{ id: 'q1', status: 'answered', choice: 'No', note: 'see the shot', images: [dataUrl('png', PNG)] }],
+      answers: [{ id: 'q1', status: 'answered', choice: 'No', note: 'see the shot', images: [dataUrl('png', PNG), dataUrl('jpeg', JPEG), dataUrl('webp', WEBP)] }],
       comments: [{ blockId: diagramId, anchor: { kind: 'block' }, text: 'this one too', images: [dataUrl('gif', GIF)] }],
     });
     assert.equal(r.status, 200, await r.text());
     const result = (await withTimeout(call, 8000, 'the ask did not return after the Send')).result;
     assert.equal(result.isError, false, result.content[0].text);
 
-    pngPath = path.join(imagesDir(boardId), `${createHashHex(PNG)}.png`);
-    gifPath = path.join(imagesDir(boardId), `${createHashHex(GIF)}.gif`);
-    assert.deepEqual(result.answers[0].images, [pngPath]);
+    [pngPath, gifPath, jpgPath, webpPath] = [NAME.png, NAME.gif, NAME.jpg, NAME.webp].map(n => path.join(imagesDir(boardId), n));
+    assert.deepEqual(result.answers[0].images, [pngPath, jpgPath, webpPath]);
     assert.deepEqual(result.comments[0].images, [gifPath]);
     assert.deepEqual(readFileSync(pngPath), PNG, 'the path the agent is given opens to the pasted bytes');
     assert.deepEqual(readFileSync(gifPath), GIF);
-    assert.deepEqual(readdirSync(imagesDir(boardId)).sort(), [path.basename(pngPath), path.basename(gifPath)].sort());
+    assert.deepEqual(readFileSync(jpgPath), JPEG);
+    assert.deepEqual(readFileSync(webpPath), WEBP);
+    assert.deepEqual(readdirSync(imagesDir(boardId)).sort(), Object.values(NAME).sort());
     // The text channel is the one no client drops, so the paths ride it too.
-    assert.ok(result.content[0].text.includes(`[images: ${pngPath}]`), result.content[0].text);
+    assert.ok(result.content[0].text.includes(`[images: ${[pngPath, jpgPath, webpPath].join(', ')}]`), result.content[0].text);
     assert.ok(result.content[0].text.includes(`[images: ${gifPath}]`), result.content[0].text);
     // The board keeps the names, never a path or the bytes.
     const stored = readBoard(boardId, home);
-    assert.deepEqual(stored.answers.q1.images, [path.basename(pngPath)]);
-    assert.deepEqual(stored.comments[0].images, [path.basename(gifPath)]);
+    assert.deepEqual(stored.answers.q1.images, [NAME.png, NAME.jpg, NAME.webp]);
+    assert.deepEqual(stored.comments[0].images, [NAME.gif]);
   });
 
   await check('read: the same answer and comment name the same absolute paths', async () => {
     const result = (await withTimeout(shim.request('tools/call', { name: 'read', arguments: { board: boardId } }), 8000, 'read did not answer')).result;
     assert.equal(result.isError, false, result.content[0].text);
-    assert.deepEqual(result.answers.find(a => a.id === 'q1').images, [pngPath]);
+    assert.deepEqual(result.answers.find(a => a.id === 'q1').images, [pngPath, jpgPath, webpPath]);
     assert.deepEqual(result.comments[0].images, [gifPath]);
-    assert.ok(result.content[0].text.includes(`[images: ${pngPath}]`), result.content[0].text);
+    assert.ok(result.content[0].text.includes(`[images: ${[pngPath, jpgPath, webpPath].join(', ')}]`), result.content[0].text);
   });
 
-  await check('a text-only Send\'s packet carries no images key on its answer or comment', async () => {
+  await check('a text-only Send\'s packet carries no images key on its answer or comment, an answer sent with images: null included', async () => {
     const call = shim.request('tools/call', { name: 'ask', arguments: { title: 'Text only', blocks: [QUESTION] } });
     let round;
     for (let i = 0; i < 250 && !round; i++) {
@@ -100,7 +106,7 @@ async function main() {
     }
     assert.ok(round, 'setup: the second ask must add round 2 to the same board');
     const qid = readBoard(boardId, home).blocks.find(b => b.kind === 'question' && b.round === 2).id;
-    const r = await submit(boardId, { round: 2, answers: [{ id: qid, status: 'answered', choice: 'Yes', note: '' }], comments: [{ blockId: qid, anchor: { kind: 'block' }, text: 'words only' }] });
+    const r = await submit(boardId, { round: 2, answers: [{ id: qid, status: 'answered', choice: 'Yes', note: '', images: null }], comments: [{ blockId: qid, anchor: { kind: 'block' }, text: 'words only' }] });
     assert.equal(r.status, 200, await r.text());
     const result = (await withTimeout(call, 8000, 'the second ask did not return')).result;
     assert.deepEqual(result.answers.map(a => 'images' in a), [false]);
@@ -108,17 +114,20 @@ async function main() {
     assert.ok(!result.content[0].text.includes('[images:'), result.content[0].text);
   });
 
-  await check('the sent round\'s page draws each image under the board\'s folder, served and from Finder alike', async () => {
-    const pngSrc = `${boardId}/${path.basename(pngPath)}`;
-    const gifSrc = `${boardId}/${path.basename(gifPath)}`;
-    const served = await (await fetch(`${base}/b/${boardId}`)).text();
-    assert.ok(served.includes(`<img src="${pngSrc}" alt="Pasted image 1">`), 'the answer\'s image is drawn');
-    assert.ok(served.includes(`<img src="${gifSrc}" alt="Pasted image 1">`), 'the comment\'s image is drawn');
+  await check('the sent round\'s page draws each image under its answer or its comment, from the board\'s folder, served and from Finder alike', async () => {
+    const src = name => `${boardId}/${name}`;
+    const pngSrc = src(NAME.png);
+    const page = parseHTML(await (await fetch(`${base}/b/${boardId}`)).text());
+    const srcs = sel => page.querySelectorAll(`${sel} .sent-images img`).map(i => i.getAttribute('src'));
+    assert.deepEqual(srcs('section.question-block[data-block-id="q1"] .note-field'), [NAME.png, NAME.jpg, NAME.webp].map(src), 'the answer\'s images, under its note');
+    assert.deepEqual(srcs(`.comment-item[data-block-id="${diagramId}"]`), [src(NAME.gif)], 'the comment\'s image, in its comment');
     // Served: the page is `/b/<id>`, so the relative src is `/b/<id>/<name>`.
-    const img = await fetch(new URL(pngSrc, `${base}/b/${boardId}`));
-    assert.equal(img.status, 200);
-    assert.equal(img.headers.get('content-type'), 'image/png');
-    assert.deepEqual(Buffer.from(await img.arrayBuffer()), PNG);
+    for (const [name, type, bytes] of [[NAME.png, 'image/png', PNG], [NAME.jpg, 'image/jpeg', JPEG], [NAME.webp, 'image/webp', WEBP], [NAME.gif, 'image/gif', GIF]]) {
+      const img = await fetch(new URL(src(name), `${base}/b/${boardId}`));
+      assert.equal(img.status, 200, name);
+      assert.equal(img.headers.get('content-type'), type, name);
+      assert.deepEqual(Buffer.from(await img.arrayBuffer()), bytes, name);
+    }
     // From Finder: the page file is `pages/<id>.html`, so the same src is the stored file.
     const filed = readFileSync(path.join(home, 'pages', `${boardId}.html`), 'utf8');
     assert.ok(filed.includes(`<img src="${pngSrc}"`));
@@ -141,6 +150,7 @@ async function main() {
       ['a .png holding text', [dataUrl('png', Buffer.from('just some text, not an image'))], /is not a real PNG image/],
       ['a GIF labelled as a JPEG', [dataUrl('jpeg', GIF)], /is not a real JPEG image/],
       ['an SVG', ['data:image/svg+xml;base64,PHN2Zy8+'], /is not a PNG, JPEG, GIF or WebP data URL/],
+      ['an images field that is not a list', dataUrl('png', PNG), /"images" must be an array of image data URLs/],
       ['one image of 11 MB', [dataUrl('png', pngOfSize(11 * 1024 * 1024))], /is 11 MB, over the 10 MB limit for one image/],
       ['three images of 7 MB', [1, 2, 3].map(() => dataUrl('png', pngOfSize(7 * 1024 * 1024))), /over 20 MB, the limit for one Send/],
     ];
@@ -177,10 +187,6 @@ async function main() {
     assert.equal(existsSync(imagesDir(old)), false);
     assert.ok(existsSync(pngPath), 'a surviving board keeps its images through the prune');
   });
-}
-
-function createHashHex(bytes) {
-  return createHash('sha256').update(bytes).digest('hex').slice(0, 16);
 }
 
 runMain('images', main, {
