@@ -235,6 +235,14 @@ function atomicWrite(targetPath, contents) {
   renameSync(tmp, targetPath);
 }
 
+/** Whether board `id` is in the store, by its file alone: a mission's board is chosen on
+ * every post its session makes, and parsing a board that size twice per post is the cost
+ * this avoids. */
+export function boardExists(id, home = boardHome()) {
+  if (typeof id !== 'string' || !SAFE_BOARD_ID.test(id)) return false;
+  return existsSync(boardPath(id, home));
+}
+
 export function readBoard(id, home = boardHome()) {
   try {
     const raw = readFileSync(boardPath(id, home), 'utf8');

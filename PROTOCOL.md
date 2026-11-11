@@ -2836,3 +2836,50 @@ here; it was "five" for long enough to go stale twice. No browser, no network, n
 temp `CLAUDE_BOARD_HOME`. Every check that touches the local secret points
 `CLAUDE_BOARD_SECRET_FILE` at its own temp dir first: the real `~/.config/claude-board/secret` is
 never read, written, or rotated by a check run.
+
+## One board per mission (ADR 150)
+
+Added on top of the sections above, which still hold for a board one conversation posts to.
+
+**Choosing the board.** A `POST /api/board` from a session bound to a mission (`session` names
+its process, no `mission` in the body) lands on the mission's board: the latest board in the
+mission's `boards` that is still stored, whatever `boardId` the post names. A mission with none
+gets a new board at that round. When the board differs from the one the post named (or the post
+named none and the board already existed), the response carries `moved: true`; a client takes
+`boardId` and `thread` from the response as its own from then on. The rounds the posting session
+left open on the board it named are closed as by a scoped abandon (below). A post naming its
+mission explicitly keeps the board it names.
+
+**What a round records.** A round minted by a post naming `session` carries:
+
+```
+  session: { pid, procStart, id },   // the posting session; id from the session list, else null
+  cwd?: '<absolute folder>',         // the folder its file references read from, when not the board's
+  handedFrom?: '<session id>',       // set by a takeover: the session that posted it
+```
+
+A round with no `session` (posted before this) is the board's first poster's (`board.session`).
+On a mission's board a session bound to that mission posts from its own folder: `cwd` is
+accepted on every round, not only the first. Elsewhere a `cwd` other than the board's is still a
+400.
+
+**Amend, `fresh`.** A post amends the latest open question round only when the posting session
+posted it; another session's first question opens a round of its own. `fresh: true` on a post
+says it starts a new conversation: it never amends, and on a board that already holds rounds it
+closes the posting session's other open rounds there in the same write (each with an
+`awaitExpired` event). `bin/mcp.mjs` sends it on a `fresh` ask and on the first ask after a
+mission join or leave, and sends `cwd` on every post.
+
+**Scoped abandon.** `POST /api/board/:id/abandon` takes an optional body `{ session: { pid,
+procStart } }`: with it, only the open rounds that session posted close; without a body, every
+open round, as before. The stranded announcement is withdrawn only once no round is left open.
+
+**Owed answers and comments** ride only packets of a round the same session posted (by its id,
+or its pid and start): a shared board's late answer reaches the session that asked.
+
+**Takeover.** When a leave binds the session that asked to take over (`POST
+/api/mission/:key/leave` with a takeover pending), the giver's open rounds on the mission's board
+become the taker's: `session` is rewritten to the taker and `handedFrom` names the giver. The
+answer the PM sends on such a round rides the taker's next packet.
+
+**Needs you** reads, on each board, the newest round of every session that posted there.

@@ -1038,12 +1038,17 @@ function declareBoundary(session) {
  * the `fresh` flag exists to avoid but strictly better than failing a post that has
  * already succeeded. Cleared before the call, so a daemon that is slow or down cannot
  * make the next post try again forever. */
-async function flushBoundary(session) {
+async function flushBoundary(session, postedBoardId) {
   const abandoned = session.pendingAbandon;
   session.pendingAbandon = null;
   if (!abandoned) return;
+  // The post landed on the very board it walked away from (its mission's, ADR 150): it
+  // carried `fresh`, and the daemon closed this session's older rounds there in that write.
+  if (abandoned === postedBoardId) return;
   try {
-    await httpJson('POST', `${BASE_URL}/api/board/${abandoned}/abandon`, null, { timeoutMs: POST_TIMEOUT_MS });
+    // Naming this session closes only its own rounds: a mission's board is shared.
+    const own = sessionField().session;
+    await httpJson('POST', `${BASE_URL}/api/board/${abandoned}/abandon`, own ? { session: own } : null, { timeoutMs: POST_TIMEOUT_MS });
   } catch (err) {
     logErr(
       `could not close the round(s) still open on board ${abandoned} ` +
@@ -1158,6 +1163,10 @@ async function postThisRound(session, title, blocks, wait, fresh) {
     break;
   }
 
+  // A post that starts a new conversation (a `fresh` ask, or a mission join or leave):
+  // when the daemon lands it on a board this session already posted to, its mission's
+  // (ADR 150), it opens a round of its own there and closes the ones this session left.
+  const newConversation = boundaryDeclared || session.pendingAbandon != null;
   if (session.boardId == null) {
     // A first post has no board id to scope a key to, so its key is the content alone —
     // and the session remembers it, because the daemon has now seen this round under THAT
@@ -1169,7 +1178,7 @@ async function postThisRound(session, title, blocks, wait, fresh) {
     const creating = (async () => {
       const posted = await httpJson(
         'POST', `${BASE_URL}/api/board`,
-        { title, blocks, wait: Boolean(wait), noWait, movingDeadline: true, cwd: process.cwd(), thread: session.thread ?? null, requestId: createRequestId, ...sessionField() },
+        { title, blocks, wait: Boolean(wait), noWait, movingDeadline: true, cwd: process.cwd(), thread: session.thread ?? null, requestId: createRequestId, ...(newConversation ? { fresh: true } : {}), ...sessionField() },
         { timeoutMs: CREATE_TIMEOUT_MS }
       );
       session.boardId = posted.boardId;
@@ -1229,7 +1238,10 @@ async function postThisRound(session, title, blocks, wait, fresh) {
   try {
     posted = await httpJson(
       'POST', `${BASE_URL}/api/board`,
-      { boardId: session.boardId, blocks, title, wait: Boolean(wait), noWait, movingDeadline: true, requestId, ...sessionField() },
+      // `cwd` on every round: a mission's board reads each round from the folder of the
+      // session that posted it (ADR 150), and on a board of this conversation's own it is
+      // the folder the board was bound to, which the daemon accepts as agreement.
+      { boardId: session.boardId, blocks, title, wait: Boolean(wait), noWait, movingDeadline: true, cwd: process.cwd(), requestId, ...sessionField() },
       { timeoutMs: POST_TIMEOUT_MS }
     );
   } catch (err) {
@@ -1248,6 +1260,14 @@ async function postThisRound(session, title, blocks, wait, fresh) {
       return postThisRound(session, title, blocks, wait);
     }
     throw err;
+  }
+  // The daemon moved this round to the board of the mission this session is bound to
+  // (ADR 150): that board is this conversation's from here, and a first one for the tab.
+  if (posted && typeof posted.boardId === 'string' && posted.boardId !== session.boardId) {
+    session.boardId = posted.boardId;
+    session.thread = posted.thread ?? null;
+    session.createRequestId = null;
+    return { posted, isFirstBoard: true };
   }
   return { posted, isFirstBoard: false };
 }
@@ -1375,7 +1395,7 @@ async function askTool(args, session, { sendProgress, cancelled }) {
   // declareBoundary). Only here: a refused post -- the throw above -- leaves the previous
   // conversation's open round exactly as the reviewer left it, which is what makes a
   // refusal cost nothing but a re-post.
-  await flushBoundary(session);
+  await flushBoundary(session, posted.boardId);
 
   // Built here, never taken from the response body (see safeBoardUrl).
   const url = safeBoardUrl(posted.boardId);

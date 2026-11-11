@@ -1388,7 +1388,7 @@ async function main() {
     assert.deepEqual(readMission('PRUNED_LINK', home).boards.map(b => b.id), [first.body.boardId]);
   });
 
-  await check('a board posted by a session bound to a mission, naming none, links to that mission; once the session leaves or joins another, its next board links to none or the other, and a later round on the first board is a 400 that writes nothing', async () => {
+  await check('a board posted by a session bound to a mission, naming none, links to that mission; once the session leaves, its next board links to none and a later round on the first board is a 400 that writes nothing; once it joins another, that round moves to the other mission\'s board and closes its rounds on the first', async () => {
     const tab = liveProcess();
     const start = '2026-10-30T07:00:00Z';
     try {
@@ -1411,12 +1411,16 @@ async function main() {
         `board ${linked.body.boardId} belongs to mission BOUND_POSTS, and the posting session has left it: ask with fresh for a board of its own`]);
 
       assert.equal((await post('/api/mission/BOUND_POSTS_NEXT/join', { id: 'poster', pid: tab.pid, procStart: start })).status, 200);
-      const elsewhere = await post('/api/board', { ...followUp, requestId: 'bound-4' });
-      assert.deepEqual([elsewhere.status, elsewhere.body.error], [400,
-        `board ${linked.body.boardId} belongs to mission BOUND_POSTS, and the posting session is bound to mission BOUND_POSTS_NEXT: ask with fresh for a board of its own`]);
       assert.deepEqual(readBoard(linked.body.boardId, home), landed, 'a refused round writes nothing');
+      // ADR 150: a session bound to a mission posts on that mission's board, whatever board it names.
+      const elsewhere = await post('/api/board', { ...followUp, requestId: 'bound-4' });
+      assert.equal(elsewhere.status, 200, JSON.stringify(elsewhere.body));
+      assert.notEqual(elsewhere.body.boardId, linked.body.boardId);
+      assert.equal(elsewhere.body.moved, true);
+      assert.equal(readBoard(elsewhere.body.boardId, home).mission, 'BOUND_POSTS_NEXT');
+      assert.deepEqual(readBoard(linked.body.boardId, home).rounds.map(r => r.status), ['abandoned'], 'the rounds it left open on the first board close');
       const next = await post('/api/board', { title: 'Next mission round', ...ask });
-      assert.equal(readBoard(next.body.boardId, home).mission, 'BOUND_POSTS_NEXT');
+      assert.equal(next.body.boardId, elsewhere.body.boardId, 'the mission\'s next round lands on its one board');
       assert.equal((await post('/api/mission/BOUND_POSTS_NEXT/leave', { id: 'poster' })).status, 200);
     } finally {
       await endProcess(tab);
