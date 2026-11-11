@@ -27,7 +27,6 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
 import { sessionToken } from '../src/secret.mjs';
 import { readBoard } from '../src/store.mjs';
 import { runMain, skipFile, sleep } from './support.mjs';
@@ -250,7 +249,8 @@ async function main() {
           await real.until(`document.querySelector('span#send-status').textContent === 'Sent.'`, 'the real Send to land');
 
           const qid = await real.evalPage(`window.__keys.note.slice(5)`);
-          const expectedName = `${createHash('sha256').update(Buffer.from(PNG_BASE64, 'base64')).digest('hex').slice(0, 16)}.png`;
+          // The first 16 hex of the PNG's sha256 and its extension, written out.
+          const expectedName = 'bc09c2590d2502c8.png';
           const filePath = path.join(daemon.home, 'pages', real.boardId, expectedName);
           let board = null;
           for (let i = 0; i < 100 && !(board && board.answers[qid] && board.answers[qid].images); i++) {

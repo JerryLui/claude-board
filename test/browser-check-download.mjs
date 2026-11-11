@@ -22,11 +22,10 @@
 // copies the saved file there.
 
 import assert from 'node:assert/strict';
-import { existsSync, readdirSync, readFileSync, copyFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync, copyFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { sessionToken } from '../src/secret.mjs';
-import { exportDate } from '../src/round-export.mjs';
 import { runMain, skipFile, withTimeout } from './support.mjs';
 import { CHROME, guardRun, openTab, postJson, row, scratchDir, startScratchDaemon, withChrome } from './browser-support.mjs';
 
@@ -38,6 +37,9 @@ const TITLE = 'Download fixture';
 const STAGE_PX = 760; // past the board's 600px stage cap, so the page folds it and the file must not
 const PRINT_W = 739; // Letter less Chrome's default 0.4in margins, at 96px an inch
 const PRINT_H = 979;
+// Round 1's send time, set in the store: midday UTC is the same date in every zone the
+// checks run in.
+const SENT_AT = '2026-03-04T12:00:00.000Z';
 
 const ROUND_1 = [
   { id: 'd1', kind: 'markdown', text: '# Scope\n\nWhat this round settles.' },
@@ -144,6 +146,11 @@ async function main() {
     const origin = `http://127.0.0.1:${port}`;
     const created = await postJson(`${origin}/api/board`, { title: TITLE, blocks: ROUND_1 }, daemon.secret);
     await postJson(`${origin}/api/board/${created.boardId}/submit`, { round: 1, action: 'send', answers: ANSWERS, comments: COMMENTS }, daemon.secret);
+    // Before round 2's post, which writes the page from the stored board.
+    const stored = path.join(daemon.home, 'boards', `${created.boardId}.json`);
+    const doc = JSON.parse(readFileSync(stored, 'utf8'));
+    doc.rounds[0].sentAt = SENT_AT;
+    writeFileSync(stored, JSON.stringify(doc));
     await postJson(`${origin}/api/board`, { boardId: created.boardId, title: TITLE,
       blocks: [{ id: 'q6', kind: 'question', prompt: 'Next?', widget: 'single', options: [{ label: 'Go' }] }] }, daemon.secret);
     const boardUrl = `${origin}${new URL(created.url).pathname}`;
@@ -213,7 +220,7 @@ async function main() {
       await row('opened from disk with the network off, it heads with the title, the round and its date, then the decisions table', note => {
         note(`${m.title} | ${m.meta} | ${m.sections.join(' > ')}`);
         assert.equal(m.title, TITLE);
-        assert.deepEqual(m.meta, ['Round 1', `Sent ${exportDate(new Date().toISOString())}`]);
+        assert.deepEqual(m.meta, ['Round 1', 'Sent 2026-03-04']);
         assert.deepEqual(m.sections, ['Decisions', 'Round content']);
         assert.equal(m.decisionsFirst, true);
         assert.deepEqual(m.fetched, [], 'nothing asked of the network or the disk');

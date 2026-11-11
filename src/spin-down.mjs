@@ -45,11 +45,9 @@ export function setSpinDown(body, { home = boardHome(), now = Date.now() } = {})
   }
   if (!body.on) {
     writeSpinDownFile(null, home);
-    return readSpinDown(home);
+    return { on: false };
   }
   const held = readSpinDown(home);
-  if (!held.on) {
-    writeSpinDownFile({ on: true, at: new Date(now).toISOString(), ...(body.by !== undefined ? { by: body.by } : {}) }, home);
-  }
-  return readSpinDown(home);
+  if (held.on) return held;
+  return writeSpinDownFile({ on: true, at: new Date(now).toISOString(), ...(body.by !== undefined ? { by: body.by } : {}) }, home);
 }

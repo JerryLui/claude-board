@@ -8,7 +8,8 @@
 
 import assert from 'node:assert/strict';
 import { createBoard, addRound, applySubmit, abandonOpenRounds } from '../src/board.mjs';
-import { renderBoardPage, renderRoundSection, groupCommentsByBlock } from '../src/render.mjs';
+import { renderBoardPage } from '../src/render.mjs';
+import { buildRoundPushPayload } from '../src/server.mjs';
 import { decisionRows, exportDocument } from '../src/round-export.mjs';
 import { parseHTML } from './dom-stand-in.mjs';
 import { check, finish, pageHarness } from './support.mjs';
@@ -47,12 +48,10 @@ check('a round that goes sent under an open tab gains Download round, live, as a
   const { document, es } = loadBoardWithEventSource(renderBoardPage(board));
   assert.equal(downloadsIn(document, 1).length, 0, 'setup: the open round offers none');
 
-  // A new round's push, marking round 1 sent (src/ui.mjs's markRoundHistory), in the
-  // payload shape src/server.mjs sends (test/check-round-end.mjs's own construction).
+  // A new round's push, marking round 1 sent (src/ui.mjs's markRoundHistory).
   applySubmit(board, { action: 'send', answers: [], comments: [] }, 1);
   addRound(board, { blocks: [Q2] });
-  es.dispatch('round', JSON.stringify({ round: 2, mode: 'new-round', blockIds: [],
-    html: renderRoundSection(board, 2, groupCommentsByBlock([])), board: { ...board, comments: [] } }));
+  es.dispatch('round', JSON.stringify(buildRoundPushPayload(board, 2, 'new-round', [])));
 
   const live = downloadsIn(document, 1);
   assert.equal(live.length, 1);
