@@ -20,7 +20,7 @@
 // of reach for every other check, and this file restores it the moment the scenario ends).
 
 import assert from 'node:assert/strict';
-import { mkdirSync, rmSync, readdirSync, readFileSync, existsSync } from 'node:fs';
+import { mkdirSync, rmSync, readdirSync, readFileSync, existsSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { SECRET_HEADER } from '../src/secret.mjs';
 import { startServer } from '../src/server.mjs';
@@ -346,6 +346,18 @@ async function main() {
 
     const missing = await fetch(`${base}/api/board/b_nosuchboard/abandon`, { method: 'POST', headers: { [SECRET_HEADER]: SECRET } });
     assert.equal(missing.status, 404, 'a board id that names nothing is a 404, not a silent success');
+  });
+
+  await check('abandoning a board whose file does not parse answers 500 naming the failure, rather than leaving the caller waiting', async () => {
+    const id = 'b_unreadable';
+    writeFileSync(path.join(home, 'boards', `${id}.json`), '{"id": "b_unreadable", "rounds": [');
+    try {
+      const r = await fetch(`${base}/api/board/${id}/abandon`, { method: 'POST', headers: { [SECRET_HEADER]: SECRET } });
+      assert.equal(r.status, 500);
+      assert.match((await r.json()).error, /JSON/);
+    } finally {
+      rmSync(path.join(home, 'boards', `${id}.json`));
+    }
   });
 
   await check('abandoning needs the local secret: the browser session cookie does not reach it', async () => {

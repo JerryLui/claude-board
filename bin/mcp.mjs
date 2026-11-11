@@ -27,7 +27,7 @@
 import http from 'node:http';
 import readline from 'node:readline';
 import { spawn } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -121,6 +121,15 @@ function answerWatchText({ watch }) {
 // every shim. No environment names a mission: a board post names its session (below), and
 // the daemon links the board to the mission that session joined (ADR 141).
 const MISSION_KEY_RE = /^[A-Za-z0-9_-]{1,80}$/;
+
+/** The folder a post names: this process's, or none once it is gone (a worktree removed after
+ * its merge, which `process.cwd()` still answers with). A post naming none reads from its
+ * board's folder, so the session keeps posting, and the daemon never answers by whether a
+ * path exists. */
+function postCwd() {
+  const cwd = process.cwd();
+  return existsSync(cwd) ? cwd : undefined;
+}
 
 // The agent session this shim runs under, carried on every board post so the daemon links
 // the board's open round to that session's tab card (ADR 131). Claude Code spawns the shim
@@ -1022,6 +1031,7 @@ function declareBoundary(session) {
   const abandoned = session.boardId;
   session.boardId = null;
   session.thread = null;
+  session.threadAdopted = false;
   session.url = null;
   // The abandoned board's first-post key with it: it names a round on a board this
   // conversation has walked away from, and the next post mints its own.
@@ -1184,11 +1194,13 @@ async function postThisRound(session, title, blocks, wait, fresh) {
     const creating = (async () => {
       const posted = await httpJson(
         'POST', `${BASE_URL}/api/board`,
-        { title, blocks, wait: Boolean(wait), noWait, movingDeadline: true, cwd: process.cwd(), thread: session.thread ?? null, requestId: createRequestId, ...(newConversation ? { fresh: true } : {}), ...sessionField() },
+        { title, blocks, wait: Boolean(wait), noWait, movingDeadline: true, cwd: postCwd(), thread: session.thread ?? null, requestId: createRequestId, ...(newConversation ? { fresh: true } : {}), ...sessionField() },
         { timeoutMs: CREATE_TIMEOUT_MS }
       );
       session.boardId = posted.boardId;
       session.thread = posted.thread;
+      // Landed on its mission's board (ADR 150): the thread is that board's, not this session's.
+      session.threadAdopted = posted.moved === true;
       return posted;
     })();
     // Assigned synchronously, before the first await below: a concurrent `ask`
@@ -1247,7 +1259,7 @@ async function postThisRound(session, title, blocks, wait, fresh) {
       // `cwd` on every round: a mission's board reads each round from the folder of the
       // session that posted it (ADR 150), and on a board of this conversation's own it is
       // the folder the board was bound to, which the daemon accepts as agreement.
-      { boardId: session.boardId, blocks, title, wait: Boolean(wait), noWait, movingDeadline: true, cwd: process.cwd(), requestId, ...sessionField() },
+      { boardId: session.boardId, blocks, title, wait: Boolean(wait), noWait, movingDeadline: true, cwd: postCwd(), requestId, ...sessionField() },
       { timeoutMs: POST_TIMEOUT_MS }
     );
   } catch (err) {
@@ -1255,14 +1267,20 @@ async function postThisRound(session, title, blocks, wait, fresh) {
     // index's settings panel while the session kept running (ADR 71). 404 is the only
     // way the daemon says that, and a session is not punished for it -- forget the dead
     // id and let the same call mint a fresh board, tab and all, rather than failing a
-    // question the agent genuinely asked. `session.thread` is deliberately kept: if the
-    // thread has surviving boards the fresh one rejoins them in the index, and if it
-    // has none the id costs nothing.
+    // question the agent genuinely asked. `session.thread` is kept, unless it was taken from
+    // a mission's board (below): if the thread has surviving boards the fresh one rejoins
+    // them in the index, and if it has none the id costs nothing.
     //
     // Re-entrant exactly once: `boardId` is null on the way back in, so the call takes
     // the create branch above, and nothing on that branch can 404.
     if (err && err.statusCode === 404) {
       session.boardId = null;
+      // A thread taken from a mission's board is the folder of whichever session made that
+      // board: a board of this session's own in it would be refused as a retarget.
+      if (session.threadAdopted) {
+        session.thread = null;
+        session.threadAdopted = false;
+      }
       return postThisRound(session, title, blocks, wait);
     }
     throw err;
@@ -1272,6 +1290,7 @@ async function postThisRound(session, title, blocks, wait, fresh) {
   if (posted && typeof posted.boardId === 'string' && posted.boardId !== session.boardId) {
     session.boardId = posted.boardId;
     session.thread = posted.thread ?? null;
+    session.threadAdopted = true;
     session.createRequestId = null;
     return { posted, isFirstBoard: true };
   }
@@ -1388,7 +1407,9 @@ async function askTool(args, session, { sendProgress, cancelled }) {
   // Set only by declareBoundary, which a `fresh` ask and a mission join or leave call, and
   // only when there genuinely was a board: an ordinary ask, and a boundary in a conversation
   // that had no board, add nothing to their result.
-  const abandonedUrl = safeBoardUrl(session.pendingAbandon);
+  // Not when the post landed back on that very board (its mission's, ADR 150): it is this
+  // conversation's board still, and the daemon closed only this session's older rounds there.
+  const abandonedUrl = session.pendingAbandon !== posted.boardId ? safeBoardUrl(session.pendingAbandon) : null;
   const abandonedNote = abandonedUrl
     ? `Abandoned board: ${abandonedUrl} (the board this conversation left by a fresh ask or a mission join or leave, closed by this ask). ` +
       `Call read with that URL to collect any answer left on it.`
@@ -1767,7 +1788,7 @@ function sendProgressNotification(token, elapsedMs, totalMs, boardUrl) {
 // that minted it is gone, which clears both and starts the next one over. This process
 // outlives `/clear`, so the flag is the only thing that can tell those two apart.
 // Nothing call-scoped lives here (see askTool's comment).
-const session = { boardId: null, thread: null, url: null, creatingThread: null, createRequestId: null, pendingAbandon: null, missionKey: null };
+const session = { boardId: null, thread: null, threadAdopted: false, url: null, creatingThread: null, createRequestId: null, pendingAbandon: null, missionKey: null };
 
 /** In-flight `tools/call` requests by JSON-RPC id, so `notifications/cancelled` has
  * something to cancel. Without it a cancelled call leaks three things: the progress

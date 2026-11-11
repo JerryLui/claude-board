@@ -874,7 +874,7 @@ function assertCwdNotRetargeted(cwd, board) {
  * of its own (a `/direct` run in a worktree), so a round posted there by a session bound
  * to that mission (`ownFolder`) reads from the folder its post names, the board's when it
  * names none. */
-function roundFolder(board, cwd, ownFolder) {
+export function roundFolder(board, cwd, ownFolder) {
   if (!ownFolder) {
     assertCwdNotRetargeted(cwd, board);
     return board.cwd ?? null;
@@ -897,10 +897,13 @@ export function folderOfRound(board, round) {
  * so a board no session ever posted to, and a post naming none, keep the one-conversation
  * board they always had. */
 export function roundOwnedBy(board, round, ref) {
-  const owner = (round && round.session) || (board && board.session) || null;
+  const owner = posterOf(board, round);
   if (!owner || !ref) return true;
   return sessionMatches(owner, ref);
 }
+
+/** The session that posted `round` of `board`, null when none is recorded. */
+const posterOf = (board, round) => (round && round.session) || (board && board.session) || null;
 
 /** 40 minutes (ADR.md entry 47): the default a round's `awaitDeadline` is stamped
  * `awaitTimeoutMs` amount of time past `postedAt` with, when a caller (test or
@@ -947,6 +950,9 @@ function mintAwait(blocks, round, wait, postedAt, awaitTimeoutMs, movingDeadline
   };
 }
 
+/** A session as a round records it: `{ pid, procStart, id }`, each null when unknown. */
+const sessionStamp = s => ({ pid: s.pid ?? null, procStart: s.procStart ?? null, id: s.id ?? null });
+
 /** What a round records of who posted it and from where (ADR 150): the posting session,
  * `{ pid, procStart, id }`, and the folder its file references read from. Stamped only on
  * a round a session posted; `folder` only when it is the board's own on round 1 or the
@@ -955,7 +961,7 @@ function mintAwait(blocks, round, wait, postedAt, awaitTimeoutMs, movingDeadline
 function roundStamp(session, folder, boardFolder) {
   if (!session) return {};
   return {
-    session: { pid: session.pid ?? null, procStart: session.procStart ?? null, id: session.id ?? null },
+    session: sessionStamp(session),
     ...(folder && folder !== boardFolder ? { cwd: folder } : {}),
   };
 }
@@ -1130,8 +1136,10 @@ export function abandonOpenRounds(board, { session = null, except = null } = {})
   for (const r of (board && board.rounds) || []) {
     if (r.status !== 'open') continue;
     // A mission's board is shared (ADR 150): a session's boundary closes only the rounds it
-    // posted, and never the round its own post just opened.
-    if (r.n === except || (session && !roundOwnedBy(board, r, session))) continue;
+    // posted, and never the round its own post just opened. A close naming no session there
+    // (a shim from before it named one) closes only rounds no session posted.
+    if (r.n === except) continue;
+    if (session ? !roundOwnedBy(board, r, session) : board.mission && posterOf(board, r)) continue;
     r.status = 'abandoned';
     r.abandonedAt = now;
     r.awaited = false;
@@ -1148,9 +1156,12 @@ export function abandonOpenRounds(board, { session = null, except = null } = {})
 export function handOverRounds(board, giver, taker) {
   const handed = [];
   for (const r of (board && board.rounds) || []) {
-    if (r.status !== 'open' || !roundOwnedBy(board, r, giver)) continue;
+    // Only rounds recorded as the giver's own (`round.session`): one no session posted is no
+    // one's to hand, even once a later poster has given the board a session. A round from
+    // before rounds recorded their poster stays where it is, as no takeover moved one then.
+    if (r.status !== 'open' || !sessionMatches(r.session, giver)) continue;
     const from = (r.session && r.session.id) || giver.id || null;
-    r.session = { pid: taker.pid ?? null, procStart: taker.procStart ?? null, id: taker.id ?? null };
+    r.session = sessionStamp(taker);
     if (from) r.handedFrom = from;
     handed.push(r.n);
   }

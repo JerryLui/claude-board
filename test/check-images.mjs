@@ -114,6 +114,31 @@ async function main() {
     assert.ok(!result.content[0].text.includes('[images:'), result.content[0].text);
   });
 
+  await check('a round sent with images that no packet carried rides the next round\'s packet with each image\'s absolute path, on its answer and its comment', async () => {
+    const first = await postBoard(port, SECRET, { title: 'Owed', blocks: [QUESTION] });
+    const qid = readBoard(first.boardId, home).blocks.find(b => b.kind === 'question').id;
+    // Its wait ends unanswered, on a short cap, as an agent's does before a late Send.
+    const cap = process.env.CLAUDE_BOARD_TIMEOUT_MS;
+    process.env.CLAUDE_BOARD_TIMEOUT_MS = '250';
+    try {
+      assert.equal((await (await fetch(`${base}/api/board/${first.boardId}/wait?round=1`)).json()).status, 'timeout');
+    } finally {
+      if (cap === undefined) delete process.env.CLAUDE_BOARD_TIMEOUT_MS;
+      else process.env.CLAUDE_BOARD_TIMEOUT_MS = cap;
+    }
+    const r = await submit(first.boardId, {
+      round: 1,
+      answers: [{ id: qid, status: 'answered', choice: 'No', note: 'late', images: [dataUrl('png', PNG)] }],
+      comments: [{ blockId: qid, anchor: { kind: 'block' }, text: 'late comment', images: [dataUrl('gif', GIF)] }],
+    });
+    assert.equal(r.status, 200, await r.text());
+    const next = await postBoard(port, SECRET, { boardId: first.boardId, title: 'Next', blocks: [{ kind: 'markdown', text: 'carrying on' }], noWait: true });
+    assert.equal(next.round, 2);
+    const dir = imagesDir(first.boardId);
+    assert.deepEqual(next.answers.map(a => [a.round, a.images]), [[1, [path.join(dir, NAME.png)]]]);
+    assert.deepEqual(next.comments.map(c => [c.round, c.images]), [[1, [path.join(dir, NAME.gif)]]]);
+  });
+
   await check('the sent round\'s page draws each image under its answer or its comment, from the board\'s folder, served and from Finder alike', async () => {
     const src = name => `${boardId}/${name}`;
     const pngSrc = src(NAME.png);

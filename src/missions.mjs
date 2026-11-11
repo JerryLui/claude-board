@@ -387,21 +387,25 @@ export function roundWantsAnswer(round, questions) {
  * the sessions that posted there, when it still wants an answer, the latest such. A
  * mission's board is shared (ADR 150), so one session's newer round never hides
  * another's question. An older page a session left open is answered from its own page
- * on the board, and never holds the mission there. */
+ * on the board, and never holds the mission there. Rounds are one session's by
+ * `sessionMatches`: its id, or its process to the second, so a resumed session or a start
+ * read with milliseconds is still one poster. A round from before rounds recorded their
+ * poster is the board's first poster's. */
 function waitingRound({ board, questions }) {
-  const newest = new Map();
-  for (const r of board.rounds || []) newest.set(roundPoster(r, board), r);
+  const newest = [];
+  for (const r of board.rounds || []) {
+    const poster = (r && r.session) || board.session || null;
+    // Matched against every poster a group holds, so a session read first by its process and
+    // later by its id, then resumed under that id in another process, stays one group.
+    const slot = newest.find(e => e.posters.some(p => p === poster || sessionMatches(p, poster)));
+    if (slot) {
+      slot.round = r;
+      if (!slot.posters.includes(poster)) slot.posters.push(poster);
+    } else newest.push({ posters: [poster], round: r });
+  }
   let hit = null;
-  for (const r of newest.values()) if (roundWantsAnswer(r, questions) && (!hit || r.n > hit.n)) hit = r;
+  for (const { round: r } of newest) if (roundWantsAnswer(r, questions) && (!hit || r.n > hit.n)) hit = r;
   return hit;
-}
-
-/** Which session posted round `r` of `board`, as a key: its process, else its id. A round
- * from before rounds recorded it is the board's first poster's. */
-function roundPoster(r, board) {
-  const s = (r && r.session) || board.session;
-  if (!s) return '';
-  return s.pid != null ? `${s.pid}|${s.procStart}` : `id:${s.id}`;
 }
 
 function boardsNeedYou(linked) {
@@ -874,7 +878,7 @@ function conflict(answer) {
  * `{ status: 202, takeover: 'pending', session }`, the bound session told through
  * `bindingFor` to finish its step and leave. A fresh bind moves the mission to working, in
  * `phase` when given, and clears any takeover; so does the bound session joining its
- * released mission again. Two joins are refused whatever holds the mission: the session a
+ * released or parked mission again. Two joins are refused whatever holds the mission: the session a
  * launch replaced (`ended`, not left), a 409 `{ error: 'ended', session }`, unless it is
  * that session resumed in a new process (`resumedFrom`), which binds and drops `ended`; and a session
  * bound to another mission (`bindingFor`'s rule), its own released mission's rejoin
@@ -902,7 +906,7 @@ export function joinMission(key, body, { home = boardHome(), now = Date.now(), i
   let answer;
   if (rejoin) {
     m.session = heardFrom(bound, ref, at);
-    if (m.state === 'released') moveTo(m, { phase: phase || m.phase, state: 'working' }, now);
+    if (m.state === 'released' || m.state === 'parked') moveTo(m, { phase: phase || m.phase, state: 'working' }, now);
     else if (phase && phase !== m.phase) moveTo(m, { phase }, now);
     answer = { status: 200, bound: true, session: m.session };
   } else if (bound && isReservation(bound) && hasLiveSession(m, now, isAlive, listed)) {

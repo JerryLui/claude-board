@@ -1183,8 +1183,11 @@ board document as `suppressed` and stripped from everything a client sees, like 
 beside it, because the stranded rule reads it back long after the response is spent — and that rule
 **spends** it the first time a Watcher reports the board focused, since a board the reviewer has
 reached needs no banner telling them it exists. A push into a board reports the stored value, which
-is therefore false once it has been visited; only a thread's first board consults it at all. A
-daemon older than the field omits it, and a caller then opens exactly as it always has.
+is therefore false once it has been visited; only a thread's first board consults it at all. The
+one exception is a post moved onto its mission's board (`moved: true`, "One board per mission"
+below): that board is the session's first, so the answer is decided again at that post, by the
+same condition. A daemon older than the field omits it, and a caller then opens exactly as it
+always has.
 
 A **retry** carrying a `requestId` this board has already applied is answered from what that id
 already did (`deduped: true`) while the round it guarded is still `open`, **its wait has not
@@ -2922,22 +2925,28 @@ accepted on every round, not only the first. Elsewhere a `cwd` other than the bo
 400.
 
 **Amend, `fresh`.** A post amends the latest open question round only when the posting session
-posted it; another session's first question opens a round of its own. `fresh: true` on a post
+posted it (by its id, or its pid and start) and, on a mission's board, from the folder that round
+reads from; another session's first question, or one from another folder, opens a round of its own. `fresh: true` on a post
 says it starts a new conversation: it never amends, and on a board that already holds rounds it
 closes the posting session's other open rounds there in the same write (each with an
 `awaitExpired` event). `bin/mcp.mjs` sends it on a `fresh` ask and on the first ask after a
-mission join or leave, and sends `cwd` on every post.
+mission join or leave, and sends `cwd` on every post while its folder exists: once it is gone (a
+worktree removed after its merge) it sends none, and the round reads from the board's folder.
 
 **Scoped abandon.** `POST /api/board/:id/abandon` takes an optional body `{ session: { pid,
-procStart } }`: with it, only the open rounds that session posted close; without a body, every
-open round, as before. The stranded announcement is withdrawn only once no round is left open.
+procStart } }`: with it, only the open rounds that session posted close (by its id, or its pid
+and start); without a body, every open round, as before, except on a mission's board, where it
+closes only rounds no session posted. The stranded announcement is withdrawn only once no round is left open.
 
 **Owed answers and comments** ride only packets of a round the same session posted (by its id,
 or its pid and start): a shared board's late answer reaches the session that asked.
 
 **Takeover.** When a leave binds the session that asked to take over (`POST
-/api/mission/:key/leave` with a takeover pending), the giver's open rounds on the mission's board
-become the taker's: `session` is rewritten to the taker and `handedFrom` names the giver. The
-answer the PM sends on such a round rides the taker's next packet.
+/api/mission/:key/leave` with a takeover pending), the giver's open rounds on every board the
+mission links become the taker's: `session` is rewritten to the taker and `handedFrom` names the giver. The
+answer the PM sends on such a round rides the taker's next packet. A join that binds in place of a
+session that went or that a launch replaced (the joined record's `session.ended`) hands that
+session's open rounds over the same way. Only rounds whose own `session` names the giver are
+handed: one recording none stays where it is.
 
-**Needs you** reads, on each board, the newest round of every session that posted there.
+**Needs you** reads, on each board, the newest round of every session that posted there, one session being one by its id, or its pid and start to the second.
