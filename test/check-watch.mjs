@@ -81,17 +81,30 @@ async function lapse(boardId, round = 1) {
   }
 }
 
+/** A 1x1 PNG, as a pasted screenshot arrives in a Send. */
+const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
+const PNG_DATA_URL = `data:image/png;base64,${PNG.toString('base64')}`;
+
+/** Whether `paths` names one stored image of board `boardId` holding the PNG's bytes, by an
+ * absolute path the agent can open. */
+function namesThePng(paths, boardId) {
+  assert.equal(paths.length, 1);
+  assert.ok(path.isAbsolute(paths[0]), paths[0]);
+  assert.equal(path.basename(path.dirname(paths[0])), boardId);
+  assert.deepEqual(readFileSync(paths[0]), PNG);
+}
+
 /** `answer` sends one round as the page's Send does, with a comment on its question when
- * `comment` is given. */
-async function answer(boardId, round, qid, choice, note, comment) {
+ * `comment` is given; `images` rides both. */
+async function answer(boardId, round, qid, choice, note, comment, images) {
   const res = await fetch(`${base}/api/board/${boardId}/submit`, {
     method: 'POST',
     headers: writeHeaders(SECRET),
     body: JSON.stringify({
       round,
       action: 'send',
-      answers: [{ id: qid, status: 'answered', choice, note }],
-      comments: comment ? [{ blockId: qid, anchor: { kind: 'block' }, text: comment }] : [],
+      answers: [{ id: qid, status: 'answered', choice, note, ...(images ? { images } : {}) }],
+      comments: comment ? [{ blockId: qid, anchor: { kind: 'block' }, text: comment, ...(images ? { images } : {}) }] : [],
     }),
   });
   assert.equal(res.status, 200, `setup: round ${round} must take the Send`);
@@ -111,14 +124,14 @@ async function main() {
   ({ server, port } = await startServer({ home, port: 0 }));
   base = `http://127.0.0.1:${port}`;
 
-  await check('a late Send ends the watch with 0, printing that round\'s answers and comments, and spends them: the next round\'s packet carries none of them', async () => {
+  await check('a late Send ends the watch with 0, printing that round\'s answers and comments, each pasted image by the path the agent opens, and spends them: the next round\'s packet carries none of them', async () => {
     const r1 = await askRound('WATCHED_Q1');
     assert.equal((await lapse(r1.boardId)).status, 'timeout', 'setup: round 1\'s wait must end unanswered');
 
     const watch = startWatch(watchArgs(r1.boardId, 1));
     await sleep(INTERVAL_MS * 4);
     assert.equal(watch.exited, false, 'the watch keeps polling while the round is open');
-    await answer(r1.boardId, 1, r1.qid, 'No', 'sent an hour late', 'LATE_COMMENT');
+    await answer(r1.boardId, 1, r1.qid, 'No', 'sent an hour late', 'LATE_COMMENT', [PNG_DATA_URL]);
     const { code, stdout } = await watch.done;
 
     assert.equal(code, 0);
@@ -130,6 +143,8 @@ async function main() {
     assert.deepEqual(out.answers.map(a => [a.round, a.id, a.prompt, a.status, a.choice, a.note]),
       [[1, r1.qid, 'WATCHED_Q1', 'answered', 'No', 'sent an hour late']]);
     assert.deepEqual(out.comments.map(c => [c.round, c.blockId, c.text]), [[1, r1.qid, 'LATE_COMMENT']]);
+    namesThePng(out.answers[0].images, r1.boardId);
+    namesThePng(out.comments[0].images, r1.boardId);
 
     const r2 = await askRound('WATCHED_Q2', { boardId: r1.boardId });
     assert.equal(r2.round, 2, 'setup: the next round is round 2 of the same board');
