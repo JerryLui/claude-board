@@ -816,6 +816,7 @@ async function main() {
       ['START_IN_MS', ['open', 'sent'], 'working', [], [at(100, '2026-11-11T08:00:15Z'), at(100, '2026-11-11T08:00:15.400Z')]],
       ['RESUMED_ID', ['open', 'sent'], 'working', [], [at(100, '2026-11-11T08:00:15Z', 'same'), at(200, '2026-11-11T09:30:00Z', 'same')]],
       ['TWO_SESSIONS', ['open', 'sent'], 'needs-you', [1], [at(100, '2026-11-11T08:00:15Z', 'one'), at(200, '2026-11-11T08:00:15Z', 'two')]],
+      ['LISTED_THEN_RESUMED', ['sent', 'open', 'sent'], 'working', [], [at(100, '2026-11-11T08:00:15Z'), at(100, '2026-11-11T08:00:15Z', 'same'), at(200, '2026-11-11T09:30:00Z', 'same')]],
     ]) {
       const boardId = `b_${key.toLowerCase()}`;
       mkdirSync(path.join(dir, 'boards'), { recursive: true });

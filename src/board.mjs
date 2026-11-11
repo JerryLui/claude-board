@@ -1156,8 +1156,10 @@ export function abandonOpenRounds(board, { session = null, except = null } = {})
 export function handOverRounds(board, giver, taker) {
   const handed = [];
   for (const r of (board && board.rounds) || []) {
-    // Only rounds the giver is recorded posting: one no session posted is no one's to hand.
-    if (r.status !== 'open' || !sessionMatches(posterOf(board, r), giver)) continue;
+    // Only rounds recorded as the giver's own (`round.session`): one no session posted is no
+    // one's to hand, even once a later poster has given the board a session. A round from
+    // before rounds recorded their poster stays where it is, as no takeover moved one then.
+    if (r.status !== 'open' || !sessionMatches(r.session, giver)) continue;
     const from = (r.session && r.session.id) || giver.id || null;
     r.session = sessionStamp(taker);
     if (from) r.handedFrom = from;

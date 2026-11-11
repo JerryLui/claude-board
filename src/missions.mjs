@@ -395,9 +395,13 @@ function waitingRound({ board, questions }) {
   const newest = [];
   for (const r of board.rounds || []) {
     const poster = (r && r.session) || board.session || null;
-    const slot = newest.find(e => e.poster === poster || sessionMatches(e.poster, poster));
-    if (slot) slot.round = r;
-    else newest.push({ poster, round: r });
+    // Matched against every poster a group holds, so a session read first by its process and
+    // later by its id, then resumed under that id in another process, stays one group.
+    const slot = newest.find(e => e.posters.some(p => p === poster || sessionMatches(p, poster)));
+    if (slot) {
+      slot.round = r;
+      if (!slot.posters.includes(poster)) slot.posters.push(poster);
+    } else newest.push({ posters: [poster], round: r });
   }
   let hit = null;
   for (const { round: r } of newest) if (roundWantsAnswer(r, questions) && (!hit || r.n > hit.n)) hit = r;

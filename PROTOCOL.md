@@ -2942,10 +2942,11 @@ closes only rounds no session posted. The stranded announcement is withdrawn onl
 or its pid and start): a shared board's late answer reaches the session that asked.
 
 **Takeover.** When a leave binds the session that asked to take over (`POST
-/api/mission/:key/leave` with a takeover pending), the giver's open rounds on the mission's board
-become the taker's: `session` is rewritten to the taker and `handedFrom` names the giver. The
+/api/mission/:key/leave` with a takeover pending), the giver's open rounds on every board the
+mission links become the taker's: `session` is rewritten to the taker and `handedFrom` names the giver. The
 answer the PM sends on such a round rides the taker's next packet. A join that binds in place of a
 session that went or that a launch replaced (the joined record's `session.ended`) hands that
-session's open rounds over the same way. Only rounds recorded as the giver's are handed.
+session's open rounds over the same way. Only rounds whose own `session` names the giver are
+handed: one recording none stays where it is.
 
 **Needs you** reads, on each board, the newest round of every session that posted there, one session being one by its id, or its pid and start to the second.

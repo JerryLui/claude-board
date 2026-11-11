@@ -10,7 +10,7 @@ import path from 'node:path';
 import { startServer } from '../src/server.mjs';
 import { readBoard, readMission, writeBoard } from '../src/store.mjs';
 import { linkBoard } from '../src/missions.mjs';
-import { createBoard } from '../src/board.mjs';
+import { addRound, createBoard } from '../src/board.mjs';
 import { processStartUtc } from '../src/proc-start.mjs';
 import { McpClient, check, mcpBin, openSseClient, rawRequest, runMain, secretFetch, secretHome, waitFor, writeHeaders } from './support.mjs';
 
@@ -178,17 +178,23 @@ async function main() {
     assert.equal((await leave('SCOPED', 'scoped-b', b)).status, 200);
   });
 
-  await check('a takeover hands over only rounds the giver posted: a question a caller naming no session left on the mission\'s board stays no one\'s', async () => {
+  await check('a takeover hands over only rounds the giver posted: a question a caller naming no session left on the mission\'s board stays no one\'s, though the giver posted there after it', async () => {
     const giver = sessionProcess();
     const taker = sessionProcess();
     const folder = folderWith('orphan', 'x\n');
-    const orphan = await post('/api/board', { title: 'Round', blocks: [question('Asked by no session')], cwd: folder, noWait: true, mission: 'ORPHAN' });
-    assert.equal(orphan.status, 200, JSON.stringify(orphan.body));
+    // The board as the store holds it then: round 1 a question posted naming no session, round 2
+    // the giver's, and the board's session the giver's, set by its post.
+    const board = createBoard({ title: 'Orphan', blocks: [question('Asked by no session')], cwd: folder, mission: 'ORPHAN' });
+    addRound(board, { blocks: [question('Asked by the giver')], session: giver.ref });
+    board.session = { ...giver.ref, id: null };
+    writeBoard(board, home);
+    linkBoard('ORPHAN', { id: board.id, url: `${base}/b/${board.id}` }, { home });
     assert.equal((await join('ORPHAN', 'orphan-giver', giver)).status, 200);
     assert.equal((await join('ORPHAN', 'orphan-taker', taker, { takeover: true })).status, 202);
     assert.equal((await leave('ORPHAN', 'orphan-giver', giver)).status, 200);
-    const [round] = readBoard(orphan.body.boardId, home).rounds;
+    const [round, givers] = readBoard(board.id, home).rounds;
     assert.deepEqual([round.session, round.handedFrom], [undefined, undefined]);
+    assert.deepEqual([givers.session.pid, givers.handedFrom], [taker.ref.pid, 'orphan-giver']);
     assert.equal((await leave('ORPHAN', 'orphan-taker', taker)).status, 200);
   });
 
@@ -286,20 +292,31 @@ async function main() {
     }
   });
 
-  await check('a session that joins after the bound one went (its process gone, no leave) is asked the gone session\'s open round, so the answer the PM sends on it rides its next packet', async () => {
+  await check('a session that joins after the bound one went (its process gone, no leave) is asked the gone session\'s open rounds on every board the mission links, so the answer the PM sends on one rides its next packet', async () => {
     const gone = sessionProcess();
     const next = sessionProcess();
     const folder = folderWith('crashed', 'x\n');
+    // An older board the mission links, holding a question of the gone session's, and the
+    // newer one its next round lands on.
+    const older = createBoard({ title: 'Older', blocks: [question('Asked on the older board')], cwd: folder, mission: 'CRASHED', session: gone.ref });
+    const newer = createBoard({ title: 'Newer', blocks: [note('the newer board')], cwd: folder, mission: 'CRASHED' });
+    for (const b of [older, newer]) {
+      writeBoard(b, home);
+      linkBoard('CRASHED', { id: b.id, url: `${base}/b/${b.id}` }, { home });
+    }
     assert.equal((await join('CRASHED', 'crashed-gone', gone)).status, 200);
     const asked = await ask(gone, folder, [question('Asked before the crash')]);
+    assert.deepEqual([asked.boardId, asked.round], [newer.id, 2]);
     gone.child.kill('SIGKILL');
     await new Promise(resolve => gone.child.once('exit', resolve));
     assert.equal((await join('CRASHED', 'crashed-next', next)).status, 200);
-    const [round] = readBoard(asked.boardId, home).rounds;
+    const round = readBoard(asked.boardId, home).rounds[1];
     assert.deepEqual([round.status, round.session.pid, round.handedFrom], ['open', next.ref.pid, 'crashed-gone']);
+    const [olderRound] = readBoard(older.id, home).rounds;
+    assert.deepEqual([olderRound.status, olderRound.session.pid, olderRound.handedFrom], ['open', next.ref.pid, 'crashed-gone']);
 
     const qid = readBoard(asked.boardId, home).blocks.find(x => x.kind === 'question').id;
-    const sent = await post(`/api/board/${asked.boardId}/submit`, { round: 1, action: 'send', answers: [{ id: qid, status: 'answered', choice: 'No', note: '' }], comments: [] });
+    const sent = await post(`/api/board/${asked.boardId}/submit`, { round: 2, action: 'send', answers: [{ id: qid, status: 'answered', choice: 'No', note: '' }], comments: [] });
     assert.equal(sent.status, 200, JSON.stringify(sent.body));
     const after = await ask(next, folder, [note('picking up')]);
     assert.deepEqual(after.answers.map(x => [x.id, x.choice]), [[qid, 'No']]);

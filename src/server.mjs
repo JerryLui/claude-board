@@ -50,7 +50,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { randomBytes, createHash } from 'node:crypto';
-import { readBoard, writeBoard, writePage, readAsset, boardHome, listBoards, storeFingerprint, searchBoards, pruneStore, migrateMissions, writeBoardImages, readBoardImage, boardImagePath, SAFE_BOARD_ID } from './store.mjs';
+import { readBoard, readMission, writeBoard, writePage, readAsset, boardHome, listBoards, storeFingerprint, searchBoards, pruneStore, migrateMissions, writeBoardImages, readBoardImage, boardImagePath, SAFE_BOARD_ID } from './store.mjs';
 import { decodeSubmitImages, boardImageNames, imageContentType, IMAGE_NAME } from './images.mjs';
 import { ASSET_NAME, MERMAID_ASSET_NAME, SHARED_ASSETS, assetContentType } from './assets.mjs';
 import { createBrowserStreams } from './browser-stream.mjs';
@@ -3376,20 +3376,27 @@ async function handleMission(req, res, parts, home, stream, cache, heldSecret, l
   }
 }
 
-/** Hand the rounds session `giver` left open on mission `key`'s board to `taker`, the
- * session a takeover, or a join after `giver` went, bound in its place. A failure is
- * warned: the leave or join has happened. */
+/** Hand the rounds session `giver` left open on every board mission `key` links to `taker`,
+ * the session a takeover, or a join after `giver` went, bound in its place: needs you reads
+ * every linked board, so an older one's open round is handed too. A board that fails is
+ * warned and the rest go on: the leave or join has happened. */
 function handOverMissionRounds(key, giver, taker, home) {
+  let links = [];
   try {
-    const id = missionBoardId(key, { home });
-    const board = id && readBoard(id, home);
-    if (!board) return;
-    if (handOverRounds(board, giver, taker).length === 0) return;
-    const html = renderBoardPage(board);
-    writeBoard(board, home);
-    writePage(board.id, html, home);
+    links = (readMission(key, home) || {}).boards || [];
   } catch (err) {
     console.error(`claude-board: mission ${key}'s open rounds were not handed over: ${(err && err.message) || err}`);
+  }
+  for (const { id } of links) {
+    try {
+      const board = readBoard(id, home);
+      if (!board || handOverRounds(board, giver, taker).length === 0) continue;
+      const html = renderBoardPage(board);
+      writeBoard(board, home);
+      writePage(board.id, html, home);
+    } catch (err) {
+      console.error(`claude-board: mission ${key}'s open rounds on board ${id} were not handed over: ${(err && err.message) || err}`);
+    }
   }
 }
 
