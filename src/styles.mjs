@@ -1060,6 +1060,31 @@ body.sent-page .comment-btn { display: none; }
   border-radius: var(--r-md); padding: 8px 16px; font: inherit; transition: filter var(--dur) var(--ease); }
 .comment-form button:hover:not(:disabled) { filter: brightness(1.08); }
 .comment-form button:disabled { opacity: 0.5; }
+.comment-form.open { align-items: flex-start; }
+.comment-form-col { flex: 1; min-width: 0; }
+.comment-form-col input[type=text] { width: 100%; }
+
+/* images pasted or dropped on a note, a text answer or a comment, before Send:
+   src/render.mjs's imageTray, filled by src/ui.mjs. The row is empty, and takes
+   no room, until an image lands. '.thumb-row .thumb-remove' outranks the
+   comment form's own 'button' rule, which would otherwise paint it as Add. */
+.thumb-row { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.thumb-row:not(:empty) { margin-top: var(--space-2); }
+.thumb { position: relative; width: 112px; border: 1px solid var(--hairline-2); border-radius: var(--r-sm);
+  background: var(--panel); overflow: hidden; }
+.thumb-img { display: block; width: 100%; height: 72px; object-fit: cover; background: var(--panel-3);
+  border-bottom: 1px solid var(--hairline); }
+.thumb-cap { font-size: 10px; color: var(--muted); padding: 4px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.thumb-row .thumb-remove { position: absolute; top: 4px; right: 4px; width: 18px; height: 18px; display: inline-flex;
+  align-items: center; justify-content: center; border-radius: 50%; border: none; padding: 0;
+  background: var(--ink); color: var(--panel); opacity: 0.7; font-size: 11px; line-height: 1; cursor: pointer; }
+.thumb-row .thumb-remove:hover:not(:disabled) { opacity: 1; filter: none; }
+.comment-item .thumb-row .thumb { width: 72px; }
+.comment-item .thumb-row .thumb-img { height: 48px; border-bottom: none; }
+.paste-hint { margin: 6px 0 0; font-size: 11.5px; color: var(--muted); }
+body.readonly .paste-hint { display: none; }
+.image-refusal { margin: var(--space-2) 0 0; background: var(--critical-soft); border: 1px solid var(--critical-border);
+  color: var(--critical); border-radius: var(--r-md); padding: 10px 12px; font-size: 12.5px; line-height: 1.5; }
 
 /* mermaid: client-rendered SVG from the daemon's own vendored copy; pre.mermaid holds raw source until then */
 .mermaid-block pre.mermaid { background: none; border: none; overflow-x: auto; margin: 0; }

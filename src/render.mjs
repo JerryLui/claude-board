@@ -365,12 +365,34 @@ function commentArea(blockId, commentsByBlock, historical) {
   const items = commentItemsHtml(blockId, commentsByBlock);
   return `
     <div class="comment-target" id="comment-target-${escAttr(blockId)}">commenting on: whole block</div>
-    <form class="comment-form" id="comment-form-${escAttr(blockId)}" data-block-id="${escAttr(blockId)}" data-anchor-kind="block">
-      <input type="text" placeholder="Add a comment"${historical ? ' disabled' : ''}>
-      <button type="submit"${historical ? ' disabled' : ''}>Add</button>
-    </form>
+    ${commentFormHtml(blockId, historical, '')}
     <div class="comment-list" id="comment-list-${escAttr(blockId)}">${items}</div>`;
 }
+
+/** One block's comment composer: the text field, the images pasted or dropped on it
+ * (src/ui.mjs fills the row) and Add. `describedBy` is an id for the field's
+ * aria-describedby, or ''. */
+function commentFormHtml(blockId, historical, describedBy) {
+  return `<form class="comment-form" id="comment-form-${escAttr(blockId)}" data-block-id="${escAttr(blockId)}" data-anchor-kind="block">
+      <div class="comment-form-col">
+        <input type="text" placeholder="Add a comment"${describedBy ? ` aria-describedby="${describedBy}"` : ''}${historical ? ' disabled' : ''}>
+        ${imageTray(`comment:${blockId}`, historical, true)}
+      </div>
+      <button type="submit"${historical ? ' disabled' : ''}>Add</button>
+    </form>`;
+}
+
+/** Under a composer that takes images: the row src/ui.mjs draws each pasted or dropped
+ * image's thumbnail in, keyed by `key` ('note:<id>', 'answer:<id>' or 'comment:<id>'),
+ * and, with `hint`, the line saying so. Nothing on a sent round: what it sent is the
+ * round's own record. */
+function imageTray(key, historical, hint) {
+  if (historical) return '';
+  const hintHtml = hint ? `<p class="paste-hint">${PASTE_HINT}</p>` : '';
+  return `<div class="thumb-row" data-images-for="${escAttr(key)}"></div>${hintHtml}`;
+}
+
+const PASTE_HINT = 'Paste or drop images, up to 10 MB each';
 
 /** The generic element-level pin overlay for a block whose content lives in the
  * board's OWN document (as opposed to html/mermaid's stage-scoped one inside
@@ -615,7 +637,7 @@ function renderMultiChoice(block, answer, historical) {
  * capability the terminal tool lacks entirely. */
 function renderTextWidget(block, answer, historical) {
   const value = answer && typeof answer.choice === 'string' ? answer.choice : '';
-  return `<textarea class="answer-textarea" data-answer-for="${escAttr(block.id)}" rows="8" placeholder="Write your answer…"${historical ? ' disabled' : ''}>${escHtml(value)}</textarea>`;
+  return `<textarea class="answer-textarea" data-answer-for="${escAttr(block.id)}" rows="8" placeholder="Write your answer…"${historical ? ' disabled' : ''}>${escHtml(value)}</textarea>${imageTray(`answer:${block.id}`, historical, false)}`;
 }
 
 /** Drag-to-rank: every option, in the stored order if there is a prior answer, else
@@ -1004,6 +1026,7 @@ function renderQuestionBlock(block, board, commentsByBlock, historical) {
       <button type="button" class="btn-defer${isDeferred ? ' active' : ''}" data-defer-for="${escAttr(block.id)}"${historical ? ' disabled' : ''}>Defer</button>
     </div>
     <textarea id="note-${escAttr(block.id)}" data-note-for="${escAttr(block.id)}" placeholder="Optional note"${historical ? ' disabled' : ''}>${escHtml(answer ? answer.note : '')}</textarea>
+    ${imageTray(`note:${block.id}`, historical, true)}
   </div>
   ${cardDetails(block)}
 </section>`;
@@ -3025,10 +3048,7 @@ function renderPageCommentPanel(block, round, commentsByBlock) {
   return `
     <div class="comment-list-wrap"><div class="comment-list" id="comment-list-${escAttr(blockId)}">${commentItemsHtml(blockId, commentsByBlock)}</div></div>
     <div class="comment-target" id="comment-target-${escAttr(blockId)}">commenting on: whole block</div>
-    <form class="comment-form" id="comment-form-${escAttr(blockId)}" data-block-id="${escAttr(blockId)}" data-anchor-kind="block">
-      <input type="text" placeholder="Add a comment"${showHint ? ` aria-describedby="${hintId}"` : ''}${historical ? ' disabled' : ''}>
-      <button type="submit"${historical ? ' disabled' : ''}>Add</button>
-    </form>
+    ${commentFormHtml(blockId, historical, showHint ? hintId : '')}
     <div class="page-send-bar" data-round="${round.n}">
       ${hint}
       <button type="button" class="btn-discuss page-discuss-btn" data-round="${round.n}"${historical ? ' disabled' : ''}>Discuss in chat</button>
