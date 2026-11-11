@@ -57,6 +57,12 @@
   var selections = {};   // qid -> string (single/text) | string[] (multi/rank)
   var notes = {};
   var deferred = {};     // qid -> bool, the per-question defer affordance
+  // Images pasted or dropped on a composer and not sent yet, keyed as its
+  // '.thumb-row' is ('note:<qid>', 'answer:<qid>', 'comment:<blockId>'), each
+  // { name, size, data } with 'data' the data: URL a submit carries. A queued
+  // comment takes its form's list with it ('images' on its pendingComments entry).
+  // Page memory only, as 'notes' is: a reload keeps neither.
+  var draftImages = {};
 
   // Comment mode: off by default, so every ordinary
   // widget handler below runs exactly as it always has. Declared here, at the very
@@ -543,6 +549,9 @@
       // invisible destruction.
       if (editing) input.value = editing.text;
       else if (!String(input.value || '').trim()) input.value = '';
+      // Its images follow the same rule: an edit shows the entry's own, and any
+      // other open keeps whatever the draft already holds.
+      if (editing) setDraftImages('comment:' + blockId, (editing.images || []).slice());
       input.focus();
     }
   }
@@ -881,6 +890,14 @@
     label.textContent = '#' + n + ' · ' + pendingAnchorTag(entry.anchor);
     item.appendChild(label);
     item.appendChild(document.createTextNode(entry.text));
+    // Its images, small and without a remove: deleting the comment is the way
+    // to take one back.
+    if (entry.images && entry.images.length) {
+      var thumbs = document.createElement('div');
+      thumbs.className = 'thumb-row';
+      entry.images.forEach(function (img) { thumbs.appendChild(thumbEl(img, -1)); });
+      item.appendChild(thumbs);
+    }
     var del = document.createElement('button');
     del.type = 'button';
     del.className = 'comment-delete';
@@ -4177,6 +4194,10 @@
     });
   });
 
+  // A composer re-rendered by a push shows the images its draft still holds, as
+  // the note loop below refills its text.
+  qsa('div.thumb-row[data-images-for]', root).forEach(paintThumbRow);
+
   qsa('textarea[data-note-for]', root).forEach(function (ta) {
     var qid = ta.getAttribute('data-note-for');
     if (notes[qid]) ta.value = notes[qid];
@@ -4235,8 +4256,9 @@
       if (readonly) return;
       var input = form.querySelector('input[type=text]');
       var text = (input.value || '').trim();
-      if (!text) return;
       var blockId = form.getAttribute('data-block-id');
+      // An image says something on its own: a comment needs words or an image.
+      if (!text && !draftImages['comment:' + blockId]) return;
       var anchorKind = form.getAttribute('data-anchor-kind') || 'block';
       var anchorRef = form.getAttribute('data-anchor-ref') || '';
       var anchorLabel = form.getAttribute('data-anchor-label') || '';
@@ -4264,11 +4286,15 @@
       // comments ever shared an anchor (legal for a whole-block comment).
       var editingId = form.getAttribute('data-editing-id');
       var editing = editingId ? pendingComments.find(function (c) { return String(c.id) === editingId; }) : null;
+      // The images on the form go with the comment, an edit's included: the form
+      // was refilled with the entry's own when it reopened (openCommentForm).
+      var images = takeDraftImages('comment:' + blockId);
       if (editing) {
         editing.anchor = anchor;
         editing.text = text;
+        editing.images = images;
       } else {
-        pendingComments.push({ id: nextPendingId++, blockId: blockId, anchor: anchor, text: text });
+        pendingComments.push({ id: nextPendingId++, blockId: blockId, anchor: anchor, text: text, images: images });
       }
       reportActivity(form);
       // The whole layer is re-rendered rather than one pin appended, so the
@@ -4412,9 +4438,234 @@
       var input = openForm.querySelector('input[type=text]');
       if (input) input.value = '';
       var openBlockId = openForm.getAttribute('data-block-id');
+      setDraftImages('comment:' + openBlockId, []);
       var openTarget = document.querySelector('div#comment-target-' + openBlockId);
       if (openTarget) openTarget.classList.remove('open');
     }
+  });
+
+  // --- images pasted or dropped on a note, a text answer or a comment ------
+  //
+  // A composer that takes images carries a '.thumb-row' keyed as draftImages is
+  // (src/render.mjs's imageTray; none on a sent round). Paste and drop are
+  // delegated from the document, so a round pushed later takes them with no
+  // wiring pass. Each image is held as the data: URL a submit carries, under the
+  // daemon's own limits, checked here first so a refusal costs nothing typed:
+  // one image at most IMAGE_MAX_BYTES, as it lands; a Send's images together at
+  // most SEND_IMAGES_MAX_BYTES, at Send. Megabytes here are 1024 * 1024 bytes,
+  // the daemon's own.
+  var MB = 1024 * 1024;
+  var IMAGE_MAX_BYTES = 10 * MB;
+  var SEND_IMAGES_MAX_BYTES = 20 * MB;
+  var IMAGE_TYPES = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' };
+  var KEPT_LINE = ' Nothing was sent; your answers are kept.';
+  var pastedCount = 0;
+
+  function megabytes(bytes) {
+    return String(Math.round(bytes / MB * 10) / 10) + ' MB';
+  }
+  function sizeLabel(bytes) {
+    return bytes >= MB ? megabytes(bytes) : String(Math.max(1, Math.round(bytes / 1024))) + ' KB';
+  }
+
+  function thumbRowFor(key) {
+    return document.querySelector('div.thumb-row[data-images-for="' + key + '"]');
+  }
+
+  /** One thumbnail: the image, its name and size, and, for 'index' 0 or more, the
+   * remove control that drops draftImages entry 'index' of its row's key. */
+  function thumbEl(img, index) {
+    var thumb = document.createElement('div');
+    thumb.className = 'thumb';
+    var pic = document.createElement('img');
+    pic.className = 'thumb-img';
+    pic.setAttribute('src', img.data);
+    pic.setAttribute('alt', img.name);
+    thumb.appendChild(pic);
+    var cap = document.createElement('div');
+    cap.className = 'thumb-cap';
+    cap.textContent = img.name + ', ' + sizeLabel(img.size);
+    thumb.appendChild(cap);
+    if (index >= 0) {
+      var remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'thumb-remove';
+      remove.setAttribute('data-image-index', String(index));
+      remove.setAttribute('aria-label', 'Remove ' + img.name);
+      remove.textContent = '×';
+      thumb.appendChild(remove);
+    }
+    return thumb;
+  }
+
+  function paintThumbRow(row) {
+    var list = draftImages[row.getAttribute('data-images-for')] || [];
+    row.innerHTML = '';
+    list.forEach(function (img, i) { row.appendChild(thumbEl(img, i)); });
+  }
+
+  function setDraftImages(key, list) {
+    if (list.length) draftImages[key] = list; else delete draftImages[key];
+    var row = thumbRowFor(key);
+    if (row) paintThumbRow(row);
+  }
+
+  /** The key's images, handed over and cleared from its row. */
+  function takeDraftImages(key) {
+    var list = draftImages[key] || [];
+    setDraftImages(key, []);
+    clearImageRefusal(key);
+    return list;
+  }
+
+  /** An answer's images: its text answer's, then its note's. */
+  function answerImages(qid) {
+    return (draftImages['answer:' + qid] || []).concat(draftImages['note:' + qid] || []);
+  }
+
+  /** The draftImages keys a submit of 'answers' carries. */
+  function answeredImageKeys(answers) {
+    var keys = [];
+    answers.forEach(function (a) {
+      ['answer:' + a.id, 'note:' + a.id].forEach(function (key) { if (draftImages[key]) keys.push(key); });
+    });
+    return keys;
+  }
+
+  /** What a Send of the images under 'keys' and on 'comments' is told when they
+   * add up past SEND_IMAGES_MAX_BYTES; '' when they do not. */
+  function sendImagesRefusal(keys, comments) {
+    var total = 0;
+    keys.forEach(function (key) { (draftImages[key] || []).forEach(function (img) { total += img.size; }); });
+    comments.forEach(function (c) { (c.images || []).forEach(function (img) { total += img.size; }); });
+    if (total <= SEND_IMAGES_MAX_BYTES) return '';
+    return 'The images in this Send add up to ' + megabytes(total) + '; the limit is '
+      + megabytes(SEND_IMAGES_MAX_BYTES) + ' per Send.' + KEPT_LINE;
+  }
+
+  /** Queued comments as a submit carries them: an 'images' list of data: URLs,
+   * the key absent when there are none. */
+  function wireComments(list) {
+    return list.map(function (c) {
+      var out = { id: c.id, blockId: c.blockId, anchor: c.anchor, text: c.text };
+      if (c.images && c.images.length) out.images = c.images.map(function (img) { return img.data; });
+      return out;
+    });
+  }
+
+  function clearImageRefusal(key) {
+    var row = thumbRowFor(key);
+    var old = row && row.parentElement && row.parentElement.querySelector('p.image-refusal[data-refusal-for="' + key + '"]');
+    if (old) old.replaceWith();
+  }
+
+  /** Says 'text' under the composer 'key' names, in place of what it said before. */
+  function showImageRefusal(key, text) {
+    clearImageRefusal(key);
+    var row = thumbRowFor(key);
+    if (!row || !row.parentElement) return;
+    var p = document.createElement('p');
+    p.className = 'image-refusal';
+    p.setAttribute('role', 'alert');
+    p.setAttribute('data-refusal-for', key);
+    p.textContent = text;
+    row.parentElement.appendChild(p);
+  }
+
+  /** The composer key an event's target sits in, or null: a note, a text answer
+   * or a comment form, whose field is live (not readonly, not a sent round). */
+  function imageKeyAt(target) {
+    if (readonly || !target || !target.closest) return null;
+    var host = target.closest('.note-field, textarea[data-answer-for], .comment-form');
+    if (!host) return null;
+    var field = host.tagName === 'TEXTAREA' ? host
+      : host.querySelector('textarea[data-note-for], input[type=text]');
+    if (!field || field.disabled) return null;
+    var key = field.getAttribute('data-answer-for') ? 'answer:' + field.getAttribute('data-answer-for')
+      : field.getAttribute('data-note-for') ? 'note:' + field.getAttribute('data-note-for')
+      : 'comment:' + host.getAttribute('data-block-id');
+    return thumbRowFor(key) ? key : null;
+  }
+
+  function bytesToDataUrl(type, buf) {
+    var bytes = new Uint8Array(buf);
+    var parts = [];
+    for (var i = 0; i < bytes.length; i += 0x8000) {
+      parts.push(String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000)));
+    }
+    return 'data:' + type + ';base64,' + btoa(parts.join(''));
+  }
+
+  /** The image files in a clipboard or a drop, in order. */
+  function imageFiles(transfer) {
+    var files = transfer && transfer.files ? Array.prototype.slice.call(transfer.files) : [];
+    return files.filter(function (f) { return f && /^image\//.test(f.type || ''); });
+  }
+
+  /** Adds 'files' to the key's row, refusing one of a type the board does not take
+   * or over IMAGE_MAX_BYTES with a line naming why; the rest still land. */
+  function addImages(key, files, pasted, from) {
+    var refusal = '';
+    var taken = files.filter(function (f) {
+      if (!IMAGE_TYPES[f.type]) {
+        refusal = refusal || 'Only PNG, JPEG, GIF or WebP images can be attached.' + KEPT_LINE;
+        return false;
+      }
+      if (f.size > IMAGE_MAX_BYTES) {
+        refusal = refusal || 'This image is ' + megabytes(f.size) + '; the limit is ' + megabytes(IMAGE_MAX_BYTES) + '.' + KEPT_LINE;
+        return false;
+      }
+      return true;
+    });
+    if (refusal) showImageRefusal(key, refusal); else clearImageRefusal(key);
+    if (!taken.length) return;
+    Promise.all(taken.map(function (f) {
+      return f.arrayBuffer().then(function (buf) {
+        var name = pasted || !f.name ? 'pasted-' + (++pastedCount) + '.' + IMAGE_TYPES[f.type] : f.name;
+        return { name: name, size: f.size, data: bytesToDataUrl(f.type, buf) };
+      });
+    })).then(function (imgs) {
+      setDraftImages(key, (draftImages[key] || []).concat(imgs));
+      reportActivity(from);
+    });
+  }
+
+  document.addEventListener('paste', function (ev) {
+    var key = imageKeyAt(ev.target);
+    var files = key ? imageFiles(ev.clipboardData) : [];
+    if (!files.length) return;
+    ev.preventDefault();
+    addImages(key, files, true, ev.target);
+  });
+
+  // A file dropped anywhere else on the page is swallowed rather than opened:
+  // the browser would otherwise leave the board for the file, and take every
+  // unsent answer with it.
+  function carriesFiles(ev) {
+    var types = ev.dataTransfer && ev.dataTransfer.types;
+    return !!types && Array.prototype.indexOf.call(types, 'Files') !== -1;
+  }
+  document.addEventListener('dragover', function (ev) {
+    if (carriesFiles(ev)) ev.preventDefault();
+  });
+  document.addEventListener('drop', function (ev) {
+    if (!carriesFiles(ev) && !(ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files.length)) return;
+    ev.preventDefault();
+    var key = imageKeyAt(ev.target);
+    var files = key ? imageFiles(ev.dataTransfer) : [];
+    if (files.length) addImages(key, files, false, ev.target);
+  });
+
+  document.addEventListener('click', function (ev) {
+    var btn = ev.target && ev.target.closest ? ev.target.closest('.thumb-remove') : null;
+    if (!btn || readonly || btn.disabled) return;
+    var row = btn.closest('.thumb-row');
+    var key = row && row.getAttribute('data-images-for');
+    if (!key) return;
+    var list = (draftImages[key] || []).slice();
+    list.splice(Number(btn.getAttribute('data-image-index')), 1);
+    setDraftImages(key, list);
+    clearImageRefusal(key);
   });
 
   // --- mermaid: client-side, from the daemon's own vendored copy -----------
@@ -5025,12 +5276,15 @@
     pageQuestionBlocks().forEach(function (qb) {
       var qid = qb.getAttribute('data-block-id');
       var result = currentAnswer(qid, qb.getAttribute('data-widget'));
-      answers.push({
+      var answer = {
         id: qid,
         status: answerStatus(qid, result),
         choice: result.choice,
         note: notes[qid] || '',
-      });
+      };
+      var images = answerImages(qid);
+      if (images.length) answer.images = images.map(function (img) { return img.data; });
+      answers.push(answer);
     });
     return answers;
   }
@@ -5928,6 +6182,14 @@
     if (isPageRound(blocksOfRound(currentRound))) return;
     var answers = collectAnswers();
     var comments = commentsSentFrom(currentRound);
+    var sentImageKeys = answeredImageKeys(answers);
+    // Refused here, before anything leaves the page, and everything typed stays
+    // where it is: the daemon refuses the same Send whole.
+    var tooMuch = sendImagesRefusal(sentImageKeys, comments);
+    if (tooMuch) {
+      if (sendStatus) sendStatus.textContent = tooMuch;
+      return;
+    }
     setSendBarEnabled(false);
     // Held until the response lands, so that flipping to another page and back
     // mid-flight cannot hand the button back (refreshPager enables the bar
@@ -5938,7 +6200,7 @@
     fetch('/api/board/' + boardId + '/submit', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ action: action, round: currentRound, answers: answers, comments: comments, stages: 'held' }),
+      body: JSON.stringify({ action: action, round: currentRound, answers: answers, comments: wireComments(comments), stages: 'held' }),
     }).then(function (r) {
       // 409 is not an error: it means this round was already sent (a second tab,
       // or a double click that beat the disable). The right response is the same
@@ -5978,6 +6240,7 @@
       // rather than joined by the server-numbered copies of the same comments.
       // A comment that stayed behind keeps its provisional pin.
       pendingComments = pendingComments.filter(function (c) { return comments.indexOf(c) === -1; });
+      sentImageKeys.forEach(function (key) { setDraftImages(key, []); });
       applyOwnSend(result);
       refreshPins(document);
       clearPendingMark();
@@ -6095,6 +6358,11 @@
     if (!isPageRound(blocks)) return;
     var blockId = blocks[0].id;
     var mine = pendingComments.filter(function (c) { return c.blockId === blockId; });
+    var tooMuch = sendImagesRefusal([], mine);
+    if (tooMuch) {
+      showImageRefusal('comment:' + blockId, tooMuch);
+      return;
+    }
     var section = roundSectionEl(roundN);
     var pageSendBtn = section && section.querySelector('.page-send-btn');
     var pageDiscussBtn = section && section.querySelector('.page-discuss-btn');
@@ -6107,7 +6375,7 @@
     fetch('/api/board/' + boardId + '/submit', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ action: action, round: roundN, answers: [], comments: mine, stages: 'held' }),
+      body: JSON.stringify({ action: action, round: roundN, answers: [], comments: wireComments(mine), stages: 'held' }),
     }).then(function (r) {
       // 409: already sent, by another tab or a double click that beat the
       // disable above -- not an error, and the live 'submitted' push (already

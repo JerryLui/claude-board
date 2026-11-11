@@ -2553,3 +2553,9 @@ Traps that have bitten once. A second bite moves the entry up into the section i
   `CLAUDE_BOARD_WAIT_CEILING_MS` and one report that moves it (the ceiling cases in
   `test/check-http.mjs` and `test/check-mcp.mjs`). The move must clear the minimum, a fortieth
   of a short wait (`deadlineMoveMinMs`, `src/server.mjs`).
+
+- **`src/styles.mjs` takes no raw color outside its token blocks.** `check-pure.mjs` ("no rule
+  outside a token block carries a raw hex or rgba literal") failed a thumbnail's remove control
+  painted `rgba(0, 0, 0, 0.55)` as the approved render had it (2026-11-11). Build the look from
+  the palette's tokens (`var(--ink)` on `var(--panel)` with an `opacity`) or add a token to both
+  palettes; a render's literal is a reading of the look, not a value to paste.
