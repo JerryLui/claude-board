@@ -2300,6 +2300,19 @@ chrome band; if that ever surfaces, the fix is this same resend, not a broadcast
 
 Traps that have bitten once. A second bite moves the entry up into the section it belongs to.
 
+- **Every shim a check spawns is the same session.** `bin/mcp.mjs` names its session by its
+  parent process (`process.ppid` and its start), and `spawnShim` makes the check itself that
+  parent, so two shims in one check are one session to the daemon: same binding, same rounds.
+  A check about two sessions spawns the shim under its own shell, `sh -c '"$node" mcp.mjs; exit
+  $?'` (the trailing command keeps `sh` from exec-ing node in its place), and wraps the child in
+  `McpClient`; the shell's pid is then the session (`test/check-mission-board.mjs`).
+
+- **A comment on a markdown or question block is stored and never drawn.** The submit keeps any
+  comment whose `blockId` names a real block, but only `mermaid` and `html` render a comment list
+  (ADR 28), so a check fixture commenting on a markdown block passes every packet and store
+  assertion while the page shows nothing. A check about a drawn comment targets a diagram or a stage
+  (`test/check-images.mjs`).
+
 - **`yarn check` runs none of the checks.** Under yarn 1 it is yarn's own integrity built-in, which
   beats the `check` script in `package.json`: "success Folder in sync.", exit 0, in 0.02 seconds.
   `node test/run.mjs` (or `yarn run check`) is the suite.
@@ -2559,3 +2572,9 @@ Traps that have bitten once. A second bite moves the entry up into the section i
   `CLAUDE_BOARD_WAIT_CEILING_MS` and one report that moves it (the ceiling cases in
   `test/check-http.mjs` and `test/check-mcp.mjs`). The move must clear the minimum, a fortieth
   of a short wait (`deadlineMoveMinMs`, `src/server.mjs`).
+
+- **`src/styles.mjs` takes no raw color outside its token blocks.** `check-pure.mjs` ("no rule
+  outside a token block carries a raw hex or rgba literal") failed a thumbnail's remove control
+  painted `rgba(0, 0, 0, 0.55)` as the approved render had it (2026-11-11). Build the look from
+  the palette's tokens (`var(--ink)` on `var(--panel)` with an `opacity`) or add a token to both
+  palettes; a render's literal is a reading of the look, not a value to paste.

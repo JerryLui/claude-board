@@ -867,7 +867,7 @@ async function main() {
       const stateOf = (overview, id) => overview.tabs.find(t => t.id === id).state;
 
       const first = cache.overview();
-      assert.deepEqual(first.counts, { needsYou: 1, working: 3, waiting: 1, stalled: 0, released: 0, queued: 0 });
+      assert.deepEqual(first.counts, { needsYou: 1, working: 3, waiting: 1, stalled: 0, released: 0, queued: 0, parked: 0 });
       assert.deepEqual(first.live, { working: 0, alive: 0 }, 'the launch caps count no tab');
       assert.deepEqual(first.tabs.find(t => t.id === 'asks').rounds, [{ board: asking.id, round: 1 }]);
 
@@ -1127,7 +1127,7 @@ async function main() {
     const listed = missionsOverview({ home: dir, now });
     assert.deepEqual(viewsOf(listed), keptViews);
     assert.deepEqual(viewsOf(missionsOverview({ home: dir, now, all: true })), keptViews, 'the full list the mission watch reads drops it too');
-    assert.deepEqual(listed.counts, { needsYou: 0, working: 1, waiting: 3, stalled: 0, released: 0, queued: 0 });
+    assert.deepEqual(listed.counts, { needsYou: 0, working: 1, waiting: 3, stalled: 0, released: 0, queued: 0, parked: 0 });
     assert.deepEqual(['RETIRED_BARE', 'RETIRED_MERGED', 'RETIRED_RELEASED'].map(k => readMission(k, dir)?.key), ['RETIRED_BARE', 'RETIRED_MERGED', 'RETIRED_RELEASED'],
       'leaving the list deletes nothing: the purge alone does, 30 days on');
     assert.deepEqual([getMissionView('RETIRED_BARE', { home: dir, now }).view, getMissionView('RETIRED_BARE', { home: dir, now }).retired], ['waiting', true],
@@ -1388,7 +1388,7 @@ async function main() {
     assert.deepEqual(readMission('PRUNED_LINK', home).boards.map(b => b.id), [first.body.boardId]);
   });
 
-  await check('a board posted by a session bound to a mission, naming none, links to that mission; once the session leaves or joins another, its next board links to none or the other, and a later round on the first board is a 400 that writes nothing', async () => {
+  await check('a board posted by a session bound to a mission, naming none, links to that mission; once the session leaves, its next board links to none and a later round on the first board is a 400 that writes nothing; once it joins another, that round moves to the other mission\'s board and closes its rounds on the first', async () => {
     const tab = liveProcess();
     const start = '2026-10-30T07:00:00Z';
     try {
@@ -1411,12 +1411,16 @@ async function main() {
         `board ${linked.body.boardId} belongs to mission BOUND_POSTS, and the posting session has left it: ask with fresh for a board of its own`]);
 
       assert.equal((await post('/api/mission/BOUND_POSTS_NEXT/join', { id: 'poster', pid: tab.pid, procStart: start })).status, 200);
-      const elsewhere = await post('/api/board', { ...followUp, requestId: 'bound-4' });
-      assert.deepEqual([elsewhere.status, elsewhere.body.error], [400,
-        `board ${linked.body.boardId} belongs to mission BOUND_POSTS, and the posting session is bound to mission BOUND_POSTS_NEXT: ask with fresh for a board of its own`]);
       assert.deepEqual(readBoard(linked.body.boardId, home), landed, 'a refused round writes nothing');
+      // ADR 150: a session bound to a mission posts on that mission's board, whatever board it names.
+      const elsewhere = await post('/api/board', { ...followUp, requestId: 'bound-4' });
+      assert.equal(elsewhere.status, 200, JSON.stringify(elsewhere.body));
+      assert.notEqual(elsewhere.body.boardId, linked.body.boardId);
+      assert.equal(elsewhere.body.moved, true);
+      assert.equal(readBoard(elsewhere.body.boardId, home).mission, 'BOUND_POSTS_NEXT');
+      assert.deepEqual(readBoard(linked.body.boardId, home).rounds.map(r => r.status), ['abandoned'], 'the rounds it left open on the first board close');
       const next = await post('/api/board', { title: 'Next mission round', ...ask });
-      assert.equal(readBoard(next.body.boardId, home).mission, 'BOUND_POSTS_NEXT');
+      assert.equal(next.body.boardId, elsewhere.body.boardId, 'the mission\'s next round lands on its one board');
       assert.equal((await post('/api/mission/BOUND_POSTS_NEXT/leave', { id: 'poster' })).status, 200);
     } finally {
       await endProcess(tab);
@@ -1644,12 +1648,12 @@ async function main() {
     assert.equal((await rawRequest(port, 'POST', '/api/mission/COOKIE/order', { headers: { 'content-type': 'application/json' }, body: '{"kind":"stop"}' })).status, 401);
   });
 
-  await check('GET /api/missions answers missions, tab cards, counts, live, slotFree, now and the session watcher', async () => {
+  await check('GET /api/missions answers missions, tab cards, counts, live, slotFree, now, the session watcher and the spin-down flag', async () => {
     const r = await getJson('/api/missions');
     assert.equal(r.status, 200);
-    assert.deepEqual(Object.keys(r.body).sort(), ['counts', 'live', 'missions', 'now', 'slotFree', 'tabs', 'watcher']);
+    assert.deepEqual(Object.keys(r.body).sort(), ['counts', 'live', 'missions', 'now', 'slotFree', 'spinDown', 'tabs', 'watcher']);
     assert.deepEqual(Object.keys(r.body.watcher).sort(), ['lastAt', 'up']);
-    assert.deepEqual(Object.keys(r.body.counts).sort(), ['needsYou', 'queued', 'released', 'stalled', 'waiting', 'working']);
+    assert.deepEqual(Object.keys(r.body.counts).sort(), ['needsYou', 'parked', 'queued', 'released', 'stalled', 'waiting', 'working']);
     assert.deepEqual(Object.keys(r.body.live).sort(), ['alive', 'working']);
     const total = Object.values(r.body.counts).reduce((a, b) => a + b, 0);
     const tabsNeedingYou = r.body.tabs.filter(t => t.state === 'needs-you').length;

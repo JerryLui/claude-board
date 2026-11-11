@@ -9,9 +9,9 @@
 // file: page, none of which the DOM stand-in has (test/check-round-download.mjs holds
 // the markup).
 //
-// The pasted images a round carries are whatever <img> it draws, so the fixture adds two
-// to the drawn round before the download: one from a blob: URL (pixels the page may
-// read back) and one off another host (pixels it may not).
+// The fixture's images: one pasted on a note and one on a comment, sent with the round
+// and served beside the board (src/images.mjs), and an option's preview off another
+// host, which the page does not load and the file names in its place.
 //
 // NOT wired into test/run.mjs's `checks` array, on purpose: that suite has to pass on a
 // machine with no Chrome installed. Run this one by hand:
@@ -46,13 +46,16 @@ const ROUND_1 = [
     html: `<div style="height:${STAGE_PX}px;box-sizing:border-box;border:4px solid #3251c9;background:#eef">Static mock</div><div id="late"></div><script>document.getElementById('late').textContent = 'ran';</script>` },
   { id: 'q1', kind: 'question', prompt: 'Which way?', widget: 'single',
     options: [{ label: 'Yes', description: 'go now' }, { label: 'No', description: 'not yet' }, { label: 'Later' }] },
-  { id: 'q2', kind: 'question', prompt: 'Which parts?', widget: 'multi', options: [{ label: 'A' }, { label: 'B' }, { label: 'C' }] },
+  { id: 'q2', kind: 'question', prompt: 'Which parts?', widget: 'multi',
+    options: [{ label: 'A' }, { label: 'B' }, { label: 'C', preview: 'http://images.invalid/elsewhere.png' }] },
   { id: 'q3', kind: 'question', prompt: 'Say why', widget: 'text' },
   { id: 'q4', kind: 'question', prompt: 'Order them', widget: 'rank', options: [{ label: 'X' }, { label: 'Y' }, { label: 'Z' }] },
   { id: 'q5', kind: 'question', prompt: 'Park this?', widget: 'single', options: [{ label: 'Park' }, { label: 'Keep' }] },
 ];
+// A 3x2 red PNG, pasted twice.
+const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAIAAAASFvFNAAAAEklEQVR4nGP4z8DAwMDAxMAAAA8kAgFzQfa2AAAAAElFTkSuQmCC';
 const ANSWERS = [
-  { id: 'q1', status: 'answered', choice: 'No', note: 'Hold for review' },
+  { id: 'q1', status: 'answered', choice: 'No', note: 'Hold for review', images: [PNG] },
   { id: 'q2', status: 'answered', choice: ['A', 'C'], note: '' },
   { id: 'q3', status: 'answered', choice: 'Free text answer', note: '' },
   { id: 'q4', status: 'answered', choice: ['Z', 'X', 'Y'], note: '' },
@@ -61,11 +64,9 @@ const ANSWERS = [
 const COMMENTS = [
   { blockId: 'm1', anchor: { kind: 'block' }, text: 'Diagram comment' },
   { blockId: 'm1', anchor: { kind: 'mermaid', ref: 'pick' }, text: 'Pick node comment' },
-  { blockId: 'h1', anchor: { kind: 'block' }, text: 'Mock comment' },
+  { blockId: 'h1', anchor: { kind: 'block' }, text: 'Mock comment', images: [PNG] },
 ];
 
-// A 3x2 red PNG: the bytes behind the fixture's blob: image.
-const PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAIAAAASFvFNAAAAEklEQVR4nGP4z8DAwMDAxMAAAA8kAgFzQfa2AAAAAElFTkSuQmCC';
 
 const EXPORT_EXPR = `(function () {
   function texts(sel, root) { return [].slice.call((root || document).querySelectorAll(sel)).map(function (e) { return e.textContent.replace(/\\s+/g, ' ').trim(); }); }
@@ -105,7 +106,11 @@ const EXPORT_EXPR = `(function () {
     frame: frame ? { sandbox: frame.getAttribute('sandbox'), height: frame.getBoundingClientRect().height, srcdoc: frame.getAttribute('srcdoc') } : null,
     diagramComments: comments('m1'),
     mockComments: comments('h1'),
-    images: imgs.map(function (i) { return { data: /^data:image\\//.test(i.getAttribute('src') || ''), loaded: i.complete && i.naturalWidth > 0 }; }),
+    images: imgs.map(function (i) {
+      return { where: i.closest('.comment-item') ? 'comment ' + i.closest('[data-block-id]').getAttribute('data-block-id')
+        : i.closest('.note-field') ? 'note ' + i.closest('[data-block-id]').getAttribute('data-block-id') : 'elsewhere',
+        data: /^data:image\\//.test(i.getAttribute('src') || ''), width: i.naturalWidth };
+    }),
     missing: texts('.export-missing'),
     scripts: document.scripts.length,
     controls: document.querySelectorAll('button, textarea, input, form, .pin-layer, .round-download').length,
@@ -177,20 +182,6 @@ async function main() {
         assert.ok(Math.abs(line.btn.mid - line.label.mid) <= 1, 'on the label\'s line');
       });
 
-      // The fixture's images, drawn into the sent round's markdown card.
-      await board.evalPage(`(function () {
-        var bytes = Uint8Array.from(atob('${PNG_B64}'), function (c) { return c.charCodeAt(0); });
-        var card = document.querySelector('[data-block-id="d1"]');
-        var local = document.createElement('img');
-        local.alt = 'pasted';
-        local.src = URL.createObjectURL(new Blob([bytes], { type: 'image/png' }));
-        var remote = document.createElement('img');
-        remote.alt = 'elsewhere';
-        remote.src = 'http://images.invalid/elsewhere.png';
-        card.appendChild(local);
-        card.appendChild(remote);
-      })()`);
-      await board.until(`document.querySelector('[data-block-id="d1"] img').naturalWidth > 0`, 'the blob: image loading');
       // The stage reports its own height a frame or two after it lays out.
       const stageH = await board.until(`document.querySelector('[data-block-id="h1"] iframe').__cbStageContentH`, 'the stage reporting its height');
 
@@ -272,9 +263,12 @@ async function main() {
         assert.deepEqual(m.mockComments, ['Mock comment']);
       });
 
-      await row('the round\'s images ride inline: one the page drew as a data: URL, one off another host named in its place', () => {
-        assert.deepEqual(m.images, [{ data: true, loaded: true }]);
-        assert.deepEqual(m.missing, ['Image not included: elsewhere']);
+      await row('the round\'s images ride inline: each pasted one as a data: URL under its note or comment, one off another host named in its place', () => {
+        assert.deepEqual(m.images, [
+          { where: 'comment h1', data: true, width: 3 },
+          { where: 'note q1', data: true, width: 3 },
+        ]);
+        assert.deepEqual(m.missing, ['Image not included']);
         assert.equal(m.scripts, 0);
       });
 
