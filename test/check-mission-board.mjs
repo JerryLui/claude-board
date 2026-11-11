@@ -124,7 +124,7 @@ async function main() {
     assert.equal(readBoard(first.boardId, home).mission ?? null, null);
   });
 
-  await check('on a shared board a fresh post and a scoped abandon close only the rounds of the session that sent them', async () => {
+  await check('on a shared board a fresh post and a scoped abandon close only the rounds of the session that sent them, and an abandon naming no session (a shim from before) closes none a session posted', async () => {
     const a = sessionProcess();
     const b = sessionProcess();
     const folder = folderWith('scoped', 'x\n');
@@ -140,7 +140,37 @@ async function main() {
     const closed = await post(`/api/board/${first.boardId}/abandon`, { session: b.ref });
     assert.deepEqual([closed.status, closed.body.closed], [200, [3]]);
     assert.deepEqual(readBoard(first.boardId, home).rounds.map(r => r.status), ['open', 'abandoned', 'abandoned']);
+
+    const bare = await rawRequest(port, 'POST', `/api/board/${first.boardId}/abandon`, { headers: writeHeaders(SECRET) });
+    assert.deepEqual([bare.status, JSON.parse(bare.body).closed], [200, []]);
+    assert.equal(readBoard(first.boardId, home).rounds[0].status, 'open');
     assert.equal((await leave('SCOPED', 'scoped-b', b)).status, 200);
+  });
+
+  await check('a takeover hands over only rounds the giver posted: a question a caller naming no session left on the mission\'s board stays no one\'s', async () => {
+    const giver = sessionProcess();
+    const taker = sessionProcess();
+    const folder = folderWith('orphan', 'x\n');
+    const orphan = await post('/api/board', { title: 'Round', blocks: [question('Asked by no session')], cwd: folder, noWait: true, mission: 'ORPHAN' });
+    assert.equal(orphan.status, 200, JSON.stringify(orphan.body));
+    assert.equal((await join('ORPHAN', 'orphan-giver', giver)).status, 200);
+    assert.equal((await join('ORPHAN', 'orphan-taker', taker, { takeover: true })).status, 202);
+    assert.equal((await leave('ORPHAN', 'orphan-giver', giver)).status, 200);
+    const [round] = readBoard(orphan.body.boardId, home).rounds;
+    assert.deepEqual([round.session, round.handedFrom], [undefined, undefined]);
+    assert.equal((await leave('ORPHAN', 'orphan-taker', taker)).status, 200);
+  });
+
+  await check('a session moving to its mission\'s board from a board whose file no longer parses still posts there, once', async () => {
+    const s = sessionProcess();
+    const folder = folderWith('unreadable', 'x\n');
+    const own = await ask(s, folder, [question('On my own board')]);
+    writeFileSync(path.join(home, 'boards', `${own.boardId}.json`), '{"rounds": [');
+    assert.equal((await join('UNREADABLE', 'unreadable', s)).status, 200);
+    const moved = await ask(s, folder, [question('On the mission\'s')], { boardId: own.boardId });
+    assert.equal(moved.moved, true);
+    assert.deepEqual(readMission('UNREADABLE', home).boards.map(b => b.id), [moved.boardId]);
+    assert.equal((await leave('UNREADABLE', 'unreadable', s)).status, 200);
   });
 
   await check('a takeover hands the giver\'s open round to the taker, so the answer the PM sends on it rides the taker\'s next packet', async () => {

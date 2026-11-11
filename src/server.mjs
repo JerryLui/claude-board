@@ -1404,8 +1404,15 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, s
   writeBoard(board, home);
   writePage(board.id, html, home);
   for (const n of freshClosed) sse.broadcast(board.id, 'awaitExpired', { round: n });
-  // The board this session moved away from keeps every other session's rounds open.
-  if (leftBoardId && roundSession) closeRounds(leftBoardId, { session: roundSession }, home, sse, stranded, stream, waiting);
+  // The board this session moved away from keeps every other session's rounds open. A
+  // failure is warned and the post goes on, as the link below: this board is written.
+  if (leftBoardId && roundSession) {
+    try {
+      closeRounds(leftBoardId, { session: roundSession }, home, sse, stranded, stream, waiting);
+    } catch (err) {
+      console.error(`claude-board: the rounds left open on board ${leftBoardId} were not closed: ${(err && err.message) || err}`);
+    }
+  }
   // The link the mission records is the one this post's reply carries. A link that fails
   // (an unreadable or unwritable mission record) is warned and the post goes on: the
   // board is already written with this requestId, so a 500 here would send the shim's
@@ -2346,7 +2353,8 @@ async function handleWait(req, res, id, url, home, sse, stream, waiting) {
  * to one round number where this is about every open round at once. */
 async function handleAbandon(req, res, id, home, sse, stranded, stream, waiting, sessions) {
   // A body naming `session` closes only that session's rounds (ADR 150): a mission's board
-  // is shared. No body closes every open round, as a shim from before it asks.
+  // is shared. No body closes every open round, as a shim from before it asks, but on a
+  // mission's board only the rounds no session posted (`abandonOpenRounds`).
   let session = null;
   if (Number(req.headers['content-length']) > 0 || req.headers['transfer-encoding']) {
     let body;

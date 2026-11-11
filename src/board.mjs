@@ -902,10 +902,13 @@ export function folderOfRound(board, round) {
  * so a board no session ever posted to, and a post naming none, keep the one-conversation
  * board they always had. */
 export function roundOwnedBy(board, round, ref) {
-  const owner = (round && round.session) || (board && board.session) || null;
+  const owner = posterOf(board, round);
   if (!owner || !ref) return true;
   return sessionMatches(owner, ref);
 }
+
+/** The session that posted `round` of `board`, null when none is recorded. */
+const posterOf = (board, round) => (round && round.session) || (board && board.session) || null;
 
 /** 40 minutes (ADR.md entry 47): the default a round's `awaitDeadline` is stamped
  * `awaitTimeoutMs` amount of time past `postedAt` with, when a caller (test or
@@ -1138,8 +1141,10 @@ export function abandonOpenRounds(board, { session = null, except = null } = {})
   for (const r of (board && board.rounds) || []) {
     if (r.status !== 'open') continue;
     // A mission's board is shared (ADR 150): a session's boundary closes only the rounds it
-    // posted, and never the round its own post just opened.
-    if (r.n === except || (session && !roundOwnedBy(board, r, session))) continue;
+    // posted, and never the round its own post just opened. A close naming no session there
+    // (a shim from before it named one) closes only rounds no session posted.
+    if (r.n === except) continue;
+    if (session ? !roundOwnedBy(board, r, session) : board.mission && posterOf(board, r)) continue;
     r.status = 'abandoned';
     r.abandonedAt = now;
     r.awaited = false;
@@ -1156,7 +1161,8 @@ export function abandonOpenRounds(board, { session = null, except = null } = {})
 export function handOverRounds(board, giver, taker) {
   const handed = [];
   for (const r of (board && board.rounds) || []) {
-    if (r.status !== 'open' || !roundOwnedBy(board, r, giver)) continue;
+    // Only rounds the giver is recorded posting: one no session posted is no one's to hand.
+    if (r.status !== 'open' || !sessionMatches(posterOf(board, r), giver)) continue;
     const from = (r.session && r.session.id) || giver.id || null;
     r.session = sessionStamp(taker);
     if (from) r.handedFrom = from;
