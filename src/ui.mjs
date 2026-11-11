@@ -125,7 +125,7 @@ export const MERMAID_TOKEN_MAP = {
 /** Mermaid's theme variables for a downloaded round (src/round-export.mjs):
  * mermaidThemeVariables' set, read off the light palette rather than the live
  * page, since the file is light whatever the board's theme. */
-export const EXPORT_MERMAID_VARS = (() => {
+const EXPORT_MERMAID_VARS = (() => {
   const vars = {
     darkMode: false,
     background: 'transparent',
