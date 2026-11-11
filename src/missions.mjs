@@ -874,7 +874,7 @@ function conflict(answer) {
  * `{ status: 202, takeover: 'pending', session }`, the bound session told through
  * `bindingFor` to finish its step and leave. A fresh bind moves the mission to working, in
  * `phase` when given, and clears any takeover; so does the bound session joining its
- * released mission again. Two joins are refused whatever holds the mission: the session a
+ * released or parked mission again. Two joins are refused whatever holds the mission: the session a
  * launch replaced (`ended`, not left), a 409 `{ error: 'ended', session }`, unless it is
  * that session resumed in a new process (`resumedFrom`), which binds and drops `ended`; and a session
  * bound to another mission (`bindingFor`'s rule), its own released mission's rejoin
@@ -902,7 +902,7 @@ export function joinMission(key, body, { home = boardHome(), now = Date.now(), i
   let answer;
   if (rejoin) {
     m.session = heardFrom(bound, ref, at);
-    if (m.state === 'released') moveTo(m, { phase: phase || m.phase, state: 'working' }, now);
+    if (m.state === 'released' || m.state === 'parked') moveTo(m, { phase: phase || m.phase, state: 'working' }, now);
     else if (phase && phase !== m.phase) moveTo(m, { phase }, now);
     answer = { status: 200, bound: true, session: m.session };
   } else if (bound && isReservation(bound) && hasLiveSession(m, now, isAlive, listed)) {

@@ -761,18 +761,21 @@ async function main() {
     assert.equal(readMission('RELEASED_FIRST', dir).state, 'released', 'and the released mission stays released');
   });
 
-  await check('the bound session joining its released mission again moves it to working, and its binding names the mission', () => {
+  await check('the bound session joining its released or parked mission again moves it to working, and its binding names the mission', () => {
     const dir = scratchHome('rejoin-released');
     const t0 = Date.parse('2026-10-30T12:10:00Z');
     const isAlive = () => true;
-    joinMission('RELEASED_AGAIN', { id: 'sess-a', pid: 8181 }, { home: dir, now: t0, isAlive });
-    upsertMission('RELEASED_AGAIN', { state: 'released' }, { home: dir, now: t0 + 1000 });
-    assert.equal(bindingFor([readMission('RELEASED_AGAIN', dir)], { id: 'sess-a' }).key, null);
-    const again = joinMission('RELEASED_AGAIN', { id: 'sess-a', pid: 8181, phase: 'landing' }, { home: dir, now: t0 + 2000, isAlive });
-    assert.equal(again.bound, true);
-    const m = readMission('RELEASED_AGAIN', dir);
-    assert.deepEqual([m.phase, m.state, m.releasedAt], ['landing', 'working', undefined]);
-    assert.equal(bindingFor([m], { id: 'sess-a' }).key, 'RELEASED_AGAIN');
+    for (const [key, stored, boundWhile] of [['RELEASED_AGAIN', 'released', null], ['PARKED_AGAIN', 'parked', 'PARKED_AGAIN']]) {
+      joinMission(key, { id: 'sess-a', pid: 8181 }, { home: dir, now: t0, isAlive });
+      upsertMission(key, { state: stored }, { home: dir, now: t0 + 1000 });
+      assert.equal(bindingFor([readMission(key, dir)], { id: 'sess-a' }).key, boundWhile, stored);
+      const again = joinMission(key, { id: 'sess-a', pid: 8181, phase: 'landing' }, { home: dir, now: t0 + 2000, isAlive });
+      assert.equal(again.bound, true);
+      const m = readMission(key, dir);
+      assert.deepEqual([m.phase, m.state, m.releasedAt], ['landing', 'working', undefined], stored);
+      assert.equal(bindingFor([m], { id: 'sess-a' }).key, key);
+      upsertMission(key, { state: 'released' }, { home: dir, now: t0 + 3000 });
+    }
   });
 
   await check('a mission waiting on the PM is alive but not working, so it holds no working slot', () => {

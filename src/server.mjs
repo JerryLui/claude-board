@@ -3349,7 +3349,12 @@ async function handleMission(req, res, parts, home, stream, cache, heldSecret, l
     let status = 200;
     if (route === 'upsert') answer = missionView(upsertMission(key, body, { home }), { home, listed });
     else if (route === 'launch') answer = launchMission(key, body, { home, listed });
-    else if (route === 'join') ({ status, ...answer } = joinMission(key, body, { home, listed }));
+    else if (route === 'join') {
+      ({ status, ...answer } = joinMission(key, body, { home, listed }));
+      // A session bound in place of one that went or that a launch replaced: that session's
+      // open rounds are asked again of this one, as a takeover's are (ADR 150).
+      if (status === 200 && answer.session && answer.session.ended) handOverMissionRounds(key, answer.session.ended, answer.session, home);
+    }
     else if (route === 'leave') {
       answer = leaveMission(key, body, { home });
       // A takeover: the giver's open rounds on the mission's board are asked again of the
@@ -3372,7 +3377,8 @@ async function handleMission(req, res, parts, home, stream, cache, heldSecret, l
 }
 
 /** Hand the rounds session `giver` left open on mission `key`'s board to `taker`, the
- * session a takeover bound in its place. A failure is warned: the leave has happened. */
+ * session a takeover, or a join after `giver` went, bound in its place. A failure is
+ * warned: the leave or join has happened. */
 function handOverMissionRounds(key, giver, taker, home) {
   try {
     const id = missionBoardId(key, { home });

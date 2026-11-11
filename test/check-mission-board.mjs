@@ -254,6 +254,26 @@ async function main() {
     }
   });
 
+  await check('a session that joins after the bound one went (its process gone, no leave) is asked the gone session\'s open round, so the answer the PM sends on it rides its next packet', async () => {
+    const gone = sessionProcess();
+    const next = sessionProcess();
+    const folder = folderWith('crashed', 'x\n');
+    assert.equal((await join('CRASHED', 'crashed-gone', gone)).status, 200);
+    const asked = await ask(gone, folder, [question('Asked before the crash')]);
+    gone.child.kill('SIGKILL');
+    await new Promise(resolve => gone.child.once('exit', resolve));
+    assert.equal((await join('CRASHED', 'crashed-next', next)).status, 200);
+    const [round] = readBoard(asked.boardId, home).rounds;
+    assert.deepEqual([round.status, round.session.pid, round.handedFrom], ['open', next.ref.pid, 'crashed-gone']);
+
+    const qid = readBoard(asked.boardId, home).blocks.find(x => x.kind === 'question').id;
+    const sent = await post(`/api/board/${asked.boardId}/submit`, { round: 1, action: 'send', answers: [{ id: qid, status: 'answered', choice: 'No', note: '' }], comments: [] });
+    assert.equal(sent.status, 200, JSON.stringify(sent.body));
+    const after = await ask(next, folder, [note('picking up')]);
+    assert.deepEqual(after.answers.map(x => [x.id, x.choice]), [[qid, 'No']]);
+    assert.equal((await leave('CRASHED', 'crashed-next', next)).status, 200);
+  });
+
   await check('a round posts within one second on a mission board the size of the largest real mission\'s boards merged (34 rounds, 418 blocks, 4.4 MB)', async () => {
     const s = sessionProcess();
     const folder = folderWith('large', 'x\n');
