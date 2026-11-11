@@ -1022,6 +1022,9 @@ body.sent-page .comment-btn { display: none; }
 .fold-toggle:hover:not(:disabled) { color: var(--accent); }
 
 .comment-list { margin-top: var(--space-3); display: flex; flex-direction: column; gap: var(--space-2); }
+/* a sent answer's or comment's pasted images, read-only (src/render.mjs sentImagesHtml) */
+.sent-images { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.sent-images img { display: block; max-width: 100%; max-height: 360px; border: 1px solid var(--hairline-2); border-radius: var(--r-sm); background: var(--panel); }
 .comment-item { position: relative; font-size: 12.5px; color: var(--ink-2); background: var(--panel-2);
   border: 1px solid var(--hairline); border-left: 2px solid var(--hairline-2);
   border-radius: var(--r-sm); padding: 8px 12px;

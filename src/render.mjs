@@ -340,6 +340,15 @@ function anchorTag(c, lost) {
  * page board's own Tray (`renderPageCommentPanel`): one rendering of a block's
  * stored comments, so the two surfaces can never disagree about how a comment's
  * anchor tag or lost/resolved styling is drawn. */
+/** The images a sent answer or comment carries, drawn read-only. Each `src` is
+ * `<boardId>/<name>`, relative to the page, so it resolves to `GET /b/<boardId>/<name>`
+ * served and to `pages/<boardId>/<name>` opened from Finder (src/store.mjs). Never lazy:
+ * a round's download (src/ui.mjs) reads every drawn image, scrolled to or not. */
+function sentImagesHtml(boardId, names) {
+  if (!boardId || !Array.isArray(names) || !names.length) return '';
+  return `<div class="sent-images">${names.map((n, i) => `<img src="${escAttr(`${boardId}/${n}`)}" alt="Pasted image ${i + 1}">`).join('')}</div>`;
+}
+
 function commentItemsHtml(blockId, commentsByBlock) {
   const comments = commentsByBlock.get(blockId) || [];
   return comments.map(c => {
@@ -352,7 +361,7 @@ function commentItemsHtml(blockId, commentsByBlock) {
     // drawn on the thing it is about.)
     const kind = (c.anchor && c.anchor.kind) || 'block';
     const ref = (c.anchor && c.anchor.ref) || '';
-    return `<div class="comment-item" data-anchor-kind="${escAttr(kind)}"${ref ? ` data-anchor-ref="${escAttr(ref)}"` : ''} data-block-id="${escAttr(blockId)}"><span class="comment-anchor${lost ? ' comment-lost' : ''}">#${c.n} · ${escHtml(tag)}</span>${escHtml(c.text)}</div>`;
+    return `<div class="comment-item" data-anchor-kind="${escAttr(kind)}"${ref ? ` data-anchor-ref="${escAttr(ref)}"` : ''} data-block-id="${escAttr(blockId)}"><span class="comment-anchor${lost ? ' comment-lost' : ''}">#${c.n} · ${escHtml(tag)}</span>${escHtml(c.text)}${sentImagesHtml(commentsByBlock.boardId, c.images)}</div>`;
   }).join('');
 }
 
@@ -1004,6 +1013,7 @@ function renderQuestionBlock(block, board, commentsByBlock, historical) {
       <button type="button" class="btn-defer${isDeferred ? ' active' : ''}" data-defer-for="${escAttr(block.id)}"${historical ? ' disabled' : ''}>Defer</button>
     </div>
     <textarea id="note-${escAttr(block.id)}" data-note-for="${escAttr(block.id)}" placeholder="Optional note"${historical ? ' disabled' : ''}>${escHtml(answer ? answer.note : '')}</textarea>
+    ${sentImagesHtml(board.id, answer && answer.images)}
   </div>
   ${cardDetails(block)}
 </section>`;
@@ -3236,8 +3246,11 @@ export function renderBlock(block, board, commentsByBlock, historical = false, f
  * page -- resolving once per render, here, rather than once per call site, is
  * what keeps a pin's resolved/lost styling and its block's comment-list entry
  * from ever disagreeing about the same comment (see this file's header comment). */
-export function groupCommentsByBlock(resolvedComments) {
+export function groupCommentsByBlock(resolvedComments, boardId = null) {
   const map = new Map();
+  // The board the comments are on, which a comment's images are drawn under
+  // (`sentImagesHtml`); every comment in one map is from one board.
+  map.boardId = boardId;
   for (const resolved of resolvedComments) {
     if (!map.has(resolved.blockId)) map.set(resolved.blockId, []);
     map.get(resolved.blockId).push(resolved);
@@ -3501,7 +3514,7 @@ function roundPagerMarkup(board, currentN) {
  * pushed and archived never carries it. */
 export function renderBoardPage(board, { stageHtml = false } = {}) {
   const resolvedComments = resolveComments(board, board.comments);
-  const commentsByBlock = groupCommentsByBlock(resolvedComments);
+  const commentsByBlock = groupCommentsByBlock(resolvedComments, board.id);
   // The page-board layout (ADR.md entries 32 and 33) is carried two ways: down
   // into the round/block markup (no round label, no kicker -- renderRoundSection
   // decides that per round), and out onto <body> as a single class the whole

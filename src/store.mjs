@@ -6,6 +6,9 @@
 // $CLAUDE_BOARD_HOME/pages/styles-<hash>.css  the shared stylesheet a page names
 // $CLAUDE_BOARD_HOME/pages/mermaid-<hash>.js  the shared diagram engine, named by ui.js
 //                                             rather than by any page (see sweep below)
+// $CLAUDE_BOARD_HOME/pages/<boardId>/<name>    the images pasted into the board's answers
+//                                             and comments (src/images.mjs), a page-relative
+//                                             path served as `/b/<boardId>/<name>`
 //
 // The three shared assets are siblings of the page ON PURPOSE (ADR 70): a bare filename is
 // the one reference that resolves the same served (`/b/<name>`) and opened from Finder
@@ -15,10 +18,11 @@
 // corrupt a board: a reader always sees either the old or the new content, never a
 // partial one.
 
-import { readFileSync, openSync, writeSync, fsyncSync, closeSync, renameSync, mkdirSync, readdirSync, unlinkSync, existsSync, statSync } from 'node:fs';
+import { readFileSync, openSync, writeSync, fsyncSync, closeSync, renameSync, mkdirSync, readdirSync, unlinkSync, existsSync, statSync, rmSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { closeLapsedAwaitedRounds } from './badge.mjs';
 import { SHARED_ASSETS, ASSET_NAME, assetsNamedBy } from './assets.mjs';
+import { IMAGE_NAME } from './images.mjs';
 import path from 'node:path';
 import os from 'node:os';
 
@@ -203,6 +207,38 @@ function boardPath(id, home = boardHome()) {
 
 function pagePath(id, home = boardHome()) {
   return path.join(pagesDir(home), `${assertSafeId(id)}.html`);
+}
+
+/** The folder beside a board's page that holds its pasted images. A board id has no dot
+ * and an asset name always does, so it is never mistaken for either (see
+ * `sweepUnreferencedAssets`, which lists only files with an asset's name). */
+function boardImagesDir(id, home = boardHome()) {
+  return path.join(pagesDir(home), assertSafeId(id));
+}
+
+/** The absolute path of one of `id`'s images, as a packet names it. */
+export function boardImagePath(id, name, home = boardHome()) {
+  if (!IMAGE_NAME.test(name)) throw Object.assign(new Error(`not an image name: ${JSON.stringify(name)}`), { status: 400 });
+  return path.join(boardImagesDir(id, home), name);
+}
+
+/** Write each of `files` (name -> bytes) into the board's image folder. A name is the
+ * hash of its bytes, so one already there is already right and is left alone. */
+export function writeBoardImages(id, files, home = boardHome()) {
+  for (const [name, bytes] of files) {
+    const target = boardImagePath(id, name, home);
+    if (!existsSync(target)) atomicWrite(target, bytes);
+  }
+}
+
+/** One stored image's bytes, or null when the board has none by that name. */
+export function readBoardImage(id, name, home = boardHome()) {
+  try {
+    return readFileSync(boardImagePath(id, name, home));
+  } catch (err) {
+    if (err.code === 'ENOENT') return null;
+    throw err;
+  }
 }
 
 /** Atomic write: temp file in the same directory, fsync, then rename over the target.
@@ -461,6 +497,7 @@ export function searchBoards(query, home = boardHome()) {
 export function deleteBoard(id, home = boardHome()) {
   try { unlinkSync(boardPath(id, home)); } catch (err) { if (err.code !== 'ENOENT') throw err; }
   try { unlinkSync(pagePath(id, home)); } catch (err) { if (err.code !== 'ENOENT') throw err; }
+  rmSync(boardImagesDir(id, home), { recursive: true, force: true });
 }
 
 /** When a board last changed, as epoch ms — or `null` when it will not say.

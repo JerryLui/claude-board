@@ -2288,6 +2288,12 @@ chrome band; if that ever surfaces, the fix is this same resend, not a broadcast
 
 Traps that have bitten once. A second bite moves the entry up into the section it belongs to.
 
+- **A comment on a markdown or question block is stored and never drawn.** The submit keeps any
+  comment whose `blockId` names a real block, but only `mermaid` and `html` render a comment list
+  (ADR 28), so a check fixture commenting on a markdown block passes every packet and store
+  assertion while the page shows nothing. A check about a drawn comment targets a diagram or a stage
+  (`test/check-images.mjs`).
+
 - **`yarn check` runs none of the checks.** Under yarn 1 it is yarn's own integrity built-in, which
   beats the `check` script in `package.json`: "success Folder in sync.", exit 0, in 0.02 seconds.
   `node test/run.mjs` (or `yarn run check`) is the suite.
