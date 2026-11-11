@@ -24,6 +24,7 @@ import { renderBlock, highlightFenceHtml } from './render.mjs';
 // existing `from './board.mjs'` import keeps working unchanged.
 import { isPageRound, questionBlocks } from './badge.mjs';
 import { STATUS_TONES } from './card-status.mjs';
+import { storedImages } from './images.mjs';
 export { questionBlocks };
 
 // Kind letter for block id minting (`q1`, `d3`, `m2`, ...): kind letter + ordinal
@@ -1317,6 +1318,9 @@ export function applySubmit(board, { action, answers, comments, relayed }, round
         ? a.choice.map(c => byValueText(c ?? '', 'answer choice'))
         : (a.choice == null ? null : byValueText(a.choice, 'answer choice')),
       note: byValueText(a.note ?? '', 'answer note'),
+      // Names only (src/images.mjs): the daemon has already turned the wire's data URLs
+      // into the names it stores the bytes under.
+      ...storedImages(a.images),
     };
   }
 
@@ -1341,7 +1345,9 @@ export function applySubmit(board, { action, answers, comments, relayed }, round
   }
 
   for (const c of comments || []) {
-    if (!c || !c.text) continue;
+    // A comment may be an image with no words; one with neither is nothing.
+    const images = storedImages(c && c.images);
+    if (!c || (!c.text && !images.images)) continue;
     // A comment naming no real block is never a request the reviewer made
     // -- same reasoning as the answer-merge guard above, and the
     // same lookup resolveComment will need at packet-assembly time anyway.
@@ -1359,7 +1365,8 @@ export function applySubmit(board, { action, answers, comments, relayed }, round
       // reaches the agent as a `text` that is not a string, against PROTOCOL.md's
       // packet contract, and every downstream `String(...)` papers over it instead of
       // the submit being refused at the door.
-      text: byValueText(c.text, 'comment text'),
+      text: byValueText(c.text || '', 'comment text'),
+      ...images,
       createdAt: now,
       round,
       // The block's OWN kind at the moment this anchor was minted:
@@ -1492,6 +1499,9 @@ export function resolveComment(board, comment, blockCache = new Map()) {
     blockKind: block ? block.kind : null,
     anchor: comment.anchor,
     text: comment.text,
+    // Stored names; a packet turns them into absolute paths (src/server.mjs
+    // `withImagePaths`), the page into `<boardId>/<name>` (src/render.mjs).
+    ...(comment.images ? { images: comment.images } : {}),
     // `round` and `createdAt` are carried through, not dropped: without
     // them nothing downstream can tell a comment left this round from one settled
     // five rounds ago, which is how round 6's packet ended up re-delivering rounds
@@ -1610,7 +1620,7 @@ export function roundAnswers(board, round) {
     .filter(b => b.round === round)
     .map(b => {
       const a = board.answers[b.id] || { status: 'unanswered', choice: null, note: '' };
-      return { id: b.id, round: b.round, prompt: b.prompt, widget: b.widget, status: a.status, choice: a.choice, note: a.note };
+      return { id: b.id, round: b.round, prompt: b.prompt, widget: b.widget, status: a.status, choice: a.choice, note: a.note, ...(a.images ? { images: a.images } : {}) };
     });
 }
 

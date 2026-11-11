@@ -901,7 +901,13 @@ function relayedLine(relayed) {
 function answerLine(a) {
   const choice = Array.isArray(a.choice) ? a.choice.join(', ') : (a.choice ?? '—');
   const note = a.note ? ` (note: ${a.note})` : '';
-  return `${a.id} [${a.status}] "${a.prompt}" -> ${choice}${note}`;
+  return `${a.id} [${a.status}] "${a.prompt}" -> ${choice}${note}${imagesText(a)}`;
+}
+
+/** The files of the images pasted into an answer or comment, for the agent to open: on
+ * the text channel too, since a client may drop `structuredContent`. */
+function imagesText(entry) {
+  return Array.isArray(entry.images) && entry.images.length ? ` [images: ${entry.images.join(', ')}]` : '';
 }
 
 /** One comment entry as a line of text; see `answerLine` for why it is its own function. */
@@ -912,7 +918,7 @@ function commentLine(c) {
   // `lost`'s presence instead -- the two were never anything but the
   // same verdict under two names.
   const lost = c.lost ? ' [anchor no longer resolves]' : '';
-  return `[${c.n}] ${where}${lost}: ${c.text}`;
+  return `[${c.n}] ${where}${lost}: ${c.text}${imagesText(c)}`;
 }
 
 /** `read`'s text: the rounds in order, then every stored entry, each line naming the
