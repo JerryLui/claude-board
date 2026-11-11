@@ -296,8 +296,11 @@ a Fire or Merge it offers stays shown. _Avoid_: tile, row.
 waiting, stalled or released. Between merge and Released a Mission is working, or needs you
 while a release step waits on the person. Needs you is any linked board whose newest round is
 still open and asks the person a question or was posted Awaited, a Lapsed one included; waiting is the Mission waiting on
-something else (a check, another PR, a Queued launch). _Avoid_: status (collides with the
-Packet's), phase (grill, direct or landing), column, landed (the name before Released).
+something else (a check, another PR, a Queued launch). A parked Mission, stopped at a spin-down
+as its session's last act, shows under waiting tagged Parked with the line that resumes it, or
+under needs you tagged Parked while a round it left waits on the person; it never reads stalled.
+_Avoid_: status (collides with the Packet's), phase (grill, direct or landing), column, landed
+(the name before Released).
 
 **Released**: of a Mission, that every release step after its merge is walked: each deploy,
 infra apply, one-time script, secret, switch or production check that puts the change in
