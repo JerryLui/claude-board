@@ -2288,6 +2288,13 @@ chrome band; if that ever surfaces, the fix is this same resend, not a broadcast
 
 Traps that have bitten once. A second bite moves the entry up into the section it belongs to.
 
+- **Every shim a check spawns is the same session.** `bin/mcp.mjs` names its session by its
+  parent process (`process.ppid` and its start), and `spawnShim` makes the check itself that
+  parent, so two shims in one check are one session to the daemon: same binding, same rounds.
+  A check about two sessions spawns the shim under its own shell, `sh -c '"$node" mcp.mjs; exit
+  $?'` (the trailing command keeps `sh` from exec-ing node in its place), and wraps the child in
+  `McpClient`; the shell's pid is then the session (`test/check-mission-board.mjs`).
+
 - **`yarn check` runs none of the checks.** Under yarn 1 it is yarn's own integrity built-in, which
   beats the `check` script in `package.json`: "success Folder in sync.", exit 0, in 0.02 seconds.
   `node test/run.mjs` (or `yarn run check`) is the suite.
