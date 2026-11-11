@@ -138,6 +138,43 @@ export function writeMission(mission, home = boardHome()) {
   return mission;
 }
 
+// $CLAUDE_BOARD_HOME/spin-down.json, the one spin-down flag (src/spin-down.mjs): present
+// while spin-down is on, absent while it is off.
+function spinDownPath(home) {
+  return path.join(home, 'spin-down.json');
+}
+
+/** The stored spin-down flag, or null while none is stored (off). A file that does not
+ * parse reads as on, so a torn write never lets a merge through. */
+export function readSpinDownFile(home = boardHome()) {
+  let text;
+  try {
+    text = readFileSync(spinDownPath(home), 'utf8');
+  } catch (err) {
+    if (err.code === 'ENOENT') return null;
+    throw err;
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { on: true };
+  }
+}
+
+/** Writes the spin-down flag, or removes it when `flag` is null. */
+export function writeSpinDownFile(flag, home = boardHome()) {
+  if (flag === null) {
+    try {
+      unlinkSync(spinDownPath(home));
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+    }
+    return null;
+  }
+  atomicWrite(spinDownPath(home), JSON.stringify(flag, null, 2));
+  return flag;
+}
+
 /** Calls `visit(key)` for every mission record file in the store, temp files left out. A
  * throw from `visit` skips that file with a warning, as `listBoards` skips an unreadable one. */
 function eachMissionKey(home, visit) {
