@@ -58,7 +58,7 @@ import { STREAM_WORKER_FILE, STREAM_WORKER_SOURCE } from './stream-worker.mjs';
 import { readSecret, secretPath, secretMatches, sessionToken, sessionCookieMatches, SECRET_HEADER, SESSION_COOKIE, SESSION_MAX_AGE_S } from './secret.mjs';
 import { createHandoffStore, handoffTarget, recoveryCommand, HANDOFF_TOKEN_RE, DEFAULT_PORT, waitCeilingMs } from './handoff.mjs';
 import { createSigninStore, signinRefusal, startSignin, SIGNIN_STARTED_PAGE, SIGNIN_SPENT_PAGE } from './signin-link.mjs';
-import { createBoard, addRound, amendRound, abandonOpenRounds, roundOwnedBy, handOverRounds, applySubmit, buildPacket, roundAnswers, dropResolved, resolveComments, questionBlocks, SUPPRESSED, ANSWERS_DELIVERED, roundContentDrifted } from './board.mjs';
+import { createBoard, addRound, amendRound, abandonOpenRounds, roundOwnedBy, roundFolder, folderOfRound, handOverRounds, applySubmit, buildPacket, roundAnswers, dropResolved, resolveComments, questionBlocks, SUPPRESSED, ANSWERS_DELIVERED, roundContentDrifted } from './board.mjs';
 import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, renderRefusalPage, boardForClient, holdStages, holdAllStages, stageShas, CSP, INDEX_CSP } from './render.mjs';
 import { buildThreadIndex, renderIndexPage, renderMissionsPage, renderThreadRows, folderName } from './indexpage.mjs';
 // The one shape rule for "is this round a full-viewport page" (ADR.md entry 33),
@@ -1233,10 +1233,13 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, s
         && questionBlocks(board).some(q => q.round === latestRound.n);
       // On a shared board (ADR 150) only the session that posted the round amends it: another
       // session's first question opens a round of its own. And a `fresh` post is a new
-      // conversation, which never joins the round its last one left open.
+      // conversation, which never joins the round its last one left open. Nor does a post from
+      // another folder than the round reads from (a round a takeover handed over, asked in the
+      // giver's worktree): a round's folder never moves, so it opens a round of its own.
       if (latestRound && latestRound.status === 'open' && latestAsksSomething
         && !roundWaitLapsed(latestRound) && !drifted
-        && body.fresh !== true && roundOwnedBy(board, latestRound, sessionRef)) {
+        && body.fresh !== true && roundOwnedBy(board, latestRound, sessionRef)
+        && (!ownFolder || roundFolder(board, cwd, true) === folderOfRound(board, latestRound))) {
         // The open round hasn't been sent yet: amend it in place rather than
         // minting round N+1.
         //

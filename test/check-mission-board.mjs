@@ -5,7 +5,7 @@
 
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { startServer } from '../src/server.mjs';
 import { readBoard, readMission, writeBoard } from '../src/store.mjs';
@@ -161,6 +161,47 @@ async function main() {
     assert.equal(next.boardId, asked.boardId);
     assert.deepEqual(next.answers.map(x => [x.id, x.choice]), [[qid, 'Yes']]);
     assert.equal((await leave('TAKEN', 'taker', taker)).status, 200);
+  });
+
+  await check('a taker in another folder than the giver asks its own question while the handed round waits: a round of its own, reading from the taker\'s folder', async () => {
+    const giver = sessionProcess();
+    const taker = sessionProcess();
+    const giverFolder = folderWith('giver-wt', 'from the giver\n');
+    const takerFolder = folderWith('taker-wt', 'from the taker\n');
+    assert.equal((await join('ACROSS', 'across-giver', giver)).status, 200);
+    const asked = await ask(giver, giverFolder, [{ kind: 'code', source: { path: 'notes.txt' } }, question('Giver asks')]);
+    assert.equal((await join('ACROSS', 'across-taker', taker, { takeover: true })).status, 202);
+    assert.equal((await leave('ACROSS', 'across-giver', giver)).status, 200);
+    const own = await ask(taker, takerFolder, [{ kind: 'code', source: { path: 'notes.txt' } }, question('Taker asks')]);
+    assert.deepEqual([own.boardId, own.round], [asked.boardId, 2]);
+    const board = readBoard(asked.boardId, home);
+    assert.deepEqual(board.rounds.map(r => [r.n, r.status, r.session.pid, r.cwd]), [[1, 'open', taker.ref.pid, giverFolder], [2, 'open', taker.ref.pid, takerFolder]]);
+    assert.deepEqual(board.blocks.filter(x => x.kind === 'code').map(x => x.text), ['from the giver\n', 'from the taker\n']);
+    assert.equal((await leave('ACROSS', 'across-taker', taker)).status, 200);
+  });
+
+  await check('a session whose folder was removed (a worktree, after its merge) still posts: on its own board it continues there, and on its mission\'s board its next round reads from the board\'s folder', async () => {
+    const loose = sessionProcess();
+    const gone = folderWith('removed-loose', 'x\n');
+    const own = await ask(loose, gone, [note('before the removal')]);
+    rmSync(gone, { recursive: true });
+    const again = await ask(loose, gone, [note('after it')], { boardId: own.boardId });
+    assert.deepEqual([again.boardId, again.round], [own.boardId, 2]);
+
+    const first = sessionProcess();
+    const bound = sessionProcess();
+    const main = folderWith('removed-main', 'x\n');
+    const worktree = folderWith('removed-wt', 'x\n');
+    assert.equal((await join('REMOVED', 'removed-first', first)).status, 200);
+    const missionBoard = await ask(first, main, [note('the mission\'s first round')]);
+    assert.equal((await leave('REMOVED', 'removed-first', first)).status, 200);
+    assert.equal((await join('REMOVED', 'removed-bound', bound)).status, 200);
+    await ask(bound, worktree, [question('From the worktree?')]);
+    rmSync(worktree, { recursive: true });
+    const after = await ask(bound, worktree, [question('After its removal?')]);
+    assert.deepEqual([after.boardId, after.round], [missionBoard.boardId, 3]);
+    assert.deepEqual(readBoard(missionBoard.boardId, home).rounds.map(r => r.cwd), [main, worktree, undefined]);
+    assert.equal((await leave('REMOVED', 'removed-bound', bound)).status, 200);
   });
 
   await check('a round posts within one second on a mission board the size of the largest real mission\'s boards merged (34 rounds, 418 blocks, 4.4 MB)', async () => {
