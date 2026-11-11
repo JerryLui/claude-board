@@ -280,6 +280,7 @@ one case that matters is also the one no automated check here can produce.
 - [Preview harness](#preview-harness)
 - [A driven tab does not paint, and half the stage channel needs a paint](#a-driven-tab-does-not-paint-and-half-the-stage-channel-needs-a-paint)
 - [Headless Chrome's scrollbars follow the Mac's Show scroll bars setting](#headless-chromes-scrollbars-follow-the-macs-show-scroll-bars-setting)
+- [A sandboxed frame below the first screen paints blank in a screenshot](#a-sandboxed-frame-below-the-first-screen-paints-blank-in-a-screenshot)
 
 ### `ResizeObserver` does not necessarily deliver an initial observation
 
@@ -780,6 +781,17 @@ with the key (still 0px).
 
 A wide stage's sideways classic bar takes 15px out of its viewport, so a check of a
 fitted height adds `innerHeight - clientHeight`, read inside the frame.
+
+### A sandboxed frame below the first screen paints blank in a screenshot
+
+Headless Chromium's `Page.captureScreenshot` with `captureBeyondViewport` captures a sandboxed
+`srcdoc` frame that sits wholly below the first screen as an empty box: a board's stage
+(2026-10-29) and a downloaded round's script-free mock (2026-11-11) both looked unrendered
+although each drew once in view, and `Page.printToPDF` of the same file drew it. Before a
+full-page shot, raise the viewport to the page's full height
+(`Emulation.setDeviceMetricsOverride`), or scroll each frame into view first. Such a frame is
+not in the page target's `Page.getFrameTree` either (it runs out of process), so it cannot be
+read from there.
 
 ---
 
@@ -2534,11 +2546,11 @@ Traps that have bitten once. A second bite moves the entry up into the section i
   `overflow-y: scroll` (true width 1429), so the centred `--doc-w` wash overflowed by half the
   difference and the page scrolled sideways 6px. Re-measure on the root's `ResizeObserver` and on
   `load`, not only on `resize`.
-- **Headless Chromium does not paint a sandboxed stage frame wholly below the first screen in a
-  full-page screenshot.** The frame is captured blank, so a before/after compare low on a long
-  board looked empty although it rendered once scrolled into view (2026-10-29). Before a
-  full-page shot, raise the viewport to the page's full height, or scroll each stage into view
-  first.
+- **A `file:` page cannot read its own sibling stylesheet's rules back.** `sheet.cssRules` on a
+  Finder-opened archive's `styles-<hash>.css` throws `SecurityError` (Chrome 155, 2026-11-11):
+  each `file:` URL is its own opaque origin. So anything that copies the page's CSS as text
+  (Download round's file, `pageCssText` in `src/ui.mjs`) works served and not from disk;
+  Download round is hidden under `body.readonly` for that reason.
 - **A click or key that navigates can fail its own DevTools call.** A `mouseReleased` that
   clicks a link-like card, or a `keyDown` Enter on one, may answer
   `{"code":-32000,"message":"Not attached to an active page"}` because the page is already

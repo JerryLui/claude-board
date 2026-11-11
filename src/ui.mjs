@@ -64,6 +64,9 @@ import { palettes } from './styles.mjs';
 import { MERMAID_ASSET } from './vendor/mermaid/index.mjs';
 import { openSharedStream, STREAM_WORKER_URL } from './stream-worker.mjs';
 import { activityMinMs } from './activity.mjs';
+import {
+  ROUND_DOWNLOAD_BUTTON, EXPORT_CSS, decisionRows, exportDate, exportFileName, exportDocument,
+} from './round-export.mjs';
 
 // Mermaid variable -> CSS token, read at call time from the live computed style
 // rather than hardcoded a second time in the client script below. 'background'
@@ -114,6 +117,20 @@ export const MERMAID_TOKEN_MAP = {
  * read can come before the root's scrollbar has taken its width, and a scrollbar
  * appearing as the page grows fires no resize. Written only when the value changed.
  * Guarded for the check stand-ins, which may run it with no body or no listener API. */
+/** Mermaid's theme variables for a downloaded round (src/round-export.mjs):
+ * mermaidThemeVariables' set, read off the light palette rather than the live
+ * page, since the file is light whatever the board's theme. */
+export const EXPORT_MERMAID_VARS = (() => {
+  const vars = {
+    darkMode: false,
+    background: 'transparent',
+    fontFamily: 'Inter, -apple-system, BlinkMacSystemFont, system-ui, sans-serif',
+    fontSize: '13px',
+  };
+  for (const [key, token] of Object.entries(MERMAID_TOKEN_MAP)) vars[key] = palettes.light[token];
+  return vars;
+})();
+
 export function trackDocWidth() {
   function measureDocWidth() {
     if (!document.body || !document.documentElement) return;
@@ -4299,6 +4316,225 @@ export const ui = `
     if (block) toggleStageFold(block);
   });
 
+  // --- Download round: a sent round saved as one HTML file ------------------
+  //
+  // Made here, from the round as drawn, so a diagram is already SVG and the
+  // file carries no engine (src/round-export.mjs holds the pure half and says
+  // what the file is). The copy is the round's own markup with every control
+  // and pin taken out, its answers written as text, its images inlined as
+  // data: URLs and its stages script-free: each mock is its srcdoc with every
+  // script removed, in a frame sandboxed with no allow-scripts, as tall as the
+  // stage last reported itself. The file's own policy admits no script at all.
+  // Its diagrams are drawn again in the light palette, since a file is printed.
+  var ROUND_DOWNLOAD_BUTTON = ${JSON.stringify(ROUND_DOWNLOAD_BUTTON)};
+  var EXPORT_CSS = ${JSON.stringify(EXPORT_CSS)};
+  var EXPORT_MERMAID_VARS = ${JSON.stringify(EXPORT_MERMAID_VARS)};
+  var decisionRows = ${decisionRows.toString()};
+  var exportDate = ${exportDate.toString()};
+  var exportFileName = ${exportFileName.toString()};
+  var exportDocument = ${exportDocument.toString()};
+  // Everything in a round that is a control or a pin rather than what the round
+  // said. The round's chip line goes too: the file's own head names the round.
+  var EXPORT_DROP = '.round-chips, .round-end, .comment-btn, .comment-form, .comment-target, .pin-layer, '
+    + '.pull-out, .stage-fold, .fold-toggle, .btn-defer, .rank-grip, .question-picks, .note-head, '
+    + 'script, noscript, source, object, embed, base, meta';
+  var nextExportDiagramId = 0;
+
+  // The page's stylesheet as text. A sheet the page may not read back (a
+  // file: archive's sibling, where the control is hidden) gives nothing.
+  function pageCssText() {
+    return [].slice.call(document.styleSheets).map(function (sheet) {
+      try { return [].slice.call(sheet.cssRules).map(function (r) { return r.cssText; }).join('\\n'); } catch (e) { return ''; }
+    }).join('\\n');
+  }
+
+  // No inline handler and no javascript: URL survives into the file.
+  function stripActiveAttributes(root) {
+    qsa('*', root).forEach(function (el) {
+      [].slice.call(el.attributes).forEach(function (a) {
+        if (/^on/i.test(a.name) || /^\\s*javascript:/i.test(a.value)) el.removeAttribute(a.name);
+      });
+    });
+  }
+
+  // A stage's srcdoc with every script, and everything else that acts, taken out.
+  function scriptFreeHtml(html) {
+    var doc = new DOMParser().parseFromString(html, 'text/html');
+    qsa('script, noscript, object, embed, base, meta[http-equiv]', doc).forEach(function (el) { el.remove(); });
+    stripActiveAttributes(doc);
+    return '<!DOCTYPE html>' + doc.documentElement.outerHTML;
+  }
+
+  // 'orig' as drawn on the page, copied into 'copy' as a data: URL of its pixels.
+  // An image the page may not read back (one off another host, which the page's
+  // policy does not even load) is named in its place, so the file asks nothing
+  // of the network.
+  // A lazy image the reader never scrolled to is loaded first.
+  async function inlineImage(orig, copy) {
+    copy.removeAttribute('srcset');
+    copy.removeAttribute('loading');
+    if (!orig.complete || !orig.naturalWidth) {
+      orig.loading = 'eager';
+      try { await orig.decode(); } catch (e) { /* broken or refused: named below */ }
+    }
+    var src = orig.currentSrc || orig.getAttribute('src') || '';
+    var data = /^data:/i.test(src) ? src : null;
+    if (!data && orig.complete && orig.naturalWidth) {
+      try {
+        var canvas = document.createElement('canvas');
+        canvas.width = orig.naturalWidth;
+        canvas.height = orig.naturalHeight;
+        canvas.getContext('2d').drawImage(orig, 0, 0);
+        data = canvas.toDataURL('image/png');
+      } catch (e) { data = null; }
+    }
+    if (data) { copy.setAttribute('src', data); return; }
+    var note = document.createElement('span');
+    note.className = 'export-missing';
+    note.textContent = 'Image not included' + (orig.alt ? ': ' + orig.alt : '');
+    copy.replaceWith(note);
+  }
+
+  // Each diagram's source drawn again in the light palette, through the one
+  // queue every mermaid pass shares; null where a diagram cannot be, which
+  // keeps the copy of what the page drew.
+  function exportDiagramSvgs(nodes) {
+    return queueMermaidTask(async function () {
+      var out = nodes.map(function () { return null; });
+      var sources = nodes.map(function (n) { return mermaidSourceByBlock && mermaidSourceByBlock.has(n) ? mermaidSourceByBlock.get(n) : null; });
+      if (!sources.some(Boolean)) return out;
+      try {
+        var engine = await ensureMermaidEngine();
+        engine.initialize({ startOnLoad: false, theme: 'base', themeVariables: EXPORT_MERMAID_VARS });
+        for (var i = 0; i < sources.length; i++) {
+          if (!sources[i]) continue;
+          try { out[i] = (await engine.render('cb-export-diagram-' + (nextExportDiagramId++), sources[i])).svg; } catch (e) { out[i] = null; }
+        }
+      } catch (e) { /* no engine: the copies of what the page drew stay */ }
+      return out;
+    });
+  }
+
+  // The round's markup, made into the file's content.
+  async function exportRoundContent(section) {
+    var copy = section.cloneNode(true);
+    // Paired by position before anything in the copy moves.
+    var pairs = function (sel) {
+      var a = qsa(sel, section), b = qsa(sel, copy);
+      return a.map(function (el, i) { return [el, b[i]]; }).filter(function (p) { return p[1]; });
+    };
+    var images = pairs('img');
+    var frames = pairs('iframe');
+    var diagrams = pairs('pre.mermaid');
+    var fields = pairs('textarea');
+
+    fields.forEach(function (p) {
+      var value = p[0].value || '';
+      var inNote = !!p[1].closest('.note-field');
+      if (inNote && !value.trim()) { p[1].remove(); return; }
+      var box = document.createElement('div');
+      box.className = inNote ? 'export-note-box' : 'export-text';
+      if (inNote) {
+        var tag = document.createElement('span');
+        tag.className = 'export-note-tag';
+        tag.textContent = 'Note';
+        box.appendChild(tag);
+      }
+      box.appendChild(document.createTextNode(value || (inNote ? '' : 'No answer')));
+      p[1].replaceWith(box);
+    });
+
+    frames.forEach(function (p) {
+      var srcdoc = p[0].getAttribute('srcdoc');
+      if (srcdoc == null) {
+        var missing = document.createElement('p');
+        missing.className = 'export-missing';
+        missing.textContent = 'This mock was not loaded on the page, so the file does not carry it.';
+        p[1].replaceWith(missing);
+        return;
+      }
+      var reported = p[0].__cbStageContentH;
+      var height = reported > 0 ? reported + STAGE_FRAME_EDGE : (p[0].getBoundingClientRect().height || 320);
+      var frame = document.createElement('iframe');
+      frame.className = 'html-stage';
+      frame.setAttribute('sandbox', '');
+      frame.setAttribute('title', 'Mock');
+      frame.setAttribute('srcdoc', scriptFreeHtml(srcdoc));
+      frame.style.height = Math.ceil(height) + 'px';
+      p[1].replaceWith(frame);
+    });
+
+    var svgs = await exportDiagramSvgs(diagrams.map(function (p) { return p[0]; }));
+    diagrams.forEach(function (p, i) {
+      if (svgs[i]) p[1].innerHTML = svgs[i];
+      p[1].removeAttribute('style');
+    });
+
+    await Promise.all(images.map(function (p) { return inlineImage(p[0], p[1]); }));
+
+    qsa(EXPORT_DROP, copy).forEach(function (el) { el.remove(); });
+    // Buttons become plain boxes: an option is a record here, not a control.
+    qsa('button', copy).forEach(function (btn) {
+      var box = document.createElement('div');
+      box.className = btn.className;
+      while (btn.firstChild) box.appendChild(btn.firstChild);
+      btn.replaceWith(box);
+    });
+    qsa('details', copy).forEach(function (d) { d.setAttribute('open', ''); });
+    qsa('.folded, .stage-folded, .stage-opened, .stage-scrolls', copy).forEach(function (el) {
+      el.classList.remove('folded', 'stage-folded', 'stage-opened', 'stage-scrolls');
+    });
+    qsa('.note-field', copy).forEach(function (field) {
+      if (!field.textContent.trim() && !field.querySelector('img')) field.remove();
+    });
+    qsa('[draggable], [tabindex], [aria-disabled]', copy).forEach(function (el) {
+      el.removeAttribute('draggable');
+      el.removeAttribute('tabindex');
+      el.removeAttribute('aria-disabled');
+    });
+    stripActiveAttributes(copy);
+    return copy.innerHTML;
+  }
+
+  function saveHtmlFile(name, html) {
+    var url = URL.createObjectURL(new Blob([html], { type: 'text/html;charset=utf-8' }));
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    // Never put in the page: its click would reach the page's own listeners.
+    a.click();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
+  }
+
+  async function downloadRound(section) {
+    var n = Number(section.getAttribute('data-round'));
+    var round = (board.rounds || []).find(function (r) { return r.n === n; }) || {};
+    var questions = questionBlocks({ blocks: (board.blocks || []).filter(function (b) { return b.round === n; }) });
+    var html = exportDocument({
+      title: board.title || '',
+      roundN: n,
+      roundTitle: round.title || '',
+      sentDate: exportDate(round.sentAt),
+      rows: decisionRows(questions, board.answers || {}),
+      css: pageCssText(),
+      exportCss: EXPORT_CSS,
+      contentHtml: await exportRoundContent(section),
+    });
+    saveHtmlFile(exportFileName(board.title, n), html);
+  }
+
+  // Delegated, so a round that arrives sent over a push needs no wiring.
+  document.addEventListener('click', function (ev) {
+    var btn = ev.target && ev.target.closest && ev.target.closest('button.round-download');
+    if (!btn || readonly || btn.disabled) return;
+    var section = btn.closest('.round');
+    if (!section) return;
+    btn.disabled = true;
+    downloadRound(section).catch(function (e) {
+      if (window.console) console.error('Download round failed', e);
+    }).then(function () { btn.disabled = false; });
+  });
+
   // Keyboard focus reaching into the clipped part opens the fold: a Tab that
   // lands on a link below the fade would otherwise leave the reviewer's focus
   // on something they cannot see, in a box that does not scroll to reveal it. Opening is the only honest answer -- the fold is a reading
@@ -6977,6 +7213,14 @@ export const ui = `
     // li tag's own controls does nothing to its native HTML5 drag capability,
     // which lives on the draggable attribute of the list item itself.
     qsa('.rank-list li[draggable]', section).forEach(function (li) { li.removeAttribute('draggable'); });
+    // A sent round offers Download round at the right end of its chip line, as
+    // renderRoundSection draws one rendered sent.
+    var chips = section.querySelector('.round-chips');
+    if (chips && !chips.querySelector('.round-download')) {
+      var holder = document.createElement('div');
+      holder.innerHTML = ROUND_DOWNLOAD_BUTTON;
+      if (holder.firstElementChild) chips.appendChild(holder.firstElementChild);
+    }
   }
 
   /** Find a block element by id without splicing the (potentially caller-chosen,
