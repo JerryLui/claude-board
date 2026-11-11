@@ -129,6 +129,11 @@ export function trackDocWidth() {
   }
 }
 
+/** The `localStorage` key holding the overview this browser last opened, '/' (Missions) or
+ * '/boards' (Boards): src/indexpage.mjs's rememberHomeView writes it, and a board page's
+ * Home mark reads it. Absent, the mark goes to Missions. */
+export const HOME_STORAGE_KEY = 'cb-home';
+
 export const ui = `
 (function () {
   // THE ID RULE FOR THIS WHOLE FILE, stated here once: every id lookup is
@@ -154,6 +159,15 @@ export const ui = `
   var boardId = board.id;
   var readonly = (location.protocol === 'file:');
   if (readonly) document.body.classList.add('readonly');
+
+  // The Home mark goes to the overview this browser last opened (HOME_STORAGE_KEY in
+  // src/ui.mjs), Missions when none is remembered or storage is off.
+  try {
+    if (window.localStorage.getItem('${HOME_STORAGE_KEY}') === '/boards') {
+      var homeLink = document.querySelector('a.back-to-index');
+      if (homeLink) homeLink.setAttribute('href', '/boards');
+    }
+  } catch (e) { /* storage off: the mark keeps '/' */ }
 
   // Marks the innermost element under the cursor for the page's OWN generic
   // anchor gesture (the delegated document-level listener further down), so the

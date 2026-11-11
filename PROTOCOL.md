@@ -68,6 +68,8 @@ $CLAUDE_BOARD_HOME/pages/mermaid-<hash>.js  the shared diagram engine, named by 
 $CLAUDE_BOARD_HOME/pomodoro.json            the pomodoro clock and its settings (ADR 8)
 $CLAUDE_BOARD_HOME/missions/<key>.json      one mission record (ADR 123), see "The missions
                                              routes" below
+$CLAUDE_BOARD_HOME/spin-down.json           the spin-down flag, present only while it is on,
+                                             see "The spin-down routes" below
 ```
 
 A page does not carry the client script or the stylesheet; it *names* them, as a bare
@@ -1659,7 +1661,7 @@ summaries.
 Mission = {
   key, title, cwd?,
   phase,                     // 'grill' | 'direct' | 'landing'
-  state,                     // stored: 'needs-you' | 'working' | 'waiting' | 'queued' | 'released'
+  state,                     // stored: 'needs-you' | 'working' | 'waiting' | 'queued' | 'released' | 'parked'
   summary?,                  // at most 280 characters
   waitingOn?, next?,         // short phrases, at most 280 characters each
   prs: [ { repo, number, url, order? } ],          // the session names its PRs (a `state` is dropped)
@@ -1684,7 +1686,8 @@ fields derived on each read and never stored. `view` is the column the mission s
 `released` while stored released; else `waiting` while it is retired (its `retiredAt` parses,
 ADR 147), whatever its rounds, its session or its `waitingOn`; else `needs-you` when a linked
 board's newest round is open and asks a question or was minted awaited (a lapsed wait still counts; an older round left open does
-not, ADR 134), whatever its session is doing (ADR 140); else `stalled` when its session is gone (a
+not, ADR 134), whatever its session is doing (ADR 140); else `parked` while stored parked (a
+mission stopped at a spin-down, its session ended on purpose); else `stalled` when its session is gone (a
 bound `pid` that no longer exists, or a reservation no `pid` or `id` bound within 5 minutes) or it
 is stored `working` and has not been heard from for 15 minutes; else the stored `state`. A session
 is heard from at its last heartbeat (`session.seenAt`) and at the time of the session watcher's
@@ -1696,7 +1699,7 @@ lists the session's `id` in another live process is not gone: the session runs o
 no launch made). `listedAt` is that snapshot's time while it lists the bound session, else `null`.
 `retired` is whether its `retiredAt` parses.
 `gone` is `{ lastSeenAt }`, the session's `seenAt`, while that session is gone and the mission has
-neither recorded its end nor retired, else `null`. `rejoin` is `{ reason, since, id }` while the snapshot lists the bound
+neither recorded its end, retired nor parked, else `null`. `rejoin` is `{ reason, since, id }` while the snapshot lists the bound
 session needing `/mission` again and no heartbeat has come from it since `since`, else `null`:
 `reason` is `'clear'` when its process is listed under another `id` (a `/clear`, which drops the
 skill's hooks), `'resume'` when its `id` is listed in another process (a resume or respawn no launch
@@ -1723,8 +1726,8 @@ question block's id, and `choice` option 0's label, the one a click submits thro
 
 ```
 GET  /api/missions[?all=1]
-       -> { missions: [View], tabs: [Tab], counts: { needsYou, working, waiting, stalled, released, queued },
-            live: { working, alive }, slotFree, now, watcher: { up, lastAt } }
+       -> { missions: [View], tabs: [Tab], counts: { needsYou, working, waiting, stalled, released, queued, parked },
+            live: { working, alive }, slotFree, now, watcher: { up, lastAt }, spinDown: { on, at? } }
 ```
 
 Newest change first. A released mission is listed until 24 hours after `releasedAt`, or always with
@@ -1779,7 +1782,7 @@ POST /api/mission/:key/leave        { id, pid?, procStart? } -> { left: true, se
        -> 409 { error: 'not bound', session }
 GET  /api/binding?id=<session id>[&pid=&procStart=]
        -> { key | null, takeover: { by, at } | null, orders: [Order], handoff | null,
-            rejoin: { reason, since, id } | null }
+            rejoin: { reason, since, id } | null, spinDown: { on, at? } }
 ```
 
 **A session is bound to a mission by its own session id** (ADR 141), which the agent reads fresh
@@ -1871,6 +1874,34 @@ either.
 
 Every write publishes `missions` on the daemon-wide stream ("SSE events"). A refusal is
 `{ error }` with its status.
+
+## The spin-down routes
+
+One flag, in `$CLAUDE_BOARD_HOME/spin-down.json` while it is on and absent while it is off, that
+the Master Chief's `/spin-down` sets. While it is on no session runs a merge, deploy or release
+step; the sessions' own rules hold that gate, and the daemon only stores and answers the flag.
+
+```
+GET  /api/spin-down                 -> { on: false } | { on: true, at, by? }
+POST /api/spin-down  { on: true | false, by? }   -> the flag as GET answers it
+```
+
+`at` is when it went on, `by` who turned it on, as written (at most 200 characters). Turning it
+on while it is on keeps the first `at` and `by`; turning it off removes the file. Any other
+field, an `on` that is not a boolean or a `by` off its shape is a 400 that writes nothing. The
+read takes the secret or the cookie; the write the secret alone. A write publishes `missions`
+on the daemon-wide stream, so an open Missions view shows the flag at once.
+
+The flag reaches every session without a message of its own: `GET /api/binding` carries it as
+`spinDown: { on, at? }` whether the session is bound or not, so a successor launched or joined
+during the spin-down reads it on its first binding read, and `GET /api/missions` carries the
+same `spinDown`, which the Missions view shows as a Spin-down chip at the end of its counts row.
+
+A mission stops at a spin-down by writing `state: 'parked'` as its last act, with `next` the
+line that resumes it (the card shows it as Resume). It reads `parked`, its card under Waiting
+tagged Parked; while a round on its boards still waits on the PM it reads `needs-you`, its card
+under Needs you tagged Parked. A parked mission never reads `stalled` or `gone`. A launch or a
+join moves it on as from any other state.
 
 ## The session routes
 

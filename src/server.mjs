@@ -75,6 +75,7 @@ import { MAX_POST_BYTES, MAX_DRAINED_BYTES, postTooLargeMessage } from './post-l
 import { activityMinMs } from './activity.mjs';
 import { getMissionView, missionView, upsertMission, launchMission, bindSession, joinMission, leaveMission, addOrder, ackOrder, seenOrder, resentOrder, linkBoard, recordFire, recordPrFacts, assertMissionKey } from './missions.mjs';
 import { createBindingIndex } from './bindings.mjs';
+import { readSpinDown, setSpinDown, spinDownBrief } from './spin-down.mjs';
 import { createSessionList, validateSessionRef, bindBoardSession } from './sessions.mjs';
 
 // Declared in src/handoff.mjs (which this module imports, so it cannot import back) and
@@ -2878,7 +2879,7 @@ function emptyMissionsOverview() {
   return {
     missions: [],
     tabs: [],
-    counts: { needsYou: 0, working: 0, waiting: 0, stalled: 0, released: 0, queued: 0 },
+    counts: { needsYou: 0, working: 0, waiting: 0, stalled: 0, released: 0, queued: 0, parked: 0 },
     live: { working: 0, alive: 0 },
     now: new Date().toISOString(),
   };
@@ -3223,10 +3224,11 @@ async function handleMission(req, res, parts, home, stream, cache, heldSecret, l
 }
 
 /** `GET /api/binding?id=<session id>[&pid=&procStart=]`: the mission that session is bound
- * to (src/missions.mjs `bindingFor`), as `{ key, takeover, orders, handoff, rejoin }`,
- * `rejoin` read off `listed`, the session watcher's latest snapshot. A session names itself
+ * to (src/missions.mjs `bindingFor`), as `{ key, takeover, orders, handoff, rejoin, spinDown }`,
+ * `rejoin` read off `listed`, the session watcher's latest snapshot, and `spinDown` the
+ * flag as `spinDownBrief` reads it, carried whether the session is bound or not. A session names itself
  * by `id`, its process by `pid` and `procStart`, or both; neither is a 400. */
-function handleBinding(res, url, bindings, listed) {
+function handleBinding(res, url, bindings, listed, home) {
   const q = url.searchParams;
   const ref = {};
   if (q.get('id')) ref.id = q.get('id');
@@ -3240,7 +3242,7 @@ function handleBinding(res, url, bindings, listed) {
     ref.procStart = q.get('procStart');
   }
   if (ref.id === undefined && ref.pid === undefined) return sendJson(res, 400, { error: 'binding needs id, or pid and procStart' });
-  return sendJson(res, 200, bindings.binding(ref, listed));
+  return sendJson(res, 200, { ...bindings.binding(ref, listed), spinDown: spinDownBrief(home) });
 }
 
 /** `POST /api/mission/:key/facts` stores the session watcher's PR facts and
@@ -3270,10 +3272,27 @@ function broadcastMissions(stream, key) {
 
 /** The overview a request answers: the cached one, each tab round given its `url` off this
  * request's host (as `boardUrl` gives every board link it hands back, so it is built per
- * request and never cached), and the watcher's state read now. */
-function overviewFor(req, overview, sessions) {
+ * request and never cached), and the watcher's state and the spin-down flag read now. */
+function overviewFor(req, overview, sessions, home) {
   const tabs = (overview.tabs || []).map(t => ({ ...t, rounds: t.rounds.map(r => ({ ...r, url: boardUrl(req, r.board) })) }));
-  return { ...overview, tabs, watcher: sessions.watcher() };
+  return { ...overview, tabs, watcher: sessions.watcher(), spinDown: spinDownBrief(home) };
+}
+
+/** `GET /api/spin-down` answers the flag (src/spin-down.mjs); `POST /api/spin-down`
+ * `{ on, by? }` sets or clears it, answers the flag, and publishes `missions` so an open
+ * Missions view shows it now. */
+async function handleSpinDown(req, res, home, stream) {
+  if (req.method === 'GET') return sendJson(res, 200, readSpinDown(home));
+  if (req.method !== 'POST') return sendText(res, 404, 'not found');
+  let body;
+  try {
+    body = await readJsonBody(req);
+  } catch (err) {
+    return sendJson(res, err.status || 400, { error: err.status ? err.message : 'invalid JSON body' });
+  }
+  const flag = setSpinDown(body, { home });
+  broadcastMissions(stream, null);
+  return sendJson(res, 200, flag);
 }
 
 /** The session routes (src/sessions.mjs holds the rules):
@@ -3507,7 +3526,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
             console.error(`claude-board: the missions could not be read for the home page: ${(err && err.message) || err}`);
             overview = emptyMissionsOverview();
           }
-          overview = overviewFor(req, overview, sessions);
+          overview = overviewFor(req, overview, sessions, home);
           return sendHtml(res, 200, renderMissionsPage({ waitingCount, pomodoroEnabled, overview }), {
             'content-security-policy': INDEX_CSP,
           });
@@ -3693,7 +3712,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
       // holding the cookie reads it through gate 4 above.
       if (req.method === 'GET' && url.pathname === '/api/missions') {
         try {
-          return sendJson(res, 200, overviewFor(req, missionsCache.overview({ all: url.searchParams.get('all') === '1' }), sessions));
+          return sendJson(res, 200, overviewFor(req, missionsCache.overview({ all: url.searchParams.get('all') === '1' }), sessions, home));
         } catch (err) {
           // Not an empty list: a reader told "no missions" would act on it. The page keeps
           // the columns it has on a failed read.
@@ -3710,7 +3729,13 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
           res.end();
           return;
         }
-        return handleBinding(res, url, bindings, sessions.listed());
+        return handleBinding(res, url, bindings, sessions.listed(), home);
+      }
+
+      // The spin-down flag: read with the secret or the cookie through gate 4, written with
+      // the secret alone through gate 3, as every write off the cookie list is.
+      if (url.pathname === '/api/spin-down') {
+        return await handleSpinDown(req, res, home, streamHub);
       }
 
       // The watcher's snapshot and a tab card's orders (src/sessions.mjs). Every one is a

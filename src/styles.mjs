@@ -2093,6 +2093,11 @@ body.home-page .mode-toggle:disabled { opacity: 0.5; cursor: default; }
 .tab-turn { color: var(--warning); background: var(--warning-soft); border-color: var(--warning-border); }
 /* a retired mission still listed, waiting on its open work (ADR 147) */
 .mission-retired { color: var(--retired); border-color: var(--retired-border); }
+/* a mission parked at a spin-down: a neutral grey tag, beside needs you's tone when a
+   round waits on the PM */
+.mission-parked { color: var(--ink-2); background: var(--panel-3); }
+/* the spin-down flag on: the counts row's last chip */
+.mission-spin-down { color: var(--ink); background: var(--panel-3); font-weight: 600; }
 .missions-notice { margin: 0 0 var(--space-4); padding: 8px 12px; font-size: 13px; color: var(--ink-2);
   background: var(--warning-soft); border: 1px solid var(--warning-border); border-radius: var(--r-sm); }
 .missions-notice b { color: var(--warning); }
