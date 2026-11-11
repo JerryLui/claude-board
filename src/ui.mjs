@@ -67,6 +67,11 @@ import { activityMinMs } from './activity.mjs';
 import {
   ROUND_DOWNLOAD_BUTTON, EXPORT_CSS, decisionRows, exportDate, exportFileName, exportDocument,
 } from './round-export.mjs';
+// The one source of truth for both image limits -- the daemon's own
+// src/images.mjs checks a submit against these same two constants, so a page
+// refusal and a daemon refusal always agree. Spliced into the `ui` template
+// literal by value, same discipline as MERMAID_ASSET above.
+import { MAX_IMAGE_BYTES, MAX_SEND_IMAGE_BYTES } from './post-limit.mjs';
 
 // Mermaid variable -> CSS token, read at call time from the live computed style
 // rather than hardcoded a second time in the client script below. 'background'
@@ -4592,11 +4597,13 @@ export const ui = `
   // wiring pass. Each image is held as the data: URL a submit carries, under the
   // daemon's own limits, checked here first so a refusal costs nothing typed:
   // one image at most IMAGE_MAX_BYTES, as it lands; a Send's images together at
-  // most SEND_IMAGES_MAX_BYTES, at Send. Megabytes here are 1024 * 1024 bytes,
-  // the daemon's own.
+  // most SEND_IMAGES_MAX_BYTES, at Send. Both are spliced in from
+  // src/post-limit.mjs, the same module the daemon's own src/images.mjs checks
+  // against, so the page and the daemon can never disagree on the number.
+  // Megabytes here are 1024 * 1024 bytes, the daemon's own.
   var MB = 1024 * 1024;
-  var IMAGE_MAX_BYTES = 10 * MB;
-  var SEND_IMAGES_MAX_BYTES = 20 * MB;
+  var IMAGE_MAX_BYTES = ${JSON.stringify(MAX_IMAGE_BYTES)};
+  var SEND_IMAGES_MAX_BYTES = ${JSON.stringify(MAX_SEND_IMAGE_BYTES)};
   var IMAGE_TYPES = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' };
   var KEPT_LINE = ' Nothing was sent; your answers are kept.';
   var pastedCount = 0;

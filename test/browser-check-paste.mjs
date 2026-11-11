@@ -19,12 +19,18 @@
 // Chrome's own ClipboardEvent and DragEvent carrying a DataTransfer of real Files,
 // dispatched at the field. Send's request is caught in the page before it leaves and
 // answered with a network failure, so the round stays open for the next row and what
-// is asserted is the body the page built, not what a daemon kept of it.
+// is asserted is the body the page built, not what a daemon kept of it -- except the
+// last row, which lets a real Send reach the real daemon so something drives a real
+// paste all the way to the stored file: test/check-images.mjs otherwise only ever
+// posts a data: URL by hand, never one a browser actually built from a pasted File.
 
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { sessionToken } from '../src/secret.mjs';
-import { runMain, skipFile } from './support.mjs';
+import { readBoard } from '../src/store.mjs';
+import { runMain, skipFile, sleep } from './support.mjs';
 import { CHROME, guardRun, openTab, postJson, row, startScratchDaemon, withChrome } from './browser-support.mjs';
 
 if (!existsSync(CHROME)) skipFile('browser-check-paste', `browser-check-paste: no Chrome at ${CHROME} (set CLAUDE_BOARD_CHROME_BIN to override)`);
@@ -124,13 +130,14 @@ async function main() {
     const cookie = sessionToken(daemon.secret);
 
     await withChrome({ tag: 'cb-paste' }, async ({ send, onEvent }) => {
-      const open = async () => {
+      const open = async ({ intercept = true } = {}) => {
         const posted = await postJson(`${origin}/api/board`, BOARD, daemon.secret);
         const tab = await openTab(send, onEvent, `${origin}${new URL(posted.url).pathname}`, cookie, {
           width: 1280, height: 900, theme: 'light', expr: PAGE_HELPERS,
-          prepare: sp => sp('Page.addScriptToEvaluateOnNewDocument', { source: SUBMIT_CATCHER }),
+          ...(intercept ? { prepare: sp => sp('Page.addScriptToEvaluateOnNewDocument', { source: SUBMIT_CATCHER }) } : {}),
         });
         assert.equal(tab.measured, true, 'setup: the helpers installed');
+        tab.boardId = posted.boardId;
         return tab;
       };
       const thumbsSettle = (tab, name, n) => tab.until(`window.__thumbs(${JSON.stringify(name)}).length === ${n}`, `${name} showing ${n} thumbnail(s)`);
@@ -225,6 +232,39 @@ async function main() {
         });
       } finally {
         await big.close();
+      }
+
+      // Every row above catches the submit before it leaves the page (SUBMIT_CATCHER),
+      // so none of them ever drives a real paste through to a real daemon's store. This
+      // one does: no `prepare`, so the fetch submitBoard() builds goes out for real, and
+      // the assertions read what actually landed on disk, not a body the page built.
+      const real = await open({ intercept: false });
+      try {
+        await row('a real paste through an uninstrumented Send lands the file beside the board, and the stored answer names it', async note => {
+          assert.equal(await real.evalPage(`window.__give('note', 'paste')`), true, 'the paste was taken');
+          await thumbsSettle(real, 'note', 1);
+          await real.evalPage(`window.__type('note', 'see the real shot')`);
+          await real.evalPage(`window.__type('answer', 'because')`);
+          await real.evalPage(`[].find.call(document.querySelectorAll('.choice-single'), function (b) { return b.textContent.trim() === 'Keep'; }).click()`);
+          await clickAt(real, 'button#send-btn');
+          await real.until(`document.querySelector('span#send-status').textContent === 'Sent.'`, 'the real Send to land');
+
+          const qid = await real.evalPage(`window.__keys.note.slice(5)`);
+          const expectedName = `${createHash('sha256').update(Buffer.from(PNG_BASE64, 'base64')).digest('hex').slice(0, 16)}.png`;
+          const filePath = path.join(daemon.home, 'pages', real.boardId, expectedName);
+          let board = null;
+          for (let i = 0; i < 100 && !(board && board.answers[qid] && board.answers[qid].images); i++) {
+            board = readBoard(real.boardId, daemon.home);
+            if (!(board && board.answers[qid] && board.answers[qid].images)) await sleep(20);
+          }
+          note(`stored as ${expectedName}, board ${real.boardId}`);
+          assert.ok(board && board.answers[qid], 'setup: the board must hold an answer for the note\'s question');
+          assert.deepEqual(board.answers[qid].images, [expectedName], 'the stored answer must name exactly the pasted image');
+          assert.ok(existsSync(filePath), `the stored file must exist at ${filePath}`);
+          assert.deepEqual(readFileSync(filePath), Buffer.from(PNG_BASE64, 'base64'), 'the stored bytes are the pasted PNG, byte for byte');
+        });
+      } finally {
+        await real.close();
       }
     });
   } finally {

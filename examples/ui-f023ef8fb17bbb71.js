@@ -4719,11 +4719,13 @@
   // wiring pass. Each image is held as the data: URL a submit carries, under the
   // daemon's own limits, checked here first so a refusal costs nothing typed:
   // one image at most IMAGE_MAX_BYTES, as it lands; a Send's images together at
-  // most SEND_IMAGES_MAX_BYTES, at Send. Megabytes here are 1024 * 1024 bytes,
-  // the daemon's own.
+  // most SEND_IMAGES_MAX_BYTES, at Send. Both are spliced in from
+  // src/post-limit.mjs, the same module the daemon's own src/images.mjs checks
+  // against, so the page and the daemon can never disagree on the number.
+  // Megabytes here are 1024 * 1024 bytes, the daemon's own.
   var MB = 1024 * 1024;
-  var IMAGE_MAX_BYTES = 10 * MB;
-  var SEND_IMAGES_MAX_BYTES = 20 * MB;
+  var IMAGE_MAX_BYTES = 10485760;
+  var SEND_IMAGES_MAX_BYTES = 20971520;
   var IMAGE_TYPES = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' };
   var KEPT_LINE = ' Nothing was sent; your answers are kept.';
   var pastedCount = 0;
