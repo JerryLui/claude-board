@@ -58,7 +58,7 @@ import { STREAM_WORKER_FILE, STREAM_WORKER_SOURCE } from './stream-worker.mjs';
 import { readSecret, secretPath, secretMatches, sessionToken, sessionCookieMatches, SECRET_HEADER, SESSION_COOKIE, SESSION_MAX_AGE_S } from './secret.mjs';
 import { createHandoffStore, handoffTarget, recoveryCommand, HANDOFF_TOKEN_RE, DEFAULT_PORT, waitCeilingMs } from './handoff.mjs';
 import { createSigninStore, signinRefusal, startSignin, SIGNIN_STARTED_PAGE, SIGNIN_SPENT_PAGE } from './signin-link.mjs';
-import { createBoard, addRound, amendRound, abandonOpenRounds, applySubmit, buildPacket, roundAnswers, dropResolved, resolveComments, questionBlocks, SUPPRESSED, ANSWERS_DELIVERED, roundContentDrifted } from './board.mjs';
+import { createBoard, addRound, amendRound, abandonOpenRounds, roundOwnedBy, handOverRounds, applySubmit, buildPacket, roundAnswers, dropResolved, resolveComments, questionBlocks, SUPPRESSED, ANSWERS_DELIVERED, roundContentDrifted } from './board.mjs';
 import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, renderRefusalPage, boardForClient, holdStages, holdAllStages, stageShas, CSP, INDEX_CSP } from './render.mjs';
 import { buildThreadIndex, renderIndexPage, renderMissionsPage, renderThreadRows, folderName } from './indexpage.mjs';
 // The one shape rule for "is this round a full-viewport page" (ADR.md entry 33),
@@ -74,7 +74,7 @@ import { createMissionWatch } from './mission-watch.mjs';
 import { createMissionsCache } from './missions-cache.mjs';
 import { MAX_POST_BYTES, MAX_DRAINED_BYTES, MAX_SUBMIT_BYTES, postTooLargeMessage } from './post-limit.mjs';
 import { activityMinMs } from './activity.mjs';
-import { getMissionView, missionView, upsertMission, launchMission, bindSession, joinMission, leaveMission, addOrder, ackOrder, seenOrder, resentOrder, linkBoard, recordFire, recordPrFacts, assertMissionKey } from './missions.mjs';
+import { getMissionView, missionView, upsertMission, launchMission, bindSession, joinMission, leaveMission, addOrder, ackOrder, seenOrder, resentOrder, linkBoard, missionBoardId, recordFire, recordPrFacts, assertMissionKey } from './missions.mjs';
 import { createBindingIndex } from './bindings.mjs';
 import { readSpinDown, setSpinDown, spinDownBrief } from './spin-down.mjs';
 import { createSessionList, validateSessionRef, bindBoardSession } from './sessions.mjs';
@@ -1072,6 +1072,31 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, s
       console.error(`claude-board: the posting session's mission could not be read: ${(err && err.message) || err}`);
     }
   }
+  // The posting session as a round records it (ADR 150): its process, and the id the
+  // watcher's list holds for that process.
+  const roundSession = sessionRef
+    ? { ...sessionRef, id: (postingSession && postingSession.id) || (sessions ? sessions.matchId(sessionRef.pid, sessionRef.procStart) : null) }
+    : null;
+  // One board per mission (ADR 150): a session bound to a mission posts on the mission's
+  // board, whatever board it names, and a mission with none yet gets one at this round. A
+  // session that posted elsewhere before it joined moves here, and the rounds it left open
+  // there close (`leftBoardId`). A post naming its mission explicitly keeps the board it
+  // names: only a bound session's posts are moved.
+  let targetId = body.boardId || null;
+  let leftBoardId = null;
+  const missionPost = Boolean(!namedMission && mission && postingSession);
+  if (missionPost) {
+    let chosen = targetId;
+    try {
+      chosen = missionBoardId(mission, { home });
+    } catch (err) {
+      console.error(`claude-board: mission ${mission}'s board could not be read: ${(err && err.message) || err}`);
+    }
+    if (chosen !== targetId) {
+      leftBoardId = targetId;
+      targetId = chosen;
+    }
+  }
   let board;
   let round;
   let pushMode = null; // null: a brand-new board, nothing live to push to yet
@@ -1087,9 +1112,14 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, s
   let storeBoards = null;
   const allBoards = () => (storeBoards ??= listBoards(home));
   try {
-    if (body.boardId) {
-      board = readBoard(body.boardId, home);
+    if (targetId) {
+      board = readBoard(targetId, home);
       if (!board) return sendJson(res, 404, { error: 'board not found' });
+      // A round on a mission's board reads from its own session's folder (ADR 150).
+      const ownFolder = missionPost && board.mission === mission;
+      // A session posting on a mission's board it is not bound to is refused or let through
+      // by the mission check below, which names why; its folder is not what decides that.
+      const cwd = board.mission && !ownFolder && postingSession ? undefined : body.cwd;
       // Idempotency. Everything after readJsonBody is synchronous, so a socket that dies
       // before the response lands — a reload-on-change exit, a kickstart, the shim's own
       // inactivity timeout — leaves the round fully applied and the caller told it
@@ -1136,7 +1166,7 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, s
       const isRetry = Boolean(body.requestId) && board.lastRequestId === body.requestId;
       const drifted = isRetry && !!guarded && roundContentDrifted(board, guarded.n);
       if (isRetry && guarded && guarded.status === 'open'
-        && !roundWaitLapsed(guarded) && !drifted) {
+        && !roundWaitLapsed(guarded) && !drifted && roundOwnedBy(board, guarded, sessionRef)) {
         // A retry is the session waiting on this round again, whether its response was
         // lost or the session gave up and asked the same thing: on a round whose deadline
         // moves, the wait restarts as an amend's does below (ADR 145). Without it the
@@ -1201,8 +1231,12 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, s
       // already applied"; it never meant "so append it to that request's round".
       const latestAsksSomething = !!latestRound
         && questionBlocks(board).some(q => q.round === latestRound.n);
+      // On a shared board (ADR 150) only the session that posted the round amends it: another
+      // session's first question opens a round of its own. And a `fresh` post is a new
+      // conversation, which never joins the round its last one left open.
       if (latestRound && latestRound.status === 'open' && latestAsksSomething
-        && !roundWaitLapsed(latestRound) && !drifted) {
+        && !roundWaitLapsed(latestRound) && !drifted
+        && body.fresh !== true && roundOwnedBy(board, latestRound, sessionRef)) {
         // The open round hasn't been sent yet: amend it in place rather than
         // minting round N+1.
         //
@@ -1221,7 +1255,7 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, s
         // once: a post naming a different `cwd` alongside `boardId` got a 200 and the
         // caller believed it had retargeted the board. PROTOCOL.md and the guard's own
         // comment both specify a loud 400 instead of a silent no-op.
-        const result = amendRound(board, { blocks: body.blocks, title: body.title, cwd: body.cwd });
+        const result = amendRound(board, { blocks: body.blocks, title: body.title, cwd, ownFolder });
         round = result.round;
         touchedBlockIds = result.blockIds;
         pushMode = 'amend';
@@ -1242,7 +1276,7 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, s
         // `movingDeadline` (ADR 145): the shim declares it follows the stored deadline, so
         // the reviewer's activity may move this round's. Strictly `=== true`, and never
         // inferred: a shim from before it sends nothing and keeps its fixed 40 minutes.
-        round = addRound(board, { blocks: body.blocks, title: body.title, cwd: body.cwd, wait: Boolean(body.wait), awaitTimeoutMs: waitTimeoutMs(), movingDeadline: body.movingDeadline === true });
+        round = addRound(board, { blocks: body.blocks, title: body.title, cwd, wait: Boolean(body.wait), awaitTimeoutMs: waitTimeoutMs(), movingDeadline: body.movingDeadline === true, session: roundSession, ownFolder });
         touchedBlockIds = board.blocks.filter(b => b.round === round).map(b => b.id);
         pushMode = 'new-round';
       }
@@ -1265,8 +1299,9 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, s
         title: body.title,
         blocks: body.blocks,
         cwd: body.cwd ?? null,
-        thread: body.thread ?? null,
-        threadCwd: body.thread ? boundCwdForThread(body.thread, boards) : null,
+        // A session moving to its mission's first board leaves its old board's thread.
+        thread: leftBoardId ? null : (body.thread ?? null),
+        threadCwd: body.thread && !leftBoardId ? boundCwdForThread(body.thread, boards) : null,
         // The thread ids already in use, so a minted one cannot land on another
         // session's (src/board.mjs `mintThreadId`). Thread ids route undelivered
         // comments across the whole store, so a collision is a comment delivered to a
@@ -1277,6 +1312,7 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, s
         awaitTimeoutMs: waitTimeoutMs(),
         movingDeadline: body.movingDeadline === true,
         mission,
+        session: roundSession,
       });
       round = 1;
       // A fresh board defers to an open tab (ADR.md entry 91). The decision is made HERE
@@ -1355,9 +1391,18 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, s
   // only a process, and the list says which session that process is (src/sessions.mjs
   // `bindBoardSession` for what a later post may change).
   if (sessionRef) bindBoardSession(board, sessionRef, sessions ? sessions.matchId(sessionRef.pid, sessionRef.procStart) : null);
+  // A `fresh` post that lands on a board already holding rounds (a mission's, ADR 150) is
+  // the boundary itself: the rounds this session's last conversation left open there close
+  // in this same write, and only those. The shim closes nothing on this board after it.
+  const freshClosed = body.fresh === true && pushMode === 'new-round' && sessionRef
+    ? abandonOpenRounds(board, { session: sessionRef, except: round })
+    : [];
   const html = renderBoardPage(board);
   writeBoard(board, home);
   writePage(board.id, html, home);
+  for (const n of freshClosed) sse.broadcast(board.id, 'awaitExpired', { round: n });
+  // The board this session moved away from keeps every other session's rounds open.
+  if (leftBoardId && sessionRef) closeRounds(leftBoardId, { session: sessionRef }, home, sse, stranded, stream, waiting);
   // The link the mission records is the one this post's reply carries. A link that fails
   // (an unreadable or unwritable mission record) is warned and the post goes on: the
   // board is already written with this requestId, so a 500 here would send the shim's
@@ -1435,18 +1480,22 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, s
   if (owed) spendWhenSent(res, owed);
   // `clients` is the count at the instant this round landed. Nothing in bin/ reads it --
   // see createSseHub.clientCount.
+  // The post landed on a board its caller did not name: its mission's (ADR 150). The shim
+  // takes this board as its own from here, and opens a tab on it unless one is watching.
+  const moved = Boolean(missionPost && targetId !== (body.boardId || null));
   return sendJson(res, 200, {
     boardId: board.id,
     thread: board.thread,
     round,
     url: boardUrl(req, board.id),
     clients: sse.clientCount(board.id),
+    ...(moved ? { moved: true } : {}),
     // Whether this BOARD's auto-open was Suppressed (ADR.md entry 91) -- a property of the
     // board, decided when it was created, so a push into an existing one reports what that
     // creation decided rather than re-asking a question that is settled. The shim reads it
     // on a thread's first board and skips the tab; it opens exactly as it always has when
     // this is false, and when a daemon predating the field returns nothing at all.
-    suppressed: board[SUPPRESSED] === true,
+    suppressed: moved && pushMode ? sse.anyWatcher() : board[SUPPRESSED] === true,
     // The minted round's own awaited-ness, straight from `mintAwait` (src/board.mjs),
     // so the caller does not have to re-derive it from the blocks it sent. It cannot:
     // the shim checks the RAW blocks and has no way to know that an `html` block's
@@ -1787,6 +1836,15 @@ function unspentRounds(board) {
   return { adopting, rounds };
 }
 
+/** Whether round `n` of board `b` is another session's than the one round `round` of
+ * `board` records (ADR 150): what a mission's board owes one session never rides another's
+ * packet. A packet round recording no session owes nothing to anyone else, as before. */
+function othersRounds(board, round) {
+  const owner = ((board.rounds || []).find(r => r.n === round) || {}).session || null;
+  if (!owner) return () => false;
+  return (b, n) => !roundOwnedBy(b, (b.rounds || []).find(r => r.n === n), owner);
+}
+
 /** ADR 35: a comment left on a round that returned no packet is held as undelivered
  * and rides the next packet the same thread returns, once.
  *
@@ -1834,6 +1892,7 @@ function unspentRounds(board) {
 function drainUndeliveredComments(boards, board, round, home, hold, { carriesOwnRound = true } = {}) {
   const comments = [];
   const pendingByBoard = [];
+  const theirs = othersRounds(board, round);
   for (const b of boards) {
     // The waited round's own comments are DRAINED by nobody -- `buildPacket`'s
     // round-scoped filter already put them in this very packet, and repeating them here
@@ -1853,7 +1912,7 @@ function drainUndeliveredComments(boards, board, round, home, hold, { carriesOwn
     // A comment on a round another response still on the wire is carrying is that
     // response's, so this one neither carries nor marks it (see `carrying` above). The
     // packet's own round is carried by its body whoever holds it, so it is marked anyway.
-    const mark = (b.comments || []).filter(c => c.delivered !== true && (hold.claim(b.id, c.round) || ownBody(c)));
+    const mark = (b.comments || []).filter(c => c.delivered !== true && !theirs(b, c.round) && (hold.claim(b.id, c.round) || ownBody(c)));
     const drained = mark.filter(c => !ownBody(c));
     if (!mark.length) continue;
     // `dropResolved` for the same reason `buildPacket` applies it to its own
@@ -1912,6 +1971,7 @@ function drainUndeliveredComments(boards, board, round, home, hold, { carriesOwn
 function drainUndeliveredAnswers(boards, board, round, home, hold, { carriesOwnRound = true } = {}) {
   const answers = [];
   const pendingByBoard = [];
+  const theirs = othersRounds(board, round);
   for (const b of boards) {
     const { adopting, rounds } = unspentRounds(b);
     const mark = [];
@@ -1921,6 +1981,7 @@ function drainUndeliveredAnswers(boards, board, round, home, hold, { carriesOwnR
       // ...unless the caller has no packet of its own (`carriesOwnRound: false`, the
       // posted-packet path -- see the same option on drainUndeliveredComments above).
       const ownBody = carriesOwnRound && b.id === board.id && n === round;
+      if (theirs(b, n)) continue;
       if (!hold.claim(b.id, n) && !ownBody) continue;
       mark.push(n);
       if (!adopting && !ownBody) answers.push(...withImagePaths(entries, b.id, home));
@@ -2280,11 +2341,38 @@ async function handleWait(req, res, id, url, home, sse, stream, waiting) {
  *
  * Deliberately NOT `stranded.answered`: nobody answered anything, and that path is scoped
  * to one round number where this is about every open round at once. */
-function handleAbandon(req, res, id, home, sse, stranded, stream, waiting) {
-  req.resume();
+async function handleAbandon(req, res, id, home, sse, stranded, stream, waiting) {
+  // A body naming `session` closes only that session's rounds (ADR 150): a mission's board
+  // is shared. No body closes every open round, as a shim from before it asks.
+  let session = null;
+  if (Number(req.headers['content-length']) > 0 || req.headers['transfer-encoding']) {
+    let body;
+    try {
+      body = await readJsonBody(req);
+    } catch (err) {
+      return sendJson(res, err.status || 400, { error: err.status ? err.message : 'invalid JSON body' });
+    }
+    if (body && typeof body === 'object' && body.session != null) {
+      try {
+        session = validateSessionRef(body.session);
+      } catch (err) {
+        return sendJson(res, 400, { error: err.message });
+      }
+    }
+  } else {
+    req.resume();
+  }
+  const closed = closeRounds(id, { session }, home, sse, stranded, stream, waiting);
+  if (closed === null) return sendJson(res, 404, { error: 'board not found' });
+  return sendJson(res, 200, { ok: true, board: id, closed });
+}
+
+/** Close the open rounds of board `id` (`abandonOpenRounds`, scoped by `opts`), persist,
+ * and tell its tabs and the waiting count. Null when the board is gone. */
+function closeRounds(id, opts, home, sse, stranded, stream, waiting) {
   const board = readBoard(id, home);
-  if (!board) return sendJson(res, 404, { error: 'board not found' });
-  const closed = abandonOpenRounds(board);
+  if (!board) return null;
+  const closed = abandonOpenRounds(board, opts);
   if (closed.length) {
     const html = renderBoardPage(board);
     writeBoard(board, home);
@@ -2297,8 +2385,9 @@ function handleAbandon(req, res, id, home, sse, stranded, stream, waiting) {
     // same reasoning `broadcastWaiting`'s other call sites carry.
     broadcastWaiting(stream, waiting, board);
   }
-  stranded.abandoned(id);
-  return sendJson(res, 200, { ok: true, board: board.id, closed });
+  // A scoped close that leaves another session's round open leaves its announcement too.
+  if (!(board.rounds || []).some(r => r.status === 'open')) stranded.abandoned(id);
+  return closed;
 }
 
 /** The one way a board runs out of rounds to answer, and the sentence the 409 says so
@@ -3247,7 +3336,12 @@ async function handleMission(req, res, parts, home, stream, cache, heldSecret, l
     if (route === 'upsert') answer = missionView(upsertMission(key, body, { home }), { home, listed });
     else if (route === 'launch') answer = launchMission(key, body, { home, listed });
     else if (route === 'join') ({ status, ...answer } = joinMission(key, body, { home, listed }));
-    else if (route === 'leave') answer = leaveMission(key, body, { home });
+    else if (route === 'leave') {
+      answer = leaveMission(key, body, { home });
+      // A takeover: the giver's open rounds on the mission's board are asked again of the
+      // session that now holds the mission (ADR 150), so the PM's answer reaches it.
+      if (answer.session) handOverMissionRounds(key, body, answer.session, home);
+    }
     else if (route === 'session') answer = { session: bindSession(key, body, { home, listed }).session };
     else if (route === 'order') answer = { order: addOrder(key, body, { home }) };
     else if (route === 'seen') answer = { order: seenOrder(key, tail[1], body, { home }) };
@@ -3260,6 +3354,23 @@ async function handleMission(req, res, parts, home, stream, cache, heldSecret, l
     if (status === 409 && err.answer) return sendJson(res, 409, err.answer);
     if (status === 409) return sendJson(res, 409, { error: 'live', session: err.session, ...(err.silent ? { silent: true } : {}) });
     return sendJson(res, status, { error: String((err && err.message) || err) });
+  }
+}
+
+/** Hand the rounds session `giver` left open on mission `key`'s board to `taker`, the
+ * session a takeover bound in its place. A failure is warned: the leave has happened. */
+function handOverMissionRounds(key, giver, taker, home) {
+  try {
+    const id = missionBoardId(key, { home });
+    const board = id && readBoard(id, home);
+    if (!board) return;
+    const ref = { id: taker.id ?? null, pid: taker.pid ?? null, procStart: taker.procStart ?? null };
+    if (handOverRounds(board, giver, ref).length === 0) return;
+    const html = renderBoardPage(board);
+    writeBoard(board, home);
+    writePage(board.id, html, home);
+  } catch (err) {
+    console.error(`claude-board: mission ${key}'s open rounds were not handed over: ${(err && err.message) || err}`);
   }
 }
 

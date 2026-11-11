@@ -24,6 +24,7 @@ import { renderBlock, highlightFenceHtml } from './render.mjs';
 // existing `from './board.mjs'` import keeps working unchanged.
 import { isPageRound, questionBlocks } from './badge.mjs';
 import { STATUS_TONES } from './card-status.mjs';
+import { sessionMatches } from './missions.mjs';
 import { storedImages } from './images.mjs';
 export { questionBlocks };
 
@@ -867,6 +868,40 @@ function assertCwdNotRetargeted(cwd, board) {
   }
 }
 
+/** The folder a round pushed into `board` reads its file references from. A board one
+ * conversation posts to keeps the folder it was bound to (`assertCwdNotRetargeted`). A
+ * mission's board is shared by every session the mission binds, each working in a folder
+ * of its own (a `/direct` run in a worktree), so a round posted there by a session bound
+ * to that mission (`ownFolder`) reads from the folder its post names, the board's when it
+ * names none. */
+function roundFolder(board, cwd, ownFolder) {
+  if (!ownFolder) {
+    assertCwdNotRetargeted(cwd, board);
+    return board.cwd ?? null;
+  }
+  if (cwd === undefined || cwd === null) return board.cwd ?? null;
+  const resolved = resolveBoardCwd(cwd);
+  if (resolved.error) throw new Error(resolved.error);
+  return resolved.path ?? board.cwd ?? null;
+}
+
+/** The folder round `round` of `board` read its file references from: its own, on a
+ * round that records one, else the board's. */
+export function folderOfRound(board, round) {
+  return (round && round.cwd) || board.cwd || null;
+}
+
+/** Whether session `ref` (`{ pid, procStart, id? }`, as a post names it) posted `round`.
+ * A round records the session that posted it; a round from before rounds did is the
+ * board's first poster's (`board.session`). Either side naming no session answers true,
+ * so a board no session ever posted to, and a post naming none, keep the one-conversation
+ * board they always had. */
+export function roundOwnedBy(board, round, ref) {
+  const owner = (round && round.session) || (board && board.session) || null;
+  if (!owner || !ref) return true;
+  return sessionMatches(owner, ref);
+}
+
 /** 40 minutes (ADR.md entry 47): the default a round's `awaitDeadline` is stamped
  * `awaitTimeoutMs` amount of time past `postedAt` with, when a caller (test or
  * otherwise) mints a round through this module without naming its own. The real
@@ -912,6 +947,19 @@ function mintAwait(blocks, round, wait, postedAt, awaitTimeoutMs, movingDeadline
   };
 }
 
+/** What a round records of who posted it and from where (ADR 150): the posting session,
+ * `{ pid, procStart, id }`, and the folder its file references read from. Stamped only on
+ * a round a session posted; `folder` only when it is the board's own on round 1 or the
+ * round's differs from the board's, so a one-conversation board keeps its stored shape
+ * but for `session`. */
+function roundStamp(session, folder, boardFolder) {
+  if (!session) return {};
+  return {
+    session: { pid: session.pid ?? null, procStart: session.procStart ?? null, id: session.id ?? null },
+    ...(folder && folder !== boardFolder ? { cwd: folder } : {}),
+  };
+}
+
 /** Create a new board (round 1) from posted args: `{ title, blocks, cwd, thread, wait, movingDeadline, mission }`.
  * `threadCwd` (additive) is the project directory already bound to `thread`, when the
  * caller is starting a second board in a thread that exists; the request may agree with
@@ -923,7 +971,7 @@ function mintAwait(blocks, round, wait, postedAt, awaitTimeoutMs, movingDeadline
  * `threadCwd`). It only ever narrows what `mintThreadId` may draw -- see its own comment
  * for why a collision is a routing fault rather than a cosmetic one -- and is irrelevant
  * when the caller names the thread. */
-export function createBoard({ title, blocks, cwd = null, thread = null, threadCwd = null, wait = false, awaitTimeoutMs = DEFAULT_AWAIT_TIMEOUT_MS, movingDeadline = false, takenThreads = null, mission = null }) {
+export function createBoard({ title, blocks, cwd = null, thread = null, threadCwd = null, wait = false, awaitTimeoutMs = DEFAULT_AWAIT_TIMEOUT_MS, movingDeadline = false, takenThreads = null, mission = null, session = null }) {
   const now = new Date().toISOString();
   const boundCwd = bindBoardCwd(cwd, threadCwd);
   const counters = {};
@@ -941,7 +989,7 @@ export function createBoard({ title, blocks, cwd = null, thread = null, threadCw
     // `title` is stored on the round as well as on the board: every later round
     // carries its own (see addRound), and round 1's would otherwise be the only one
     // the page label and the round pager could not name.
-    rounds: [{ n: 1, postedAt: now, status: 'open', sentAt: null, title: title || '', ...awaitFields }],
+    rounds: [{ n: 1, postedAt: now, status: 'open', sentAt: null, title: title || '', ...awaitFields, ...roundStamp(session, boundCwd) }],
     blocks: normalized,
     answers: {},
     comments: [],
@@ -960,14 +1008,14 @@ export function createBoard({ title, blocks, cwd = null, thread = null, threadCw
  * a Send racing an amend, and appending a second block under that id would silently
  * destroy the original round's answer (`board.answers` is keyed by id) and its
  * history-rail entry. Nothing on the board is mutated before the throw. */
-export function addRound(board, { blocks, cwd, title, wait = false, awaitTimeoutMs = DEFAULT_AWAIT_TIMEOUT_MS, movingDeadline = false }) {
-  assertCwdNotRetargeted(cwd, board);
+export function addRound(board, { blocks, cwd, title, wait = false, awaitTimeoutMs = DEFAULT_AWAIT_TIMEOUT_MS, movingDeadline = false, session = null, ownFolder = false }) {
+  const folder = roundFolder(board, cwd, ownFolder);
   const now = new Date().toISOString();
   const n = board.rounds.length + 1;
   const counters = countersFromBoard(board);
   const ids = idLedgerFromBoard(board, null);
   ids.openRound = n;
-  const normalized = normalizePost(blocks, n, counters, board.cwd, ids);
+  const normalized = normalizePost(blocks, n, counters, folder, ids);
   const awaitFields = mintAwait(normalized, n, wait, now, awaitTimeoutMs, movingDeadline);
   // Per-round title, stored rather than dropped. `ask` requires a non-empty title on
   // every call and commands/grill.md tells the agent to make it the branch name, so a
@@ -975,7 +1023,7 @@ export function addRound(board, { blocks, cwd, title, wait = false, awaitTimeout
   // "Round N" headings with the FIRST round's title as the only label on the page.
   // Falls back to the board title so a caller that omits it still gets a labelled
   // round rather than a bare number.
-  board.rounds.push({ n, postedAt: now, status: 'open', sentAt: null, title: title || board.title || '', ...awaitFields });
+  board.rounds.push({ n, postedAt: now, status: 'open', sentAt: null, title: title || board.title || '', ...awaitFields, ...roundStamp(session, folder, board.cwd) });
   board.blocks.push(...normalized);
   board.state = 'open';
   board.updatedAt = now;
@@ -990,8 +1038,7 @@ export function addRound(board, { blocks, cwd, title, wait = false, awaitTimeout
  * rather than re-sending blocks the reviewer has already seen and may be mid-edit
  * on. Mutates `board` in place; caller persists it. Throws if no round is open
  * (use `addRound` instead once the open round has been sent). */
-export function amendRound(board, { blocks, cwd, title }) {
-  assertCwdNotRetargeted(cwd, board);
+export function amendRound(board, { blocks, cwd, title, ownFolder = false }) {
   // The LATEST open round, not the first one. A board can hold two open rounds
   // at once now: an artifact round is never sendable (ADR.md entry 35), so it
   // stays `open` for good, and the question round posted after it is open too.
@@ -1002,6 +1049,12 @@ export function amendRound(board, { blocks, cwd, title }) {
   // only stops the two readings diverging now that they can.
   const openRound = [...board.rounds].reverse().find(r => r.status === 'open');
   if (!openRound) throw new Error('no open round to amend');
+  // An amend is the round's own session asking again, from the folder it posted from: the
+  // round's folder never moves, whoever's board it is on.
+  const folder = folderOfRound(board, openRound);
+  if (roundFolder(board, cwd, ownFolder) !== folder && cwd != null) {
+    throw new Error(`cannot change the project directory of an open round: it reads from ${folder ?? '(none)'}`);
+  }
   const counters = countersFromBoard(board);
   // The id ledger decides, during normalisation and before anything is mutated,
   // which caller-supplied ids may be accepted: only the open round's top-level
@@ -1012,7 +1065,7 @@ export function amendRound(board, { blocks, cwd, title }) {
   // rendering as if the question had never been asked. That is not an amend, it is corruption of a round that
   // already went out.
   const ids = idLedgerFromBoard(board, openRound.n);
-  const normalized = normalizePost(blocks, openRound.n, counters, board.cwd, ids);
+  const normalized = normalizePost(blocks, openRound.n, counters, folder, ids);
   const blockIds = [];
   for (const nb of normalized) {
     const idx = board.blocks.findIndex(b => b.id === nb.id);
@@ -1071,11 +1124,14 @@ export function amendRound(board, { blocks, cwd, title }) {
  * No `action` is recorded. `action` is the reviewer's own choice and `buildPacket` reads
  * it straight into the packet's `status`, so writing one here would invent a packet
  * status no caller knows. */
-export function abandonOpenRounds(board) {
+export function abandonOpenRounds(board, { session = null, except = null } = {}) {
   const now = new Date().toISOString();
   const closed = [];
   for (const r of (board && board.rounds) || []) {
     if (r.status !== 'open') continue;
+    // A mission's board is shared (ADR 150): a session's boundary closes only the rounds it
+    // posted, and never the round its own post just opened.
+    if (r.n === except || (session && !roundOwnedBy(board, r, session))) continue;
     r.status = 'abandoned';
     r.abandonedAt = now;
     r.awaited = false;
@@ -1083,6 +1139,23 @@ export function abandonOpenRounds(board) {
   }
   if (closed.length) board.updatedAt = now;
   return closed;
+}
+
+/** A takeover (ADR 150): the rounds session `giver` left open on `board` become session
+ * `taker`'s, the one now holding the mission, so its packets carry their answers and its
+ * boundaries close them. Each keeps `handedFrom`, the giver's id. Returns the round numbers
+ * handed; mutates `board`, caller persists it. */
+export function handOverRounds(board, giver, taker) {
+  const handed = [];
+  for (const r of (board && board.rounds) || []) {
+    if (r.status !== 'open' || !roundOwnedBy(board, r, giver)) continue;
+    const from = (r.session && r.session.id) || giver.id || null;
+    r.session = { pid: taker.pid ?? null, procStart: taker.procStart ?? null, id: taker.id ?? null };
+    if (from) r.handedFrom = from;
+    handed.push(r.n);
+  }
+  if (handed.length) board.updatedAt = new Date().toISOString();
+  return handed;
 }
 
 /** Every block of round `n`, top-level and nested alike, in stored order. The same tree
@@ -1136,7 +1209,7 @@ export function roundContentDrifted(board, n) {
     const source = block.source;
     if (!source) continue;
     if (block.kind === 'html' && (source.lines || source.section)) continue;
-    const result = resolveRef(source, { cwd: board.cwd, maxBytes: refCapFor(block.kind) });
+    const result = resolveRef(source, { cwd: folderOfRound(board, board.rounds.find(r => r.n === n)), maxBytes: refCapFor(block.kind) });
     const sha = result.error ? sha256('') : result.sha;
     if (sha !== block.sha) return true;
   }

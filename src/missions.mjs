@@ -23,7 +23,7 @@
 // the record.
 
 import { randomBytes } from 'node:crypto';
-import { readBoard, boardHome, readMission, writeMission, listMissions, assertMissionKey, SAFE_MISSION_KEY, MISSION_RETENTION_MS } from './store.mjs';
+import { readBoard, boardExists, boardHome, readMission, writeMission, listMissions, assertMissionKey, SAFE_MISSION_KEY, MISSION_RETENTION_MS } from './store.mjs';
 import { questionBlocks } from './badge.mjs';
 import { processStartUtc } from './proc-start.mjs';
 
@@ -383,13 +383,25 @@ export function roundWantsAnswer(round, questions) {
   return questions.some(q => q.round === round.n);
 }
 
-/** The round of `board` that can hold its mission at needs you: its newest, when that one
- * still wants an answer. An older page left open is answered from its own page on the
- * board, and never holds the mission there. */
+/** The round of `board` that can hold its mission at needs you: the newest round of one of
+ * the sessions that posted there, when it still wants an answer, the latest such. A
+ * mission's board is shared (ADR 150), so one session's newer round never hides
+ * another's question. An older page a session left open is answered from its own page
+ * on the board, and never holds the mission there. */
 function waitingRound({ board, questions }) {
-  const rounds = board.rounds || [];
-  const newest = rounds[rounds.length - 1];
-  return newest && roundWantsAnswer(newest, questions) ? newest : null;
+  const newest = new Map();
+  for (const r of board.rounds || []) newest.set(roundPoster(r, board), r);
+  let hit = null;
+  for (const r of newest.values()) if (roundWantsAnswer(r, questions) && (!hit || r.n > hit.n)) hit = r;
+  return hit;
+}
+
+/** Which session posted round `r` of `board`, as a key: its process, else its id. A round
+ * from before rounds recorded it is the board's first poster's. */
+function roundPoster(r, board) {
+  const s = (r && r.session) || board.session;
+  if (!s) return '';
+  return s.pid != null ? `${s.pid}|${s.procStart}` : `id:${s.id}`;
 }
 
 function boardsNeedYou(linked) {
@@ -1059,6 +1071,18 @@ export function roundFired(board, round) {
 export function recordFire(board, round, by, { home = boardHome(), now = Date.now() } = {}) {
   if (!board.mission || !roundFired(board, round)) return null;
   return upsertMission(board.mission, { fire: { by } }, { home, now });
+}
+
+/** The board mission `key`'s sessions post on (ADR 150): the latest board it links that is
+ * still in the store, so a mission that already holds several continues on its newest.
+ * Null for a mission with none, or none left, and for a mission not stored. */
+export function missionBoardId(key, { home = boardHome() } = {}) {
+  const m = readMission(key, home);
+  const links = (m && m.boards) || [];
+  for (let i = links.length - 1; i >= 0; i--) {
+    if (boardExists(links[i].id, home)) return links[i].id;
+  }
+  return null;
 }
 
 /** A board posted with `mission: <key>`: appends `{ id, url, at }` to the mission's `boards`
