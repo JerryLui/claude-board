@@ -77,16 +77,21 @@ async function main() {
     const code = n => board.blocks.find(x => x.round === n && x.kind === 'code').text;
     assert.deepEqual([code(1), code(2)], ['from the grill folder\n', 'from the worktree folder\n']);
     assert.deepEqual(board.rounds.map(r => [r.n, r.status, r.session.pid, r.cwd]), [[1, 'open', a.ref.pid, grill], [2, 'open', b.ref.pid, worktree]]);
-    // B's content round is the board's newest; A's question still holds the mission at needs you.
-    await ask(b, worktree, [note('the plan, to read')]);
+    // B's question answered, its content round is the board's newest; A's question still holds
+    // the mission at needs you.
+    const answer = (n, choice) => {
+      const id = readBoard(first.boardId, home).blocks.find(x => x.round === n && x.kind === 'question').id;
+      return post(`/api/board/${first.boardId}/submit`, { round: n, action: 'send', answers: [{ id, status: 'answered', choice, note: '' }], comments: [] });
+    };
+    assert.equal((await answer(2, 'Yes')).status, 200);
+    assert.equal((await ask(b, worktree, [note('the plan, to read')])).round, 3);
     const listed = await (await fetch(`${base}/api/missions`)).json();
     const card = listed.missions.find(m => m.key === 'SHARED');
     assert.deepEqual(card.boards.map(x => x.id), [first.boardId], 'the card links the one board');
     assert.equal(card.view, 'needs-you');
 
     // The answer the PM sends on A's round rides none of B's packets.
-    const qid = readBoard(first.boardId, home).blocks.find(x => x.round === 1 && x.kind === 'question').id;
-    assert.equal((await post(`/api/board/${first.boardId}/submit`, { round: 1, action: 'send', answers: [{ id: qid, status: 'answered', choice: 'No', note: '' }], comments: [] })).status, 200);
+    assert.equal((await answer(1, 'No')).status, 200);
     assert.deepEqual((await ask(b, worktree, [note('carrying on')])).answers, []);
     assert.equal((await leave('SHARED', 'sess-b', b)).status, 200);
   });
