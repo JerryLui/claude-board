@@ -8,7 +8,7 @@
 // missionsParts the server's first paint does (test/check-missions-view.mjs keeps that).
 
 import assert from 'node:assert/strict';
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { SECRET_HEADER } from '../src/secret.mjs';
 import { startServer } from '../src/server.mjs';
@@ -101,6 +101,15 @@ async function main() {
       assert.deepEqual(await get('/api/spin-down'), { on: false });
     });
 
+    await check('a spin-down file that does not parse reads on, on its route and every binding: a torn write lets no merge through', async () => {
+      writeFileSync(path.join(home, 'spin-down.json'), '{"on": tr');
+      assert.deepEqual(await get('/api/spin-down'), { on: true });
+      assert.deepEqual((await get('/api/binding?id=sess-torn')).spinDown, { on: true });
+      assert.deepEqual((await get('/api/missions')).spinDown, { on: true });
+      assert.deepEqual((await post('/api/spin-down', { on: false })).body, { on: false }, 'off clears it');
+      assert.deepEqual(await get('/api/spin-down'), { on: false });
+    });
+
     await check('a parked mission reads parked, under waiting, its card tagged Parked with the line that resumes it and its board', async () => {
       const posted = await postBoard(port, SECRET, { title: 'Parked board', mission: 'PARKED_ONE', blocks: [{ kind: 'markdown', text: 'Shown.' }] });
       // Parked as the session's last act, its process since ended: never stalled or gone.
@@ -116,7 +125,6 @@ async function main() {
       assert.equal(columnOf(doc, 'PARKED_ONE'), 'waiting');
       assert.deepEqual(tags(card), ['Parked']);
       assert.deepEqual(card.querySelectorAll('p.mission-fact').map(n => n.textContent), ['Resumerelaunch PARKED_ONE from its spec']);
-      assert.equal(card.querySelector('span.mission-tag.mission-parked').textContent, 'Parked');
       assert.equal(card.querySelector('a.mission-link').getAttribute('href'), `/b/${posted.boardId}`);
     });
 

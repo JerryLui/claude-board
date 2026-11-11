@@ -41,6 +41,7 @@ import { palettes, faviconLink, markSvg } from './styles.mjs';
 import { SCRIPT_ASSET, STYLE_ASSET } from './assets.mjs';
 import { STATUS_TONES } from './card-status.mjs';
 import { ROUND_DOWNLOAD_BUTTON } from './round-export.mjs';
+import { MAX_IMAGE_BYTES, megabytes } from './post-limit.mjs';
 import { themeBootScript, themeToggle } from './theme.mjs';
 import { resolveComments, stripDaemonOnly } from './board.mjs';
 import { buildSteps, stepsToPath, pathToSteps, resolveSteps, videoIdentity, videoSecond } from './anchor.mjs';
@@ -402,7 +403,7 @@ function imageTray(key, historical, hint) {
   return `<div class="thumb-row" data-images-for="${escAttr(key)}"></div>${hintHtml}`;
 }
 
-const PASTE_HINT = 'Paste or drop images, up to 10 MB each';
+const PASTE_HINT = `Paste or drop images, up to ${megabytes(MAX_IMAGE_BYTES)} each`;
 
 /** The generic element-level pin overlay for a block whose content lives in the
  * board's OWN document (as opposed to html/mermaid's stage-scoped one inside
