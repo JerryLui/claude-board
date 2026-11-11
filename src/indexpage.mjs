@@ -16,7 +16,7 @@ import { faviconLink, markSvg } from './styles.mjs';
 import { STYLE_ASSET } from './assets.mjs';
 import { themeBootScript, themeToggle } from './theme.mjs';
 import { commentModeToggle } from './render.mjs';
-import { trackDocWidth } from './ui.mjs';
+import { trackDocWidth, HOME_STORAGE_KEY } from './ui.mjs';
 import { roundIsAwaited } from './badge.mjs';
 // formatCountdown only -- src/pomodoro.mjs's document shape, HTTP surface and
 // clock are owned by other tickets and stay untouched here (this file consumes
@@ -1882,7 +1882,18 @@ function initIndexStream() {
 }
 initIndexStream();
 ` + '\nvar TAB_KEY_PREFIX = ' + JSON.stringify(TAB_KEY_PREFIX) + ';\n' + missionsParts.toString() + '\n' + missionsScript
-  + '\n' + trackDocWidth.toString() + '\ntrackDocWidth();\n';
+  + '\n' + trackDocWidth.toString() + '\ntrackDocWidth();\n'
+  + '\nvar HOME_STORAGE_KEY = ' + JSON.stringify(HOME_STORAGE_KEY) + ';\n' + rememberHomeView.toString() + '\nrememberHomeView();\n';
+
+/** Remembers the overview this page is, Missions or Boards, under HOME_STORAGE_KEY
+ * (src/ui.mjs), for a board page's Home mark. Runs in the browser, from indexScript. */
+function rememberHomeView() {
+  var view = document.querySelector('main.home-view');
+  if (!view) return;
+  try {
+    window.localStorage.setItem(HOME_STORAGE_KEY, view.id === 'boards-view' ? '/boards' : '/');
+  } catch (e) { /* storage off: a board page's Home stays Missions */ }
+}
 
 /** Filter the thread index down to the sessions a query names. Matches on what
  * IDENTIFIES a session and nothing else — its title, its project folder, the
@@ -1911,7 +1922,9 @@ export function filterThreads(threads, query) {
  * server renders the first paint with it and indexScript carries its source to repaint
  * from every later fetch, so the two can never draw a card differently.
  *
- * Five columns by derived state (`view`), queued shown under waiting with its tag; a
+ * Five columns by derived state (`view`), queued and parked shown under waiting with their
+ * tags, a parked card's `next` read as the line that resumes it, and a parked mission whose
+ * round waits on the PM tagged Parked under needs you; a
  * retired mission's card is tagged Retired, under waiting unless released (ADR 147). A card's Fire or
  * Merge button exists only while `actions` holds that kind, which the daemon fills only
  * from a round still waiting on the PM. Fire carries what a click submits; Merge is a
@@ -1926,6 +1939,8 @@ export function filterThreads(threads, query) {
  * and its session id, which no mission key can be. A watcher that posted in this daemon's life
  * and then went quiet (`watcher.up` false, `lastAt` set) puts a notice over the columns;
  * a board that never had a watcher shows none. Columns count their cards, so a needs-you tab counts once there.
+ * While the spin-down flag is on (`spinDown.on`) the counts row ends on a Spin-down chip,
+ * shown over the empty state too.
  *
  * Answers `{ html, countsHtml, noticeHtml, columns: [{ col, label, count, cards: [{ key, html }] }] }`,
  * `html` being the mount's whole contents: the empty state when there is no card. */
@@ -1961,8 +1976,9 @@ function missionsParts(overview, ui) {
     return Math.floor(hours / 24) + ' d';
   }
 
+  // A queued mission and a parked one wait, each tagged as such on its card.
   function columnOf(m) {
-    return m.view === 'queued' ? 'waiting' : m.view;
+    return m.view === 'queued' || m.view === 'parked' ? 'waiting' : m.view;
   }
 
   function orderLines(list, live, sent) {
@@ -2066,7 +2082,9 @@ function missionsParts(overview, ui) {
     var merging = actions.some(function (a) { return a.kind === 'merge'; });
     if (m.summary) out += '<p class="mission-summary"' + (merging ? ' data-digest' : '') + '>' + esc(m.summary) + '</p>';
     if (m.waitingOn) out += '<p class="mission-fact mission-waiting"><span class="mission-label">Waiting on</span>' + esc(m.waitingOn) + '</p>';
-    if (m.next) out += '<p class="mission-fact mission-next"><span class="mission-label">Next</span>' + esc(m.next) + '</p>';
+    // A parked mission's next is the line that resumes it.
+    var parked = m.state === 'parked';
+    if (m.next) out += '<p class="mission-fact mission-next"><span class="mission-label">' + (parked ? 'Resume' : 'Next') + '</span>' + esc(m.next) + '</p>';
     // A gone session says so with its last heartbeat, the whole time in its tooltip.
     if (m.gone) {
       var seen = age(m.gone.lastSeenAt);
@@ -2088,6 +2106,8 @@ function missionsParts(overview, ui) {
     // A retired mission is listed only while it has open work (ADR 147).
     var foot = m.retired ? '<span class="mission-tag mission-retired" title="' + esc('Retired ' + m.retiredAt) + '">Retired</span>'
       : m.view === 'queued' ? '<span class="mission-tag">Queued</span>' : '';
+    // Parked at a spin-down: on its own, or beside the round it left for the PM.
+    if (parked) foot += '<span class="mission-tag mission-parked">Parked</span>';
     var prs = Array.isArray(m.prs) ? m.prs : [];
     for (var p = 0; p < prs.length; p++) {
       var pr = prs[p];
@@ -2160,8 +2180,12 @@ function missionsParts(overview, ui) {
   var noticeHtml = watcherDown
     ? '<p class="missions-notice" role="status"><b>Session watcher down.</b> Tabs started by hand show again once it reports.</p>'
     : '';
+  var spinDown = data.spinDown && data.spinDown.on
+    ? '<span class="mission-count mission-spin-down" title="' + esc('Spin-down since ' + (data.spinDown.at || 'unknown')
+      + ': no merge, deploy or release step runs') + '">Spin-down on</span>'
+    : '';
   if (!missions.length && !tabs.length) {
-    return { html: noticeHtml + '<p class="empty-state">No missions yet. Work a session records as a mission shows up here.</p>', countsHtml: '', noticeHtml: noticeHtml, columns: [] };
+    return { html: noticeHtml + (spinDown ? '<div class="mission-counts">' + spinDown + '</div>' : '') + '<p class="empty-state">No missions yet. Work a session records as a mission shows up here.</p>', countsHtml: '', noticeHtml: noticeHtml, columns: [] };
   }
   var columns = COLUMNS.map(function (c) { return { col: c[0], label: c[1], count: 0, cards: [] }; });
   var byCol = {};
@@ -2180,7 +2204,7 @@ function missionsParts(overview, ui) {
   });
   var countsHtml = columns.map(function (c) {
     return '<span class="mission-count"><b>' + c.count + '</b> ' + esc(c.label.toLowerCase()) + '</span>';
-  }).join('');
+  }).join('') + spinDown;
   var html = noticeHtml + '<div class="mission-counts">' + countsHtml + '</div><div class="mission-cols">' + columns.map(function (c) {
     return '<section class="mission-col" data-col="' + c.col + '" aria-label="' + esc(c.label) + '">'
       + '<h2 class="mission-col-head"><span class="mission-badge" data-col="' + c.col + '">' + esc(c.label) + '</span>'

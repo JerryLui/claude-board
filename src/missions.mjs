@@ -10,7 +10,8 @@
 // What a reader sees is a view, derived on every read and never stored: a released mission
 // reads released, and a retired one (its `retiredAt` set) waiting, no list showing it once
 // its PRs are merged or closed and no release step waits (ADR 147); else a mission whose
-// board's newest round still waits on an answer reads needs-you; else a session whose process is
+// board's newest round still waits on an answer reads needs-you; else a parked one reads parked;
+// else a session whose process is
 // gone, a reservation no process bound within `UNBOUND_GRACE_MS`, or a working one silent
 // past `STALL_SILENCE_MS`, reads stalled, and a gone one also carries `gone: { lastSeenAt }`.
 // A session the session watcher's latest snapshot lists counts as heard from at the
@@ -29,7 +30,9 @@ import { processStartUtc } from './proc-start.mjs';
 export { SAFE_MISSION_KEY, assertMissionKey, MISSION_RETENTION_MS };
 
 export const PHASES = ['grill', 'direct', 'landing'];
-export const STORED_STATES = ['needs-you', 'working', 'waiting', 'queued', 'released'];
+/** `parked` is a mission that stopped at a spin-down (src/spin-down.mjs), written as its
+ * session's last act: it reads parked, or needs-you while a round waits on the PM. */
+export const STORED_STATES = ['needs-you', 'working', 'waiting', 'queued', 'released', 'parked'];
 /** A PR's state as the session watcher reads it from GitHub at the PR's head commit,
  * `closed` being one closed without merging. */
 export const PR_STATES = ['draft', 'open', 'green', 'red', 'merged', 'closed'];
@@ -448,17 +451,19 @@ function viewState(m, linked, now, isAlive, listed) {
   // session do: it waits on its open work, if any (ADR 147).
   if (isRetired(m)) return 'waiting';
   if (boardsNeedYou(linked())) return 'needs-you';
+  // A parked mission's session is ended on purpose: it never reads stalled.
+  if (m.state === 'parked') return 'parked';
   if (sessionStalled(m, now, isAlive, listed)) return 'stalled';
   return m.state;
 }
 
 /** `{ lastSeenAt }` while the session bound or reserved on `m` is gone (`sessionGone`) and
- * the mission has neither recorded its end nor retired, `lastSeenAt` being its last
- * heartbeat; else null. A retired mission's session is expected to stop, as a finished
- * one's is, so its card never says it went (ADR 147). */
+ * the mission has neither recorded its end, retired nor parked, `lastSeenAt` being its last
+ * heartbeat; else null. A retired or parked mission's session is expected to stop, as a
+ * finished one's is, so its card never says it went (ADR 147). */
 function goneOf(m, now, isAlive, listed) {
   const s = currentSession(m);
-  if (!s || sessionFinished(m) || isRetired(m) || !sessionGone(s, now, isAlive, listingOf(s, listed))) return null;
+  if (!s || sessionFinished(m) || isRetired(m) || m.state === 'parked' || !sessionGone(s, now, isAlive, listingOf(s, listed))) return null;
   return { lastSeenAt: s.seenAt ?? s.startedAt ?? null };
 }
 
@@ -506,8 +511,8 @@ function aliveOnce(isAlive) {
 }
 
 /** The column `m` shows in: released stays released; a retired mission waits; then a
- * board's round waiting on the PM, whatever its session is doing; then a stalled session;
- * else the stored state. */
+ * board's round waiting on the PM, whatever its session is doing; then a parked mission;
+ * then a stalled session; else the stored state. */
 export function deriveState(m, { home = boardHome(), now = Date.now(), isAlive = pidAlive, listed = null } = {}) {
   return viewState(m, () => linkedBoards(m, home), now, isAlive, listed);
 }
@@ -577,7 +582,7 @@ export function missionsOverview({ home = boardHome(), now = Date.now(), all = f
   const views = (records ?? listMissions(home)).map(m => missionView(m, { home, now, isAlive, listed }));
   const missions = views.filter(v => !(v.retired && !hasOpenWork(v)) && (all || !releasedLongAgo(v, now)))
     .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
-  const counts = { needsYou: 0, working: 0, waiting: 0, stalled: 0, released: 0, queued: 0 };
+  const counts = { needsYou: 0, working: 0, waiting: 0, stalled: 0, released: 0, queued: 0, parked: 0 };
   for (const v of missions) counts[v.view === 'needs-you' ? 'needsYou' : v.view] += 1;
   const live = liveCounts(views, listed);
   return { missions, counts, live, slotFree: slotFree(live), now: iso(now) };

@@ -867,7 +867,7 @@ async function main() {
       const stateOf = (overview, id) => overview.tabs.find(t => t.id === id).state;
 
       const first = cache.overview();
-      assert.deepEqual(first.counts, { needsYou: 1, working: 3, waiting: 1, stalled: 0, released: 0, queued: 0 });
+      assert.deepEqual(first.counts, { needsYou: 1, working: 3, waiting: 1, stalled: 0, released: 0, queued: 0, parked: 0 });
       assert.deepEqual(first.live, { working: 0, alive: 0 }, 'the launch caps count no tab');
       assert.deepEqual(first.tabs.find(t => t.id === 'asks').rounds, [{ board: asking.id, round: 1 }]);
 
@@ -1127,7 +1127,7 @@ async function main() {
     const listed = missionsOverview({ home: dir, now });
     assert.deepEqual(viewsOf(listed), keptViews);
     assert.deepEqual(viewsOf(missionsOverview({ home: dir, now, all: true })), keptViews, 'the full list the mission watch reads drops it too');
-    assert.deepEqual(listed.counts, { needsYou: 0, working: 1, waiting: 3, stalled: 0, released: 0, queued: 0 });
+    assert.deepEqual(listed.counts, { needsYou: 0, working: 1, waiting: 3, stalled: 0, released: 0, queued: 0, parked: 0 });
     assert.deepEqual(['RETIRED_BARE', 'RETIRED_MERGED', 'RETIRED_RELEASED'].map(k => readMission(k, dir)?.key), ['RETIRED_BARE', 'RETIRED_MERGED', 'RETIRED_RELEASED'],
       'leaving the list deletes nothing: the purge alone does, 30 days on');
     assert.deepEqual([getMissionView('RETIRED_BARE', { home: dir, now }).view, getMissionView('RETIRED_BARE', { home: dir, now }).retired], ['waiting', true],
@@ -1648,12 +1648,12 @@ async function main() {
     assert.equal((await rawRequest(port, 'POST', '/api/mission/COOKIE/order', { headers: { 'content-type': 'application/json' }, body: '{"kind":"stop"}' })).status, 401);
   });
 
-  await check('GET /api/missions answers missions, tab cards, counts, live, slotFree, now and the session watcher', async () => {
+  await check('GET /api/missions answers missions, tab cards, counts, live, slotFree, now, the session watcher and the spin-down flag', async () => {
     const r = await getJson('/api/missions');
     assert.equal(r.status, 200);
-    assert.deepEqual(Object.keys(r.body).sort(), ['counts', 'live', 'missions', 'now', 'slotFree', 'tabs', 'watcher']);
+    assert.deepEqual(Object.keys(r.body).sort(), ['counts', 'live', 'missions', 'now', 'slotFree', 'spinDown', 'tabs', 'watcher']);
     assert.deepEqual(Object.keys(r.body.watcher).sort(), ['lastAt', 'up']);
-    assert.deepEqual(Object.keys(r.body.counts).sort(), ['needsYou', 'queued', 'released', 'stalled', 'waiting', 'working']);
+    assert.deepEqual(Object.keys(r.body.counts).sort(), ['needsYou', 'parked', 'queued', 'released', 'stalled', 'waiting', 'working']);
     assert.deepEqual(Object.keys(r.body.live).sort(), ['alive', 'working']);
     const total = Object.values(r.body.counts).reduce((a, b) => a + b, 0);
     const tabsNeedingYou = r.body.tabs.filter(t => t.state === 'needs-you').length;
