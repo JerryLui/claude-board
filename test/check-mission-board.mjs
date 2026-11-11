@@ -242,28 +242,28 @@ async function main() {
     assert.equal((await leave('ACROSS', 'across-taker', taker)).status, 200);
   });
 
-  await check('a session whose folder was removed (a worktree, after its merge) still posts: on its own board it continues there, and on its mission\'s board its next round reads from the board\'s folder', async () => {
-    const loose = sessionProcess();
-    const gone = folderWith('removed-loose', 'x\n');
-    const own = await ask(loose, gone, [note('before the removal')]);
-    rmSync(gone, { recursive: true });
-    const again = await ask(loose, gone, [note('after it')], { boardId: own.boardId });
-    assert.deepEqual([again.boardId, again.round], [own.boardId, 2]);
-
+  await check('a shim whose folder was removed (a worktree, after its merge) still posts: on its own board it continues there, and once it joins a mission its round lands on the mission\'s board, reading from the board\'s folder', async () => {
     const first = sessionProcess();
-    const bound = sessionProcess();
     const main = folderWith('removed-main', 'x\n');
-    const worktree = folderWith('removed-wt', 'x\n');
+    const gone = folderWith('removed-wt', 'x\n');
     assert.equal((await join('REMOVED', 'removed-first', first)).status, 200);
     const missionBoard = await ask(first, main, [note('the mission\'s first round')]);
     assert.equal((await leave('REMOVED', 'removed-first', first)).status, 200);
-    assert.equal((await join('REMOVED', 'removed-bound', bound)).status, 200);
-    await ask(bound, worktree, [question('From the worktree?')]);
-    rmSync(worktree, { recursive: true });
-    const after = await ask(bound, worktree, [question('After its removal?')]);
-    assert.deepEqual([after.boardId, after.round], [missionBoard.boardId, 3]);
-    assert.deepEqual(readBoard(missionBoard.boardId, home).rounds.map(r => r.cwd), [main, worktree, undefined]);
-    assert.equal((await leave('REMOVED', 'removed-bound', bound)).status, 200);
+    const { shim, call } = await sessionShim(gone);
+    try {
+      const own = (await call('ask', { title: 'Own', blocks: [note('before the removal')] })).structuredContent.board;
+      rmSync(gone, { recursive: true });
+      const again = (await call('ask', { title: 'Own', blocks: [note('after it')] })).structuredContent;
+      assert.deepEqual([again.board, again.round], [own, 2]);
+
+      await call('mission', { action: 'join', key: 'REMOVED', session: 'removed-shim' });
+      const joined = (await call('ask', { title: 'Joined', blocks: [note('on the mission\'s board')] })).structuredContent;
+      assert.deepEqual([joined.board, joined.round], [missionBoard.boardId, 2]);
+      assert.deepEqual(readBoard(missionBoard.boardId, home).rounds.map(r => r.cwd), [main, undefined]);
+      await call('mission', { action: 'leave', key: 'REMOVED', session: 'removed-shim' });
+    } finally {
+      shim.close();
+    }
   });
 
   await check('a session resumed in a new process (the same id, as the watcher lists it) still owns its rounds: its next question amends its open one, and its scoped abandon closes it', async () => {

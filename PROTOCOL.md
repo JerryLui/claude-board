@@ -2922,8 +2922,7 @@ mission explicitly keeps the board it names.
 A round with no `session` (posted before this) is the board's first poster's (`board.session`).
 On a mission's board a session bound to that mission posts from its own folder: `cwd` is
 accepted on every round, not only the first. Elsewhere a `cwd` other than the board's is still a
-400. On any board, a `cwd` that no longer exists (a worktree removed after its merge) on a round
-pushed into it names no folder: the round reads from the board's.
+400.
 
 **Amend, `fresh`.** A post amends the latest open question round only when the posting session
 posted it (by its id, or its pid and start) and, on a mission's board, from the folder that round
@@ -2931,7 +2930,8 @@ reads from; another session's first question, or one from another folder, opens 
 says it starts a new conversation: it never amends, and on a board that already holds rounds it
 closes the posting session's other open rounds there in the same write (each with an
 `awaitExpired` event). `bin/mcp.mjs` sends it on a `fresh` ask and on the first ask after a
-mission join or leave, and sends `cwd` on every post.
+mission join or leave, and sends `cwd` on every post while its folder exists: once it is gone (a
+worktree removed after its merge) it sends none, and the round reads from the board's folder.
 
 **Scoped abandon.** `POST /api/board/:id/abandon` takes an optional body `{ session: { pid,
 procStart } }`: with it, only the open rounds that session posted close (by its id, or its pid

@@ -2,8 +2,6 @@
 // assembly. See PROTOCOL.md "Board document", "Identifiers", "Packet".
 
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync } from 'node:fs';
-import path from 'node:path';
 import { mdToHtmlAndAnchors } from './markdown.mjs';
 import { checkDiagram, MERMAID_MAX_TEXT } from './mermaid-parse.mjs';
 import { resolveRef, langForPath, resolveBoardCwd, refCapFor, MAX_REF_BYTES, MAX_HTML_BYTES } from './resolve.mjs';
@@ -875,11 +873,8 @@ function assertCwdNotRetargeted(cwd, board) {
  * mission's board is shared by every session the mission binds, each working in a folder
  * of its own (a `/direct` run in a worktree), so a round posted there by a session bound
  * to that mission (`ownFolder`) reads from the folder its post names, the board's when it
- * names none. A folder that no longer exists (a worktree removed after its merge, which the
- * session still sits in) names none: the session keeps posting, as it did when a push
- * carried no folder. */
+ * names none. */
 export function roundFolder(board, cwd, ownFolder) {
-  if (typeof cwd === 'string' && path.isAbsolute(cwd) && !existsSync(cwd)) cwd = undefined;
   if (!ownFolder) {
     assertCwdNotRetargeted(cwd, board);
     return board.cwd ?? null;
