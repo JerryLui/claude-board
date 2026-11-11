@@ -40,6 +40,7 @@
 import { palettes, faviconLink, markSvg } from './styles.mjs';
 import { SCRIPT_ASSET, STYLE_ASSET } from './assets.mjs';
 import { STATUS_TONES } from './card-status.mjs';
+import { ROUND_DOWNLOAD_BUTTON } from './round-export.mjs';
 import { themeBootScript, themeToggle } from './theme.mjs';
 import { resolveComments, stripDaemonOnly } from './board.mjs';
 import { buildSteps, stepsToPath, pathToSteps, resolveSteps, videoIdentity, videoSecond } from './anchor.mjs';
@@ -3319,8 +3320,13 @@ export function renderRoundSection(board, roundN, commentsByBlock) {
   // card, no kicker" noise this layout exists to remove. The rail carries a
   // second meaning too (it is what docks the send bar), which a page with
   // nothing to send has no use for either.
+  //
+  // The label sits in the round's chip line, whose right end holds Download round
+  // once the round is sent (src/round-export.mjs): a round still open has nothing
+  // settled to save. src/ui.mjs's markRoundHistory adds the same control to a
+  // round that goes sent under an open tab.
   const roundLabel = fullpage ? '' : `
-  <div class="round-label">${escHtml(label)}</div>`;
+  <div class="round-chips"><div class="round-label">${escHtml(label)}</div>${historical ? ROUND_DOWNLOAD_BUTTON : ''}</div>`;
   return `
 <section class="round ${historical ? 'round-history' : 'round-open'}${current ? ' round-current' : ''}" data-round="${roundN}" data-round-status="${historical ? 'sent' : 'open'}">${roundLabel}
   ${blocksHtml}
