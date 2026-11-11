@@ -21,11 +21,39 @@ const asUrl = (type, bytes) => `data:${type};base64,${bytes.toString('base64')}`
 
 const single = prompt => ({ kind: 'question', prompt, widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] });
 
-/** Pastes one file on `el` as the clipboard would hand it over, and lets it be read. */
-async function paste(el, bytes, type) {
+// The DOM stand-in has no FileReader: this one answers readAsDataURL as a browser does
+// for a typed file, some ticks later.
+globalThis.FileReader ??= class {
+  readAsDataURL(file) {
+    file.arrayBuffer().then(b => { this.result = `data:${file.type};base64,${Buffer.from(b).toString('base64')}`; this.onload(); },
+      err => { this.error = err; this.onerror(); });
+  }
+};
+
+/** Pastes one file on `el` as the clipboard would hand it over, and lets it be read
+ * unless `settle` is false. */
+async function paste(el, bytes, type, { settle = true } = {}) {
   assert.ok(el, 'setup failure: no field to paste on');
   el.dispatchEvent(new StandInEvent('paste', { clipboardData: { files: [new File([bytes], 'clip', { type })] } }));
-  await flush();
+  if (settle) await flush();
+}
+
+/** Presses Send and lets whatever it waits on land, answering each submit 200: the
+ * bodies posted. */
+async function sendSettled(document) {
+  const original = globalThis.fetch;
+  const bodies = [];
+  globalThis.fetch = (url, opts) => {
+    if (String(url).endsWith('/submit')) bodies.push(JSON.parse(opts.body));
+    return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+  };
+  try {
+    document.getElementById('send-btn').dispatchEvent(new StandInEvent('click'));
+    await flush();
+  } finally {
+    globalThis.fetch = original;
+  }
+  return bodies;
 }
 
 function send(document) {
@@ -82,6 +110,32 @@ await checkAsync('a comment of an image and no words queues, and Send posts it w
   assert.equal(comments.length, 1, 'the image alone queued a comment');
   assert.equal(comments[0].text, '');
   assert.deepEqual(comments[0].images, [asUrl('image/png', PNG)]);
+});
+
+await checkAsync('a Send pressed while a pasted image is still being read waits for it, and posts it on its answer once', async () => {
+  const board = createBoard({ title: 'Send mid-read', blocks: [single('Q1: ship it?')] });
+  const [q1] = board.blocks.map(b => b.id);
+  const { document } = loadBoardWithEventSource(renderBoardPage(board));
+  answerSingle(document.querySelector(`.question-block[data-block-id="${q1}"]`), 'Yes');
+  await paste(document.querySelector(`textarea[data-note-for="${q1}"]`), PNG, 'image/png', { settle: false });
+  const bodies = await sendSettled(document);
+  assert.equal(bodies.length, 1);
+  assert.deepEqual(bodies[0].answers[0].images, [asUrl('image/png', PNG)]);
+});
+
+await checkAsync('a comment added while its pasted image is still being read keeps the image', async () => {
+  const board = createBoard({ title: 'Add mid-read', blocks: [single('Q1: ship it?'), { kind: 'html', html: '<p>mock</p>' }] });
+  const [q1, h] = board.blocks.map(b => b.id);
+  const { document } = loadBoardWithEventSource(renderBoardPage(board));
+  click(document.querySelector(`.comment-btn[data-block-id="${h}"]`));
+  const form = document.querySelector(`form#comment-form-${h}`);
+  const input = form.querySelector('input[type=text]');
+  input.value = 'see the shot';
+  await paste(input, GIF, 'image/gif', { settle: false });
+  form.dispatchEvent(new StandInEvent('submit'));
+  answerSingle(document.querySelector(`.question-block[data-block-id="${q1}"]`), 'Yes');
+  const [body] = await sendSettled(document);
+  assert.deepEqual(body.comments.map(c => [c.text, c.images]), [['see the shot', [asUrl('image/gif', GIF)]]]);
 });
 
 await checkAsync('an amend that re-renders a question keeps the thumbnails its note holds, and Send still posts them', async () => {

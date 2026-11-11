@@ -4177,12 +4177,13 @@ export const ui = `
   });
 
   qsa('.comment-form', root).forEach(function (form) {
-    form.addEventListener('submit', function (ev) {
-      ev.preventDefault();
+    form.addEventListener('submit', function addComment(ev) {
+      if (ev) ev.preventDefault();
       if (readonly) return;
       var input = form.querySelector('input[type=text]');
       var text = (input.value || '').trim();
       var blockId = form.getAttribute('data-block-id');
+      if (afterImageReads('comment:' + blockId, function () { addComment(null); })) return;
       // An image says something on its own: a comment needs words or an image.
       if (!text && !draftImages['comment:' + blockId]) return;
       var anchorKind = form.getAttribute('data-anchor-kind') || 'block';
@@ -4732,13 +4733,30 @@ export const ui = `
     return thumbRowFor(key) ? key : null;
   }
 
-  function bytesToDataUrl(type, buf) {
-    var bytes = new Uint8Array(buf);
-    var parts = [];
-    for (var i = 0; i < bytes.length; i += 0x8000) {
-      parts.push(String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000)));
-    }
-    return 'data:' + type + ';base64,' + btoa(parts.join(''));
+  function readDataUrl(file) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onload = function () { resolve(reader.result); };
+      reader.onerror = function () { reject(reader.error); };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  // Images still being read, and what waits on them: a Send, or a comment's
+  // Add, pressed while a pasted image is read is held until it lands, so the
+  // image goes with it. Keyed, so a second press while held still sends once.
+  var imageReads = 0;
+  var afterReads = {};
+  function afterImageReads(key, fn) {
+    if (!imageReads) return false;
+    afterReads[key] = fn;
+    return true;
+  }
+  function imageReadDone() {
+    if (--imageReads) return;
+    var waiting = afterReads;
+    afterReads = {};
+    Object.keys(waiting).forEach(function (k) { waiting[k](); });
   }
 
   /** The image files in a clipboard or a drop, in order. */
@@ -4764,15 +4782,16 @@ export const ui = `
     });
     if (refusal) showImageRefusal(key, refusal); else clearImageRefusal(key);
     if (!taken.length) return;
+    imageReads++;
     Promise.all(taken.map(function (f) {
-      return f.arrayBuffer().then(function (buf) {
+      return readDataUrl(f).then(function (data) {
         var name = pasted || !f.name ? 'pasted-' + (++pastedCount) + '.' + IMAGE_TYPES[f.type] : f.name;
-        return { name: name, size: f.size, data: bytesToDataUrl(f.type, buf) };
+        return { name: name, size: f.size, data: data };
       });
     })).then(function (imgs) {
       setDraftImages(key, (draftImages[key] || []).concat(imgs));
       reportActivity(from);
-    });
+    }).then(imageReadDone, imageReadDone);
   }
 
   document.addEventListener('paste', function (ev) {
@@ -6325,6 +6344,7 @@ export const ui = `
   function submitBoard(action) {
     if (readonly) return;
     if (isPageRound(blocksOfRound(currentRound))) return;
+    if (afterImageReads('send', function () { submitBoard(action); })) return;
     var answers = collectAnswers();
     var comments = commentsSentFrom(currentRound);
     var sentImageKeys = answeredImageKeys(answers);
@@ -6501,6 +6521,7 @@ export const ui = `
     if (!round || round.status === 'sent') return;
     var blocks = blocksOfRound(roundN);
     if (!isPageRound(blocks)) return;
+    if (afterImageReads('page:' + roundN, function () { submitPageRound(roundN, action); })) return;
     var blockId = blocks[0].id;
     var mine = pendingComments.filter(function (c) { return c.blockId === blockId; });
     var tooMuch = sendImagesRefusal([], mine);
