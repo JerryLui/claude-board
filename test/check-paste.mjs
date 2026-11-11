@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { createBoard, amendRound } from '../src/board.mjs';
 import { renderBoardPage } from '../src/render.mjs';
 import { buildRoundPushPayload } from '../src/server.mjs';
+import { MAX_IMAGE_BYTES } from '../src/post-limit.mjs';
 import { StandInEvent } from './dom-stand-in.mjs';
 import { checkAsync, finish, flush, pageHarness } from './support.mjs';
 
@@ -58,6 +59,14 @@ await checkAsync('Send posts a text answer\'s and its note\'s images on that ans
   assert.equal('images' in byId(q1), false, 'an answer given no image carries no images key');
   assert.equal(body.comments.length, 1, 'setup failure: the comment must be queued');
   assert.equal('images' in body.comments[0], false, 'a comment given no image carries no images key');
+});
+
+await checkAsync('the paste hint under every composer names the one-image limit the daemon enforces', async () => {
+  const board = createBoard({ title: 'Hint', blocks: [{ kind: 'question', prompt: 'Q1: why?', widget: 'text', options: [] }, { kind: 'html', html: '<p>mock</p>' }] });
+  const { document } = loadBoardWithEventSource(renderBoardPage(board));
+  const hints = document.querySelectorAll('p.paste-hint').map(p => p.textContent);
+  assert.equal(hints.length, 2, 'setup failure: the note and the mock\'s comment form each carry the hint');
+  for (const hint of hints) assert.equal(hint, `Paste or drop images, up to ${MAX_IMAGE_BYTES / (1024 * 1024)} MB each`);
 });
 
 await checkAsync('a comment of an image and no words queues, and Send posts it with empty text and the image', async () => {

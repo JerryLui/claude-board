@@ -4721,8 +4721,8 @@
   // one image at most IMAGE_MAX_BYTES, as it lands; a Send's images together at
   // most SEND_IMAGES_MAX_BYTES, at Send. Both are spliced in from
   // src/post-limit.mjs, the same module the daemon's own src/images.mjs checks
-  // against, so the page and the daemon can never disagree on the number.
-  // Megabytes here are 1024 * 1024 bytes, the daemon's own.
+  // against, so the page and the daemon can never disagree on the number, and
+  // so is megabytes, which names a limit the way the daemon's refusal does.
   var MB = 1024 * 1024;
   var IMAGE_MAX_BYTES = 10485760;
   var SEND_IMAGES_MAX_BYTES = 20971520;
@@ -4730,9 +4730,9 @@
   var KEPT_LINE = ' Nothing was sent; your answers are kept.';
   var pastedCount = 0;
 
-  function megabytes(bytes) {
-    return String(Math.round(bytes / MB * 10) / 10) + ' MB';
-  }
+  var megabytes = function megabytes(bytes) {
+  return String(Math.round(bytes / (1024 * 1024) * 10) / 10) + ' MB';
+};
   function sizeLabel(bytes) {
     return bytes >= MB ? megabytes(bytes) : String(Math.max(1, Math.round(bytes / 1024))) + ' KB';
   }

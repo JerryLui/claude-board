@@ -5,7 +5,7 @@
 // written.
 
 import { createHash } from 'node:crypto';
-import { MAX_IMAGE_BYTES, MAX_SEND_IMAGE_BYTES } from './post-limit.mjs';
+import { MAX_IMAGE_BYTES, MAX_SEND_IMAGE_BYTES, megabytes } from './post-limit.mjs';
 
 /** The allowed types, each with its stored extension and the leading bytes a real file of
  * that type starts with. The data URL's own type is a claim; these bytes are the check. */
@@ -28,7 +28,6 @@ export function imageContentType(name) {
   return CONTENT_TYPE[name.slice(name.lastIndexOf('.') + 1)];
 }
 
-const mb = bytes => `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 const refuse = message => Object.assign(new Error(message), { status: 400 });
 
 /** The decoded size of a base64 payload, read off its length so an oversized image is
@@ -57,9 +56,9 @@ export function decodeSubmitImages({ answers, comments }) {
       const m = typeof url === 'string' ? DATA_URL.exec(url) : null;
       if (!m) throw refuse(`${label} image ${i + 1} is not a PNG, JPEG, GIF or WebP data URL`);
       const size = decodedBytes(m[2]);
-      if (size > MAX_IMAGE_BYTES) throw refuse(`${label} image ${i + 1} is ${mb(size)}, over the ${mb(MAX_IMAGE_BYTES)} limit for one image`);
+      if (size > MAX_IMAGE_BYTES) throw refuse(`${label} image ${i + 1} is ${megabytes(size)}, over the ${megabytes(MAX_IMAGE_BYTES)} limit for one image`);
       total += size;
-      if (total > MAX_SEND_IMAGE_BYTES) throw refuse(`the images in this Send come to over ${mb(MAX_SEND_IMAGE_BYTES)}, the limit for one Send`);
+      if (total > MAX_SEND_IMAGE_BYTES) throw refuse(`the images in this Send come to over ${megabytes(MAX_SEND_IMAGE_BYTES)}, the limit for one Send`);
       const bytes = Buffer.from(m[2], 'base64');
       const type = TYPES[m[1]];
       if (!type.magic(bytes)) throw refuse(`${label} image ${i + 1} is not a real ${m[1].toUpperCase()} image`);

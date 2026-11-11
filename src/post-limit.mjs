@@ -26,6 +26,14 @@ export function postTooLargeMessage(bytes) {
 export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 export const MAX_SEND_IMAGE_BYTES = 20 * 1024 * 1024;
 
+/** 'bytes' in megabytes of 1024 * 1024 bytes, to one decimal and a whole number bare
+ * ('10 MB', '10.5 MB'): how the page's paste hint and refusals and the daemon's 400s name
+ * an image limit. Spliced by its source into the page's script (src/ui.mjs), so it is
+ * written as the page's own code is. */
+export function megabytes(bytes) {
+  return String(Math.round(bytes / (1024 * 1024) * 10) / 10) + ' MB';
+}
+
 /** The submit route's body cap: one post's worth of text plus a Send's images as base64,
  * which carries 4 bytes for every 3. */
 export const MAX_SUBMIT_BYTES = MAX_POST_BYTES + Math.ceil(MAX_SEND_IMAGE_BYTES * 4 / 3);

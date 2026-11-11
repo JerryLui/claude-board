@@ -141,8 +141,8 @@ async function main() {
       ['a .png holding text', [dataUrl('png', Buffer.from('just some text, not an image'))], /is not a real PNG image/],
       ['a GIF labelled as a JPEG', [dataUrl('jpeg', GIF)], /is not a real JPEG image/],
       ['an SVG', ['data:image/svg+xml;base64,PHN2Zy8+'], /is not a PNG, JPEG, GIF or WebP data URL/],
-      ['one image of 11 MB', [dataUrl('png', pngOfSize(11 * 1024 * 1024))], /is 11\.0 MB, over the 10\.0 MB limit for one image/],
-      ['three images of 7 MB', [1, 2, 3].map(() => dataUrl('png', pngOfSize(7 * 1024 * 1024))), /over 20\.0 MB, the limit for one Send/],
+      ['one image of 11 MB', [dataUrl('png', pngOfSize(11 * 1024 * 1024))], /is 11 MB, over the 10 MB limit for one image/],
+      ['three images of 7 MB', [1, 2, 3].map(() => dataUrl('png', pngOfSize(7 * 1024 * 1024))), /over 20 MB, the limit for one Send/],
     ];
     assert.ok(11 * 1024 * 1024 > MAX_IMAGE_BYTES && 7 * 1024 * 1024 <= MAX_IMAGE_BYTES, 'setup: the sizes straddle the limits');
     for (const [what, images, message] of cases) {
