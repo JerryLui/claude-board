@@ -9,7 +9,8 @@
 // at its own size and a taller one scaled into its holder. A second board holds what is
 // taller than a printed page: a sent artifact round (drawn full page, its Download round
 // on a chip line of its own, its file listing every comment under the mock), a long text,
-// a diagram, a question with many options and a long comment list; its files are
+// a diagram, a question with many options, a long free-text answer under a long note and
+// a long comment list; its files are
 // paginated under print media and nothing that must stay whole sits across a page's edge.
 // The artifact round's chip line is read twice more: in a window too narrow for the
 // header to condense, where it stays live over a scrolled artifact, and in the board's
@@ -79,14 +80,31 @@ const TALL_ROUND_1 = [
 ];
 // More than the board's comment rail shows at once: it scrolls past three.
 const TALL_PAGE_COMMENTS = Array.from({ length: 5 }, (_, i) => ({ blockId: 'h2', anchor: { kind: 'block' }, text: `Mock comment ${i}` }));
+// Its text items run several printed lines each and differ in length, so a page's edge
+// falls inside one of every kind and only that kind's own print rule keeps it whole (the
+// row checks that one did, contestedKinds below): two lines must stay either side of a
+// break, so nothing under four lines can be split whatever the rules say.
+const SENTENCE = 'A sentence that runs on so that its item takes several printed lines. ';
 const TALL_ROUND_2 = [
-  { id: 'd2', kind: 'markdown', text: Array.from({ length: 12 }, (_, i) => `Paragraph ${i}: ` + 'a sentence that runs on so the paragraph takes several printed lines. '.repeat(8)).join('\n\n') },
+  { id: 'd2', kind: 'markdown', text: [
+    ...Array.from({ length: 8 }, (_, i) => `Paragraph ${i}: ${SENTENCE.repeat(16 + (i * 5) % 9)}`.trim()),
+    Array.from({ length: 8 }, (_, i) => `- List item ${i}: ${SENTENCE.repeat(12 + (i * 3) % 7)}`.trim()).join('\n'),
+  ].join('\n\n') },
   { id: 'm2', kind: 'mermaid', text: 'flowchart TD\n' + Array.from({ length: 24 }, (_, i) => `  n${i}[Step ${i}] --> n${i + 1}[Step ${i + 1}]`).join('\n') },
   { id: 'q7', kind: 'question', prompt: 'Which of the many?', widget: 'single',
-    options: Array.from({ length: 30 }, (_, i) => ({ label: `Option ${i}`, description: `What option ${i} would mean, in a sentence long enough to take a line of its own.` })) },
+    // An option's label and description are one box no page can part, so each carries a
+    // snippet under them, which one can.
+    options: Array.from({ length: 14 }, (_, i) => ({ label: `Option ${i}`, description: SENTENCE.repeat(2 + i % 3).trim(),
+      preview: Array.from({ length: 6 + (i * 3) % 5 }, (_, k) => `option${i}.step(${k});`).join('\n') })) },
+  { id: 'q9', kind: 'question', prompt: 'Why this one?', widget: 'text',
+    explainer: Array.from({ length: 3 }, (_, i) => `Background ${i}: ${SENTENCE.repeat(6 + i)}`.trim()).join('\n\n') },
 ];
-const TALL_COMMENTS = Array.from({ length: 30 }, (_, i) => ({ blockId: 'm2', anchor: { kind: 'block' },
-  text: `Comment ${i} on the diagram, long enough that thirty of them run past a printed page.` }));
+const TALL_COMMENTS = Array.from({ length: 14 }, (_, i) => ({ blockId: 'm2', anchor: { kind: 'block' },
+  text: `Comment ${i} on the diagram. ${SENTENCE.repeat(6 + (i * 2) % 5)}`.trim() }));
+// A free-text answer and a note, each most of a page: under the question's explainer the
+// answer does not fit the first page, nor the note the page the answer moves to.
+const TALL_ANSWER = Array.from({ length: 40 }, (_, i) => `Reason ${i}, on a line of its own.`).join('\n');
+const TALL_NOTE = Array.from({ length: 40 }, (_, i) => `Caveat ${i}, on a line of its own.`).join('\n');
 
 // A 3x2 red PNG, pasted twice.
 const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAIAAAASFvFNAAAAEklEQVR4nGP4z8DAwMDAxMAAAA8kAgFzQfa2AAAAAElFTkSuQmCC';
@@ -192,7 +210,8 @@ const PRINT_EXPR = `(function () {
 // wide and one page tall, so Chrome's own fragmentation lays each page out as a column
 // (the engine paged media uses). A piece is cut when it leaves its column's top or bottom
 // edge (a diagram or a frame, which cannot be split) or lies in more than one fragment (an
-// option, a comment). Answers every such piece, how many pages each card runs over, and
+// option, a comment). Each piece carries its card and the page it begins on. Answers
+// every such piece, how many pages each card runs over, and
 // each mock as printed beside as laid out: its frame's box before the print scales it
 // ('drawn'), the box it prints in, how far its right edge passes its holder's, and the
 // holder's own box; and each block of code with how much of its text lies past its box,
@@ -206,7 +225,8 @@ const pagesExpr = width => `(function () {
     return function (el) {
       var r = el.getBoundingClientRect();
       return { what: what, top: Math.round(r.top - bodyTop), bottom: Math.round(r.bottom - bodyTop), height: Math.round(r.height),
-        fragments: el.getClientRects().length };
+        fragments: el.getClientRects().length, page: Math.floor(r.left / ${width}),
+        block: el.closest('[data-block-id]').getAttribute('data-block-id') };
     };
   }
   function all(sel, what) { return [].slice.call(document.querySelectorAll(sel)).map(piece(what)); }
@@ -214,7 +234,8 @@ const pagesExpr = width => `(function () {
     pieces: [].concat(all('section.export-round pre.mermaid svg', 'diagram'), all('section.export-round iframe', 'mock'),
       all('section.export-round .export-frame', 'frame'),
       all('section.export-round .card-choice', 'option'), all('section.export-round .comment-item', 'comment'),
-      all('section.export-round .md-content > p', 'paragraph')),
+      all('section.export-round .md-content > p', 'paragraph'), all('section.export-round .md-content li', 'list item'),
+      all('section.export-round .export-text', 'answer'), all('section.export-round .export-note-box', 'note')),
     cardPages: [].slice.call(document.querySelectorAll('section.export-round .block')).map(function (b) {
       return b.getAttribute('data-block-id') + ' ' + b.getClientRects().length; }),
     code: [].slice.call(document.querySelectorAll('section.export-round pre:not(.mermaid)')).map(function (el) {
@@ -238,6 +259,25 @@ const keepsAspect = m => Math.abs(m.w / m.h - m.drawnW / m.drawnH) < 0.002;
 function cutPieces(pieces) {
   return pieces.filter(p => p.top < 0 || p.bottom > PRINT_H || p.fragments > 1)
     .map(p => `${p.what}: ${p.top}..${p.bottom} (${p.height}px), ${p.fragments} fragment(s)`);
+}
+
+// What a page must have left for an item to be split there: two of its lines and its
+// own padding, with room to spare.
+const SPLIT_ROOM = 80;
+
+/** The kinds of piece a page's edge fell inside: one that begins a page though the page
+ * before it, in the same card, ended with room for a split and too little for the whole
+ * piece. Such a piece moved because it is kept whole; nothing else moves one. */
+function contestedKinds(pieces) {
+  const kinds = new Set();
+  for (const p of pieces) {
+    const inCard = pieces.filter(o => o.block === p.block);
+    const before = inCard.filter(o => o.page === p.page - 1);
+    if (!before.length || inCard.some(o => o.page === p.page && o.top < p.top)) continue;
+    const left = PRINT_H - Math.max(...before.map(o => o.bottom));
+    if (left >= SPLIT_ROOM && left < p.height) kinds.add(p.what);
+  }
+  return [...kinds].sort();
 }
 
 /** Clicks round `n`'s Download round on the open board tab and answers the one file it
@@ -299,7 +339,8 @@ async function main() {
       comments: TALL_PAGE_COMMENTS }, daemon.secret);
     await postJson(`${origin}/api/board`, { boardId: tall.boardId, title: TALL_TITLE, blocks: TALL_ROUND_2 }, daemon.secret);
     await postJson(`${origin}/api/board/${tall.boardId}/submit`, { round: 2, action: 'send',
-      answers: [{ id: 'q7', status: 'answered', choice: 'Option 7', note: '' }], comments: TALL_COMMENTS }, daemon.secret);
+      answers: [{ id: 'q7', status: 'answered', choice: 'Option 7', note: '' },
+        { id: 'q9', status: 'answered', choice: TALL_ANSWER, note: TALL_NOTE }], comments: TALL_COMMENTS }, daemon.secret);
     await postJson(`${origin}/api/board`, { boardId: tall.boardId, title: TALL_TITLE,
       blocks: [{ id: 'q8', kind: 'question', prompt: 'Next?', widget: 'single', options: [{ label: 'Go' }] }] }, daemon.secret);
     const tallUrl = `${origin}${new URL(tall.url).pathname}`;
@@ -596,12 +637,17 @@ async function main() {
         assert.equal(svgs.length, 1, 'setup: the diagram was found');
         assert.deepEqual(cutPieces(svgs), []);
       });
-      await row('printed, a card taller than a page breaks only between its paragraphs, options and comments, each kept whole', note => {
+      await row('printed, a card taller than a page breaks only between its paragraphs, list items, options, comments, answer and note, each kept whole', note => {
         const items = printedTall.pieces.filter(p => p.what !== 'diagram');
-        note(`pages per card: ${printedTall.cardPages.join(', ')}; ${items.length} paragraphs, options and comments`);
-        assert.deepEqual(printedTall.cardPages.map(c => Number(c.split(' ')[1]) > 1), [true, true, true], 'setup: the text, the diagram\'s card and the question each run past a page');
-        assert.equal(items.length, 72, 'setup: every paragraph, option and comment was found');
+        const counts = {};
+        for (const p of items) counts[p.what] = (counts[p.what] || 0) + 1;
+        const contested = contestedKinds(printedTall.pieces);
+        note(`pages per card: ${printedTall.cardPages.join(', ')}; a page's edge fell inside: ${contested.join(', ')}`);
+        assert.deepEqual(printedTall.cardPages.map(c => Number(c.split(' ')[1]) > 1), [true, true, true, true], 'setup: the text, the diagram\'s card and both questions each run past a page');
+        assert.deepEqual(counts, { option: 14, comment: 14, paragraph: 11, 'list item': 8, answer: 1, note: 1 }, 'setup: every item was found');
         assert.deepEqual(cutPieces(items), []);
+        assert.deepEqual(contested, ['answer', 'comment', 'list item', 'note', 'option', 'paragraph'],
+          'a page\'s edge fell inside an item of every kind: each was kept whole by its own rule, none by where the edges happened to fall');
       });
     });
   } finally {
