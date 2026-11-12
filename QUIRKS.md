@@ -2578,3 +2578,27 @@ Traps that have bitten once. A second bite moves the entry up into the section i
   painted `rgba(0, 0, 0, 0.55)` as the approved render had it (2026-11-11). Build the look from
   the palette's tokens (`var(--ink)` on `var(--panel)` with an `opacity`) or add a token to both
   palettes; a render's literal is a reading of the look, not a value to paste.
+
+- **A stage below the window's bottom has reported no height.** Chrome gives a frame it does not
+  show no animation frame and no ResizeObserver delivery, so `__cbStageContentH` stays unset until
+  the stage is scrolled to (2026-11-12, `test/browser-check-download.mjs`: a mock at 1415px of a
+  900px window read 0). A message still reaches it and a read forces its layout: Download round
+  posts it `height` and waits. A check that needs the report without a download calls
+  `scrollIntoView()` on the block first.
+- **Emulated print media cannot split a scroll box.** `Emulation.setEmulatedMedia` with the body
+  laid out as page-sized columns (the download check's `pagesExpr`) never breaks inside a box that
+  scrolls, so a table row or code box split shows only in a real PDF (2026-11-12).
+- **A devtools mouse wheel over an artifact can hang the next `Runtime.evaluate`.** A wheel
+  sent to a full-page artifact once ended in an evaluate that never answered (2026-11-12).
+  Scroll the artifact through its own target instead: `artifactSession` in
+  `test/browser-check-download.mjs`, then `window.scrollTo` there.
+- **A print break rule is only tested where a page's edge falls inside an item.** Two lines must
+  stay either side of a break (`orphans`, `widows`), so an item under four lines is never split
+  whatever the rules say, and a fixture of short, equal items stays green with its
+  `break-inside: avoid` deleted (2026-11-12). An option's label and description are one
+  `inline-flex` box (`.opt-main`) no page can part; only a preview under them can be. The download
+  check's `contestedKinds` asserts an edge fell inside each kind it claims.
+- **Shortening a stage's document for a read pulls a reader at its end up.** A forced layout
+  clamps the scroll offset at once: with the band's padding off for `measureArtifact`, a reader at
+  2276px landed on 2200px and stayed there after the padding came back (2026-11-12). Put the
+  offset back with the padding.
