@@ -2256,9 +2256,7 @@ the viewport's horizontal scrollbar when there is one, rounded up. The first rep
 animation frames for a real layout (a sandboxed `srcdoc` frame reads 0 before one), and a
 `ResizeObserver` on the body and the root reports every change after it. A new value is posted
 twice: at once, and again from a re-measure two frames later, so a height that holds arrives as
-two matching reports. A document `band` has padded past its own padding is measured with its
-own padding back in place for the read, so the report is the artifact's height and none of the
-room made for the board's chrome.
+two matching reports.
 
 It is stage-authored like every other field, so the parent (`handleStageHeight` and
 `applyStageHeight`, `src/ui.mjs`) drops a non-finite or non-positive value and caps the rest at
@@ -2324,7 +2322,8 @@ the parent cannot observe it short of being told.
 | `height` | — | "report your height now". Sent by Download round to each stage of the round that has reported none: a frame the window does not show is given no animation frame, so its first report has not left |
 | `diagrams` | `{ requestId, svgs }` | response to `mermaid`: one entry per requested source, in the same order — the rendered SVG as a string, or `null` for one the board could not draw |
 
-`scroll` is the one bidirectional type on this channel. Inbound it is sent only as a reset,
+`scroll` and `height` are the two bidirectional types on this channel: inbound, `height` asks for
+the report the stage otherwise sends unasked. Inbound `scroll` is sent only as a reset,
 `top: 0`, by the board's back-to-top control, since the parent cannot scroll a cross-origin
 document itself. Both directions aim at whichever element most recently identified itself as the
 scroller, never at the document by assumption.
