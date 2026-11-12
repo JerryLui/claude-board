@@ -159,8 +159,8 @@ preview, mock, iframe.
 stage at viewport size under the board header instead of in the content column. _Avoid_:
 fullpage board, artifact board, embed.
 
-**Band**: the space a board's floating chrome occupies over a Stage — the header at the top, the
-pager dock and comment rail at the bottom. _Avoid_: clearance, safe area, gutter, offset, the
+**Band**: the space a board's floating chrome occupies over a Stage — the header at the top, a
+sent full-page round's chip line under it, the pager dock and comment rail at the bottom. _Avoid_: clearance, safe area, gutter, offset, the
 96px.
 
 **Pill**: the header once it condenses while scrolling — the mark, the comment toggle, the

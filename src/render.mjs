@@ -3385,20 +3385,21 @@ export function renderRoundSection(board, roundN, commentsByBlock) {
   const endRail = historical || fullpage ? '' : `
   <div class="round-end"><span class="line"></span><span class="tag">${escHtml(endTag)}</span><span class="line"></span></div>`;
   // An artifact round keeps its section (data-round is how a push, an amend and
-  // the pager all find a round, and the section IS the page) and loses only its
-  // two labels: the "Round N" chip and the closing rail are chrome ABOUT a
-  // round, printed over a full-viewport artifact, and the pager at the bottom of
-  // the page already names the round for anyone who needs it -- exactly the "no
-  // card, no kicker" noise this layout exists to remove. The rail carries a
-  // second meaning too (it is what docks the send bar), which a page with
-  // nothing to send has no use for either.
+  // the pager all find a round, and the section IS the page). It never draws
+  // the closing rail, and draws its chip line only once sent: the "Round N"
+  // chip and the rail are chrome ABOUT a round, printed over a full-viewport
+  // artifact, and the pager at the bottom of the page already names the round
+  // for anyone who needs it -- exactly the "no card, no kicker" noise this
+  // layout exists to remove. The rail carries a second meaning too (it is what
+  // docks the send bar), which a page with nothing to send has no use for
+  // either. Sent, the chip line is there for Download round alone: it sits in
+  // the board's own top band, under the header, and the stage pads the band, so
+  // it never covers the artifact.
   //
   // The label sits in the round's chip line, whose right end holds Download round
   // once the round is sent (src/round-export.mjs): a round still open has nothing
   // settled to save. src/ui.mjs's markRoundHistory adds the same control to a
-  // round that goes sent under an open tab. A SENT artifact round gets the chip
-  // line back for that control alone: it sits in the board's own top band, under
-  // the header, and the stage pads the band, so it never covers the artifact.
+  // round that goes sent under an open tab.
   const roundLabel = fullpage && !historical ? '' : `
   <div class="round-chips"><div class="round-label">${escHtml(label)}</div>${historical ? ROUND_DOWNLOAD_BUTTON : ''}</div>`;
   return `

@@ -2379,7 +2379,8 @@ again on every theme change while the Lens is open, the board posts it one `mode
 comment mode. So the copy carries the same `data-theme` as the stage in its block, a template
 draws the same side of its palette in both, and the Lens stays view-only.
 
-`band` exists because the parent's header, dock and comment rail float **over** the frame rather
+`band` exists because the parent's header, a sent full-page round's chip line under it, the dock
+and the comment rail float **over** the frame rather
 than pushing it down, so an artifact that pads nothing loses its own opening under them. No fixed
 number is baked in on either side — the header's real height moves with the title's wrap and the
 viewport width — so the parent measures its live chrome (`reportStageBand`) and the stage tops its
