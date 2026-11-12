@@ -48,6 +48,9 @@ const WIDE_STAGE_PX = 1100; // taller than a page and, at the board's width, wid
 // checks run in.
 const SENT_AT = '2026-03-04T12:00:00.000Z';
 
+// One line far wider than a printed page, among enough to pass the board's 480px code box.
+const LONG_LINE = 'const settled = rounds.filter(r => r.status === "sent").map(r => r.n); '.repeat(4).trim();
+const CODE_TEXT = Array.from({ length: 30 }, (_, i) => (i === 3 ? LONG_LINE : `const step${i} = ${i};`)).join('\n');
 const ROUND_1 = [
   { id: 'd1', kind: 'markdown', text: '# Scope\n\nWhat this round settles.' },
   { id: 'm1', kind: 'mermaid', text: 'flowchart TD\n  ask[Ask] --> pick[Pick]\n  pick --> build[Build]\n  build --> ship[Ship]' },
@@ -55,6 +58,8 @@ const ROUND_1 = [
     html: `<div style="height:${STAGE_PX}px;box-sizing:border-box;border:4px solid #3251c9;background:#eef">Static mock</div><div id="late"></div><script>document.getElementById('late').textContent = 'ran';</script>` },
   { id: 'h3', kind: 'html', title: 'Wide mock',
     html: `<div style="height:${WIDE_STAGE_PX}px;box-sizing:border-box;border:4px solid #3251c9;background:#efe">Wide mock</div>` },
+  { id: 'c1', kind: 'code', lang: 'js', text: CODE_TEXT },
+  { id: 'd3', kind: 'markdown', text: '```\n' + LONG_LINE + '\n```\n\n| Part | State |\n| --- | --- |\n| Export | sent |\n| Print | open |' },
   { id: 'q1', kind: 'question', prompt: 'Which way?', widget: 'single',
     options: [{ label: 'Yes', description: 'go now' }, { label: 'No', description: 'not yet' }, { label: 'Later' }] },
   { id: 'q2', kind: 'question', prompt: 'Which parts?', widget: 'multi',
@@ -173,7 +178,7 @@ const PAGE_FILE_EXPR = `(function () {
 // Under print media at a printed page's width: every piece that must not be cut, with
 // whether it asks to be kept whole and how tall it is.
 const PRINT_EXPR = `(function () {
-  return [].slice.call(document.querySelectorAll('section.export-round .block, section.export-round pre.mermaid, section.export-round .stage-wrap, table.export-decisions tr')).map(function (el) {
+  return [].slice.call(document.querySelectorAll('section.export-round .block, section.export-round pre.mermaid, section.export-round .stage-wrap, table.export-decisions tr, section.export-round .md-content tr')).map(function (el) {
     return { what: (el.getAttribute('data-block-id') || el.className || el.tagName).toString().slice(0, 40),
       avoid: getComputedStyle(el).breakInside, height: el.getBoundingClientRect().height };
   });
@@ -186,7 +191,8 @@ const PRINT_EXPR = `(function () {
 // option, a comment). Answers every such piece, how many pages each card runs over, and
 // each mock as printed beside as laid out: its frame's box before the print scales it
 // ('drawn'), the box it prints in, how far its right edge passes its holder's, and the
-// holder's own box.
+// holder's own box; and each block of code with how much of its text lies past its box,
+// across and down, where print shows none of it.
 const pagesExpr = width => `(function () {
   var style = document.createElement('style');
   style.textContent = 'html, body.round-export { margin: 0; padding: 0; } body.round-export { height: ${PRINT_H}px; column-width: ${width}px; column-gap: 0; column-fill: auto; }';
@@ -207,6 +213,10 @@ const pagesExpr = width => `(function () {
       all('section.export-round .md-content > p', 'paragraph')),
     cardPages: [].slice.call(document.querySelectorAll('section.export-round .block')).map(function (b) {
       return b.getAttribute('data-block-id') + ' ' + b.getClientRects().length; }),
+    code: [].slice.call(document.querySelectorAll('section.export-round pre:not(.mermaid)')).map(function (el) {
+      return el.closest('[data-block-id]').getAttribute('data-block-id') + ': ' + (el.scrollWidth - el.clientWidth) + 'px across, '
+        + (el.scrollHeight - el.clientHeight) + 'px down';
+    }),
     mocks: [].slice.call(document.querySelectorAll('section.export-round iframe')).map(function (f) {
       var r = f.getBoundingClientRect(), holder = f.parentElement.getBoundingClientRect();
       return { id: f.closest('[data-block-id]').getAttribute('data-block-id'), drawnW: f.offsetWidth, drawnH: f.offsetHeight,
@@ -420,9 +430,10 @@ async function main() {
       await saved.sp('Emulation.setDeviceMetricsOverride', { width: PRINT_W, height: PRINT_H, deviceScaleFactor: 1, mobile: false });
       const pieces = await saved.evalPage(PRINT_EXPR);
       await saved.close();
-      await row('printed, no card, diagram, stage or decisions row is cut across pages', note => {
+      await row('printed, no card, diagram, stage, decisions row or table row is cut across pages', note => {
         note(`${pieces.length} pieces, tallest ${Math.max(...pieces.map(p => Math.round(p.height)))}px of a ${PRINT_H}px page`);
         assert.ok(pieces.length >= 14, 'setup: the cards, the diagram, the stage and the rows were found');
+        assert.equal(pieces.filter(p => p.what === 'TR').length, 9, 'setup: the decisions table\'s six rows and the markdown table\'s three were found');
         const cut = pieces.filter(p => p.avoid !== 'avoid' || p.height > PRINT_H).map(p => `${p.what}: ${p.avoid}, ${Math.round(p.height)}px`);
         assert.deepEqual(cut, []);
       });
@@ -446,6 +457,10 @@ async function main() {
         assert.ok(Math.abs(wide.holderH - wide.h) <= 1, 'its holder is as tall as it prints');
         assert.equal(frames.length, 2, 'setup: both holders were found');
         assert.deepEqual(cutPieces(frames), []);
+      });
+
+      await row('printed, a block of code shows every line whole: none below its box, none off its right edge', () => {
+        assert.deepEqual(printedFirst.code, ['c1: 0px across, 0px down', 'd3: 0px across, 0px down']);
       });
 
       const tallTab = await openTab(send, onEvent, tallUrl, cookie, { width: 1280, height: 800, theme: 'dark',

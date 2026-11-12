@@ -106,8 +106,10 @@ export function exportDocument(o) {
  * frame's, whichever is smaller. That second ratio is two lengths, which CSS
  * divides only through tan(atan2()); '100cqw' is the holder's width, read off
  * the '.stage-wrap' around it. A card taller than a page breaks between its
- * pieces (options, comments, paragraphs, notes), each kept whole, and never
- * inside a line. */
+ * pieces (options, comments, paragraphs, table rows, notes), each kept whole,
+ * and never inside a line. Code prints whole: paper cannot scroll, so its box
+ * loses the board's height cap (an inline height, where the board has turned
+ * the cap into one) and a long line wraps. */
 export const EXPORT_CSS = `
 body.round-export { min-height: 0; padding: 40px 24px; background: var(--bg); -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 body.round-export::before { display: none; }
@@ -150,9 +152,10 @@ body.round-export::before { display: none; }
   .export-round .block { box-shadow: none; }
   .export-round .block, .export-round .question-block, .export-round .card-choice, .export-round .variant-card,
   .export-round .stage-wrap, .export-round pre.mermaid, .export-round .comment-item, .export-decisions tr,
-  .export-round p, .export-round li, .export-round .export-text, .export-round .export-note-box { break-inside: avoid; }
+  .export-round p, .export-round li, .export-round tr, .export-round .export-text, .export-round .export-note-box { break-inside: avoid; }
   .export-round .card-head, .export-round .question-prompt { break-after: avoid; }
   .export-round pre.mermaid svg { max-height: 960px; }
+  .export-round pre:not(.mermaid) { height: auto !important; max-height: none; overflow: visible; white-space: pre-wrap; overflow-wrap: anywhere; }
   .export-round .stage-wrap { container-type: inline-size; }
   .export-round .export-frame { break-inside: avoid; }
   .export-round .export-fit { --export-fit: min(var(--export-scale), tan(atan2(100cqw, var(--export-w))));
