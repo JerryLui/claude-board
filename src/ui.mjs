@@ -65,7 +65,7 @@ import { MERMAID_ASSET } from './vendor/mermaid/index.mjs';
 import { openSharedStream, STREAM_WORKER_URL } from './stream-worker.mjs';
 import { activityMinMs } from './activity.mjs';
 import {
-  ROUND_DOWNLOAD_BUTTON, EXPORT_CSS, decisionRows, exportDate, exportFileName, exportDocument, printScale,
+  ROUND_DOWNLOAD_BUTTON, EXPORT_CSS, PRINT_PAGE_H, decisionRows, exportDate, exportFileName, exportDocument, printScale,
 } from './round-export.mjs';
 // The one source of truth for both image limits -- the daemon's own
 // src/images.mjs checks a submit against these same two constants, so a page
@@ -4346,12 +4346,13 @@ export const ui = `
   var exportDate = ${exportDate.toString()};
   var exportFileName = ${exportFileName.toString()};
   var exportDocument = ${exportDocument.toString()};
+  var PRINT_PAGE_H = ${PRINT_PAGE_H};
   var printScale = ${printScale.toString()};
   // Everything in a round that is a control or a pin rather than what the round
   // said. The round's chip line goes too: the file's own head names the round.
   var EXPORT_DROP = '.round-chips, .round-end, .comment-btn, .comment-form, .comment-target, .pin-layer, '
     + '.pull-out, .stage-fold, .fold-toggle, .btn-defer, .rank-grip, .question-picks, .note-head, '
-    + '.page-send-bar, .page-comment-hint, '
+    + '.page-send-bar, '
     + 'script, noscript, source, object, embed, base, meta';
   var nextExportDiagramId = 0;
 
@@ -4540,7 +4541,18 @@ export const ui = `
     setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
   }
 
+  // A stage the reader never scrolled to has reported no height: the browser
+  // lays out no frame it does not show. Each is asked for one, and given a
+  // moment to answer; one that does not keeps the box it has.
+  async function askStageHeights(section) {
+    var unheard = function (frame) { return !(frame.__cbStageContentH > 0); };
+    var asked = qsa('iframe.html-stage', section).filter(unheard);
+    asked.forEach(function (frame) { postToStage(frame, { type: 'height' }); });
+    for (var i = 0; i < 10 && asked.some(unheard); i++) await new Promise(function (done) { setTimeout(done, 30); });
+  }
+
   async function downloadRound(section) {
+    await askStageHeights(section);
     var n = Number(section.getAttribute('data-round'));
     var round = (board.rounds || []).find(function (r) { return r.n === n; }) || {};
     var questions = questionBlocks({ blocks: (board.blocks || []).filter(function (b) { return b.round === n; }) });

@@ -2256,7 +2256,9 @@ the viewport's horizontal scrollbar when there is one, rounded up. The first rep
 animation frames for a real layout (a sandboxed `srcdoc` frame reads 0 before one), and a
 `ResizeObserver` on the body and the root reports every change after it. A new value is posted
 twice: at once, and again from a re-measure two frames later, so a height that holds arrives as
-two matching reports.
+two matching reports. A document `band` has padded past its own padding is measured with its
+own padding back in place for the read, so the report is the artifact's height and none of the
+room made for the board's chrome.
 
 It is stage-authored like every other field, so the parent (`handleStageHeight` and
 `applyStageHeight`, `src/ui.mjs`) drops a non-finite or non-positive value and caps the rest at
@@ -2319,6 +2321,7 @@ the parent cannot observe it short of being told.
 | `band` | `{ top, bottom }` | the board's own chrome band, right now (ADR 59) |
 | `scroll` | `{ top }` | "put yourself at this offset" |
 | `scrollBy` | `{ delta }` | "move yourself this many pixels" — one forwarded wheel notch |
+| `height` | — | "report your height now". Sent by Download round to each stage of the round that has reported none: a frame the window does not show is given no animation frame, so its first report has not left |
 | `diagrams` | `{ requestId, svgs }` | response to `mermaid`: one entry per requested source, in the same order — the rendered SVG as a string, or `null` for one the board could not draw |
 
 `scroll` is the one bidirectional type on this channel. Inbound it is sent only as a reset,
@@ -2376,7 +2379,8 @@ again on every theme change while the Lens is open, the board posts it one `mode
 comment mode. So the copy carries the same `data-theme` as the stage in its block, a template
 draws the same side of its palette in both, and the Lens stays view-only.
 
-`band` exists because the parent's header, dock and comment rail float **over** the frame rather
+`band` exists because the parent's header, a sent full-page round's chip line under it, the dock
+and the comment rail float **over** the frame rather
 than pushing it down, so an artifact that pads nothing loses its own opening under them. No fixed
 number is baked in on either side — the header's real height moves with the title's wrap and the
 viewport width — so the parent measures its live chrome (`reportStageBand`) and the stage tops its
