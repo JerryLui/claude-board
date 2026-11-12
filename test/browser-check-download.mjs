@@ -5,11 +5,12 @@
 // with the pick marked, the diagram as SVG at full height, the mock at its full height
 // with none of its scripts run, each comment under what it points at and every image as
 // a data: URL, with no script anywhere in it; and under print media every card, diagram,
-// stage and decisions row is kept whole and fits one page. A second board holds what is
+// stage and decisions row is kept whole and fits one page, a mock no taller than a page
+// at its own size and a taller one scaled into its holder. A second board holds what is
 // taller than a printed page: a sent artifact round (drawn full page, its Download round
-// on a chip line of its own), a long text, a diagram, a question with many options and a
-// long comment list; its files are paginated under print media and nothing that must
-// stay whole sits across a page's edge. Layout, a real download and a file: page, none of which the DOM
+// on a chip line of its own, its file listing every comment under the mock), a long text,
+// a diagram, a question with many options and a long comment list; its files are
+// paginated under print media and nothing that must stay whole sits across a page's edge. Layout, a real download and a file: page, none of which the DOM
 // stand-in has (test/check-round-download.mjs holds the markup).
 //
 // The fixture's images: one pasted on a note and one on a comment, sent with the round
@@ -40,6 +41,9 @@ const TITLE = 'Download fixture';
 const STAGE_PX = 760; // past the board's 600px stage cap, so the page folds it and the file must not
 const PRINT_W = 739; // Letter less Chrome's default 0.4in margins, at 96px an inch
 const PRINT_H = 979;
+const A4_W = 717; // A4 less the same margins: the narrower paper, where a mock fitted to anything wider loses its right edge
+const FIT_H = 960; // the one page a mock taller than it is fitted to: Letter's height less a little
+const WIDE_STAGE_PX = 1100; // taller than a page and, at the board's width, wider than a page in proportion: its width is what limits it
 // Round 1's send time, set in the store: midday UTC is the same date in every zone the
 // checks run in.
 const SENT_AT = '2026-03-04T12:00:00.000Z';
@@ -49,6 +53,8 @@ const ROUND_1 = [
   { id: 'm1', kind: 'mermaid', text: 'flowchart TD\n  ask[Ask] --> pick[Pick]\n  pick --> build[Build]\n  build --> ship[Ship]' },
   { id: 'h1', kind: 'html', title: 'Mock',
     html: `<div style="height:${STAGE_PX}px;box-sizing:border-box;border:4px solid #3251c9;background:#eef">Static mock</div><div id="late"></div><script>document.getElementById('late').textContent = 'ran';</script>` },
+  { id: 'h3', kind: 'html', title: 'Wide mock',
+    html: `<div style="height:${WIDE_STAGE_PX}px;box-sizing:border-box;border:4px solid #3251c9;background:#efe">Wide mock</div>` },
   { id: 'q1', kind: 'question', prompt: 'Which way?', widget: 'single',
     options: [{ label: 'Yes', description: 'go now' }, { label: 'No', description: 'not yet' }, { label: 'Later' }] },
   { id: 'q2', kind: 'question', prompt: 'Which parts?', widget: 'multi',
@@ -177,10 +183,13 @@ const PRINT_EXPR = `(function () {
 // wide and one page tall, so Chrome's own fragmentation lays each page out as a column
 // (the engine paged media uses). A piece is cut when it leaves its column's top or bottom
 // edge (a diagram or a frame, which cannot be split) or lies in more than one fragment (an
-// option, a comment). Answers every such piece and how many pages each card runs over.
-const PAGES_EXPR = `(function () {
+// option, a comment). Answers every such piece, how many pages each card runs over, and
+// each mock as printed beside as laid out: its frame's box before the print scales it
+// ('drawn'), the box it prints in, how far its right edge passes its holder's, and the
+// holder's own box.
+const pagesExpr = width => `(function () {
   var style = document.createElement('style');
-  style.textContent = 'html, body.round-export { margin: 0; padding: 0; } body.round-export { height: ${PRINT_H}px; column-width: ${PRINT_W}px; column-gap: 0; column-fill: auto; }';
+  style.textContent = 'html, body.round-export { margin: 0; padding: 0; } body.round-export { height: ${PRINT_H}px; column-width: ${width}px; column-gap: 0; column-fill: auto; }';
   document.head.appendChild(style);
   var bodyTop = document.body.getBoundingClientRect().top;
   function piece(what) {
@@ -193,16 +202,25 @@ const PAGES_EXPR = `(function () {
   function all(sel, what) { return [].slice.call(document.querySelectorAll(sel)).map(piece(what)); }
   return {
     pieces: [].concat(all('section.export-round pre.mermaid svg', 'diagram'), all('section.export-round iframe', 'mock'),
+      all('section.export-round .export-frame', 'frame'),
       all('section.export-round .card-choice', 'option'), all('section.export-round .comment-item', 'comment'),
       all('section.export-round .md-content > p', 'paragraph')),
     cardPages: [].slice.call(document.querySelectorAll('section.export-round .block')).map(function (b) {
       return b.getAttribute('data-block-id') + ' ' + b.getClientRects().length; }),
-    scale: [].slice.call(document.querySelectorAll('section.export-round iframe')).map(function (f) {
-      return Math.round(f.getBoundingClientRect().height / f.offsetHeight * 1000) / 1000; }),
+    mocks: [].slice.call(document.querySelectorAll('section.export-round iframe')).map(function (f) {
+      var r = f.getBoundingClientRect(), holder = f.parentElement.getBoundingClientRect();
+      return { id: f.closest('[data-block-id]').getAttribute('data-block-id'), drawnW: f.offsetWidth, drawnH: f.offsetHeight,
+        w: r.width, h: r.height, pastHolder: r.right - holder.right, holderW: holder.width, holderH: holder.height };
+    }),
   };
 })()`;
 
-/** Each piece PAGES_EXPR found that is cut across a page's edge, as text. */
+/** One of pagesExpr's mocks as a line of text. */
+const mockLine = m => `${m.id}: drawn ${m.drawnW}x${m.drawnH}, printed ${Math.round(m.w)}x${Math.round(m.h)} in a holder ${Math.round(m.holderW)}x${Math.round(m.holderH)}`;
+/** Whether a printed mock kept its drawn proportions. */
+const keepsAspect = m => Math.abs(m.w / m.h - m.drawnW / m.drawnH) < 0.002;
+
+/** Each piece pagesExpr found that is cut across a page's edge, as text. */
 function cutPieces(pieces) {
   return pieces.filter(p => p.top < 0 || p.bottom > PRINT_H || p.fragments > 1)
     .map(p => `${p.what}: ${p.top}..${p.bottom} (${p.height}px), ${p.fragments} fragment(s)`);
@@ -222,15 +240,15 @@ async function downloadFrom(send, onEvent, tab, n) {
 }
 
 /** Opens a saved file from disk, offline, at a printed page's size under print media,
- * and answers PAGES_EXPR's reading of it. */
-async function paginate(send, onEvent, file, cookie) {
+ * and answers pagesExpr's reading of it. */
+async function paginate(send, onEvent, file, cookie, width = PRINT_W) {
   const offline = async sp => {
     await sp('Network.emulateNetworkConditions', { offline: true, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
     await sp('Emulation.setEmulatedMedia', { media: 'print', features: [] });
   };
-  const tab = await openTab(send, onEvent, pathToFileURL(file).href, cookie, { width: PRINT_W, height: PRINT_H, theme: 'light', expr: '1', prepare: offline });
+  const tab = await openTab(send, onEvent, pathToFileURL(file).href, cookie, { width, height: PRINT_H, theme: 'light', expr: '1', prepare: offline });
   await tab.sp('Emulation.setEmulatedMedia', { media: 'print', features: [] });
-  const read = await tab.evalPage(PAGES_EXPR);
+  const read = await tab.evalPage(pagesExpr(width));
   await tab.close();
   return read;
 }
@@ -307,6 +325,9 @@ async function main() {
 
       // The stage reports its own height a frame or two after it lays out.
       const stageH = await board.until(`document.querySelector('[data-block-id="h1"] iframe').__cbStageContentH`, 'the stage reporting its height');
+      // A stage below the window's bottom reports nothing until it is scrolled to.
+      await board.evalPage(`document.querySelector('[data-block-id="h3"]').scrollIntoView()`);
+      await board.until(`document.querySelector('[data-block-id="h3"] iframe').__cbStageContentH >= ${WIDE_STAGE_PX}`, 'the wide stage reporting its height');
 
       await send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: downloads, eventsEnabled: true });
       const done = waitForDownload(onEvent, downloads);
@@ -406,6 +427,27 @@ async function main() {
         assert.deepEqual(cut, []);
       });
 
+      const printedFirst = await paginate(send, onEvent, file, cookie, A4_W);
+      const frames = printedFirst.pieces.filter(p => p.what === 'frame');
+      const [small, wide] = ['h1', 'h3'].map(id => printedFirst.mocks.find(k => k.id === id));
+      await row('printed, a mock not taller than a page prints at its own size', note => {
+        note(mockLine(small));
+        assert.equal(small.drawnH, stageH + 2, 'setup: the mock is shorter than a page');
+        assert.ok(small.drawnH < FIT_H);
+        assert.deepEqual({ w: small.w, h: small.h }, { w: small.drawnW, h: small.drawnH }, 'not scaled');
+        assert.ok(small.pastHolder <= 0.5, `its right edge is inside its holder, not ${small.pastHolder}px past it`);
+      });
+      await row('printed, a wide mock taller than a page is fitted to its holder\'s width, its right edge inside', note => {
+        note(mockLine(wide));
+        assert.ok(wide.drawnH > FIT_H && wide.drawnW / wide.drawnH > A4_W / FIT_H, 'setup: taller than a page, and its width limits it');
+        assert.ok(wide.pastHolder <= 0.5, `its right edge is inside its holder, not ${wide.pastHolder}px past it`);
+        assert.ok(Math.abs(wide.w - wide.holderW) <= 1, 'as wide as its holder, no smaller');
+        assert.ok(keepsAspect(wide), 'in its drawn proportions');
+        assert.ok(Math.abs(wide.holderH - wide.h) <= 1, 'its holder is as tall as it prints');
+        assert.equal(frames.length, 2, 'setup: both holders were found');
+        assert.deepEqual(cutPieces(frames), []);
+      });
+
       const tallTab = await openTab(send, onEvent, tallUrl, cookie, { width: 1280, height: 800, theme: 'dark',
         expr: `document.querySelector('.round-current').getAttribute('data-round')` });
       await tallTab.evalPage(`document.querySelector('.round-page[data-round="1"]').click()`);
@@ -457,13 +499,16 @@ async function main() {
       const tallDownload = await downloadFrom(send, onEvent, tallTab, 2);
       await tallTab.close();
 
-      const printedPage = await paginate(send, onEvent, pageDownload.file, cookie);
+      const printedPage = await paginate(send, onEvent, pageDownload.file, cookie, A4_W);
       await row('printed, a mock taller than a page is scaled to fit one, never cut', note => {
-        note(`scale ${printedPage.scale.join(', ')}; ${printedPage.pieces.map(p => `${p.what} ${p.top}..${p.bottom}`).join(', ')}`);
-        const mocks = printedPage.pieces.filter(p => p.what === 'mock');
-        assert.equal(mocks.length, 1, 'setup: the mock was found');
-        assert.ok(printedPage.scale[0] < 1, 'drawn smaller, its own height kept inside the frame');
-        assert.deepEqual(cutPieces(printedPage.pieces), []);
+        note(`${printedPage.mocks.map(mockLine).join(', ')}; ${printedPage.pieces.map(p => `${p.what} ${p.top}..${p.bottom}`).join(', ')}`);
+        assert.equal(printedPage.mocks.length, 1, 'setup: the mock was found');
+        const [mock] = printedPage.mocks;
+        assert.ok(Math.abs(mock.h - FIT_H) <= 1, `one page tall, not ${mock.h}px`);
+        assert.ok(keepsAspect(mock), 'in its drawn proportions');
+        assert.ok(mock.pastHolder <= 0.5, `its right edge is inside its holder, not ${mock.pastHolder}px past it`);
+        assert.ok(Math.abs(mock.holderH - mock.h) <= 1, 'its holder is as tall as it prints');
+        assert.deepEqual(cutPieces(printedPage.pieces), [], 'the mock, its holder and the comments under it');
       });
 
       const printedTall = await paginate(send, onEvent, tallDownload.file, cookie);
