@@ -10,7 +10,10 @@
 // taller than a printed page: a sent artifact round (drawn full page, its Download round
 // on a chip line of its own, its file listing every comment under the mock), a long text,
 // a diagram, a question with many options and a long comment list; its files are
-// paginated under print media and nothing that must stay whole sits across a page's edge. Layout, a real download and a file: page, none of which the DOM
+// paginated under print media and nothing that must stay whole sits across a page's edge.
+// The artifact round's chip line is read twice more: in a window too narrow for the
+// header to condense, where it stays live over a scrolled artifact, and in the board's
+// archive opened from disk, which draws none. Layout, a real download and a file: page, none of which the DOM
 // stand-in has (test/check-round-download.mjs holds the markup).
 //
 // The fixture's images: one pasted on a note and one on a comment, sent with the round
