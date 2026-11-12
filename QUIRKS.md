@@ -2599,6 +2599,9 @@ Traps that have bitten once. A second bite moves the entry up into the section i
   `inline-flex` box (`.opt-main`) no page can part; only a preview under them can be. The download
   check's `contestedKinds` asserts an edge fell inside each kind it claims.
 - **Shortening a stage's document for a read pulls a reader at its end up.** A forced layout
-  clamps the scroll offset at once: with the band's padding off for `measureArtifact`, a reader at
-  2276px landed on 2200px and stayed there after the padding came back (2026-11-12). Put the
-  offset back with the padding.
+  clamps the scroll offset at once: with the band's padding taken off to measure the artifact
+  alone, a reader at 2276px landed on 2200px and stayed there after the padding came back
+  (2026-11-12). Putting the offset back is no cure: a `scrollTop` assignment follows the
+  artifact's own `scroll-behavior`, so a smooth-scrolling one animates back, and an artifact
+  scrolling in an inner pane is not reached at all. So the stage reports its height with the
+  band's padding in place (`reportHeight`), and a saved full-page mock ends in that much blank.

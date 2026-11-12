@@ -337,6 +337,20 @@ async function artifactSession(send, marker) {
   throw new Error(`no artifact frame holds "${marker}"`);
 }
 
+/** The room the board pads an artifact by for its header, chip line, dock and comment
+ * rail, top and bottom together, read in the artifact itself (neither fixture artifact
+ * pads its own body). */
+const BAND_EXPR = `(function () {
+  var cs = getComputedStyle(document.body);
+  return parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
+})()`;
+
+/** How tall a saved file draws its mock: its frame's height less the frame's own edge. */
+function savedMockHeight(file) {
+  const m = /<iframe[^>]*style="height: (\d+)px/.exec(readFileSync(file, 'utf8'));
+  return m ? Number(m[1]) - 2 : null;
+}
+
 async function waitForDownload(onEvent, dir) {
   return withTimeout(new Promise((resolve, reject) => {
     const off = onEvent(msg => {
@@ -554,7 +568,7 @@ async function main() {
         expr: `document.querySelector('.round-current').getAttribute('data-round')` });
       await tallTab.evalPage(`document.querySelector('.round-page[data-round="1"]').click()`);
       await tallTab.until(`document.body.classList.contains('page-board') && document.querySelector('.round[data-round="1"]').classList.contains('round-current')`, 'the flip to the artifact round');
-      const mockH = await reportedHeight(tallTab, 'h2');
+      await reportedHeight(tallTab, 'h2');
       await tallTab.quiet();
       const page = await tallTab.evalPage(`(function () {
         function box(el) { var r = el.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, left: r.left, right: r.right }; }
@@ -600,13 +614,15 @@ async function main() {
         assert.deepEqual(wideScrolled, { hit: false, opacity: '0', scrolled: true });
       });
 
+      const mockBand = await evalIn(send, tallFrame, BAND_EXPR);
       const pageDownload = await downloadFrom(send, onEvent, tallTab, 1);
       await row('its Download round saves the artifact round as one HTML file, the mock at its full height', note => {
-        note(`${pageDownload.files.join(', ')}; the artifact reported ${mockH}px`);
+        const saved = savedMockHeight(pageDownload.file);
+        note(`${pageDownload.files.join(', ')}; the artifact is ${TALL_MOCK_PX}px tall, padded ${mockBand}px on the board; the file draws it ${saved}px tall, ${saved - TALL_MOCK_PX}px of that past its end`);
         assert.deepEqual(pageDownload.files, ['tall-fixture-round-1.html']);
-        assert.ok(mockH >= TALL_MOCK_PX, 'setup: the board measured the whole artifact');
-        assert.ok(mockH - TALL_MOCK_PX <= 1, `the artifact's own height to the pixel, not ${mockH - TALL_MOCK_PX}px more: none of the room the board pads it by for the header, the chip line and the comment rail`);
-        assert.match(readFileSync(pageDownload.file, 'utf8'), new RegExp(`height: ${mockH + 2}px`), 'the frame is the artifact\'s own height');
+        assert.ok(mockBand > 0, 'setup: the board pads the artifact for its own chrome');
+        assert.ok(saved >= TALL_MOCK_PX, 'no shorter than the artifact, which would cut its end off');
+        assert.ok(saved <= TALL_MOCK_PX + Math.ceil(mockBand), 'and no taller than the artifact with the room the board pads it by');
       });
 
       const pageFile = await measureTab(send, onEvent, pathToFileURL(pageDownload.file).href, cookie,
@@ -627,18 +643,19 @@ async function main() {
       await tallTab.until(`document.body.classList.contains('page-board') && document.querySelector('.round[data-round="3"]').classList.contains('round-current')`, 'the flip to the pinned artifact round');
       await reportedHeight(tallTab, 'h4');
       await tallTab.quiet();
-      // Read once the board has padded the artifact for its header and dock.
-      const pinnedH = await reportedHeight(tallTab, 'h4');
+      const pinnedFrame = await artifactSession(send, 'Pinned body');
+      const pinnedBand = await evalIn(send, pinnedFrame, BAND_EXPR);
       const pinnedDownload = await downloadFrom(send, onEvent, tallTab, 3);
       await row('an artifact whose content spills out of a body pinned to the window is saved at the content\'s full height', note => {
-        const saved = /<iframe[^>]*style="height: (\d+)px/.exec(readFileSync(pinnedDownload.file, 'utf8'));
-        note(`the artifact is ${PINNED_PX}px tall and reported ${pinnedH}px; file frame ${saved && saved[1]}px`);
-        assert.equal(saved && Number(saved[1]), PINNED_PX + 2, 'the artifact\'s own height plus its frame edge: no shorter, which would cut its end off');
+        const saved = savedMockHeight(pinnedDownload.file);
+        note(`the artifact is ${PINNED_PX}px tall, padded ${pinnedBand}px on the board; the file draws it ${saved}px tall, ${saved - PINNED_PX}px of that past its end`);
+        assert.ok(pinnedBand > 0, 'setup: the board pads the artifact for its own chrome');
+        assert.ok(saved >= PINNED_PX, 'no shorter than the artifact, which would cut its end off');
+        assert.ok(saved <= PINNED_PX + Math.ceil(pinnedBand), 'and no taller than the artifact with the room the board pads it by');
       });
 
-      // Measured again with the reader at its end: the read takes the board's padding off
-      // for a moment, and the document is then shorter than where the reader is.
-      const pinnedFrame = await artifactSession(send, 'Pinned body');
+      // Measured again with the reader at its end. A measure that took the board's padding
+      // off for the read would leave the document shorter than where the reader is.
       const atEnd = await evalIn(send, pinnedFrame, `(function () {
         window.scrollTo(0, document.documentElement.scrollHeight);
         // Added after the stage's own listener, so read once that has measured.
