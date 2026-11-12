@@ -560,14 +560,44 @@ async function main() {
         function box(el) { var r = el.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, left: r.left, right: r.right }; }
         var btn = document.querySelector('.round[data-round="1"] .round-download');
         var hit = btn && document.elementFromPoint((box(btn).left + box(btn).right) / 2, (box(btn).top + box(btn).bottom) / 2);
-        return { btn: btn && box(btn), head: box(document.querySelector('.board-head')), hit: !!(hit && hit.closest('.round-download')) };
+        return { btn: btn && box(btn), head: box(document.querySelector('.board-head')), hit: !!(hit && hit.closest('.round-download')),
+          chipsBottom: box(document.querySelector('.round-current .round-chips')).bottom,
+          frameTop: box(document.querySelector('.round-current iframe')).top };
       })()`);
+      const tallFrame = await artifactSession(send, 'Tall mock');
+      const padTop = await evalIn(send, tallFrame, 'parseFloat(getComputedStyle(document.body).paddingTop)');
       await row('a sent artifact round, drawn full page, shows Download round under the header', note => {
         note(`header ends at ${page.head.bottom}, button ${page.btn && page.btn.top}..${page.btn && page.btn.bottom}`);
         assert.equal(tallTab.measured, '4', 'setup: the board opens on its open round');
         assert.ok(page.btn, 'the sent artifact round has the control');
         assert.ok(page.btn.top >= page.head.bottom - 0.5, 'below the header, not under it');
         assert.equal(page.hit, true, 'nothing covers it: a click lands on it');
+      });
+
+      await row('the artifact is padded down to the chip line\'s bottom, so the line covers none of it', note => {
+        note(`chip line ends at ${page.chipsBottom}, the artifact's own top padding is ${padTop}px in a frame at ${page.frameTop}`);
+        assert.ok(page.chipsBottom > page.head.bottom + 1, 'setup: the chip line runs on below the header');
+        assert.ok(Math.abs(page.frameTop + padTop - page.chipsBottom) <= 0.5, 'the artifact begins where the chip line ends');
+      });
+
+      // Where a click on the control lands, how drawn the chip line is, and whether the
+      // artifact has scrolled under the header.
+      const buttonHit = `(function () {
+        var chips = document.querySelector('.round-current .round-chips');
+        var r = chips.querySelector('.round-download').getBoundingClientRect();
+        var hit = document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+        return { hit: !!(hit && hit.closest('.round-download')), opacity: getComputedStyle(chips).opacity,
+          scrolled: document.body.classList.contains('stage-scrolled') };
+      })()`;
+      await evalIn(send, tallFrame, 'window.scrollTo(0, 400)');
+      await tallTab.until(`document.body.classList.contains('stage-scrolled')`, 'the artifact scrolling under the header');
+      await tallTab.quiet();
+      const wideScrolled = await tallTab.evalPage(buttonHit);
+      await evalIn(send, tallFrame, 'window.scrollTo(0, 0)');
+      await tallTab.until(`!document.body.classList.contains('stage-scrolled')`, 'the artifact back at its top');
+      await tallTab.quiet();
+      await row('in a wide window the chip line leaves as the artifact scrolls under the header, and a click at the control\'s place passes through', () => {
+        assert.deepEqual(wideScrolled, { hit: false, opacity: '0', scrolled: true });
       });
 
       const pageDownload = await downloadFrom(send, onEvent, tallTab, 1);
@@ -633,18 +663,18 @@ async function main() {
       await tallTab.until(`document.body.classList.contains('page-board') && document.querySelector('.round[data-round="1"]').classList.contains('round-current')`, 'the flip back to the artifact round');
       await tallTab.sp('Emulation.setDeviceMetricsOverride', { width: 560, height: 800, deviceScaleFactor: 1, mobile: false });
       await tallTab.quiet();
-      const buttonHit = `(function () {
-        var chips = document.querySelector('.round-current .round-chips');
-        var r = chips.querySelector('.round-download').getBoundingClientRect();
-        var hit = document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2);
-        return { hit: !!(hit && hit.closest('.round-download')), opacity: getComputedStyle(chips).opacity,
-          scrolled: document.body.classList.contains('stage-scrolled') };
-      })()`;
       const narrowAtRest = await tallTab.evalPage(buttonHit);
+      const narrowHead = await tallTab.evalPage(`({ head: document.querySelector('.board-head').getBoundingClientRect().height,
+        chipsPad: parseFloat(getComputedStyle(document.querySelector('.round-current .round-chips')).paddingTop) })`);
       await evalIn(send, await artifactSession(send, 'Tall mock'), 'window.scrollTo(0, 200)');
       await tallTab.until(`document.body.classList.contains('stage-scrolled')`, 'the artifact scrolling');
       const narrowScrolled = await tallTab.evalPage(buttonHit);
       await tallTab.close();
+      await row('under a header taller than usual, as a narrow window makes it, the chip line still begins at the header\'s bottom', note => {
+        note(`header ${narrowHead.head}px tall, chip line padded ${narrowHead.chipsPad}px`);
+        assert.ok(narrowHead.head > 80, 'setup: the header is taller than the 76px the chip line falls back on');
+        assert.ok(Math.abs(narrowHead.chipsPad - narrowHead.head) <= 0.5);
+      });
       await row('in a narrow window, where the chip line stays drawn over a scrolled artifact, its Download round still takes a click', () => {
         assert.deepEqual(narrowAtRest, { hit: true, opacity: '1', scrolled: false }, 'setup: at rest the control is drawn and live');
         assert.deepEqual(narrowScrolled, { hit: true, opacity: '1', scrolled: true });
