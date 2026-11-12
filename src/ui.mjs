@@ -4351,7 +4351,7 @@ export const ui = `
   // said. The round's chip line goes too: the file's own head names the round.
   var EXPORT_DROP = '.round-chips, .round-end, .comment-btn, .comment-form, .comment-target, .pin-layer, '
     + '.pull-out, .stage-fold, .fold-toggle, .btn-defer, .rank-grip, .question-picks, .note-head, '
-    + '.page-send-bar, .page-comment-hint, '
+    + '.page-send-bar, '
     + 'script, noscript, source, object, embed, base, meta';
   var nextExportDiagramId = 0;
 
