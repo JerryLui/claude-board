@@ -496,6 +496,7 @@ async function main() {
         note(`${pageDownload.files.join(', ')}; the artifact reported ${mockH}px`);
         assert.deepEqual(pageDownload.files, ['tall-fixture-round-1.html']);
         assert.ok(mockH >= TALL_MOCK_PX, 'setup: the board measured the whole artifact');
+        assert.ok(mockH - TALL_MOCK_PX <= 1, `the artifact's own height to the pixel, not ${mockH - TALL_MOCK_PX}px more: none of the room the board pads it by for the header, the chip line and the comment rail`);
         assert.match(readFileSync(pageDownload.file, 'utf8'), new RegExp(`height: ${mockH + 2}px`), 'the frame is the artifact\'s own height');
       });
 
