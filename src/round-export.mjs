@@ -108,7 +108,10 @@ export function exportDocument(o) {
  * its holder: by printScale's answer or by the holder's own width over the
  * frame's, whichever is smaller. That second ratio is two lengths, which CSS
  * divides only through tan(atan2()); '100cqw' is the holder's width, read off
- * the '.stage-wrap' around it. A card taller than a page breaks between its
+ * the '.stage-wrap' around it. A browser with neither container units nor
+ * the trigonometric functions fits no mock: it would hold the board's width
+ * with nothing to scale it by, its right edge clipped, so there the frame
+ * prints at the width of its place, as any shorter mock does. A card taller than a page breaks between its
  * pieces (options, comments, paragraphs, table rows, notes), each kept whole,
  * and never inside a line. Code prints whole: paper cannot scroll, so its box
  * loses the board's height cap (an inline height, where the board has turned
@@ -161,9 +164,11 @@ body.round-export::before { display: none; }
   .export-round pre:not(.mermaid) { height: auto !important; max-height: none; overflow: visible; white-space: pre-wrap; overflow-wrap: anywhere; }
   .export-round .stage-wrap { container-type: inline-size; }
   .export-round .export-frame { break-inside: avoid; }
-  .export-round .export-fit { --export-fit: min(var(--export-scale), tan(atan2(100cqw, var(--export-w))));
-    height: calc(var(--export-h) * var(--export-fit)); overflow: hidden; }
-  .export-round .export-fit > iframe.html-stage { width: var(--export-w); max-width: none;
-    transform: scale(var(--export-fit)); transform-origin: 0 0; }
+  @supports (width: 1cqw) and (rotate: atan2(1px, 1px)) {
+    .export-round .export-fit { --export-fit: min(var(--export-scale), tan(atan2(100cqw, var(--export-w))));
+      height: calc(var(--export-h) * var(--export-fit)); overflow: hidden; }
+    .export-round .export-fit > iframe.html-stage { width: var(--export-w); max-width: none;
+      transform: scale(var(--export-fit)); transform-origin: 0 0; }
+  }
 }
 `;
