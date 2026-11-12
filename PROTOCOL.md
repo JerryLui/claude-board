@@ -2256,7 +2256,9 @@ the viewport's horizontal scrollbar when there is one, rounded up. The first rep
 animation frames for a real layout (a sandboxed `srcdoc` frame reads 0 before one), and a
 `ResizeObserver` on the body and the root reports every change after it. A new value is posted
 twice: at once, and again from a re-measure two frames later, so a height that holds arrives as
-two matching reports.
+two matching reports. A document `band` has padded past its own padding is measured with its
+own padding back in place for the read, so the report is the artifact's height and none of the
+room made for the board's chrome.
 
 It is stage-authored like every other field, so the parent (`handleStageHeight` and
 `applyStageHeight`, `src/ui.mjs`) drops a non-finite or non-positive value and caps the rest at

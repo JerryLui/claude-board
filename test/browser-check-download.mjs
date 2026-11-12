@@ -101,6 +101,12 @@ const TALL_ROUND_2 = [
 ];
 const TALL_COMMENTS = Array.from({ length: 14 }, (_, i) => ({ blockId: 'm2', anchor: { kind: 'block' },
   text: `Comment ${i} on the diagram. ${SENTENCE.repeat(6 + (i * 2) % 5)}`.trim() }));
+// A second artifact: its body is pinned to the window's height and its content spills
+// out of it, so the room the board pads the body by is not all in the height it has.
+const PINNED_PX = 3000;
+const TALL_ROUND_3 = [
+  { id: 'h4', kind: 'html', html: `<style>html, body { height: 100%; margin: 0; }</style><div style="height:${PINNED_PX}px;box-sizing:border-box;border:4px solid #3251c9;background:linear-gradient(#efe,#eef)">Pinned body, spilling content</div>` },
+];
 // A free-text answer and a note, each most of a page: under the question's explainer the
 // answer does not fit the first page, nor the note the page the answer moves to.
 const TALL_ANSWER = Array.from({ length: 40 }, (_, i) => `Reason ${i}, on a line of its own.`).join('\n');
@@ -307,6 +313,30 @@ async function paginate(send, onEvent, file, cookie, width = PRINT_W) {
   return read;
 }
 
+/** The height the artifact in block `id` reports, once it has reported one. An artifact
+ * round's report moves no box, so no DOM change re-reads an 'until': polled. */
+function reportedHeight(tab, id) {
+  return tab.sp('Runtime.evaluate', { awaitPromise: true, returnByValue: true, expression: `new Promise(function (resolve) {
+    var tries = 0;
+    (function poll() {
+      var h = document.querySelector('[data-block-id="${id}"] iframe').__cbStageContentH;
+      if (h || ++tries > 100) return resolve(h || 0);
+      setTimeout(poll, 50);
+    })();
+  })` }).then(r => r.result.value);
+}
+
+/** A DevTools session on the artifact whose text holds `marker`: to the browser a stage
+ * is a frame of its own, with a target of its own. */
+async function artifactSession(send, marker) {
+  const { targetInfos } = await send('Target.getTargets');
+  for (const t of targetInfos.filter(t => t.type === 'iframe')) {
+    const { sessionId } = await send('Target.attachToTarget', { targetId: t.targetId, flatten: true });
+    if (await evalIn(send, sessionId, `document.body.textContent.indexOf(${JSON.stringify(marker)}) >= 0`)) return sessionId;
+  }
+  throw new Error(`no artifact frame holds "${marker}"`);
+}
+
 async function waitForDownload(onEvent, dir) {
   return withTimeout(new Promise((resolve, reject) => {
     const off = onEvent(msg => {
@@ -341,6 +371,8 @@ async function main() {
     await postJson(`${origin}/api/board/${tall.boardId}/submit`, { round: 2, action: 'send',
       answers: [{ id: 'q7', status: 'answered', choice: 'Option 7', note: '' },
         { id: 'q9', status: 'answered', choice: TALL_ANSWER, note: TALL_NOTE }], comments: TALL_COMMENTS }, daemon.secret);
+    await postJson(`${origin}/api/board`, { boardId: tall.boardId, title: TALL_TITLE, blocks: TALL_ROUND_3 }, daemon.secret);
+    await postJson(`${origin}/api/board/${tall.boardId}/submit`, { round: 3, action: 'send', answers: [], comments: [] }, daemon.secret);
     await postJson(`${origin}/api/board`, { boardId: tall.boardId, title: TALL_TITLE,
       blocks: [{ id: 'q8', kind: 'question', prompt: 'Next?', widget: 'single', options: [{ label: 'Go' }] }] }, daemon.secret);
     const tallUrl = `${origin}${new URL(tall.url).pathname}`;
@@ -522,15 +554,7 @@ async function main() {
         expr: `document.querySelector('.round-current').getAttribute('data-round')` });
       await tallTab.evalPage(`document.querySelector('.round-page[data-round="1"]').click()`);
       await tallTab.until(`document.body.classList.contains('page-board') && document.querySelector('.round[data-round="1"]').classList.contains('round-current')`, 'the flip to the artifact round');
-      // An artifact round's report moves no box, so no DOM change re-reads an 'until': polled.
-      const mockH = await tallTab.sp('Runtime.evaluate', { awaitPromise: true, returnByValue: true, expression: `new Promise(function (resolve) {
-        var tries = 0;
-        (function poll() {
-          var h = document.querySelector('[data-block-id="h2"] iframe').__cbStageContentH;
-          if (h || ++tries > 100) return resolve(h || 0);
-          setTimeout(poll, 50);
-        })();
-      })` }).then(r => r.result.value);
+      const mockH = await reportedHeight(tallTab, 'h2');
       await tallTab.quiet();
       const page = await tallTab.evalPage(`(function () {
         function box(el) { var r = el.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, left: r.left, right: r.right }; }
@@ -540,7 +564,7 @@ async function main() {
       })()`);
       await row('a sent artifact round, drawn full page, shows Download round under the header', note => {
         note(`header ends at ${page.head.bottom}, button ${page.btn && page.btn.top}..${page.btn && page.btn.bottom}`);
-        assert.equal(tallTab.measured, '3', 'setup: the board opens on its open round');
+        assert.equal(tallTab.measured, '4', 'setup: the board opens on its open round');
         assert.ok(page.btn, 'the sent artifact round has the control');
         assert.ok(page.btn.top >= page.head.bottom - 0.5, 'below the header, not under it');
         assert.equal(page.hit, true, 'nothing covers it: a click lands on it');
@@ -569,6 +593,40 @@ async function main() {
       await tallTab.until(`document.querySelector('[data-block-id="m2"] pre.mermaid svg')`, 'the tall diagram drawn');
       const tallDownload = await downloadFrom(send, onEvent, tallTab, 2);
 
+      await tallTab.evalPage(`document.querySelector('.round-page[data-round="3"]').click()`);
+      await tallTab.until(`document.body.classList.contains('page-board') && document.querySelector('.round[data-round="3"]').classList.contains('round-current')`, 'the flip to the pinned artifact round');
+      await reportedHeight(tallTab, 'h4');
+      await tallTab.quiet();
+      // Read once the board has padded the artifact for its header and dock.
+      const pinnedH = await reportedHeight(tallTab, 'h4');
+      const pinnedDownload = await downloadFrom(send, onEvent, tallTab, 3);
+      await row('an artifact whose content spills out of a body pinned to the window is saved at the content\'s full height', note => {
+        const saved = /<iframe[^>]*style="height: (\d+)px/.exec(readFileSync(pinnedDownload.file, 'utf8'));
+        note(`the artifact is ${PINNED_PX}px tall and reported ${pinnedH}px; file frame ${saved && saved[1]}px`);
+        assert.equal(saved && Number(saved[1]), PINNED_PX + 2, 'the artifact\'s own height plus its frame edge: no shorter, which would cut its end off');
+      });
+
+      // Measured again with the reader at its end: the read takes the board's padding off
+      // for a moment, and the document is then shorter than where the reader is.
+      const pinnedFrame = await artifactSession(send, 'Pinned body');
+      const atEnd = await evalIn(send, pinnedFrame, `(function () {
+        window.scrollTo(0, document.documentElement.scrollHeight);
+        // Added after the stage's own listener, so read once that has measured.
+        window.__afterAsk = new Promise(function (resolve) {
+          window.addEventListener('message', function (ev) { if (ev.data && ev.data.type === 'height') resolve(window.scrollY); });
+        });
+        return window.scrollY;
+      })()`);
+      await tallTab.evalPage(`document.querySelector('[data-block-id="h4"] iframe').contentWindow.postMessage({ cb: 'cb-stage', type: 'height' }, '*')`);
+      const afterAsk = await evalIn(send, pinnedFrame, 'window.__afterAsk', { awaitPromise: true });
+      await evalIn(send, pinnedFrame, 'window.scrollTo(0, 0)');
+      await tallTab.until(`!document.body.classList.contains('stage-scrolled')`, 'the pinned artifact back at its top');
+      await row('measuring an artifact leaves a reader at its end where they were', note => {
+        note(`at ${atEnd}px before the board asked its height, ${afterAsk}px after`);
+        assert.ok(atEnd > PINNED_PX - 800, 'setup: the reader is further down than the artifact reaches without the board\'s padding');
+        assert.equal(afterAsk, atEnd);
+      });
+
       // Back on the artifact round, in a window too narrow for the header to condense:
       // the chip line stays drawn as the artifact scrolls under it.
       await tallTab.evalPage(`document.querySelector('.round-page[data-round="1"]').click()`);
@@ -583,12 +641,7 @@ async function main() {
           scrolled: document.body.classList.contains('stage-scrolled') };
       })()`;
       const narrowAtRest = await tallTab.evalPage(buttonHit);
-      // The artifact is a frame of its own to the browser; this tab's is the only one open.
-      const { targetInfos } = await send('Target.getTargets');
-      for (const t of targetInfos.filter(t => t.type === 'iframe')) {
-        const { sessionId } = await send('Target.attachToTarget', { targetId: t.targetId, flatten: true });
-        await evalIn(send, sessionId, 'window.scrollTo(0, 200)');
-      }
+      await evalIn(send, await artifactSession(send, 'Tall mock'), 'window.scrollTo(0, 200)');
       await tallTab.until(`document.body.classList.contains('stage-scrolled')`, 'the artifact scrolling');
       const narrowScrolled = await tallTab.evalPage(buttonHit);
       await tallTab.close();

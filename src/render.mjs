@@ -1788,11 +1788,10 @@ export function stageAgentScript() {
   // taken once by the side that can see its own chrome, used for both the
   // padding and the anchor offset, so the two can never disagree.
   var bandTop = 0;
-  // How much of this document's height is the band's padding and not the
-  // artifact: a height report leaves it out, so a saved copy of the artifact,
-  // which no chrome covers, ends where the artifact does. Whole pixels, rounded
-  // down: a report a pixel over leaves a blank line, one under cuts the artifact.
-  var bandPad = 0;
+  // Whether the band has padded this document past its own padding. A height
+  // report then measures it without that room (measureArtifact), so a saved
+  // copy of the artifact, which no chrome covers, ends where the artifact does.
+  var banded = false;
 
   var buildSteps = ${buildSteps.toString()};
   var stepsToPath = ${stepsToPath.toString()};
@@ -1878,7 +1877,7 @@ export function stageAgentScript() {
     } catch (e) { /* no computed style reachable -- treat the artifact as padding nothing */ }
     document.body.style.paddingTop = Math.max(ownTop, top) + 'px';
     document.body.style.paddingBottom = Math.max(ownBottom, bottom) + 'px';
-    bandPad = Math.floor(Math.max(0, top - ownTop) + Math.max(0, bottom - ownBottom));
+    banded = top > ownTop || bottom > ownBottom;
   }
 
   // Discoverability CSS, applied inside THIS document only -- see QUIRKS.md
@@ -2301,7 +2300,7 @@ export function stageAgentScript() {
   var heightLast = -1;
   var heightConfirmQueued = false;
   function reportHeight() {
-    var h = Math.max(0, measureHeight() - bandPad);
+    var h = measureArtifact();
     post({ type: 'height', height: h });
     if (h === heightLast) return;
     heightLast = h;
@@ -2316,6 +2315,31 @@ export function stageAgentScript() {
         reportHeight();
       });
     });
+  }
+
+  // measureHeight of the artifact alone. A banded document is measured with
+  // its own padding back in place for the length of the read, and the band's
+  // put back before anything paints: how much of the band's room a height
+  // holds depends on what gave it (all of it for a body that grows with its
+  // content, the top alone for content spilling out of a pinned body, none
+  // for content positioned over the body), so no sum taken off afterwards is
+  // right for every artifact. A shorter document can pull a reader at its end
+  // up; the offset is put back with the padding. A document the band has not
+  // padded is measured as it stands.
+  function measureArtifact() {
+    var body = document.body;
+    if (!banded || !body) return measureHeight();
+    var scroller = document.scrollingElement;
+    var at = scroller ? scroller.scrollTop : 0;
+    var top = body.style.paddingTop;
+    var bottom = body.style.paddingBottom;
+    body.style.paddingTop = '';
+    body.style.paddingBottom = '';
+    var h = measureHeight();
+    body.style.paddingTop = top;
+    body.style.paddingBottom = bottom;
+    if (at && scroller.scrollTop !== at) scroller.scrollTop = at;
+    return h;
   }
 
   // The height a frame needs to show this whole document with no vertical
