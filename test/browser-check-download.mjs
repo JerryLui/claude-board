@@ -31,7 +31,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { sessionToken } from '../src/secret.mjs';
 import { runMain, skipFile, withTimeout } from './support.mjs';
-import { CHROME, guardRun, measureTab, openTab, postJson, row, scratchDir, startScratchDaemon, withChrome } from './browser-support.mjs';
+import { CHROME, copyArchive, evalIn, guardRun, measureTab, openTab, postJson, row, scratchDir, startScratchDaemon, withChrome } from './browser-support.mjs';
 
 if (!existsSync(CHROME)) skipFile('browser-check-download', `browser-check-download: no Chrome at ${CHROME} (set CLAUDE_BOARD_CHROME_BIN to override)`);
 
@@ -512,7 +512,55 @@ async function main() {
       await tallTab.until(`document.querySelector('.round[data-round="2"]').classList.contains('round-current')`, 'the flip to round 2');
       await tallTab.until(`document.querySelector('[data-block-id="m2"] pre.mermaid svg')`, 'the tall diagram drawn');
       const tallDownload = await downloadFrom(send, onEvent, tallTab, 2);
+
+      // Back on the artifact round, in a window too narrow for the header to condense:
+      // the chip line stays drawn as the artifact scrolls under it.
+      await tallTab.evalPage(`document.querySelector('.round-page[data-round="1"]').click()`);
+      await tallTab.until(`document.body.classList.contains('page-board') && document.querySelector('.round[data-round="1"]').classList.contains('round-current')`, 'the flip back to the artifact round');
+      await tallTab.sp('Emulation.setDeviceMetricsOverride', { width: 560, height: 800, deviceScaleFactor: 1, mobile: false });
+      await tallTab.quiet();
+      const buttonHit = `(function () {
+        var chips = document.querySelector('.round-current .round-chips');
+        var r = chips.querySelector('.round-download').getBoundingClientRect();
+        var hit = document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+        return { hit: !!(hit && hit.closest('.round-download')), opacity: getComputedStyle(chips).opacity,
+          scrolled: document.body.classList.contains('stage-scrolled') };
+      })()`;
+      const narrowAtRest = await tallTab.evalPage(buttonHit);
+      // The artifact is a frame of its own to the browser; this tab's is the only one open.
+      const { targetInfos } = await send('Target.getTargets');
+      for (const t of targetInfos.filter(t => t.type === 'iframe')) {
+        const { sessionId } = await send('Target.attachToTarget', { targetId: t.targetId, flatten: true });
+        await evalIn(send, sessionId, 'window.scrollTo(0, 200)');
+      }
+      await tallTab.until(`document.body.classList.contains('stage-scrolled')`, 'the artifact scrolling');
+      const narrowScrolled = await tallTab.evalPage(buttonHit);
       await tallTab.close();
+      await row('in a narrow window, where the chip line stays drawn over a scrolled artifact, its Download round still takes a click', () => {
+        assert.deepEqual(narrowAtRest, { hit: true, opacity: '1', scrolled: false }, 'setup: at rest the control is drawn and live');
+        assert.deepEqual(narrowScrolled, { hit: true, opacity: '1', scrolled: true });
+      });
+
+      // The board as a reader has it with no daemon behind it: opened from disk, read-only.
+      const archive = copyArchive(path.join(daemon.home, 'pages'), tall.boardId, 'cb-download');
+      const archived = await openTab(send, onEvent, archive.pageUrl, cookie, { width: 1280, height: 800, theme: 'dark',
+        expr: `document.body.classList.contains('readonly')` });
+      await archived.evalPage(`document.querySelector('.round-page[data-round="1"]').click()`);
+      await archived.until(`document.body.classList.contains('page-board') && document.querySelector('.round[data-round="1"]').classList.contains('round-current')`, 'the archive\'s flip to the artifact round');
+      await archived.quiet();
+      const strip = await archived.evalPage(`(function () {
+        var chips = document.querySelector('.round-current .round-chips');
+        var mock = document.querySelector('.round-current iframe').getBoundingClientRect();
+        var hit = document.elementFromPoint(mock.left + mock.width / 2, document.querySelector('.board-head').getBoundingClientRect().bottom + 12);
+        return { chips: !!chips, height: chips ? chips.getBoundingClientRect().height : 0, overMock: !!(hit && hit.closest('.round-chips')) };
+      })()`);
+      await archived.close();
+      await row('a read-only archive, which offers no Download round, draws no chip line over a sent artifact round', note => {
+        note(`chip line ${strip.height}px tall`);
+        assert.equal(archived.measured, true, 'setup: opened from disk, the board is read-only');
+        assert.equal(strip.chips, true, 'setup: the sent artifact round carries its chip line');
+        assert.deepEqual({ height: strip.height, overMock: strip.overMock }, { height: 0, overMock: false });
+      });
 
       const printedPage = await paginate(send, onEvent, pageDownload.file, cookie, A4_W);
       await row('printed, a mock taller than a page is scaled to fit one, never cut', note => {

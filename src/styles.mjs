@@ -2199,11 +2199,15 @@ body.page-board .html-stage { height: 100vh; min-height: 0; border: none; border
    behind the header at rest whose chips sit right under it, so the header's wash
    runs on through it with no seam, inside the top band src/ui.mjs's
    reportStageBand has the stage pad: it never covers the artifact. It leaves
-   with the header's identity text as the artifact scrolls under the pill. */
+   with the header's identity text as the artifact scrolls under the pill, and
+   then lets a click through; at 560px and under the header never condenses
+   ('--stage-p' is pinned to 0 there), so the line stays drawn and stays live.
+   A Finder-opened archive offers no Download round, so it draws no line. */
 body.page-board .round-chips { position: fixed; z-index: 19; top: 0; left: 0; right: 0;
   padding: var(--page-head-h, 76px) var(--space-5) var(--space-3); background: linear-gradient(to bottom, var(--bg) 80%, var(--bg-fade-0));
   opacity: calc(1 - var(--stage-p) * 1.8); }
-body.page-board.stage-scrolled .round-chips { pointer-events: none; }
+@media (min-width: 561px) { body.page-board.stage-scrolled .round-chips { pointer-events: none; } }
+body.readonly.page-board .round-chips { display: none; }
 /* ADR.md entry 35: a page board is not sendable. Same idiom, same guarantee as
    'body.readonly .send-bar' above -- the bar stays in the markup because a round
    arriving over SSE turns this board into an ordinary one in place (src/ui.mjs's
