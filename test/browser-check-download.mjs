@@ -30,7 +30,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { sessionToken } from '../src/secret.mjs';
 import { runMain, skipFile, withTimeout } from './support.mjs';
-import { CHROME, guardRun, openTab, postJson, row, scratchDir, startScratchDaemon, withChrome } from './browser-support.mjs';
+import { CHROME, guardRun, measureTab, openTab, postJson, row, scratchDir, startScratchDaemon, withChrome } from './browser-support.mjs';
 
 if (!existsSync(CHROME)) skipFile('browser-check-download', `browser-check-download: no Chrome at ${CHROME} (set CLAUDE_BOARD_CHROME_BIN to override)`);
 
@@ -63,6 +63,8 @@ const TALL_MOCK_PX = 2400;
 const TALL_ROUND_1 = [
   { id: 'h2', kind: 'html', html: `<div style="height:${TALL_MOCK_PX}px;box-sizing:border-box;border:4px solid #3251c9;background:linear-gradient(#eef,#fee)">Tall mock</div>` },
 ];
+// More than the board's comment rail shows at once: it scrolls past three.
+const TALL_PAGE_COMMENTS = Array.from({ length: 5 }, (_, i) => ({ blockId: 'h2', anchor: { kind: 'block' }, text: `Mock comment ${i}` }));
 const TALL_ROUND_2 = [
   { id: 'd2', kind: 'markdown', text: Array.from({ length: 12 }, (_, i) => `Paragraph ${i}: ` + 'a sentence that runs on so the paragraph takes several printed lines. '.repeat(8)).join('\n\n') },
   { id: 'm2', kind: 'mermaid', text: 'flowchart TD\n' + Array.from({ length: 24 }, (_, i) => `  n${i}[Step ${i}] --> n${i + 1}[Step ${i + 1}]`).join('\n') },
@@ -135,6 +137,30 @@ const EXPORT_EXPR = `(function () {
     scripts: document.scripts.length,
     controls: document.querySelectorAll('button, textarea, input, form, .pin-layer, .round-download').length,
     fetched: performance.getEntriesByType('resource').map(function (e) { return e.name; }).filter(function (n) { return !/^data:/.test(n); }),
+  };
+})()`;
+
+// The artifact round's file as opened: each comment with whether it sits below the mock
+// and whether a box that clips what leaves it hides it, and what is left of the board's
+// controls.
+const PAGE_FILE_EXPR = `(function () {
+  var frameBottom = document.querySelector('section.export-round iframe').getBoundingClientRect().bottom;
+  function hidden(el) {
+    var r = el.getBoundingClientRect();
+    for (var p = el.parentElement; p && p !== document.body; p = p.parentElement) {
+      if (getComputedStyle(p).overflowY === 'visible') continue;
+      var box = p.getBoundingClientRect();
+      if (r.top < box.top - 0.5 || r.bottom > box.bottom + 0.5) return true;
+    }
+    return false;
+  }
+  return {
+    comments: [].slice.call(document.querySelectorAll('section.export-round .comment-item')).map(function (c) {
+      return { text: c.textContent.slice(c.querySelector('.comment-anchor').textContent.length).trim(),
+        below: c.getBoundingClientRect().top >= frameBottom, shown: !hidden(c) };
+    }),
+    controls: document.querySelectorAll('button, textarea, input, form, .pin-layer, .round-download').length,
+    sendBars: document.querySelectorAll('.page-send-bar').length,
   };
 })()`;
 
@@ -238,7 +264,7 @@ async function main() {
 
     const tall = await postJson(`${origin}/api/board`, { title: TALL_TITLE, blocks: TALL_ROUND_1 }, daemon.secret);
     await postJson(`${origin}/api/board/${tall.boardId}/submit`, { round: 1, action: 'send', answers: [],
-      comments: [{ blockId: 'h2', anchor: { kind: 'block' }, text: 'Mock comment' }] }, daemon.secret);
+      comments: TALL_PAGE_COMMENTS }, daemon.secret);
     await postJson(`${origin}/api/board`, { boardId: tall.boardId, title: TALL_TITLE, blocks: TALL_ROUND_2 }, daemon.secret);
     await postJson(`${origin}/api/board/${tall.boardId}/submit`, { round: 2, action: 'send',
       answers: [{ id: 'q7', status: 'answered', choice: 'Option 7', note: '' }], comments: TALL_COMMENTS }, daemon.secret);
@@ -414,6 +440,15 @@ async function main() {
         assert.deepEqual(pageDownload.files, ['tall-fixture-round-1.html']);
         assert.ok(mockH >= TALL_MOCK_PX, 'setup: the board measured the whole artifact');
         assert.match(readFileSync(pageDownload.file, 'utf8'), new RegExp(`height: ${mockH + 2}px`), 'the frame is the artifact\'s own height');
+      });
+
+      const pageFile = await measureTab(send, onEvent, pathToFileURL(pageDownload.file).href, cookie,
+        { width: 1280, height: 900, theme: 'dark', expr: PAGE_FILE_EXPR, prepare: offline });
+      await row('the artifact round\'s file lists every comment below the mock, none hidden in a scroll box, with no control or send bar left', note => {
+        note(pageFile.comments.map(c => `${c.text}: ${c.below ? 'below' : 'over'} the mock, ${c.shown ? 'shown' : 'hidden'}`).join('; '));
+        assert.deepEqual(pageFile.comments, TALL_PAGE_COMMENTS.map(c => ({ text: c.text, below: true, shown: true })));
+        assert.equal(pageFile.controls, 0, 'no control is left in the file');
+        assert.equal(pageFile.sendBars, 0, 'the board\'s send bar stays on the board');
       });
 
       await tallTab.evalPage(`document.querySelector('.round-page[data-round="2"]').click()`);

@@ -139,6 +139,7 @@ body.round-export::before { display: none; }
 .export-round .html-stage { max-height: none; }
 .export-round .export-missing { color: var(--muted); font-style: italic; font-size: 12.5px; }
 .export-round .comment-list { display: block; }
+.export-round .comment-list-wrap { max-height: none; overflow: visible; }
 @media print {
   body.round-export { padding: 0; background: #fff; }
   .export-round .block { box-shadow: none; }
