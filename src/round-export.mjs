@@ -7,7 +7,8 @@
 // src/ui.mjs cannot import src/render.mjs).
 //
 // Every function below that src/ui.mjs embeds is self-contained: no import, no
-// module-scope name, since its text runs in the tab on its own.
+// module-scope name, since its text runs in the tab on its own. The one
+// exception is PRINT_PAGE_H, which src/ui.mjs embeds beside printScale.
 
 const DOWNLOAD_ICON = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="M7 11l5 5 5-5"/><path d="M5 21h14"/></svg>';
 
@@ -49,15 +50,18 @@ export function exportFileName(title, n) {
   return (slug || 'board') + '-round-' + n + '.html';
 }
 
+/** The height, in px, of the one printed page a taller diagram or mock is fitted to:
+ * Letter's, the shorter paper, under Chrome's default 0.4in margins, less a little
+ * for rounding. */
+export const PRINT_PAGE_H = 960;
+
 /** How far a printed page's height shrinks a mock 'height' px tall as drawn on the
- * board: not at all unless the mock is taller than one page, then to that page. The
- * page is Letter's height, the shorter paper, under Chrome's default 0.4in margins,
- * less a little for rounding. A mock no taller than a page prints as it always did,
- * at the width of its place in the file. EXPORT_CSS's print half shrinks a taller
- * one further where its holder's width is the tighter limit. */
+ * board: not at all unless the mock is taller than one page, then to that page. A
+ * mock no taller than a page prints as it always did, at the width of its place in
+ * the file. EXPORT_CSS's print half shrinks a taller one further where its holder's
+ * width is the tighter limit. */
 export function printScale(height) {
-  var pageH = 960;
-  return height > pageH ? pageH / height : 1;
+  return height > PRINT_PAGE_H ? PRINT_PAGE_H / height : 1;
 }
 
 /** The file itself. `css` is the board's stylesheet as text, so the drawn blocks
@@ -98,8 +102,7 @@ export function exportDocument(o) {
  * file is printed. The print half keeps a card, a question, a diagram, a stage and
  * a decisions row each on one page, and keeps the marks a reader needs (the picked
  * option's tint, the card edges) when the browser would drop backgrounds. A
- * diagram taller than a page is drawn smaller to fit one (the 960px of
- * printScale's page). A mock taller than a page (its holder is '.export-fit',
+ * diagram taller than a page is drawn smaller to fit one (PRINT_PAGE_H). A mock taller than a page (its holder is '.export-fit',
  * carrying the frame's width and height on the board and printScale's answer)
  * keeps the board's width, so it lays out as it was drawn, and is scaled into
  * its holder: by printScale's answer or by the holder's own width over the
@@ -154,7 +157,7 @@ body.round-export::before { display: none; }
   .export-round .stage-wrap, .export-round pre.mermaid, .export-round .comment-item, .export-decisions tr,
   .export-round p, .export-round li, .export-round tr, .export-round .export-text, .export-round .export-note-box { break-inside: avoid; }
   .export-round .card-head, .export-round .question-prompt { break-after: avoid; }
-  .export-round pre.mermaid svg { max-height: 960px; }
+  .export-round pre.mermaid svg { max-height: ${PRINT_PAGE_H}px; }
   .export-round pre:not(.mermaid) { height: auto !important; max-height: none; overflow: visible; white-space: pre-wrap; overflow-wrap: anywhere; }
   .export-round .stage-wrap { container-type: inline-size; }
   .export-round .export-frame { break-inside: avoid; }

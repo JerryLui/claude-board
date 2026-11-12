@@ -65,7 +65,7 @@ import { MERMAID_ASSET } from './vendor/mermaid/index.mjs';
 import { openSharedStream, STREAM_WORKER_URL } from './stream-worker.mjs';
 import { activityMinMs } from './activity.mjs';
 import {
-  ROUND_DOWNLOAD_BUTTON, EXPORT_CSS, decisionRows, exportDate, exportFileName, exportDocument, printScale,
+  ROUND_DOWNLOAD_BUTTON, EXPORT_CSS, PRINT_PAGE_H, decisionRows, exportDate, exportFileName, exportDocument, printScale,
 } from './round-export.mjs';
 // The one source of truth for both image limits -- the daemon's own
 // src/images.mjs checks a submit against these same two constants, so a page
@@ -4346,6 +4346,7 @@ export const ui = `
   var exportDate = ${exportDate.toString()};
   var exportFileName = ${exportFileName.toString()};
   var exportDocument = ${exportDocument.toString()};
+  var PRINT_PAGE_H = ${PRINT_PAGE_H};
   var printScale = ${printScale.toString()};
   // Everything in a round that is a control or a pin rather than what the round
   // said. The round's chip line goes too: the file's own head names the round.
