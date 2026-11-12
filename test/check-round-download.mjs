@@ -3,14 +3,14 @@
 // src/render.mjs and added by src/ui.mjs's markRoundHistory when a round goes sent under
 // an open tab; a round still open or abandoned offers none. The decisions table's pick
 // text per widget, and the file's head escaped so no title or stylesheet text can open a
-// script. The saved file itself, its layout and its print are
-// test/browser-check-download.mjs's, run by hand.
+// script, and how far a printed page's height shrinks a mock. The saved file itself, its
+// layout and its print are test/browser-check-download.mjs's, run by hand.
 
 import assert from 'node:assert/strict';
 import { createBoard, addRound, applySubmit, abandonOpenRounds } from '../src/board.mjs';
 import { renderBoardPage } from '../src/render.mjs';
 import { buildRoundPushPayload } from '../src/server.mjs';
-import { decisionRows, exportDocument } from '../src/round-export.mjs';
+import { decisionRows, exportDocument, printScale } from '../src/round-export.mjs';
 import { parseHTML } from './dom-stand-in.mjs';
 import { check, finish, pageHarness } from './support.mjs';
 
@@ -123,6 +123,14 @@ check('the file\'s head escapes the title, the round\'s name and every table cel
   const document = parseHTML(html);
   assert.equal(document.querySelector('h1').textContent, hostile);
   assert.deepEqual(document.querySelectorAll('td').map(td => td.textContent), [hostile, hostile, hostile]);
+});
+
+check('a printed page\'s height shrinks only a mock taller than the page, to that one page, and never enlarges one', () => {
+  const rows = [
+    [320, 1], [960, 1], [1920, 0.5], [2880, 1 / 3],
+    [0, 1], [NaN, 1], [undefined, 1],
+  ];
+  for (const [height, scale] of rows) assert.equal(printScale(height), scale, `a mock ${height}px tall`);
 });
 
 finish('round-download');

@@ -1788,6 +1788,11 @@ export function stageAgentScript() {
   // taken once by the side that can see its own chrome, used for both the
   // padding and the anchor offset, so the two can never disagree.
   var bandTop = 0;
+  // How much of this document's height is the band's padding and not the
+  // artifact: a height report leaves it out, so a saved copy of the artifact,
+  // which no chrome covers, ends where the artifact does. Whole pixels, rounded
+  // down: a report a pixel over leaves a blank line, one under cuts the artifact.
+  var bandPad = 0;
 
   var buildSteps = ${buildSteps.toString()};
   var stepsToPath = ${stepsToPath.toString()};
@@ -1873,6 +1878,7 @@ export function stageAgentScript() {
     } catch (e) { /* no computed style reachable -- treat the artifact as padding nothing */ }
     document.body.style.paddingTop = Math.max(ownTop, top) + 'px';
     document.body.style.paddingBottom = Math.max(ownBottom, bottom) + 'px';
+    bandPad = Math.floor(Math.max(0, top - ownTop) + Math.max(0, bottom - ownBottom));
   }
 
   // Discoverability CSS, applied inside THIS document only -- see QUIRKS.md
@@ -2295,7 +2301,7 @@ export function stageAgentScript() {
   var heightLast = -1;
   var heightConfirmQueued = false;
   function reportHeight() {
-    var h = measureHeight();
+    var h = Math.max(0, measureHeight() - bandPad);
     post({ type: 'height', height: h });
     if (h === heightLast) return;
     heightLast = h;

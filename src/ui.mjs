@@ -4477,16 +4477,18 @@ export const ui = `
       frame.setAttribute('title', 'Mock');
       frame.setAttribute('srcdoc', scriptFreeHtml(srcdoc));
       frame.style.height = height + 'px';
-      // Printed at the board's width, so the mock lays out as it was drawn, and
-      // scaled into one page in a box of the scaled height (EXPORT_CSS's print half).
+      // A mock taller than a printed page prints at the board's width, so it lays
+      // out as it was drawn, scaled into one page (EXPORT_CSS's print half). Any
+      // other prints as the file shows it.
       var holder = document.createElement('div');
       holder.className = 'export-frame';
       holder.appendChild(frame);
-      if (width) {
-        var scale = printScale(width, height);
+      var scale = printScale(height);
+      if (width && scale < 1) {
+        holder.classList.add('export-fit');
         holder.style.setProperty('--export-w', width + 'px');
+        holder.style.setProperty('--export-h', height + 'px');
         holder.style.setProperty('--export-scale', String(scale));
-        holder.style.setProperty('--export-print-h', Math.ceil(height * scale) + 'px');
       }
       p[1].replaceWith(holder);
     });

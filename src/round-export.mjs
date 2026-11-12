@@ -49,15 +49,15 @@ export function exportFileName(title, n) {
   return (slug || 'board') + '-round-' + n + '.html';
 }
 
-/** How far the printed file scales a mock 'width' x 'height' px as drawn on the
- * board: to one printed page, never up. The page is Chrome's default 0.4in margins
- * on A4's width and Letter's height, the narrower and the shorter, less a little
- * for rounding, so a mock it fits is never cut on either paper. The frame keeps the
- * board's width, so the mock lays out as it was drawn and prints smaller. */
-export function printScale(width, height) {
-  var pageW = 710, pageH = 960;
-  if (!(width > 0) || !(height > 0)) return 1;
-  return Math.min(1, pageW / width, pageH / height);
+/** How far a printed page's height shrinks a mock 'height' px tall as drawn on the
+ * board: not at all unless the mock is taller than one page, then to that page. The
+ * page is Letter's height, the shorter paper, under Chrome's default 0.4in margins,
+ * less a little for rounding. A mock no taller than a page prints as it always did,
+ * at the width of its place in the file. EXPORT_CSS's print half shrinks a taller
+ * one further where its holder's width is the tighter limit. */
+export function printScale(height) {
+  var pageH = 960;
+  return height > pageH ? pageH / height : 1;
 }
 
 /** The file itself. `css` is the board's stylesheet as text, so the drawn blocks
@@ -99,10 +99,17 @@ export function exportDocument(o) {
  * a decisions row each on one page, and keeps the marks a reader needs (the picked
  * option's tint, the card edges) when the browser would drop backgrounds. A
  * diagram taller than a page is drawn smaller to fit one (the 960px of
- * printScale's page), and a mock is scaled by printScale's answer, which the
- * export writes on the frame's holder with the board's width and the scaled
- * height. A card taller than a page breaks between its pieces (options,
- * comments, paragraphs, notes), each kept whole, and never inside a line. */
+ * printScale's page). A mock taller than a page (its holder is '.export-fit',
+ * carrying the frame's width and height on the board and printScale's answer)
+ * keeps the board's width, so it lays out as it was drawn, and is scaled into
+ * its holder: by printScale's answer or by the holder's own width over the
+ * frame's, whichever is smaller. That second ratio is two lengths, which CSS
+ * divides only through tan(atan2()); '100cqw' is the holder's width, read off
+ * the '.stage-wrap' around it. A card taller than a page breaks between its
+ * pieces (options, comments, paragraphs, table rows, notes), each kept whole,
+ * and never inside a line. Code prints whole: paper cannot scroll, so its box
+ * loses the board's height cap (an inline height, where the board has turned
+ * the cap into one) and a long line wraps. */
 export const EXPORT_CSS = `
 body.round-export { min-height: 0; padding: 40px 24px; background: var(--bg); -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 body.round-export::before { display: none; }
@@ -139,16 +146,21 @@ body.round-export::before { display: none; }
 .export-round .html-stage { max-height: none; }
 .export-round .export-missing { color: var(--muted); font-style: italic; font-size: 12.5px; }
 .export-round .comment-list { display: block; }
+.export-round .comment-list-wrap { max-height: none; overflow: visible; }
 @media print {
   body.round-export { padding: 0; background: #fff; }
   .export-round .block { box-shadow: none; }
   .export-round .block, .export-round .question-block, .export-round .card-choice, .export-round .variant-card,
   .export-round .stage-wrap, .export-round pre.mermaid, .export-round .comment-item, .export-decisions tr,
-  .export-round p, .export-round li, .export-round .export-text, .export-round .export-note-box { break-inside: avoid; }
+  .export-round p, .export-round li, .export-round tr, .export-round .export-text, .export-round .export-note-box { break-inside: avoid; }
   .export-round .card-head, .export-round .question-prompt { break-after: avoid; }
   .export-round pre.mermaid svg { max-height: 960px; }
-  .export-round .export-frame { height: var(--export-print-h, auto); overflow: hidden; break-inside: avoid; }
-  .export-round .export-frame > iframe.html-stage { width: var(--export-w, 100%); max-width: none;
-    transform: scale(var(--export-scale, 1)); transform-origin: 0 0; }
+  .export-round pre:not(.mermaid) { height: auto !important; max-height: none; overflow: visible; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .export-round .stage-wrap { container-type: inline-size; }
+  .export-round .export-frame { break-inside: avoid; }
+  .export-round .export-fit { --export-fit: min(var(--export-scale), tan(atan2(100cqw, var(--export-w))));
+    height: calc(var(--export-h) * var(--export-fit)); overflow: hidden; }
+  .export-round .export-fit > iframe.html-stage { width: var(--export-w); max-width: none;
+    transform: scale(var(--export-fit)); transform-origin: 0 0; }
 }
 `;
