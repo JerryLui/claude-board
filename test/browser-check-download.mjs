@@ -5,9 +5,12 @@
 // with the pick marked, the diagram as SVG at full height, the mock at its full height
 // with none of its scripts run, each comment under what it points at and every image as
 // a data: URL, with no script anywhere in it; and under print media every card, diagram,
-// stage and decisions row is kept whole and fits one page. Layout, a real download and a
-// file: page, none of which the DOM stand-in has (test/check-round-download.mjs holds
-// the markup).
+// stage and decisions row is kept whole and fits one page. A second board holds what is
+// taller than a printed page: a sent artifact round (drawn full page, its Download round
+// on a chip line of its own), a long text, a diagram, a question with many options and a
+// long comment list; its files are paginated under print media and nothing that must
+// stay whole sits across a page's edge. Layout, a real download and a file: page, none of which the DOM
+// stand-in has (test/check-round-download.mjs holds the markup).
 //
 // The fixture's images: one pasted on a note and one on a comment, sent with the round
 // and served beside the board (src/images.mjs), and an option's preview off another
@@ -19,7 +22,7 @@
 //   node test/browser-check-download.mjs
 //
 // Without Chrome it prints a skip line and exits 0. CLAUDE_BOARD_DOWNLOAD_KEEP=<dir>
-// copies the saved file there.
+// copies the saved files there.
 
 import assert from 'node:assert/strict';
 import { existsSync, readdirSync, readFileSync, writeFileSync, copyFileSync } from 'node:fs';
@@ -54,6 +57,21 @@ const ROUND_1 = [
   { id: 'q4', kind: 'question', prompt: 'Order them', widget: 'rank', options: [{ label: 'X' }, { label: 'Y' }, { label: 'Z' }] },
   { id: 'q5', kind: 'question', prompt: 'Park this?', widget: 'single', options: [{ label: 'Park' }, { label: 'Keep' }] },
 ];
+// The second board: everything here is taller than a printed page.
+const TALL_TITLE = 'Tall fixture';
+const TALL_MOCK_PX = 2400;
+const TALL_ROUND_1 = [
+  { id: 'h2', kind: 'html', html: `<div style="height:${TALL_MOCK_PX}px;box-sizing:border-box;border:4px solid #3251c9;background:linear-gradient(#eef,#fee)">Tall mock</div>` },
+];
+const TALL_ROUND_2 = [
+  { id: 'd2', kind: 'markdown', text: Array.from({ length: 12 }, (_, i) => `Paragraph ${i}: ` + 'a sentence that runs on so the paragraph takes several printed lines. '.repeat(8)).join('\n\n') },
+  { id: 'm2', kind: 'mermaid', text: 'flowchart TD\n' + Array.from({ length: 24 }, (_, i) => `  n${i}[Step ${i}] --> n${i + 1}[Step ${i + 1}]`).join('\n') },
+  { id: 'q7', kind: 'question', prompt: 'Which of the many?', widget: 'single',
+    options: Array.from({ length: 30 }, (_, i) => ({ label: `Option ${i}`, description: `What option ${i} would mean, in a sentence long enough to take a line of its own.` })) },
+];
+const TALL_COMMENTS = Array.from({ length: 30 }, (_, i) => ({ blockId: 'm2', anchor: { kind: 'block' },
+  text: `Comment ${i} on the diagram, long enough that thirty of them run past a printed page.` }));
+
 // A 3x2 red PNG, pasted twice.
 const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAIAAAASFvFNAAAAEklEQVR4nGP4z8DAwMDAxMAAAA8kAgFzQfa2AAAAAElFTkSuQmCC';
 const ANSWERS = [
@@ -129,6 +147,68 @@ const PRINT_EXPR = `(function () {
   });
 })()`;
 
+// The file under print media, paginated: the body becomes a column set one printed page
+// wide and one page tall, so Chrome's own fragmentation lays each page out as a column
+// (the engine paged media uses). A piece is cut when it leaves its column's top or bottom
+// edge (a diagram or a frame, which cannot be split) or lies in more than one fragment (an
+// option, a comment). Answers every such piece and how many pages each card runs over.
+const PAGES_EXPR = `(function () {
+  var style = document.createElement('style');
+  style.textContent = 'html, body.round-export { margin: 0; padding: 0; } body.round-export { height: ${PRINT_H}px; column-width: ${PRINT_W}px; column-gap: 0; column-fill: auto; }';
+  document.head.appendChild(style);
+  var bodyTop = document.body.getBoundingClientRect().top;
+  function piece(what) {
+    return function (el) {
+      var r = el.getBoundingClientRect();
+      return { what: what, top: Math.round(r.top - bodyTop), bottom: Math.round(r.bottom - bodyTop), height: Math.round(r.height),
+        fragments: el.getClientRects().length };
+    };
+  }
+  function all(sel, what) { return [].slice.call(document.querySelectorAll(sel)).map(piece(what)); }
+  return {
+    pieces: [].concat(all('section.export-round pre.mermaid svg', 'diagram'), all('section.export-round iframe', 'mock'),
+      all('section.export-round .card-choice', 'option'), all('section.export-round .comment-item', 'comment'),
+      all('section.export-round .md-content > p', 'paragraph')),
+    cardPages: [].slice.call(document.querySelectorAll('section.export-round .block')).map(function (b) {
+      return b.getAttribute('data-block-id') + ' ' + b.getClientRects().length; }),
+    scale: [].slice.call(document.querySelectorAll('section.export-round iframe')).map(function (f) {
+      return Math.round(f.getBoundingClientRect().height / f.offsetHeight * 1000) / 1000; }),
+  };
+})()`;
+
+/** Each piece PAGES_EXPR found that is cut across a page's edge, as text. */
+function cutPieces(pieces) {
+  return pieces.filter(p => p.top < 0 || p.bottom > PRINT_H || p.fragments > 1)
+    .map(p => `${p.what}: ${p.top}..${p.bottom} (${p.height}px), ${p.fragments} fragment(s)`);
+}
+
+/** Clicks round `n`'s Download round on the open board tab and answers the one file it
+ * saved, into a directory of its own. */
+async function downloadFrom(send, onEvent, tab, n) {
+  const dir = scratchDir('cb-download-files-');
+  await send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: dir, eventsEnabled: true });
+  const done = waitForDownload(onEvent, dir);
+  await tab.evalPage(`document.querySelector('.round[data-round="${n}"] .round-download').click()`);
+  const files = await done;
+  const file = path.join(dir, files[0]);
+  if (process.env.CLAUDE_BOARD_DOWNLOAD_KEEP) copyFileSync(file, path.join(process.env.CLAUDE_BOARD_DOWNLOAD_KEEP, files[0]));
+  return { files, file };
+}
+
+/** Opens a saved file from disk, offline, at a printed page's size under print media,
+ * and answers PAGES_EXPR's reading of it. */
+async function paginate(send, onEvent, file, cookie) {
+  const offline = async sp => {
+    await sp('Network.emulateNetworkConditions', { offline: true, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
+    await sp('Emulation.setEmulatedMedia', { media: 'print', features: [] });
+  };
+  const tab = await openTab(send, onEvent, pathToFileURL(file).href, cookie, { width: PRINT_W, height: PRINT_H, theme: 'light', expr: '1', prepare: offline });
+  await tab.sp('Emulation.setEmulatedMedia', { media: 'print', features: [] });
+  const read = await tab.evalPage(PAGES_EXPR);
+  await tab.close();
+  return read;
+}
+
 async function waitForDownload(onEvent, dir) {
   return withTimeout(new Promise((resolve, reject) => {
     const off = onEvent(msg => {
@@ -155,6 +235,16 @@ async function main() {
       blocks: [{ id: 'q6', kind: 'question', prompt: 'Next?', widget: 'single', options: [{ label: 'Go' }] }] }, daemon.secret);
     const boardUrl = `${origin}${new URL(created.url).pathname}`;
     const downloads = scratchDir('cb-download-files-');
+
+    const tall = await postJson(`${origin}/api/board`, { title: TALL_TITLE, blocks: TALL_ROUND_1 }, daemon.secret);
+    await postJson(`${origin}/api/board/${tall.boardId}/submit`, { round: 1, action: 'send', answers: [],
+      comments: [{ blockId: 'h2', anchor: { kind: 'block' }, text: 'Mock comment' }] }, daemon.secret);
+    await postJson(`${origin}/api/board`, { boardId: tall.boardId, title: TALL_TITLE, blocks: TALL_ROUND_2 }, daemon.secret);
+    await postJson(`${origin}/api/board/${tall.boardId}/submit`, { round: 2, action: 'send',
+      answers: [{ id: 'q7', status: 'answered', choice: 'Option 7', note: '' }], comments: TALL_COMMENTS }, daemon.secret);
+    await postJson(`${origin}/api/board`, { boardId: tall.boardId, title: TALL_TITLE,
+      blocks: [{ id: 'q8', kind: 'question', prompt: 'Next?', widget: 'single', options: [{ label: 'Go' }] }] }, daemon.secret);
+    const tallUrl = `${origin}${new URL(tall.url).pathname}`;
 
     await withChrome({ tag: 'cb-download', hideScrollbars: true }, async ({ send, onEvent }) => {
       const cookie = sessionToken(daemon.secret);
@@ -288,6 +378,72 @@ async function main() {
         assert.ok(pieces.length >= 14, 'setup: the cards, the diagram, the stage and the rows were found');
         const cut = pieces.filter(p => p.avoid !== 'avoid' || p.height > PRINT_H).map(p => `${p.what}: ${p.avoid}, ${Math.round(p.height)}px`);
         assert.deepEqual(cut, []);
+      });
+
+      const tallTab = await openTab(send, onEvent, tallUrl, cookie, { width: 1280, height: 800, theme: 'dark',
+        expr: `document.querySelector('.round-current').getAttribute('data-round')` });
+      await tallTab.evalPage(`document.querySelector('.round-page[data-round="1"]').click()`);
+      await tallTab.until(`document.body.classList.contains('page-board') && document.querySelector('.round[data-round="1"]').classList.contains('round-current')`, 'the flip to the artifact round');
+      // An artifact round's report moves no box, so no DOM change re-reads an 'until': polled.
+      const mockH = await tallTab.sp('Runtime.evaluate', { awaitPromise: true, returnByValue: true, expression: `new Promise(function (resolve) {
+        var tries = 0;
+        (function poll() {
+          var h = document.querySelector('[data-block-id="h2"] iframe').__cbStageContentH;
+          if (h || ++tries > 100) return resolve(h || 0);
+          setTimeout(poll, 50);
+        })();
+      })` }).then(r => r.result.value);
+      await tallTab.quiet();
+      const page = await tallTab.evalPage(`(function () {
+        function box(el) { var r = el.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, left: r.left, right: r.right }; }
+        var btn = document.querySelector('.round[data-round="1"] .round-download');
+        var hit = btn && document.elementFromPoint((box(btn).left + box(btn).right) / 2, (box(btn).top + box(btn).bottom) / 2);
+        return { btn: btn && box(btn), head: box(document.querySelector('.board-head')), hit: !!(hit && hit.closest('.round-download')) };
+      })()`);
+      await row('a sent artifact round, drawn full page, shows Download round under the header', note => {
+        note(`header ends at ${page.head.bottom}, button ${page.btn && page.btn.top}..${page.btn && page.btn.bottom}`);
+        assert.equal(tallTab.measured, '3', 'setup: the board opens on its open round');
+        assert.ok(page.btn, 'the sent artifact round has the control');
+        assert.ok(page.btn.top >= page.head.bottom - 0.5, 'below the header, not under it');
+        assert.equal(page.hit, true, 'nothing covers it: a click lands on it');
+      });
+
+      const pageDownload = await downloadFrom(send, onEvent, tallTab, 1);
+      await row('its Download round saves the artifact round as one HTML file, the mock at its full height', note => {
+        note(`${pageDownload.files.join(', ')}; the artifact reported ${mockH}px`);
+        assert.deepEqual(pageDownload.files, ['tall-fixture-round-1.html']);
+        assert.ok(mockH >= TALL_MOCK_PX, 'setup: the board measured the whole artifact');
+        assert.match(readFileSync(pageDownload.file, 'utf8'), new RegExp(`height: ${mockH + 2}px`), 'the frame is the artifact\'s own height');
+      });
+
+      await tallTab.evalPage(`document.querySelector('.round-page[data-round="2"]').click()`);
+      await tallTab.until(`document.querySelector('.round[data-round="2"]').classList.contains('round-current')`, 'the flip to round 2');
+      await tallTab.until(`document.querySelector('[data-block-id="m2"] pre.mermaid svg')`, 'the tall diagram drawn');
+      const tallDownload = await downloadFrom(send, onEvent, tallTab, 2);
+      await tallTab.close();
+
+      const printedPage = await paginate(send, onEvent, pageDownload.file, cookie);
+      await row('printed, a mock taller than a page is scaled to fit one, never cut', note => {
+        note(`scale ${printedPage.scale.join(', ')}; ${printedPage.pieces.map(p => `${p.what} ${p.top}..${p.bottom}`).join(', ')}`);
+        const mocks = printedPage.pieces.filter(p => p.what === 'mock');
+        assert.equal(mocks.length, 1, 'setup: the mock was found');
+        assert.ok(printedPage.scale[0] < 1, 'drawn smaller, its own height kept inside the frame');
+        assert.deepEqual(cutPieces(printedPage.pieces), []);
+      });
+
+      const printedTall = await paginate(send, onEvent, tallDownload.file, cookie);
+      await row('printed, a diagram taller than a page is drawn to fit one, never cut', note => {
+        const svgs = printedTall.pieces.filter(p => p.what === 'diagram');
+        note(svgs.map(p => `diagram ${p.top}..${p.bottom} (${p.height}px)`).join(', '));
+        assert.equal(svgs.length, 1, 'setup: the diagram was found');
+        assert.deepEqual(cutPieces(svgs), []);
+      });
+      await row('printed, a card taller than a page breaks only between its paragraphs, options and comments, each kept whole', note => {
+        const items = printedTall.pieces.filter(p => p.what !== 'diagram');
+        note(`pages per card: ${printedTall.cardPages.join(', ')}; ${items.length} paragraphs, options and comments`);
+        assert.deepEqual(printedTall.cardPages.map(c => Number(c.split(' ')[1]) > 1), [true, true, true], 'setup: the text, the diagram\'s card and the question each run past a page');
+        assert.equal(items.length, 72, 'setup: every paragraph, option and comment was found');
+        assert.deepEqual(cutPieces(items), []);
       });
     });
   } finally {

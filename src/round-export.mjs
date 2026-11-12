@@ -49,6 +49,17 @@ export function exportFileName(title, n) {
   return (slug || 'board') + '-round-' + n + '.html';
 }
 
+/** How far the printed file scales a mock 'width' x 'height' px as drawn on the
+ * board: to one printed page, never up. The page is Chrome's default 0.4in margins
+ * on A4's width and Letter's height, the narrower and the shorter, less a little
+ * for rounding, so a mock it fits is never cut on either paper. The frame keeps the
+ * board's width, so the mock lays out as it was drawn and prints smaller. */
+export function printScale(width, height) {
+  var pageW = 710, pageH = 960;
+  if (!(width > 0) || !(height > 0)) return 1;
+  return Math.min(1, pageW / width, pageH / height);
+}
+
 /** The file itself. `css` is the board's stylesheet as text, so the drawn blocks
  * in `contentHtml` read as they did on the board; EXPORT_CSS lays out the rest
  * and prints it. The policy admits styles, fonts and images inline and nothing
@@ -86,7 +97,12 @@ export function exportDocument(o) {
 /** Layout A, decisions first, over the board's own stylesheet; light, since a
  * file is printed. The print half keeps a card, a question, a diagram, a stage and
  * a decisions row each on one page, and keeps the marks a reader needs (the picked
- * option's tint, the card edges) when the browser would drop backgrounds. */
+ * option's tint, the card edges) when the browser would drop backgrounds. A
+ * diagram taller than a page is drawn smaller to fit one (the 960px of
+ * printScale's page), and a mock is scaled by printScale's answer, which the
+ * export writes on the frame's holder with the board's width and the scaled
+ * height. A card taller than a page breaks between its pieces (options,
+ * comments, paragraphs, notes), each kept whole, and never inside a line. */
 export const EXPORT_CSS = `
 body.round-export { min-height: 0; padding: 40px 24px; background: var(--bg); -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 body.round-export::before { display: none; }
@@ -127,6 +143,12 @@ body.round-export::before { display: none; }
   body.round-export { padding: 0; background: #fff; }
   .export-round .block { box-shadow: none; }
   .export-round .block, .export-round .question-block, .export-round .card-choice, .export-round .variant-card,
-  .export-round .stage-wrap, .export-round pre.mermaid, .export-round .comment-item, .export-decisions tr { break-inside: avoid; }
+  .export-round .stage-wrap, .export-round pre.mermaid, .export-round .comment-item, .export-decisions tr,
+  .export-round p, .export-round li, .export-round .export-text, .export-round .export-note-box { break-inside: avoid; }
+  .export-round .card-head, .export-round .question-prompt { break-after: avoid; }
+  .export-round pre.mermaid svg { max-height: 960px; }
+  .export-round .export-frame { height: var(--export-print-h, auto); overflow: hidden; break-inside: avoid; }
+  .export-round .export-frame > iframe.html-stage { width: var(--export-w, 100%); max-width: none;
+    transform: scale(var(--export-scale, 1)); transform-origin: 0 0; }
 }
 `;

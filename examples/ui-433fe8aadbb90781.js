@@ -1364,14 +1364,15 @@
    * once a frame. */
   function handleStageHeight(data, frame) {
     if (!Number.isFinite(data.height) || data.height <= 0) return;
-    if (isPageStage(frame)) return;
     var h = Math.min(data.height, STAGE_TRAVEL_CAP);
     // Kept beside the box, not derived later from it: this is the mock's OWN
     // content height, and the difference between it and the cap is exactly how
     // much of the mock the cap is hiding -- the number forwardStageWheel
-    // (below) and an open both read.
+    // (below) and an open both read. A page board's stage keeps it too, for
+    // Download round's full-height copy, and applies nothing.
     frame.__cbStageMatched = h === frame.__cbStageContentH;
     frame.__cbStageContentH = h;
+    if (isPageStage(frame)) return;
     scheduleStageHeight(frame);
   }
 
@@ -1438,7 +1439,7 @@
    * which is what reaches the reports that move no box. Until a box is
    * written the frame stands at the stylesheet's own height,
    * STAGE_HEIGHT_FLOOR. A page board's stage never gets here:
-   * handleStageHeight drops its reports. */
+   * handleStageHeight applies none of its reports. */
   function markStageScrolls(frame, block) {
     var box = frame.__cbStageBox || STAGE_HEIGHT_FLOOR;
     block.classList.toggle('stage-scrolls', frame.__cbStageContentH + STAGE_FRAME_EDGE > box);
@@ -2008,7 +2009,13 @@
     var head = document.querySelector('.board-head');
     if (head && head.getBoundingClientRect && !document.body.classList.contains('stage-scrolled')) {
       lastTopBand = head.getBoundingClientRect().height;
+      // A sent artifact round's chip line runs on under the header at rest
+      // ('body.page-board .round-chips', src/styles.mjs), so the band ends at
+      // its bottom.
+      document.body.style.setProperty('--page-head-h', lastTopBand + 'px');
     }
+    var chips = document.querySelector('.round-current .round-chips');
+    var top = Math.max(lastTopBand, chips && chips.getBoundingClientRect ? chips.getBoundingClientRect().bottom : 0);
     var bottom = 0;
     var dock = document.querySelector('.round-pager-dock');
     if (dock && dock.getBoundingClientRect) {
@@ -2031,7 +2038,7 @@
         bandObservedRail = rail;
       }
     }
-    postToStage(frame, { type: 'band', top: lastTopBand, bottom: bottom });
+    postToStage(frame, { type: 'band', top: top, bottom: bottom });
   }
 
   /** ADR.md entry 40: an ordinary board's own
@@ -4407,7 +4414,7 @@
   // stage last reported itself. The file's own policy admits no script at all.
   // Its diagrams are drawn again in the light palette, since a file is printed.
   var ROUND_DOWNLOAD_BUTTON = "<button type=\"button\" class=\"round-download\" title=\"Save this round as one HTML file\"><svg viewBox=\"0 0 24 24\" width=\"13\" height=\"13\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M12 3v12\"/><path d=\"M7 11l5 5 5-5\"/><path d=\"M5 21h14\"/></svg>Download round</button>";
-  var EXPORT_CSS = "\nbody.round-export { min-height: 0; padding: 40px 24px; background: var(--bg); -webkit-print-color-adjust: exact; print-color-adjust: exact; }\nbody.round-export::before { display: none; }\n.export-doc { max-width: 1065px; margin: 0 auto; }\n.export-head { padding-bottom: 20px; border-bottom: 1px solid var(--hairline-2); margin-bottom: 28px; }\n.export-from { font-size: 11px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); margin-bottom: 10px; }\n.export-title { font-size: 22px; font-weight: 650; margin: 0 0 6px; letter-spacing: -0.01em; }\n.export-meta { font-size: 13px; color: var(--muted); display: flex; gap: 14px; flex-wrap: wrap; }\n.export-meta b { color: var(--ink-2); font-weight: 600; }\n.export-section { font-size: 15px; font-weight: 650; margin: 36px 0 14px; display: flex; align-items: center; gap: 10px; break-after: avoid; }\n.export-section::after { content: \"\"; flex: 1; height: 1px; background: var(--hairline-2); }\n.export-decisions { width: 100%; border-collapse: separate; border-spacing: 0; table-layout: fixed; font-size: 13px;\n  background: var(--panel); border: 1px solid var(--hairline); border-radius: var(--r-card); overflow: hidden; }\n.export-decisions th, .export-decisions td { text-align: left; vertical-align: top; padding: 12px 16px; border-bottom: 1px solid var(--hairline); overflow-wrap: anywhere; }\n.export-decisions tr:last-child td { border-bottom: none; }\n.export-decisions th { background: var(--panel-2); font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }\n.export-decisions th:first-child { width: 40%; }\n.export-q { color: var(--ink-2); }\n.export-pick { font-weight: 650; color: var(--ink); white-space: pre-wrap; }\n.export-note { color: var(--muted); font-style: italic; white-space: pre-wrap; }\n.export-empty { color: var(--muted); }\n.export-round { gap: 16px; }\n.export-round .round-history .block, .export-round .block { background: var(--panel); }\n.export-round .folded > .fold-body { max-height: none; overflow: visible; -webkit-mask-image: none; mask-image: none; }\n.export-round .card-choice { cursor: default; opacity: 1; }\n.export-round .opt-check { display: none; }\n.export-round .card-choice.selected, .export-round .variant-card.selected { border-color: var(--good); background: var(--good-soft); box-shadow: inset 3px 0 0 var(--good); }\n.export-round .card-choice.selected .opt-label::before, .export-round .variant-card.selected .opt-label::before { content: \"\\2713  \"; color: var(--good); }\n.export-round .export-text { white-space: pre-wrap; font-size: 13px; color: var(--ink); background: var(--panel-2); border: 1px solid var(--hairline);\n  border-radius: var(--r-md); padding: 12px 14px; }\n.export-round .export-note-box { font-size: 12.5px; color: var(--ink-2); background: var(--accent-soft); border: 1px solid var(--hairline);\n  border-radius: var(--r-sm); padding: 8px 12px; white-space: pre-wrap; }\n.export-round .export-note-tag { display: block; font-weight: 650; font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); margin-bottom: 3px; }\n.export-round .html-stage { max-height: none; }\n.export-round .export-missing { color: var(--muted); font-style: italic; font-size: 12.5px; }\n.export-round .comment-list { display: block; }\n@media print {\n  body.round-export { padding: 0; background: #fff; }\n  .export-round .block { box-shadow: none; }\n  .export-round .block, .export-round .question-block, .export-round .card-choice, .export-round .variant-card,\n  .export-round .stage-wrap, .export-round pre.mermaid, .export-round .comment-item, .export-decisions tr { break-inside: avoid; }\n}\n";
+  var EXPORT_CSS = "\nbody.round-export { min-height: 0; padding: 40px 24px; background: var(--bg); -webkit-print-color-adjust: exact; print-color-adjust: exact; }\nbody.round-export::before { display: none; }\n.export-doc { max-width: 1065px; margin: 0 auto; }\n.export-head { padding-bottom: 20px; border-bottom: 1px solid var(--hairline-2); margin-bottom: 28px; }\n.export-from { font-size: 11px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); margin-bottom: 10px; }\n.export-title { font-size: 22px; font-weight: 650; margin: 0 0 6px; letter-spacing: -0.01em; }\n.export-meta { font-size: 13px; color: var(--muted); display: flex; gap: 14px; flex-wrap: wrap; }\n.export-meta b { color: var(--ink-2); font-weight: 600; }\n.export-section { font-size: 15px; font-weight: 650; margin: 36px 0 14px; display: flex; align-items: center; gap: 10px; break-after: avoid; }\n.export-section::after { content: \"\"; flex: 1; height: 1px; background: var(--hairline-2); }\n.export-decisions { width: 100%; border-collapse: separate; border-spacing: 0; table-layout: fixed; font-size: 13px;\n  background: var(--panel); border: 1px solid var(--hairline); border-radius: var(--r-card); overflow: hidden; }\n.export-decisions th, .export-decisions td { text-align: left; vertical-align: top; padding: 12px 16px; border-bottom: 1px solid var(--hairline); overflow-wrap: anywhere; }\n.export-decisions tr:last-child td { border-bottom: none; }\n.export-decisions th { background: var(--panel-2); font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }\n.export-decisions th:first-child { width: 40%; }\n.export-q { color: var(--ink-2); }\n.export-pick { font-weight: 650; color: var(--ink); white-space: pre-wrap; }\n.export-note { color: var(--muted); font-style: italic; white-space: pre-wrap; }\n.export-empty { color: var(--muted); }\n.export-round { gap: 16px; }\n.export-round .round-history .block, .export-round .block { background: var(--panel); }\n.export-round .folded > .fold-body { max-height: none; overflow: visible; -webkit-mask-image: none; mask-image: none; }\n.export-round .card-choice { cursor: default; opacity: 1; }\n.export-round .opt-check { display: none; }\n.export-round .card-choice.selected, .export-round .variant-card.selected { border-color: var(--good); background: var(--good-soft); box-shadow: inset 3px 0 0 var(--good); }\n.export-round .card-choice.selected .opt-label::before, .export-round .variant-card.selected .opt-label::before { content: \"\\2713  \"; color: var(--good); }\n.export-round .export-text { white-space: pre-wrap; font-size: 13px; color: var(--ink); background: var(--panel-2); border: 1px solid var(--hairline);\n  border-radius: var(--r-md); padding: 12px 14px; }\n.export-round .export-note-box { font-size: 12.5px; color: var(--ink-2); background: var(--accent-soft); border: 1px solid var(--hairline);\n  border-radius: var(--r-sm); padding: 8px 12px; white-space: pre-wrap; }\n.export-round .export-note-tag { display: block; font-weight: 650; font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); margin-bottom: 3px; }\n.export-round .html-stage { max-height: none; }\n.export-round .export-missing { color: var(--muted); font-style: italic; font-size: 12.5px; }\n.export-round .comment-list { display: block; }\n@media print {\n  body.round-export { padding: 0; background: #fff; }\n  .export-round .block { box-shadow: none; }\n  .export-round .block, .export-round .question-block, .export-round .card-choice, .export-round .variant-card,\n  .export-round .stage-wrap, .export-round pre.mermaid, .export-round .comment-item, .export-decisions tr,\n  .export-round p, .export-round li, .export-round .export-text, .export-round .export-note-box { break-inside: avoid; }\n  .export-round .card-head, .export-round .question-prompt { break-after: avoid; }\n  .export-round pre.mermaid svg { max-height: 960px; }\n  .export-round .export-frame { height: var(--export-print-h, auto); overflow: hidden; break-inside: avoid; }\n  .export-round .export-frame > iframe.html-stage { width: var(--export-w, 100%); max-width: none;\n    transform: scale(var(--export-scale, 1)); transform-origin: 0 0; }\n}\n";
   var EXPORT_MERMAID_VARS = {"darkMode":false,"background":"transparent","fontFamily":"Inter, -apple-system, BlinkMacSystemFont, system-ui, sans-serif","fontSize":"13px","primaryColor":"#f5f6fb","primaryTextColor":"#171c2a","primaryBorderColor":"#3251c9","secondaryColor":"#e2e6f0","tertiaryColor":"#ffffff","lineColor":"#515c76","textColor":"#3c4459","mainBkg":"#f5f6fb","nodeBorder":"#3251c9","clusterBkg":"rgba(50, 81, 201, 0.06)","clusterBorder":"rgba(0, 0, 0, 0.18)","edgeLabelBackground":"#ffffff"};
   var decisionRows = function decisionRows(questions, answers) {
   return (questions || []).map(function (q) {
@@ -4461,10 +4468,16 @@
     + '<section class="round round-current export-round">\n' + o.contentHtml + '\n</section>\n'
     + '</main>\n</body>\n</html>\n';
 };
+  var printScale = function printScale(width, height) {
+  var pageW = 710, pageH = 960;
+  if (!(width > 0) || !(height > 0)) return 1;
+  return Math.min(1, pageW / width, pageH / height);
+};
   // Everything in a round that is a control or a pin rather than what the round
   // said. The round's chip line goes too: the file's own head names the round.
   var EXPORT_DROP = '.round-chips, .round-end, .comment-btn, .comment-form, .comment-target, .pin-layer, '
     + '.pull-out, .stage-fold, .fold-toggle, .btn-defer, .rank-grip, .question-picks, .note-head, '
+    + '.page-send-bar, .page-comment-hint, '
     + 'script, noscript, source, object, embed, base, meta';
   var nextExportDiagramId = 0;
 
@@ -4582,14 +4595,26 @@
         return;
       }
       var reported = p[0].__cbStageContentH;
-      var height = reported > 0 ? reported + STAGE_FRAME_EDGE : (p[0].getBoundingClientRect().height || 320);
+      var height = Math.ceil(reported > 0 ? reported + STAGE_FRAME_EDGE : (p[0].getBoundingClientRect().height || 320));
+      var width = Math.round(p[0].getBoundingClientRect().width) || 0;
       var frame = document.createElement('iframe');
       frame.className = 'html-stage';
       frame.setAttribute('sandbox', '');
       frame.setAttribute('title', 'Mock');
       frame.setAttribute('srcdoc', scriptFreeHtml(srcdoc));
-      frame.style.height = Math.ceil(height) + 'px';
-      p[1].replaceWith(frame);
+      frame.style.height = height + 'px';
+      // Printed at the board's width, so the mock lays out as it was drawn, and
+      // scaled into one page in a box of the scaled height (EXPORT_CSS's print half).
+      var holder = document.createElement('div');
+      holder.className = 'export-frame';
+      holder.appendChild(frame);
+      if (width) {
+        var scale = printScale(width, height);
+        holder.style.setProperty('--export-w', width + 'px');
+        holder.style.setProperty('--export-scale', String(scale));
+        holder.style.setProperty('--export-print-h', Math.ceil(height * scale) + 'px');
+      }
+      p[1].replaceWith(holder);
     });
 
     var svgs = await exportDiagramSvgs(diagrams.map(function (p) { return p[0]; }));
@@ -4607,6 +4632,11 @@
       box.className = btn.className;
       while (btn.firstChild) box.appendChild(btn.firstChild);
       btn.replaceWith(box);
+    });
+    // An artifact round's comments float over it on the board; here they list under it.
+    qsa('.page-comments', copy).forEach(function (rail) {
+      while (rail.firstChild) rail.parentNode.insertBefore(rail.firstChild, rail);
+      rail.remove();
     });
     qsa('details', copy).forEach(function (d) { d.setAttribute('open', ''); });
     qsa('.folded, .stage-folded, .stage-opened, .stage-scrolls', copy).forEach(function (el) {
@@ -7364,9 +7394,20 @@
     // which lives on the draggable attribute of the list item itself.
     qsa('.rank-list li[draggable]', section).forEach(function (li) { li.removeAttribute('draggable'); });
     // A sent round offers Download round at the right end of its chip line, as
-    // renderRoundSection draws one rendered sent.
+    // renderRoundSection draws one rendered sent. An artifact round drew no chip
+    // line while open, and gets the one renderRoundSection draws it sent.
     var chips = section.querySelector('.round-chips');
-    if (chips && !chips.querySelector('.round-download')) {
+    if (!chips) {
+      var entry = roundEntry(n);
+      chips = document.createElement('div');
+      chips.className = 'round-chips';
+      var chipLabel = document.createElement('div');
+      chipLabel.className = 'round-label';
+      chipLabel.textContent = roundPageLabel(n, (entry && entry.title) || '') + ' · sent';
+      chips.appendChild(chipLabel);
+      section.insertBefore(chips, section.firstChild);
+    }
+    if (!chips.querySelector('.round-download')) {
       var holder = document.createElement('div');
       holder.innerHTML = ROUND_DOWNLOAD_BUTTON;
       if (holder.firstElementChild) chips.appendChild(holder.firstElementChild);

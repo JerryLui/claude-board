@@ -65,7 +65,7 @@ import { MERMAID_ASSET } from './vendor/mermaid/index.mjs';
 import { openSharedStream, STREAM_WORKER_URL } from './stream-worker.mjs';
 import { activityMinMs } from './activity.mjs';
 import {
-  ROUND_DOWNLOAD_BUTTON, EXPORT_CSS, decisionRows, exportDate, exportFileName, exportDocument,
+  ROUND_DOWNLOAD_BUTTON, EXPORT_CSS, decisionRows, exportDate, exportFileName, exportDocument, printScale,
 } from './round-export.mjs';
 // The one source of truth for both image limits -- the daemon's own
 // src/images.mjs checks a submit against these same two constants, so a page
@@ -1314,14 +1314,15 @@ export const ui = `
    * once a frame. */
   function handleStageHeight(data, frame) {
     if (!Number.isFinite(data.height) || data.height <= 0) return;
-    if (isPageStage(frame)) return;
     var h = Math.min(data.height, STAGE_TRAVEL_CAP);
     // Kept beside the box, not derived later from it: this is the mock's OWN
     // content height, and the difference between it and the cap is exactly how
     // much of the mock the cap is hiding -- the number forwardStageWheel
-    // (below) and an open both read.
+    // (below) and an open both read. A page board's stage keeps it too, for
+    // Download round's full-height copy, and applies nothing.
     frame.__cbStageMatched = h === frame.__cbStageContentH;
     frame.__cbStageContentH = h;
+    if (isPageStage(frame)) return;
     scheduleStageHeight(frame);
   }
 
@@ -1388,7 +1389,7 @@ export const ui = `
    * which is what reaches the reports that move no box. Until a box is
    * written the frame stands at the stylesheet's own height,
    * STAGE_HEIGHT_FLOOR. A page board's stage never gets here:
-   * handleStageHeight drops its reports. */
+   * handleStageHeight applies none of its reports. */
   function markStageScrolls(frame, block) {
     var box = frame.__cbStageBox || STAGE_HEIGHT_FLOOR;
     block.classList.toggle('stage-scrolls', frame.__cbStageContentH + STAGE_FRAME_EDGE > box);
@@ -1958,7 +1959,13 @@ export const ui = `
     var head = document.querySelector('.board-head');
     if (head && head.getBoundingClientRect && !document.body.classList.contains('stage-scrolled')) {
       lastTopBand = head.getBoundingClientRect().height;
+      // A sent artifact round's chip line runs on under the header at rest
+      // ('body.page-board .round-chips', src/styles.mjs), so the band ends at
+      // its bottom.
+      document.body.style.setProperty('--page-head-h', lastTopBand + 'px');
     }
+    var chips = document.querySelector('.round-current .round-chips');
+    var top = Math.max(lastTopBand, chips && chips.getBoundingClientRect ? chips.getBoundingClientRect().bottom : 0);
     var bottom = 0;
     var dock = document.querySelector('.round-pager-dock');
     if (dock && dock.getBoundingClientRect) {
@@ -1981,7 +1988,7 @@ export const ui = `
         bandObservedRail = rail;
       }
     }
-    postToStage(frame, { type: 'band', top: lastTopBand, bottom: bottom });
+    postToStage(frame, { type: 'band', top: top, bottom: bottom });
   }
 
   /** ADR.md entry 40: an ordinary board's own
@@ -4339,10 +4346,12 @@ export const ui = `
   var exportDate = ${exportDate.toString()};
   var exportFileName = ${exportFileName.toString()};
   var exportDocument = ${exportDocument.toString()};
+  var printScale = ${printScale.toString()};
   // Everything in a round that is a control or a pin rather than what the round
   // said. The round's chip line goes too: the file's own head names the round.
   var EXPORT_DROP = '.round-chips, .round-end, .comment-btn, .comment-form, .comment-target, .pin-layer, '
     + '.pull-out, .stage-fold, .fold-toggle, .btn-defer, .rank-grip, .question-picks, .note-head, '
+    + '.page-send-bar, .page-comment-hint, '
     + 'script, noscript, source, object, embed, base, meta';
   var nextExportDiagramId = 0;
 
@@ -4460,14 +4469,26 @@ export const ui = `
         return;
       }
       var reported = p[0].__cbStageContentH;
-      var height = reported > 0 ? reported + STAGE_FRAME_EDGE : (p[0].getBoundingClientRect().height || 320);
+      var height = Math.ceil(reported > 0 ? reported + STAGE_FRAME_EDGE : (p[0].getBoundingClientRect().height || 320));
+      var width = Math.round(p[0].getBoundingClientRect().width) || 0;
       var frame = document.createElement('iframe');
       frame.className = 'html-stage';
       frame.setAttribute('sandbox', '');
       frame.setAttribute('title', 'Mock');
       frame.setAttribute('srcdoc', scriptFreeHtml(srcdoc));
-      frame.style.height = Math.ceil(height) + 'px';
-      p[1].replaceWith(frame);
+      frame.style.height = height + 'px';
+      // Printed at the board's width, so the mock lays out as it was drawn, and
+      // scaled into one page in a box of the scaled height (EXPORT_CSS's print half).
+      var holder = document.createElement('div');
+      holder.className = 'export-frame';
+      holder.appendChild(frame);
+      if (width) {
+        var scale = printScale(width, height);
+        holder.style.setProperty('--export-w', width + 'px');
+        holder.style.setProperty('--export-scale', String(scale));
+        holder.style.setProperty('--export-print-h', Math.ceil(height * scale) + 'px');
+      }
+      p[1].replaceWith(holder);
     });
 
     var svgs = await exportDiagramSvgs(diagrams.map(function (p) { return p[0]; }));
@@ -4485,6 +4506,11 @@ export const ui = `
       box.className = btn.className;
       while (btn.firstChild) box.appendChild(btn.firstChild);
       btn.replaceWith(box);
+    });
+    // An artifact round's comments float over it on the board; here they list under it.
+    qsa('.page-comments', copy).forEach(function (rail) {
+      while (rail.firstChild) rail.parentNode.insertBefore(rail.firstChild, rail);
+      rail.remove();
     });
     qsa('details', copy).forEach(function (d) { d.setAttribute('open', ''); });
     qsa('.folded, .stage-folded, .stage-opened, .stage-scrolls', copy).forEach(function (el) {
@@ -7240,9 +7266,20 @@ export const ui = `
     // which lives on the draggable attribute of the list item itself.
     qsa('.rank-list li[draggable]', section).forEach(function (li) { li.removeAttribute('draggable'); });
     // A sent round offers Download round at the right end of its chip line, as
-    // renderRoundSection draws one rendered sent.
+    // renderRoundSection draws one rendered sent. An artifact round drew no chip
+    // line while open, and gets the one renderRoundSection draws it sent.
     var chips = section.querySelector('.round-chips');
-    if (chips && !chips.querySelector('.round-download')) {
+    if (!chips) {
+      var entry = roundEntry(n);
+      chips = document.createElement('div');
+      chips.className = 'round-chips';
+      var chipLabel = document.createElement('div');
+      chipLabel.className = 'round-label';
+      chipLabel.textContent = roundPageLabel(n, (entry && entry.title) || '') + ' · sent';
+      chips.appendChild(chipLabel);
+      section.insertBefore(chips, section.firstChild);
+    }
+    if (!chips.querySelector('.round-download')) {
       var holder = document.createElement('div');
       holder.innerHTML = ROUND_DOWNLOAD_BUTTON;
       if (holder.firstElementChild) chips.appendChild(holder.firstElementChild);

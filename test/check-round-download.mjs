@@ -60,6 +60,28 @@ check('a round that goes sent under an open tab gains Download round, live, as a
   assert.equal(downloadsIn(document, 2).length, 0, 'the round that just opened offers none');
 });
 
+check('a sent artifact round, drawn full page, offers Download round on a chip line of its own, rendered sent or gone sent live; an open one offers none', () => {
+  const MOCK = { kind: 'html', html: '<div>Mock</div>' };
+  const board = createBoard({ title: 'Download - page', blocks: [MOCK] });
+  const before = parseHTML(renderBoardPage(board));
+  assert.equal(before.querySelectorAll('.round[data-round="1"] .round-chips').length, 0, 'the open artifact round draws no chip line');
+  assert.equal(downloadsIn(before, 1).length, 0);
+
+  const { document, es } = loadBoardWithEventSource(renderBoardPage(board));
+  applySubmit(board, { action: 'send', answers: [], comments: [] }, 1);
+  addRound(board, { blocks: [Q2] });
+  es.dispatch('round', JSON.stringify(buildRoundPushPayload(board, 2, 'new-round', [])));
+  const rendered = parseHTML(renderBoardPage(board));
+  for (const [how, doc] of [['rendered sent', rendered], ['gone sent under an open tab', document]]) {
+    const chips = doc.querySelectorAll('.round[data-round="1"] .round-chips');
+    assert.equal(chips.length, 1, `${how}: one chip line`);
+    assert.equal(chips[0].children.length, 2, `${how}: the label and the button, nothing else`);
+    assert.equal(chips[0].children[0].textContent, 'Round 1 · Download - page · sent', how);
+    assert.equal(lastChild(chips[0]).className, 'round-download', how);
+    assert.equal(lastChild(chips[0]).textContent.trim(), 'Download round', how);
+  }
+});
+
 check('the decisions table names each question\'s pick in words, per widget and state, with its note', () => {
   const questions = [
     { id: 'q1', prompt: 'One', widget: 'single' },
