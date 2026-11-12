@@ -2319,6 +2319,7 @@ the parent cannot observe it short of being told.
 | `band` | `{ top, bottom }` | the board's own chrome band, right now (ADR 59) |
 | `scroll` | `{ top }` | "put yourself at this offset" |
 | `scrollBy` | `{ delta }` | "move yourself this many pixels" — one forwarded wheel notch |
+| `height` | — | "report your height now". Sent by Download round to each stage of the round that has reported none: a frame the window does not show is given no animation frame, so its first report has not left |
 | `diagrams` | `{ requestId, svgs }` | response to `mermaid`: one entry per requested source, in the same order — the rendered SVG as a string, or `null` for one the board could not draw |
 
 `scroll` is the one bidirectional type on this channel. Inbound it is sent only as a reset,

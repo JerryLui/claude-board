@@ -140,6 +140,7 @@ const EXPORT_EXPR = `(function () {
     svg: svg ? { height: svg.getBoundingClientRect().height, fill: getComputedStyle(svg.querySelector('.node rect, .node polygon, .node path')).fill } : null,
     preClipped: pre ? pre.scrollHeight > pre.clientHeight + 1 : null,
     frame: frame ? { sandbox: frame.getAttribute('sandbox'), height: frame.getBoundingClientRect().height, srcdoc: frame.getAttribute('srcdoc') } : null,
+    wideFrameHeight: block('h3').querySelector('iframe').getBoundingClientRect().height,
     diagramComments: comments('m1'),
     mockComments: comments('h1'),
     images: imgs.map(function (i) {
@@ -338,9 +339,12 @@ async function main() {
 
       // The stage reports its own height a frame or two after it lays out.
       const stageH = await board.until(`document.querySelector('[data-block-id="h1"] iframe').__cbStageContentH`, 'the stage reporting its height');
-      // A stage below the window's bottom reports nothing until it is scrolled to.
-      await board.evalPage(`document.querySelector('[data-block-id="h3"]').scrollIntoView()`);
-      await board.until(`document.querySelector('[data-block-id="h3"] iframe').__cbStageContentH >= ${WIDE_STAGE_PX}`, 'the wide stage reporting its height');
+      // The wide mock sits below the window's bottom and is never scrolled to: the browser
+      // lays out no frame it does not show, so the board has heard no height from it.
+      const unseen = await board.evalPage(`(function () {
+        var frame = document.querySelector('[data-block-id="h3"] iframe');
+        return { top: frame.getBoundingClientRect().top, windowBottom: window.innerHeight, reported: frame.__cbStageContentH || 0 };
+      })()`);
 
       await send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: downloads, eventsEnabled: true });
       const done = waitForDownload(onEvent, downloads);
@@ -413,6 +417,13 @@ async function main() {
         assert.equal(m.frame.height, stageH + 2, 'the stage\'s own height plus its frame edge, past the board\'s 600px fold');
         assert.ok(m.frame.srcdoc.includes('Static mock'), 'the mock\'s markup rides');
         assert.ok(!/<script/i.test(m.frame.srcdoc), 'its script does not');
+      });
+
+      await row('a mock below the window\'s bottom, never scrolled to, is saved at its full height too', note => {
+        note(`on the board its frame began at ${unseen.top}px of a ${unseen.windowBottom}px window, reported ${unseen.reported}px; file frame ${m.wideFrameHeight}px`);
+        assert.ok(unseen.top > unseen.windowBottom, 'setup: the mock is below the window\'s bottom');
+        assert.equal(unseen.reported, 0, 'setup: the board has heard no height from it');
+        assert.equal(m.wideFrameHeight, WIDE_STAGE_PX + 2, 'its own height plus its frame edge, not the placeholder a stage holds until its first report');
       });
 
       await row('each comment is listed under what it points at', () => {

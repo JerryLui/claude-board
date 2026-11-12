@@ -2609,6 +2609,14 @@ export function stageAgentScript() {
       applyBand(data.top, data.bottom);
       return;
     }
+    if (data.type === 'height') {
+      // The inbound half: the parent asking for a report now. A frame the
+      // window does not show gets no animation frame and no ResizeObserver
+      // delivery, so its first report has not left; a message still reaches
+      // it, and measuring lays the document out.
+      reportHeight();
+      return;
+    }
     if (data.type === 'locate') {
       if (typeof data.requestId !== 'string' || !Array.isArray(data.refs)) return;
       // Answered in THIS FRAME'S VIEWPORT coordinates: the element's own client

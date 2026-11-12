@@ -4540,7 +4540,18 @@ export const ui = `
     setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
   }
 
+  // A stage the reader never scrolled to has reported no height: the browser
+  // lays out no frame it does not show. Each is asked for one, and given a
+  // moment to answer; one that does not keeps the box it has.
+  async function askStageHeights(section) {
+    var unheard = function (frame) { return !(frame.__cbStageContentH > 0); };
+    var asked = qsa('iframe.html-stage', section).filter(unheard);
+    asked.forEach(function (frame) { postToStage(frame, { type: 'height' }); });
+    for (var i = 0; i < 10 && asked.some(unheard); i++) await new Promise(function (done) { setTimeout(done, 30); });
+  }
+
   async function downloadRound(section) {
+    await askStageHeights(section);
     var n = Number(section.getAttribute('data-round'));
     var round = (board.rounds || []).find(function (r) { return r.n === n; }) || {};
     var questions = questionBlocks({ blocks: (board.blocks || []).filter(function (b) { return b.round === n; }) });
