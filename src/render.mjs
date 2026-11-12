@@ -3358,8 +3358,10 @@ export function renderRoundSection(board, roundN, commentsByBlock) {
   // The label sits in the round's chip line, whose right end holds Download round
   // once the round is sent (src/round-export.mjs): a round still open has nothing
   // settled to save. src/ui.mjs's markRoundHistory adds the same control to a
-  // round that goes sent under an open tab.
-  const roundLabel = fullpage ? '' : `
+  // round that goes sent under an open tab. A SENT artifact round gets the chip
+  // line back for that control alone: it sits in the board's own top band, under
+  // the header, and the stage pads the band, so it never covers the artifact.
+  const roundLabel = fullpage && !historical ? '' : `
   <div class="round-chips"><div class="round-label">${escHtml(label)}</div>${historical ? ROUND_DOWNLOAD_BUTTON : ''}</div>`;
   return `
 <section class="round ${historical ? 'round-history' : 'round-open'}${current ? ' round-current' : ''}" data-round="${roundN}" data-round-status="${historical ? 'sent' : 'open'}">${roundLabel}
