@@ -2301,7 +2301,7 @@ export function stageAgentScript() {
   var heightLast = -1;
   var heightConfirmQueued = false;
   function reportHeight() {
-    var h = Math.max(1, measureHeight() - bandPad);
+    var h = Math.max(0, measureHeight() - bandPad);
     post({ type: 'height', height: h });
     if (h === heightLast) return;
     heightLast = h;
