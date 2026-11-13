@@ -761,18 +761,21 @@ async function main() {
     assert.equal(readMission('RELEASED_FIRST', dir).state, 'released', 'and the released mission stays released');
   });
 
-  await check('the bound session joining its released mission again moves it to working, and its binding names the mission', () => {
+  await check('the bound session joining its released or parked mission again moves it to working, and its binding names the mission', () => {
     const dir = scratchHome('rejoin-released');
     const t0 = Date.parse('2026-10-30T12:10:00Z');
     const isAlive = () => true;
-    joinMission('RELEASED_AGAIN', { id: 'sess-a', pid: 8181 }, { home: dir, now: t0, isAlive });
-    upsertMission('RELEASED_AGAIN', { state: 'released' }, { home: dir, now: t0 + 1000 });
-    assert.equal(bindingFor([readMission('RELEASED_AGAIN', dir)], { id: 'sess-a' }).key, null);
-    const again = joinMission('RELEASED_AGAIN', { id: 'sess-a', pid: 8181, phase: 'landing' }, { home: dir, now: t0 + 2000, isAlive });
-    assert.equal(again.bound, true);
-    const m = readMission('RELEASED_AGAIN', dir);
-    assert.deepEqual([m.phase, m.state, m.releasedAt], ['landing', 'working', undefined]);
-    assert.equal(bindingFor([m], { id: 'sess-a' }).key, 'RELEASED_AGAIN');
+    for (const [key, stored, boundWhile] of [['RELEASED_AGAIN', 'released', null], ['PARKED_AGAIN', 'parked', 'PARKED_AGAIN']]) {
+      joinMission(key, { id: 'sess-a', pid: 8181 }, { home: dir, now: t0, isAlive });
+      upsertMission(key, { state: stored }, { home: dir, now: t0 + 1000 });
+      assert.equal(bindingFor([readMission(key, dir)], { id: 'sess-a' }).key, boundWhile, stored);
+      const again = joinMission(key, { id: 'sess-a', pid: 8181, phase: 'landing' }, { home: dir, now: t0 + 2000, isAlive });
+      assert.equal(again.bound, true);
+      const m = readMission(key, dir);
+      assert.deepEqual([m.phase, m.state, m.releasedAt], ['landing', 'working', undefined], stored);
+      assert.equal(bindingFor([m], { id: 'sess-a' }).key, key);
+      upsertMission(key, { state: 'released' }, { home: dir, now: t0 + 3000 });
+    }
   });
 
   await check('a mission waiting on the PM is alive but not working, so it holds no working slot', () => {
@@ -800,21 +803,26 @@ async function main() {
       'seven working and two waiting on the PM leave a working slot');
   });
 
-  await check('needs you and the card\'s Fire come only from a board\'s newest round: an older page left asking holds neither', () => {
+  await check('needs you and the card\'s Fire come only from the newest round of each session on a board: an older page left asking holds neither, and one session is one poster by its id or its process start to the second', () => {
     const dir = scratchHome('newest-page');
     const now = Date.now();
     const fireQ = (id, round) => ({ id, kind: 'question', round, prompt: 'Fire?', widget: 'single', action: 'fire', options: [{ label: 'Fire /direct' }, { label: 'Not yet' }] });
-    const roundOf = (n, status) => ({ n, postedAt: iso(now), status, sentAt: status === 'sent' ? iso(now) : null, title: `p${n}` });
-    for (const [key, statuses, view, actionRounds] of [
+    const roundOf = (n, status, session) => ({ n, postedAt: iso(now), status, sentAt: status === 'sent' ? iso(now) : null, title: `p${n}`, ...(session ? { session } : {}) });
+    const at = (pid, procStart, id = null) => ({ pid, procStart, id });
+    for (const [key, statuses, view, actionRounds, sessions = []] of [
       ['OLDER_ASKS', ['open', 'sent'], 'working', []],
       ['NEWEST_ASKS', ['sent', 'open'], 'needs-you', [2]],
       ['BOTH_ASK', ['open', 'open'], 'needs-you', [2]],
+      ['START_IN_MS', ['open', 'sent'], 'working', [], [at(100, '2026-11-11T08:00:15Z'), at(100, '2026-11-11T08:00:15.400Z')]],
+      ['RESUMED_ID', ['open', 'sent'], 'working', [], [at(100, '2026-11-11T08:00:15Z', 'same'), at(200, '2026-11-11T09:30:00Z', 'same')]],
+      ['TWO_SESSIONS', ['open', 'sent'], 'needs-you', [1], [at(100, '2026-11-11T08:00:15Z', 'one'), at(200, '2026-11-11T08:00:15Z', 'two')]],
+      ['LISTED_THEN_RESUMED', ['sent', 'open', 'sent'], 'working', [], [at(100, '2026-11-11T08:00:15Z'), at(100, '2026-11-11T08:00:15Z', 'same'), at(200, '2026-11-11T09:30:00Z', 'same')]],
     ]) {
       const boardId = `b_${key.toLowerCase()}`;
       mkdirSync(path.join(dir, 'boards'), { recursive: true });
       writeFileSync(path.join(dir, 'boards', `${boardId}.json`), JSON.stringify({
         id: boardId, thread: 't', title: 'q', cwd: null, createdAt: iso(now), updatedAt: iso(now), state: 'open',
-        rounds: statuses.map((status, i) => roundOf(i + 1, status)),
+        rounds: statuses.map((status, i) => roundOf(i + 1, status, sessions[i])),
         blocks: statuses.map((_, i) => fireQ(`q${i + 1}`, i + 1)),
         answers: {}, comments: [],
       }));
@@ -867,7 +875,7 @@ async function main() {
       const stateOf = (overview, id) => overview.tabs.find(t => t.id === id).state;
 
       const first = cache.overview();
-      assert.deepEqual(first.counts, { needsYou: 1, working: 3, waiting: 1, stalled: 0, released: 0, queued: 0 });
+      assert.deepEqual(first.counts, { needsYou: 1, working: 3, waiting: 1, stalled: 0, released: 0, queued: 0, parked: 0 });
       assert.deepEqual(first.live, { working: 0, alive: 0 }, 'the launch caps count no tab');
       assert.deepEqual(first.tabs.find(t => t.id === 'asks').rounds, [{ board: asking.id, round: 1 }]);
 
@@ -1127,7 +1135,7 @@ async function main() {
     const listed = missionsOverview({ home: dir, now });
     assert.deepEqual(viewsOf(listed), keptViews);
     assert.deepEqual(viewsOf(missionsOverview({ home: dir, now, all: true })), keptViews, 'the full list the mission watch reads drops it too');
-    assert.deepEqual(listed.counts, { needsYou: 0, working: 1, waiting: 3, stalled: 0, released: 0, queued: 0 });
+    assert.deepEqual(listed.counts, { needsYou: 0, working: 1, waiting: 3, stalled: 0, released: 0, queued: 0, parked: 0 });
     assert.deepEqual(['RETIRED_BARE', 'RETIRED_MERGED', 'RETIRED_RELEASED'].map(k => readMission(k, dir)?.key), ['RETIRED_BARE', 'RETIRED_MERGED', 'RETIRED_RELEASED'],
       'leaving the list deletes nothing: the purge alone does, 30 days on');
     assert.deepEqual([getMissionView('RETIRED_BARE', { home: dir, now }).view, getMissionView('RETIRED_BARE', { home: dir, now }).retired], ['waiting', true],
@@ -1388,7 +1396,7 @@ async function main() {
     assert.deepEqual(readMission('PRUNED_LINK', home).boards.map(b => b.id), [first.body.boardId]);
   });
 
-  await check('a board posted by a session bound to a mission, naming none, links to that mission; once the session leaves or joins another, its next board links to none or the other, and a later round on the first board is a 400 that writes nothing', async () => {
+  await check('a board posted by a session bound to a mission, naming none, links to that mission; once the session leaves, its next board links to none and a later round on the first board is a 400 that writes nothing; once it joins another, that round moves to the other mission\'s board and closes its rounds on the first', async () => {
     const tab = liveProcess();
     const start = '2026-10-30T07:00:00Z';
     try {
@@ -1411,12 +1419,16 @@ async function main() {
         `board ${linked.body.boardId} belongs to mission BOUND_POSTS, and the posting session has left it: ask with fresh for a board of its own`]);
 
       assert.equal((await post('/api/mission/BOUND_POSTS_NEXT/join', { id: 'poster', pid: tab.pid, procStart: start })).status, 200);
-      const elsewhere = await post('/api/board', { ...followUp, requestId: 'bound-4' });
-      assert.deepEqual([elsewhere.status, elsewhere.body.error], [400,
-        `board ${linked.body.boardId} belongs to mission BOUND_POSTS, and the posting session is bound to mission BOUND_POSTS_NEXT: ask with fresh for a board of its own`]);
       assert.deepEqual(readBoard(linked.body.boardId, home), landed, 'a refused round writes nothing');
+      // ADR 150: a session bound to a mission posts on that mission's board, whatever board it names.
+      const elsewhere = await post('/api/board', { ...followUp, requestId: 'bound-4' });
+      assert.equal(elsewhere.status, 200, JSON.stringify(elsewhere.body));
+      assert.notEqual(elsewhere.body.boardId, linked.body.boardId);
+      assert.equal(elsewhere.body.moved, true);
+      assert.equal(readBoard(elsewhere.body.boardId, home).mission, 'BOUND_POSTS_NEXT');
+      assert.deepEqual(readBoard(linked.body.boardId, home).rounds.map(r => r.status), ['abandoned'], 'the rounds it left open on the first board close');
       const next = await post('/api/board', { title: 'Next mission round', ...ask });
-      assert.equal(readBoard(next.body.boardId, home).mission, 'BOUND_POSTS_NEXT');
+      assert.equal(next.body.boardId, elsewhere.body.boardId, 'the mission\'s next round lands on its one board');
       assert.equal((await post('/api/mission/BOUND_POSTS_NEXT/leave', { id: 'poster' })).status, 200);
     } finally {
       await endProcess(tab);
@@ -1644,12 +1656,12 @@ async function main() {
     assert.equal((await rawRequest(port, 'POST', '/api/mission/COOKIE/order', { headers: { 'content-type': 'application/json' }, body: '{"kind":"stop"}' })).status, 401);
   });
 
-  await check('GET /api/missions answers missions, tab cards, counts, live, slotFree, now and the session watcher', async () => {
+  await check('GET /api/missions answers missions, tab cards, counts, live, slotFree, now, the session watcher and the spin-down flag', async () => {
     const r = await getJson('/api/missions');
     assert.equal(r.status, 200);
-    assert.deepEqual(Object.keys(r.body).sort(), ['counts', 'live', 'missions', 'now', 'slotFree', 'tabs', 'watcher']);
+    assert.deepEqual(Object.keys(r.body).sort(), ['counts', 'live', 'missions', 'now', 'slotFree', 'spinDown', 'tabs', 'watcher']);
     assert.deepEqual(Object.keys(r.body.watcher).sort(), ['lastAt', 'up']);
-    assert.deepEqual(Object.keys(r.body.counts).sort(), ['needsYou', 'queued', 'released', 'stalled', 'waiting', 'working']);
+    assert.deepEqual(Object.keys(r.body.counts).sort(), ['needsYou', 'parked', 'queued', 'released', 'stalled', 'waiting', 'working']);
     assert.deepEqual(Object.keys(r.body.live).sort(), ['alive', 'working']);
     const total = Object.values(r.body.counts).reduce((a, b) => a + b, 0);
     const tabsNeedingYou = r.body.tabs.filter(t => t.state === 'needs-you').length;

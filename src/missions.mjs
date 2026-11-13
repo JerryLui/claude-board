@@ -10,7 +10,8 @@
 // What a reader sees is a view, derived on every read and never stored: a released mission
 // reads released, and a retired one (its `retiredAt` set) waiting, no list showing it once
 // its PRs are merged or closed and no release step waits (ADR 147); else a mission whose
-// board's newest round still waits on an answer reads needs-you; else a session whose process is
+// board's newest round still waits on an answer reads needs-you; else a parked one reads parked;
+// else a session whose process is
 // gone, a reservation no process bound within `UNBOUND_GRACE_MS`, or a working one silent
 // past `STALL_SILENCE_MS`, reads stalled, and a gone one also carries `gone: { lastSeenAt }`.
 // A session the session watcher's latest snapshot lists counts as heard from at the
@@ -22,14 +23,16 @@
 // the record.
 
 import { randomBytes } from 'node:crypto';
-import { readBoard, boardHome, readMission, writeMission, listMissions, assertMissionKey, SAFE_MISSION_KEY, MISSION_RETENTION_MS } from './store.mjs';
+import { readBoard, boardExists, boardHome, readMission, writeMission, listMissions, assertMissionKey, SAFE_MISSION_KEY, MISSION_RETENTION_MS } from './store.mjs';
 import { questionBlocks } from './badge.mjs';
 import { processStartUtc } from './proc-start.mjs';
 
 export { SAFE_MISSION_KEY, assertMissionKey, MISSION_RETENTION_MS };
 
 export const PHASES = ['grill', 'direct', 'landing'];
-export const STORED_STATES = ['needs-you', 'working', 'waiting', 'queued', 'released'];
+/** `parked` is a mission that stopped at a spin-down (src/spin-down.mjs), written as its
+ * session's last act: it reads parked, or needs-you while a round waits on the PM. */
+export const STORED_STATES = ['needs-you', 'working', 'waiting', 'queued', 'released', 'parked'];
 /** A PR's state as the session watcher reads it from GitHub at the PR's head commit,
  * `closed` being one closed without merging. */
 export const PR_STATES = ['draft', 'open', 'green', 'red', 'merged', 'closed'];
@@ -380,13 +383,29 @@ export function roundWantsAnswer(round, questions) {
   return questions.some(q => q.round === round.n);
 }
 
-/** The round of `board` that can hold its mission at needs you: its newest, when that one
- * still wants an answer. An older page left open is answered from its own page on the
- * board, and never holds the mission there. */
+/** The round of `board` that can hold its mission at needs you: the newest round of one of
+ * the sessions that posted there, when it still wants an answer, the latest such. A
+ * mission's board is shared (ADR 150), so one session's newer round never hides
+ * another's question. An older page a session left open is answered from its own page
+ * on the board, and never holds the mission there. Rounds are one session's by
+ * `sessionMatches`: its id, or its process to the second, so a resumed session or a start
+ * read with milliseconds is still one poster. A round from before rounds recorded their
+ * poster is the board's first poster's. */
 function waitingRound({ board, questions }) {
-  const rounds = board.rounds || [];
-  const newest = rounds[rounds.length - 1];
-  return newest && roundWantsAnswer(newest, questions) ? newest : null;
+  const newest = [];
+  for (const r of board.rounds || []) {
+    const poster = (r && r.session) || board.session || null;
+    // Matched against every poster a group holds, so a session read first by its process and
+    // later by its id, then resumed under that id in another process, stays one group.
+    const slot = newest.find(e => e.posters.some(p => p === poster || sessionMatches(p, poster)));
+    if (slot) {
+      slot.round = r;
+      if (!slot.posters.includes(poster)) slot.posters.push(poster);
+    } else newest.push({ posters: [poster], round: r });
+  }
+  let hit = null;
+  for (const { round: r } of newest) if (roundWantsAnswer(r, questions) && (!hit || r.n > hit.n)) hit = r;
+  return hit;
 }
 
 function boardsNeedYou(linked) {
@@ -436,17 +455,19 @@ function viewState(m, linked, now, isAlive, listed) {
   // session do: it waits on its open work, if any (ADR 147).
   if (isRetired(m)) return 'waiting';
   if (boardsNeedYou(linked())) return 'needs-you';
+  // A parked mission's session is ended on purpose: it never reads stalled.
+  if (m.state === 'parked') return 'parked';
   if (sessionStalled(m, now, isAlive, listed)) return 'stalled';
   return m.state;
 }
 
 /** `{ lastSeenAt }` while the session bound or reserved on `m` is gone (`sessionGone`) and
- * the mission has neither recorded its end nor retired, `lastSeenAt` being its last
- * heartbeat; else null. A retired mission's session is expected to stop, as a finished
- * one's is, so its card never says it went (ADR 147). */
+ * the mission has neither recorded its end, retired nor parked, `lastSeenAt` being its last
+ * heartbeat; else null. A retired or parked mission's session is expected to stop, as a
+ * finished one's is, so its card never says it went (ADR 147). */
 function goneOf(m, now, isAlive, listed) {
   const s = currentSession(m);
-  if (!s || sessionFinished(m) || isRetired(m) || !sessionGone(s, now, isAlive, listingOf(s, listed))) return null;
+  if (!s || sessionFinished(m) || isRetired(m) || m.state === 'parked' || !sessionGone(s, now, isAlive, listingOf(s, listed))) return null;
   return { lastSeenAt: s.seenAt ?? s.startedAt ?? null };
 }
 
@@ -494,8 +515,8 @@ function aliveOnce(isAlive) {
 }
 
 /** The column `m` shows in: released stays released; a retired mission waits; then a
- * board's round waiting on the PM, whatever its session is doing; then a stalled session;
- * else the stored state. */
+ * board's round waiting on the PM, whatever its session is doing; then a parked mission;
+ * then a stalled session; else the stored state. */
 export function deriveState(m, { home = boardHome(), now = Date.now(), isAlive = pidAlive, listed = null } = {}) {
   return viewState(m, () => linkedBoards(m, home), now, isAlive, listed);
 }
@@ -565,7 +586,7 @@ export function missionsOverview({ home = boardHome(), now = Date.now(), all = f
   const views = (records ?? listMissions(home)).map(m => missionView(m, { home, now, isAlive, listed }));
   const missions = views.filter(v => !(v.retired && !hasOpenWork(v)) && (all || !releasedLongAgo(v, now)))
     .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
-  const counts = { needsYou: 0, working: 0, waiting: 0, stalled: 0, released: 0, queued: 0 };
+  const counts = { needsYou: 0, working: 0, waiting: 0, stalled: 0, released: 0, queued: 0, parked: 0 };
   for (const v of missions) counts[v.view === 'needs-you' ? 'needsYou' : v.view] += 1;
   const live = liveCounts(views, listed);
   return { missions, counts, live, slotFree: slotFree(live), now: iso(now) };
@@ -857,7 +878,7 @@ function conflict(answer) {
  * `{ status: 202, takeover: 'pending', session }`, the bound session told through
  * `bindingFor` to finish its step and leave. A fresh bind moves the mission to working, in
  * `phase` when given, and clears any takeover; so does the bound session joining its
- * released mission again. Two joins are refused whatever holds the mission: the session a
+ * released or parked mission again. Two joins are refused whatever holds the mission: the session a
  * launch replaced (`ended`, not left), a 409 `{ error: 'ended', session }`, unless it is
  * that session resumed in a new process (`resumedFrom`), which binds and drops `ended`; and a session
  * bound to another mission (`bindingFor`'s rule), its own released mission's rejoin
@@ -885,7 +906,7 @@ export function joinMission(key, body, { home = boardHome(), now = Date.now(), i
   let answer;
   if (rejoin) {
     m.session = heardFrom(bound, ref, at);
-    if (m.state === 'released') moveTo(m, { phase: phase || m.phase, state: 'working' }, now);
+    if (m.state === 'released' || m.state === 'parked') moveTo(m, { phase: phase || m.phase, state: 'working' }, now);
     else if (phase && phase !== m.phase) moveTo(m, { phase }, now);
     answer = { status: 200, bound: true, session: m.session };
   } else if (bound && isReservation(bound) && hasLiveSession(m, now, isAlive, listed)) {
@@ -1054,6 +1075,18 @@ export function roundFired(board, round) {
 export function recordFire(board, round, by, { home = boardHome(), now = Date.now() } = {}) {
   if (!board.mission || !roundFired(board, round)) return null;
   return upsertMission(board.mission, { fire: { by } }, { home, now });
+}
+
+/** The board mission `key`'s sessions post on (ADR 150): the latest board it links that is
+ * still in the store, so a mission that already holds several continues on its newest.
+ * Null for a mission with none, or none left, and for a mission not stored. */
+export function missionBoardId(key, { home = boardHome() } = {}) {
+  const m = readMission(key, home);
+  const links = (m && m.boards) || [];
+  for (let i = links.length - 1; i >= 0; i--) {
+    if (boardExists(links[i].id, home)) return links[i].id;
+  }
+  return null;
 }
 
 /** A board posted with `mission: <key>`: appends `{ id, url, at }` to the mission's `boards`

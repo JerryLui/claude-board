@@ -22,6 +22,7 @@ import { DEFAULT_AWAIT_TIMEOUT_MS, STRANDED_BANNER, ANSWERS_DELIVERED, MAX_SUBMI
 // the product's own parser rather than restated here.
 import { MAX_REF_BYTES, MAX_HTML_BYTES, resolveRefRoots } from '../src/resolve.mjs';
 import { readBoard, writeBoard } from '../src/store.mjs';
+import { MAX_SUBMIT_BYTES } from '../src/post-limit.mjs';
 // Used only to ARRANGE fixture states the HTTP surface itself has no fast way to reach
 // (a nonzero cycle, a timer already mid-break) -- every ASSERTION below still goes
 // through the HTTP routes, never these directly. See the pomodoro checks near the
@@ -4081,15 +4082,17 @@ async function main() {
 
   await check('a body over the limit on a JSON route other than a board post is a 413 naming its size and the limit, with no advice about rounds or stages', async () => {
     const { boardId } = await postBoard(port, SECRET, { title: 'A board to post oversized bodies at', blocks: [{ kind: 'markdown', text: 'target' }] });
-    const body = `{}${' '.repeat(25_000_000)}`;
-    for (const route of [
-      '/api/handoff', '/api/signin-link', `/api/board/${boardId}/submit`, `/api/board/${boardId}/attended`,
-      '/api/pomodoro/settings', '/api/pomodoro/preview', '/api/store/prune',
+    // The submit's limit is its own: it carries a Send's pasted images as base64.
+    for (const [route, limit] of [
+      ['/api/handoff', 25_000_000], ['/api/signin-link', 25_000_000], [`/api/board/${boardId}/submit`, MAX_SUBMIT_BYTES],
+      [`/api/board/${boardId}/attended`, 25_000_000], ['/api/pomodoro/settings', 25_000_000], ['/api/pomodoro/preview', 25_000_000],
+      ['/api/store/prune', 25_000_000],
     ]) {
+      const body = `{}${' '.repeat(limit)}`;
       const before = storeListing();
       const r = await rawRequest(port, 'POST', route, { headers: writeHeaders(SECRET), body });
       assert.equal(r.status, 413, `${route} answers an oversized body 413: ${r.body.slice(0, 200)}`);
-      assert.equal(JSON.parse(r.body).error, 'body is 25,000,002 bytes, over the 25,000,000-byte limit of one request body', `${route} names the size and the limit`);
+      assert.equal(JSON.parse(r.body).error, `body is ${(limit + 2).toLocaleString('en-US')} bytes, over the ${limit.toLocaleString('en-US')}-byte limit of one request body`, `${route} names the size and the limit`);
       assert.deepEqual(storeListing(), before, `${route} writes nothing for it`);
     }
   });

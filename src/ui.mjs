@@ -64,6 +64,14 @@ import { palettes } from './styles.mjs';
 import { MERMAID_ASSET } from './vendor/mermaid/index.mjs';
 import { openSharedStream, STREAM_WORKER_URL } from './stream-worker.mjs';
 import { activityMinMs } from './activity.mjs';
+import {
+  ROUND_DOWNLOAD_BUTTON, EXPORT_CSS, PRINT_PAGE_H, decisionRows, exportDate, exportFileName, exportDocument, printScale,
+} from './round-export.mjs';
+// The one source of truth for both image limits -- the daemon's own
+// src/images.mjs checks a submit against these same two constants, so a page
+// refusal and a daemon refusal always agree. Spliced into the `ui` template
+// literal by value, same discipline as MERMAID_ASSET above.
+import { MAX_IMAGE_BYTES, MAX_SEND_IMAGE_BYTES, megabytes } from './post-limit.mjs';
 
 // Mermaid variable -> CSS token, read at call time from the live computed style
 // rather than hardcoded a second time in the client script below. 'background'
@@ -114,6 +122,20 @@ export const MERMAID_TOKEN_MAP = {
  * read can come before the root's scrollbar has taken its width, and a scrollbar
  * appearing as the page grows fires no resize. Written only when the value changed.
  * Guarded for the check stand-ins, which may run it with no body or no listener API. */
+/** Mermaid's theme variables for a downloaded round (src/round-export.mjs):
+ * mermaidThemeVariables' set, read off the light palette rather than the live
+ * page, since the file is light whatever the board's theme. */
+const EXPORT_MERMAID_VARS = (() => {
+  const vars = {
+    darkMode: false,
+    background: 'transparent',
+    fontFamily: 'Inter, -apple-system, BlinkMacSystemFont, system-ui, sans-serif',
+    fontSize: '13px',
+  };
+  for (const [key, token] of Object.entries(MERMAID_TOKEN_MAP)) vars[key] = palettes.light[token];
+  return vars;
+})();
+
 export function trackDocWidth() {
   function measureDocWidth() {
     if (!document.body || !document.documentElement) return;
@@ -128,6 +150,11 @@ export function trackDocWidth() {
     new ResizeObserver(measureDocWidth).observe(document.documentElement);
   }
 }
+
+/** The `localStorage` key holding the overview this browser last opened, '/' (Missions) or
+ * '/boards' (Boards): src/indexpage.mjs's rememberHomeView writes it, and a board page's
+ * Home mark reads it. Absent, the mark goes to Missions. */
+export const HOME_STORAGE_KEY = 'cb-home';
 
 export const ui = `
 (function () {
@@ -155,6 +182,15 @@ export const ui = `
   var readonly = (location.protocol === 'file:');
   if (readonly) document.body.classList.add('readonly');
 
+  // The Home mark goes to the overview this browser last opened (HOME_STORAGE_KEY in
+  // src/ui.mjs), Missions when none is remembered or storage is off.
+  try {
+    if (window.localStorage.getItem('${HOME_STORAGE_KEY}') === '/boards') {
+      var homeLink = document.querySelector('a.back-to-index');
+      if (homeLink) homeLink.setAttribute('href', '/boards');
+    }
+  } catch (e) { /* storage off: the mark keeps '/' */ }
+
   // Marks the innermost element under the cursor for the page's OWN generic
   // anchor gesture (the delegated document-level listener further down), so the
   // click-to-anchor gesture is visible before it is used. An html stage's
@@ -179,6 +215,12 @@ export const ui = `
   var selections = {};   // qid -> string (single/text) | string[] (multi/rank)
   var notes = {};
   var deferred = {};     // qid -> bool, the per-question defer affordance
+  // Images pasted or dropped on a composer and not sent yet, keyed as its
+  // '.thumb-row' is ('note:<qid>', 'answer:<qid>', 'comment:<blockId>'), each
+  // { name, size, data } with 'data' the data: URL a submit carries. A queued
+  // comment takes its form's list with it ('images' on its pendingComments entry).
+  // Page memory only, as 'notes' is: a reload keeps neither.
+  var draftImages = {};
 
   // Comment mode: off by default, so every ordinary
   // widget handler below runs exactly as it always has. Declared here, at the very
@@ -460,6 +502,9 @@ export const ui = `
       // invisible destruction.
       if (editing) input.value = editing.text;
       else if (!String(input.value || '').trim()) input.value = '';
+      // Its images follow the same rule: an edit shows the entry's own, and any
+      // other open keeps whatever the draft already holds.
+      if (editing) setDraftImages('comment:' + blockId, (editing.images || []).slice());
       input.focus();
     }
   }
@@ -795,6 +840,14 @@ export const ui = `
     label.textContent = '#' + n + ' · ' + pendingAnchorTag(entry.anchor);
     item.appendChild(label);
     item.appendChild(document.createTextNode(entry.text));
+    // Its images, small and without a remove: deleting the comment is the way
+    // to take one back.
+    if (entry.images && entry.images.length) {
+      var thumbs = document.createElement('div');
+      thumbs.className = 'thumb-row';
+      entry.images.forEach(function (img) { thumbs.appendChild(thumbEl(img, -1)); });
+      item.appendChild(thumbs);
+    }
     var del = document.createElement('button');
     del.type = 'button';
     del.className = 'comment-delete';
@@ -1261,14 +1314,15 @@ export const ui = `
    * once a frame. */
   function handleStageHeight(data, frame) {
     if (!Number.isFinite(data.height) || data.height <= 0) return;
-    if (isPageStage(frame)) return;
     var h = Math.min(data.height, STAGE_TRAVEL_CAP);
     // Kept beside the box, not derived later from it: this is the mock's OWN
     // content height, and the difference between it and the cap is exactly how
     // much of the mock the cap is hiding -- the number forwardStageWheel
-    // (below) and an open both read.
+    // (below) and an open both read. A page board's stage keeps it too, for
+    // Download round's full-height copy, and applies nothing.
     frame.__cbStageMatched = h === frame.__cbStageContentH;
     frame.__cbStageContentH = h;
+    if (isPageStage(frame)) return;
     scheduleStageHeight(frame);
   }
 
@@ -1335,7 +1389,7 @@ export const ui = `
    * which is what reaches the reports that move no box. Until a box is
    * written the frame stands at the stylesheet's own height,
    * STAGE_HEIGHT_FLOOR. A page board's stage never gets here:
-   * handleStageHeight drops its reports. */
+   * handleStageHeight applies none of its reports. */
   function markStageScrolls(frame, block) {
     var box = frame.__cbStageBox || STAGE_HEIGHT_FLOOR;
     block.classList.toggle('stage-scrolls', frame.__cbStageContentH + STAGE_FRAME_EDGE > box);
@@ -1905,7 +1959,13 @@ export const ui = `
     var head = document.querySelector('.board-head');
     if (head && head.getBoundingClientRect && !document.body.classList.contains('stage-scrolled')) {
       lastTopBand = head.getBoundingClientRect().height;
+      // A sent artifact round's chip line runs on under the header at rest
+      // ('body.page-board .round-chips', src/styles.mjs), so the band ends at
+      // its bottom.
+      document.body.style.setProperty('--page-head-h', lastTopBand + 'px');
     }
+    var chips = document.querySelector('.round-current .round-chips');
+    var top = Math.max(lastTopBand, chips && chips.getBoundingClientRect ? chips.getBoundingClientRect().bottom : 0);
     var bottom = 0;
     var dock = document.querySelector('.round-pager-dock');
     if (dock && dock.getBoundingClientRect) {
@@ -1928,7 +1988,7 @@ export const ui = `
         bandObservedRail = rail;
       }
     }
-    postToStage(frame, { type: 'band', top: lastTopBand, bottom: bottom });
+    postToStage(frame, { type: 'band', top: top, bottom: bottom });
   }
 
   /** ADR.md entry 40: an ordinary board's own
@@ -4067,6 +4127,10 @@ export const ui = `
     });
   });
 
+  // A composer re-rendered by a push shows the images its draft still holds, as
+  // the note loop below refills its text.
+  qsa('div.thumb-row[data-images-for]', root).forEach(paintThumbRow);
+
   qsa('textarea[data-note-for]', root).forEach(function (ta) {
     var qid = ta.getAttribute('data-note-for');
     if (notes[qid]) ta.value = notes[qid];
@@ -4120,13 +4184,15 @@ export const ui = `
   });
 
   qsa('.comment-form', root).forEach(function (form) {
-    form.addEventListener('submit', function (ev) {
-      ev.preventDefault();
+    form.addEventListener('submit', function addComment(ev) {
+      if (ev) ev.preventDefault();
       if (readonly) return;
       var input = form.querySelector('input[type=text]');
       var text = (input.value || '').trim();
-      if (!text) return;
       var blockId = form.getAttribute('data-block-id');
+      if (afterImageReads('comment:' + blockId, function () { addComment(null); })) return;
+      // An image says something on its own: a comment needs words or an image.
+      if (!text && !draftImages['comment:' + blockId]) return;
       var anchorKind = form.getAttribute('data-anchor-kind') || 'block';
       var anchorRef = form.getAttribute('data-anchor-ref') || '';
       var anchorLabel = form.getAttribute('data-anchor-label') || '';
@@ -4154,11 +4220,15 @@ export const ui = `
       // comments ever shared an anchor (legal for a whole-block comment).
       var editingId = form.getAttribute('data-editing-id');
       var editing = editingId ? pendingComments.find(function (c) { return String(c.id) === editingId; }) : null;
+      // The images on the form go with the comment, an edit's included: the form
+      // was refilled with the entry's own when it reopened (openCommentForm).
+      var images = takeDraftImages('comment:' + blockId);
       if (editing) {
         editing.anchor = anchor;
         editing.text = text;
+        editing.images = images;
       } else {
-        pendingComments.push({ id: nextPendingId++, blockId: blockId, anchor: anchor, text: text });
+        pendingComments.push({ id: nextPendingId++, blockId: blockId, anchor: anchor, text: text, images: images });
       }
       reportActivity(form);
       // The whole layer is re-rendered rather than one pin appended, so the
@@ -4259,6 +4329,258 @@ export const ui = `
     if (block) toggleStageFold(block);
   });
 
+  // --- Download round: a sent round saved as one HTML file ------------------
+  //
+  // Made here, from the round as drawn, so a diagram is already SVG and the
+  // file carries no engine (src/round-export.mjs holds the pure half and says
+  // what the file is). The copy is the round's own markup with every control
+  // and pin taken out, its answers written as text, its images inlined as
+  // data: URLs and its stages script-free: each mock is its srcdoc with every
+  // script removed, in a frame sandboxed with no allow-scripts, as tall as the
+  // stage last reported itself. The file's own policy admits no script at all.
+  // Its diagrams are drawn again in the light palette, since a file is printed.
+  var ROUND_DOWNLOAD_BUTTON = ${JSON.stringify(ROUND_DOWNLOAD_BUTTON)};
+  var EXPORT_CSS = ${JSON.stringify(EXPORT_CSS)};
+  var EXPORT_MERMAID_VARS = ${JSON.stringify(EXPORT_MERMAID_VARS)};
+  var decisionRows = ${decisionRows.toString()};
+  var exportDate = ${exportDate.toString()};
+  var exportFileName = ${exportFileName.toString()};
+  var exportDocument = ${exportDocument.toString()};
+  var PRINT_PAGE_H = ${PRINT_PAGE_H};
+  var printScale = ${printScale.toString()};
+  // Everything in a round that is a control or a pin rather than what the round
+  // said. The round's chip line goes too: the file's own head names the round.
+  var EXPORT_DROP = '.round-chips, .round-end, .comment-btn, .comment-form, .comment-target, .pin-layer, '
+    + '.pull-out, .stage-fold, .fold-toggle, .btn-defer, .rank-grip, .question-picks, .note-head, '
+    + '.page-send-bar, '
+    + 'script, noscript, source, object, embed, base, meta';
+  var nextExportDiagramId = 0;
+
+  // The page's stylesheet as text. A sheet the page may not read back (a
+  // file: archive's sibling, where the control is hidden) gives nothing.
+  function pageCssText() {
+    return [].slice.call(document.styleSheets).map(function (sheet) {
+      try { return [].slice.call(sheet.cssRules).map(function (r) { return r.cssText; }).join('\\n'); } catch (e) { return ''; }
+    }).join('\\n');
+  }
+
+  // No inline handler and no javascript: URL survives into the file.
+  function stripActiveAttributes(root) {
+    qsa('*', root).forEach(function (el) {
+      [].slice.call(el.attributes).forEach(function (a) {
+        if (/^on/i.test(a.name) || /^\\s*javascript:/i.test(a.value)) el.removeAttribute(a.name);
+      });
+    });
+  }
+
+  // A stage's srcdoc with every script, and everything else that acts, taken out.
+  function scriptFreeHtml(html) {
+    var doc = new DOMParser().parseFromString(html, 'text/html');
+    qsa('script, noscript, object, embed, base, meta[http-equiv]', doc).forEach(function (el) { el.remove(); });
+    stripActiveAttributes(doc);
+    return '<!DOCTYPE html>' + doc.documentElement.outerHTML;
+  }
+
+  // 'orig' as drawn on the page, copied into 'copy' as a data: URL of its pixels.
+  // An image the page may not read back (one off another host, which the page's
+  // policy does not even load) is named in its place, so the file asks nothing
+  // of the network.
+  // A lazy image the reader never scrolled to is loaded first.
+  async function inlineImage(orig, copy) {
+    copy.removeAttribute('srcset');
+    copy.removeAttribute('loading');
+    if (!orig.complete || !orig.naturalWidth) {
+      orig.loading = 'eager';
+      try { await orig.decode(); } catch (e) { /* broken or refused: named below */ }
+    }
+    var src = orig.currentSrc || orig.getAttribute('src') || '';
+    var data = /^data:/i.test(src) ? src : null;
+    if (!data && orig.complete && orig.naturalWidth) {
+      try {
+        var canvas = document.createElement('canvas');
+        canvas.width = orig.naturalWidth;
+        canvas.height = orig.naturalHeight;
+        canvas.getContext('2d').drawImage(orig, 0, 0);
+        data = canvas.toDataURL('image/png');
+      } catch (e) { data = null; }
+    }
+    if (data) { copy.setAttribute('src', data); return; }
+    var note = document.createElement('span');
+    note.className = 'export-missing';
+    note.textContent = 'Image not included' + (orig.alt ? ': ' + orig.alt : '');
+    copy.replaceWith(note);
+  }
+
+  // Each diagram's source drawn again in the light palette, through the one
+  // queue every mermaid pass shares; null where a diagram cannot be, which
+  // keeps the copy of what the page drew.
+  function exportDiagramSvgs(nodes) {
+    return queueMermaidTask(async function () {
+      var out = nodes.map(function () { return null; });
+      var sources = nodes.map(function (n) { return mermaidSourceByBlock && mermaidSourceByBlock.has(n) ? mermaidSourceByBlock.get(n) : null; });
+      if (!sources.some(Boolean)) return out;
+      try {
+        var engine = await ensureMermaidEngine();
+        engine.initialize({ startOnLoad: false, theme: 'base', themeVariables: EXPORT_MERMAID_VARS });
+        for (var i = 0; i < sources.length; i++) {
+          if (!sources[i]) continue;
+          try { out[i] = (await engine.render('cb-export-diagram-' + (nextExportDiagramId++), sources[i])).svg; } catch (e) { out[i] = null; }
+        }
+      } catch (e) { /* no engine: the copies of what the page drew stay */ }
+      return out;
+    });
+  }
+
+  // The round's markup, made into the file's content.
+  async function exportRoundContent(section) {
+    var copy = section.cloneNode(true);
+    // Paired by position before anything in the copy moves.
+    var pairs = function (sel) {
+      var a = qsa(sel, section), b = qsa(sel, copy);
+      return a.map(function (el, i) { return [el, b[i]]; }).filter(function (p) { return p[1]; });
+    };
+    var images = pairs('img');
+    var frames = pairs('iframe');
+    var diagrams = pairs('pre.mermaid');
+    var fields = pairs('textarea');
+
+    fields.forEach(function (p) {
+      var value = p[0].value || '';
+      var inNote = !!p[1].closest('.note-field');
+      if (inNote && !value.trim()) { p[1].remove(); return; }
+      var box = document.createElement('div');
+      box.className = inNote ? 'export-note-box' : 'export-text';
+      if (inNote) {
+        var tag = document.createElement('span');
+        tag.className = 'export-note-tag';
+        tag.textContent = 'Note';
+        box.appendChild(tag);
+      }
+      box.appendChild(document.createTextNode(value || (inNote ? '' : 'No answer')));
+      p[1].replaceWith(box);
+    });
+
+    frames.forEach(function (p) {
+      var srcdoc = p[0].getAttribute('srcdoc');
+      if (srcdoc == null) {
+        var missing = document.createElement('p');
+        missing.className = 'export-missing';
+        missing.textContent = 'This mock was not loaded on the page, so the file does not carry it.';
+        p[1].replaceWith(missing);
+        return;
+      }
+      var reported = p[0].__cbStageContentH;
+      var height = Math.ceil(reported > 0 ? reported + STAGE_FRAME_EDGE : (p[0].getBoundingClientRect().height || 320));
+      var width = Math.round(p[0].getBoundingClientRect().width) || 0;
+      var frame = document.createElement('iframe');
+      frame.className = 'html-stage';
+      frame.setAttribute('sandbox', '');
+      frame.setAttribute('title', 'Mock');
+      frame.setAttribute('srcdoc', scriptFreeHtml(srcdoc));
+      frame.style.height = height + 'px';
+      // A mock taller than a printed page prints at the board's width, so it lays
+      // out as it was drawn, scaled into one page (EXPORT_CSS's print half). Any
+      // other prints as the file shows it.
+      var holder = document.createElement('div');
+      holder.className = 'export-frame';
+      holder.appendChild(frame);
+      var scale = printScale(height);
+      if (width && scale < 1) {
+        holder.classList.add('export-fit');
+        holder.style.setProperty('--export-w', width + 'px');
+        holder.style.setProperty('--export-h', height + 'px');
+        holder.style.setProperty('--export-scale', String(scale));
+      }
+      p[1].replaceWith(holder);
+    });
+
+    var svgs = await exportDiagramSvgs(diagrams.map(function (p) { return p[0]; }));
+    diagrams.forEach(function (p, i) {
+      if (svgs[i]) p[1].innerHTML = svgs[i];
+      p[1].removeAttribute('style');
+    });
+
+    await Promise.all(images.map(function (p) { return inlineImage(p[0], p[1]); }));
+
+    qsa(EXPORT_DROP, copy).forEach(function (el) { el.remove(); });
+    // Buttons become plain boxes: an option is a record here, not a control.
+    qsa('button', copy).forEach(function (btn) {
+      var box = document.createElement('div');
+      box.className = btn.className;
+      while (btn.firstChild) box.appendChild(btn.firstChild);
+      btn.replaceWith(box);
+    });
+    // An artifact round's comments float over it on the board; here they list under it.
+    qsa('.page-comments', copy).forEach(function (rail) {
+      while (rail.firstChild) rail.parentNode.insertBefore(rail.firstChild, rail);
+      rail.remove();
+    });
+    qsa('details', copy).forEach(function (d) { d.setAttribute('open', ''); });
+    qsa('.folded, .stage-folded, .stage-opened, .stage-scrolls', copy).forEach(function (el) {
+      el.classList.remove('folded', 'stage-folded', 'stage-opened', 'stage-scrolls');
+    });
+    qsa('.note-field', copy).forEach(function (field) {
+      if (!field.textContent.trim() && !field.querySelector('img')) field.remove();
+    });
+    qsa('[draggable], [tabindex], [aria-disabled]', copy).forEach(function (el) {
+      el.removeAttribute('draggable');
+      el.removeAttribute('tabindex');
+      el.removeAttribute('aria-disabled');
+    });
+    stripActiveAttributes(copy);
+    return copy.innerHTML;
+  }
+
+  function saveHtmlFile(name, html) {
+    var url = URL.createObjectURL(new Blob([html], { type: 'text/html;charset=utf-8' }));
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    // Never put in the page: its click would reach the page's own listeners.
+    a.click();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
+  }
+
+  // A stage the reader never scrolled to has reported no height: the browser
+  // lays out no frame it does not show. Each is asked for one, and given a
+  // moment to answer; one that does not keeps the box it has.
+  async function askStageHeights(section) {
+    var unheard = function (frame) { return !(frame.__cbStageContentH > 0); };
+    var asked = qsa('iframe.html-stage', section).filter(unheard);
+    asked.forEach(function (frame) { postToStage(frame, { type: 'height' }); });
+    for (var i = 0; i < 10 && asked.some(unheard); i++) await new Promise(function (done) { setTimeout(done, 30); });
+  }
+
+  async function downloadRound(section) {
+    await askStageHeights(section);
+    var n = Number(section.getAttribute('data-round'));
+    var round = (board.rounds || []).find(function (r) { return r.n === n; }) || {};
+    var questions = questionBlocks({ blocks: (board.blocks || []).filter(function (b) { return b.round === n; }) });
+    var html = exportDocument({
+      title: board.title || '',
+      roundN: n,
+      roundTitle: round.title || '',
+      sentDate: exportDate(round.sentAt),
+      rows: decisionRows(questions, board.answers || {}),
+      css: pageCssText(),
+      exportCss: EXPORT_CSS,
+      contentHtml: await exportRoundContent(section),
+    });
+    saveHtmlFile(exportFileName(board.title, n), html);
+  }
+
+  // Delegated, so a round that arrives sent over a push needs no wiring.
+  document.addEventListener('click', function (ev) {
+    var btn = ev.target && ev.target.closest && ev.target.closest('button.round-download');
+    if (!btn || readonly || btn.disabled) return;
+    var section = btn.closest('.round');
+    if (!section) return;
+    btn.disabled = true;
+    downloadRound(section).catch(function (e) {
+      if (window.console) console.error('Download round failed', e);
+    }).then(function () { btn.disabled = false; });
+  });
+
   // Keyboard focus reaching into the clipped part opens the fold: a Tab that
   // lands on a link below the fade would otherwise leave the reviewer's focus
   // on something they cannot see, in a box that does not scroll to reveal it. Opening is the only honest answer -- the fold is a reading
@@ -4302,9 +4624,252 @@ export const ui = `
       var input = openForm.querySelector('input[type=text]');
       if (input) input.value = '';
       var openBlockId = openForm.getAttribute('data-block-id');
+      setDraftImages('comment:' + openBlockId, []);
       var openTarget = document.querySelector('div#comment-target-' + openBlockId);
       if (openTarget) openTarget.classList.remove('open');
     }
+  });
+
+  // --- images pasted or dropped on a note, a text answer or a comment ------
+  //
+  // A composer that takes images carries a '.thumb-row' keyed as draftImages is
+  // (src/render.mjs's imageTray; none on a sent round). Paste and drop are
+  // delegated from the document, so a round pushed later takes them with no
+  // wiring pass. Each image is held as the data: URL a submit carries, under the
+  // daemon's own limits, checked here first so a refusal costs nothing typed:
+  // one image at most IMAGE_MAX_BYTES, as it lands; a Send's images together at
+  // most SEND_IMAGES_MAX_BYTES, at Send. Both are spliced in from
+  // src/post-limit.mjs, the same module the daemon's own src/images.mjs checks
+  // against, so the page and the daemon can never disagree on the number, and
+  // so is megabytes, which names a limit the way the daemon's refusal does.
+  var MB = 1024 * 1024;
+  var IMAGE_MAX_BYTES = ${JSON.stringify(MAX_IMAGE_BYTES)};
+  var SEND_IMAGES_MAX_BYTES = ${JSON.stringify(MAX_SEND_IMAGE_BYTES)};
+  var IMAGE_TYPES = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' };
+  var KEPT_LINE = ' Nothing was sent; your answers are kept.';
+  var pastedCount = 0;
+
+  var megabytes = ${megabytes.toString()};
+  function sizeLabel(bytes) {
+    return bytes >= MB ? megabytes(bytes) : String(Math.max(1, Math.round(bytes / 1024))) + ' KB';
+  }
+
+  function thumbRowFor(key) {
+    return document.querySelector('div.thumb-row[data-images-for="' + key + '"]');
+  }
+
+  /** One thumbnail: the image, its name and size, and, for 'index' 0 or more, the
+   * remove control that drops draftImages entry 'index' of its row's key. */
+  function thumbEl(img, index) {
+    var thumb = document.createElement('div');
+    thumb.className = 'thumb';
+    var pic = document.createElement('img');
+    pic.className = 'thumb-img';
+    pic.setAttribute('src', img.data);
+    pic.setAttribute('alt', img.name);
+    thumb.appendChild(pic);
+    var cap = document.createElement('div');
+    cap.className = 'thumb-cap';
+    cap.textContent = img.name + ', ' + sizeLabel(img.size);
+    thumb.appendChild(cap);
+    if (index >= 0) {
+      var remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'thumb-remove';
+      remove.setAttribute('data-image-index', String(index));
+      remove.setAttribute('aria-label', 'Remove ' + img.name);
+      remove.textContent = '×';
+      thumb.appendChild(remove);
+    }
+    return thumb;
+  }
+
+  function paintThumbRow(row) {
+    var list = draftImages[row.getAttribute('data-images-for')] || [];
+    row.innerHTML = '';
+    list.forEach(function (img, i) { row.appendChild(thumbEl(img, i)); });
+  }
+
+  function setDraftImages(key, list) {
+    if (list.length) draftImages[key] = list; else delete draftImages[key];
+    var row = thumbRowFor(key);
+    if (row) paintThumbRow(row);
+  }
+
+  /** The key's images, handed over and cleared from its row. */
+  function takeDraftImages(key) {
+    var list = draftImages[key] || [];
+    setDraftImages(key, []);
+    clearImageRefusal(key);
+    return list;
+  }
+
+  /** An answer's images: its text answer's, then its note's. */
+  function answerImages(qid) {
+    return (draftImages['answer:' + qid] || []).concat(draftImages['note:' + qid] || []);
+  }
+
+  /** The draftImages keys a submit of 'answers' carries. */
+  function answeredImageKeys(answers) {
+    var keys = [];
+    answers.forEach(function (a) {
+      ['answer:' + a.id, 'note:' + a.id].forEach(function (key) { if (draftImages[key]) keys.push(key); });
+    });
+    return keys;
+  }
+
+  /** What a Send of the images under 'keys' and on 'comments' is told when they
+   * add up past SEND_IMAGES_MAX_BYTES; '' when they do not. */
+  function sendImagesRefusal(keys, comments) {
+    var total = 0;
+    keys.forEach(function (key) { (draftImages[key] || []).forEach(function (img) { total += img.size; }); });
+    comments.forEach(function (c) { (c.images || []).forEach(function (img) { total += img.size; }); });
+    if (total <= SEND_IMAGES_MAX_BYTES) return '';
+    return 'The images in this Send add up to ' + megabytes(total) + '; the limit is '
+      + megabytes(SEND_IMAGES_MAX_BYTES) + ' per Send.' + KEPT_LINE;
+  }
+
+  /** Queued comments as a submit carries them: an 'images' list of data: URLs,
+   * the key absent when there are none. */
+  function wireComments(list) {
+    return list.map(function (c) {
+      var out = { id: c.id, blockId: c.blockId, anchor: c.anchor, text: c.text };
+      if (c.images && c.images.length) out.images = c.images.map(function (img) { return img.data; });
+      return out;
+    });
+  }
+
+  function clearImageRefusal(key) {
+    var row = thumbRowFor(key);
+    var old = row && row.parentElement && row.parentElement.querySelector('p.image-refusal[data-refusal-for="' + key + '"]');
+    if (old) old.replaceWith();
+  }
+
+  /** Says 'text' under the composer 'key' names, in place of what it said before. */
+  function showImageRefusal(key, text) {
+    clearImageRefusal(key);
+    var row = thumbRowFor(key);
+    if (!row || !row.parentElement) return;
+    var p = document.createElement('p');
+    p.className = 'image-refusal';
+    p.setAttribute('role', 'alert');
+    p.setAttribute('data-refusal-for', key);
+    p.textContent = text;
+    row.parentElement.appendChild(p);
+  }
+
+  /** The composer key an event's target sits in, or null: a note, a text answer
+   * or a comment form, whose field is live (not readonly, not a sent round). */
+  function imageKeyAt(target) {
+    if (readonly || !target || !target.closest) return null;
+    var host = target.closest('.note-field, textarea[data-answer-for], .comment-form');
+    if (!host) return null;
+    var field = host.tagName === 'TEXTAREA' ? host
+      : host.querySelector('textarea[data-note-for], input[type=text]');
+    if (!field || field.disabled) return null;
+    var key = field.getAttribute('data-answer-for') ? 'answer:' + field.getAttribute('data-answer-for')
+      : field.getAttribute('data-note-for') ? 'note:' + field.getAttribute('data-note-for')
+      : 'comment:' + host.getAttribute('data-block-id');
+    return thumbRowFor(key) ? key : null;
+  }
+
+  function readDataUrl(file) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onload = function () { resolve(reader.result); };
+      reader.onerror = function () { reject(reader.error); };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  // Images still being read, and what waits on them: a Send, or a comment's
+  // Add, pressed while a pasted image is read is held until it lands, so the
+  // image goes with it. Keyed, so a second press while held still sends once.
+  var imageReads = 0;
+  var afterReads = {};
+  function afterImageReads(key, fn) {
+    if (!imageReads) return false;
+    afterReads[key] = fn;
+    return true;
+  }
+  function imageReadDone() {
+    if (--imageReads) return;
+    var waiting = afterReads;
+    afterReads = {};
+    Object.keys(waiting).forEach(function (k) { waiting[k](); });
+  }
+
+  /** The image files in a clipboard or a drop, in order. */
+  function imageFiles(transfer) {
+    var files = transfer && transfer.files ? Array.prototype.slice.call(transfer.files) : [];
+    return files.filter(function (f) { return f && /^image\\//.test(f.type || ''); });
+  }
+
+  /** Adds 'files' to the key's row, refusing one of a type the board does not take
+   * or over IMAGE_MAX_BYTES with a line naming why; the rest still land. */
+  function addImages(key, files, pasted, from) {
+    var refusal = '';
+    var taken = files.filter(function (f) {
+      if (!IMAGE_TYPES[f.type]) {
+        refusal = refusal || 'Only PNG, JPEG, GIF or WebP images can be attached.' + KEPT_LINE;
+        return false;
+      }
+      if (f.size > IMAGE_MAX_BYTES) {
+        refusal = refusal || 'This image is ' + megabytes(f.size) + '; the limit is ' + megabytes(IMAGE_MAX_BYTES) + '.' + KEPT_LINE;
+        return false;
+      }
+      return true;
+    });
+    if (refusal) showImageRefusal(key, refusal); else clearImageRefusal(key);
+    if (!taken.length) return;
+    imageReads++;
+    Promise.all(taken.map(function (f) {
+      return readDataUrl(f).then(function (data) {
+        var name = pasted || !f.name ? 'pasted-' + (++pastedCount) + '.' + IMAGE_TYPES[f.type] : f.name;
+        return { name: name, size: f.size, data: data };
+      });
+    })).then(function (imgs) {
+      setDraftImages(key, (draftImages[key] || []).concat(imgs));
+      reportActivity(from);
+    }).then(imageReadDone, imageReadDone);
+  }
+
+  document.addEventListener('paste', function (ev) {
+    var key = imageKeyAt(ev.target);
+    var files = key ? imageFiles(ev.clipboardData) : [];
+    if (!files.length) return;
+    ev.preventDefault();
+    addImages(key, files, true, ev.target);
+  });
+
+  // A file dropped anywhere else on the page is swallowed rather than opened:
+  // the browser would otherwise leave the board for the file, and take every
+  // unsent answer with it.
+  function carriesFiles(ev) {
+    var types = ev.dataTransfer && ev.dataTransfer.types;
+    return !!types && Array.prototype.indexOf.call(types, 'Files') !== -1;
+  }
+  document.addEventListener('dragover', function (ev) {
+    if (carriesFiles(ev)) ev.preventDefault();
+  });
+  document.addEventListener('drop', function (ev) {
+    if (!carriesFiles(ev) && !(ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files.length)) return;
+    ev.preventDefault();
+    var key = imageKeyAt(ev.target);
+    var files = key ? imageFiles(ev.dataTransfer) : [];
+    if (files.length) addImages(key, files, false, ev.target);
+  });
+
+  document.addEventListener('click', function (ev) {
+    var btn = ev.target && ev.target.closest ? ev.target.closest('.thumb-remove') : null;
+    if (!btn || readonly || btn.disabled) return;
+    var row = btn.closest('.thumb-row');
+    var key = row && row.getAttribute('data-images-for');
+    if (!key) return;
+    var list = (draftImages[key] || []).slice();
+    list.splice(Number(btn.getAttribute('data-image-index')), 1);
+    setDraftImages(key, list);
+    clearImageRefusal(key);
   });
 
   // --- mermaid: client-side, from the daemon's own vendored copy -----------
@@ -4915,12 +5480,15 @@ export const ui = `
     pageQuestionBlocks().forEach(function (qb) {
       var qid = qb.getAttribute('data-block-id');
       var result = currentAnswer(qid, qb.getAttribute('data-widget'));
-      answers.push({
+      var answer = {
         id: qid,
         status: answerStatus(qid, result),
         choice: result.choice,
         note: notes[qid] || '',
-      });
+      };
+      var images = answerImages(qid);
+      if (images.length) answer.images = images.map(function (img) { return img.data; });
+      answers.push(answer);
     });
     return answers;
   }
@@ -5816,8 +6384,17 @@ export const ui = `
   function submitBoard(action) {
     if (readonly) return;
     if (isPageRound(blocksOfRound(currentRound))) return;
+    if (afterImageReads('send', function () { submitBoard(action); })) return;
     var answers = collectAnswers();
     var comments = commentsSentFrom(currentRound);
+    var sentImageKeys = answeredImageKeys(answers);
+    // Refused here, before anything leaves the page, and everything typed stays
+    // where it is: the daemon refuses the same Send whole.
+    var tooMuch = sendImagesRefusal(sentImageKeys, comments);
+    if (tooMuch) {
+      if (sendStatus) sendStatus.textContent = tooMuch;
+      return;
+    }
     setSendBarEnabled(false);
     // Held until the response lands, so that flipping to another page and back
     // mid-flight cannot hand the button back (refreshPager enables the bar
@@ -5828,7 +6405,7 @@ export const ui = `
     fetch('/api/board/' + boardId + '/submit', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ action: action, round: currentRound, answers: answers, comments: comments, stages: 'held' }),
+      body: JSON.stringify({ action: action, round: currentRound, answers: answers, comments: wireComments(comments), stages: 'held' }),
     }).then(function (r) {
       // 409 is not an error: it means this round was already sent (a second tab,
       // or a double click that beat the disable). The right response is the same
@@ -5868,6 +6445,7 @@ export const ui = `
       // rather than joined by the server-numbered copies of the same comments.
       // A comment that stayed behind keeps its provisional pin.
       pendingComments = pendingComments.filter(function (c) { return comments.indexOf(c) === -1; });
+      sentImageKeys.forEach(function (key) { setDraftImages(key, []); });
       applyOwnSend(result);
       refreshPins(document);
       clearPendingMark();
@@ -5983,8 +6561,14 @@ export const ui = `
     if (!round || round.status === 'sent') return;
     var blocks = blocksOfRound(roundN);
     if (!isPageRound(blocks)) return;
+    if (afterImageReads('page:' + roundN, function () { submitPageRound(roundN, action); })) return;
     var blockId = blocks[0].id;
     var mine = pendingComments.filter(function (c) { return c.blockId === blockId; });
+    var tooMuch = sendImagesRefusal([], mine);
+    if (tooMuch) {
+      showImageRefusal('comment:' + blockId, tooMuch);
+      return;
+    }
     var section = roundSectionEl(roundN);
     var pageSendBtn = section && section.querySelector('.page-send-btn');
     var pageDiscussBtn = section && section.querySelector('.page-discuss-btn');
@@ -5997,7 +6581,7 @@ export const ui = `
     fetch('/api/board/' + boardId + '/submit', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ action: action, round: roundN, answers: [], comments: mine, stages: 'held' }),
+      body: JSON.stringify({ action: action, round: roundN, answers: [], comments: wireComments(mine), stages: 'held' }),
     }).then(function (r) {
       // 409: already sent, by another tab or a double click that beat the
       // disable above -- not an error, and the live 'submitted' push (already
@@ -6695,6 +7279,25 @@ export const ui = `
     // li tag's own controls does nothing to its native HTML5 drag capability,
     // which lives on the draggable attribute of the list item itself.
     qsa('.rank-list li[draggable]', section).forEach(function (li) { li.removeAttribute('draggable'); });
+    // A sent round offers Download round at the right end of its chip line, as
+    // renderRoundSection draws one rendered sent. An artifact round drew no chip
+    // line while open, and gets the one renderRoundSection draws it sent.
+    var chips = section.querySelector('.round-chips');
+    if (!chips) {
+      var entry = roundEntry(n);
+      chips = document.createElement('div');
+      chips.className = 'round-chips';
+      var chipLabel = document.createElement('div');
+      chipLabel.className = 'round-label';
+      chipLabel.textContent = roundPageLabel(n, (entry && entry.title) || '') + ' · sent';
+      chips.appendChild(chipLabel);
+      section.insertBefore(chips, section.firstChild);
+    }
+    if (!chips.querySelector('.round-download')) {
+      var holder = document.createElement('div');
+      holder.innerHTML = ROUND_DOWNLOAD_BUTTON;
+      if (holder.firstElementChild) chips.appendChild(holder.firstElementChild);
+    }
   }
 
   /** Find a block element by id without splicing the (potentially caller-chosen,

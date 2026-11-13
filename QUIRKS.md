@@ -280,6 +280,7 @@ one case that matters is also the one no automated check here can produce.
 - [Preview harness](#preview-harness)
 - [A driven tab does not paint, and half the stage channel needs a paint](#a-driven-tab-does-not-paint-and-half-the-stage-channel-needs-a-paint)
 - [Headless Chrome's scrollbars follow the Mac's Show scroll bars setting](#headless-chromes-scrollbars-follow-the-macs-show-scroll-bars-setting)
+- [A sandboxed frame below the first screen paints blank in a screenshot](#a-sandboxed-frame-below-the-first-screen-paints-blank-in-a-screenshot)
 
 ### `ResizeObserver` does not necessarily deliver an initial observation
 
@@ -780,6 +781,17 @@ with the key (still 0px).
 
 A wide stage's sideways classic bar takes 15px out of its viewport, so a check of a
 fitted height adds `innerHeight - clientHeight`, read inside the frame.
+
+### A sandboxed frame below the first screen paints blank in a screenshot
+
+Headless Chromium's `Page.captureScreenshot` with `captureBeyondViewport` captures a sandboxed
+`srcdoc` frame that sits wholly below the first screen as an empty box: a board's stage
+(2026-10-29) and a downloaded round's script-free mock (2026-11-11) both looked unrendered
+although each drew once in view, and `Page.printToPDF` of the same file drew it. Before a
+full-page shot, raise the viewport to the page's full height
+(`Emulation.setDeviceMetricsOverride`), or scroll each frame into view first. Such a frame is
+not in the page target's `Page.getFrameTree` either (it runs out of process), so it cannot be
+read from there.
 
 ---
 
@@ -2288,6 +2300,19 @@ chrome band; if that ever surfaces, the fix is this same resend, not a broadcast
 
 Traps that have bitten once. A second bite moves the entry up into the section it belongs to.
 
+- **Every shim a check spawns is the same session.** `bin/mcp.mjs` names its session by its
+  parent process (`process.ppid` and its start), and `spawnShim` makes the check itself that
+  parent, so two shims in one check are one session to the daemon: same binding, same rounds.
+  A check about two sessions spawns the shim under its own shell, `sh -c '"$node" mcp.mjs; exit
+  $?'` (the trailing command keeps `sh` from exec-ing node in its place), and wraps the child in
+  `McpClient`; the shell's pid is then the session (`test/check-mission-board.mjs`).
+
+- **A comment on a markdown or question block is stored and never drawn.** The submit keeps any
+  comment whose `blockId` names a real block, but only `mermaid` and `html` render a comment list
+  (ADR 28), so a check fixture commenting on a markdown block passes every packet and store
+  assertion while the page shows nothing. A check about a drawn comment targets a diagram or a stage
+  (`test/check-images.mjs`).
+
 - **`yarn check` runs none of the checks.** Under yarn 1 it is yarn's own integrity built-in, which
   beats the `check` script in `package.json`: "success Folder in sync.", exit 0, in 0.02 seconds.
   `node test/run.mjs` (or `yarn run check`) is the suite.
@@ -2521,11 +2546,11 @@ Traps that have bitten once. A second bite moves the entry up into the section i
   `overflow-y: scroll` (true width 1429), so the centred `--doc-w` wash overflowed by half the
   difference and the page scrolled sideways 6px. Re-measure on the root's `ResizeObserver` and on
   `load`, not only on `resize`.
-- **Headless Chromium does not paint a sandboxed stage frame wholly below the first screen in a
-  full-page screenshot.** The frame is captured blank, so a before/after compare low on a long
-  board looked empty although it rendered once scrolled into view (2026-10-29). Before a
-  full-page shot, raise the viewport to the page's full height, or scroll each stage into view
-  first.
+- **A `file:` page cannot read its own sibling stylesheet's rules back.** `sheet.cssRules` on a
+  Finder-opened archive's `styles-<hash>.css` throws `SecurityError` (Chrome 155, 2026-11-11):
+  each `file:` URL is its own opaque origin. So anything that copies the page's CSS as text
+  (Download round's file, `pageCssText` in `src/ui.mjs`) works served and not from disk;
+  Download round is hidden under `body.readonly` for that reason.
 - **A click or key that navigates can fail its own DevTools call.** A `mouseReleased` that
   clicks a link-like card, or a `keyDown` Enter on one, may answer
   `{"code":-32000,"message":"Not attached to an active page"}` because the page is already
@@ -2547,3 +2572,36 @@ Traps that have bitten once. A second bite moves the entry up into the section i
   `CLAUDE_BOARD_WAIT_CEILING_MS` and one report that moves it (the ceiling cases in
   `test/check-http.mjs` and `test/check-mcp.mjs`). The move must clear the minimum, a fortieth
   of a short wait (`deadlineMoveMinMs`, `src/server.mjs`).
+
+- **`src/styles.mjs` takes no raw color outside its token blocks.** `check-pure.mjs` ("no rule
+  outside a token block carries a raw hex or rgba literal") failed a thumbnail's remove control
+  painted `rgba(0, 0, 0, 0.55)` as the approved render had it (2026-11-11). Build the look from
+  the palette's tokens (`var(--ink)` on `var(--panel)` with an `opacity`) or add a token to both
+  palettes; a render's literal is a reading of the look, not a value to paste.
+
+- **A stage below the window's bottom has reported no height.** Chrome gives a frame it does not
+  show no animation frame and no ResizeObserver delivery, so `__cbStageContentH` stays unset until
+  the stage is scrolled to (2026-11-12, `test/browser-check-download.mjs`: a mock at 1415px of a
+  900px window read 0). A message still reaches it and a read forces its layout: Download round
+  posts it `height` and waits. A check that needs the report without a download calls
+  `scrollIntoView()` on the block first.
+- **Emulated print media cannot split a scroll box.** `Emulation.setEmulatedMedia` with the body
+  laid out as page-sized columns (the download check's `pagesExpr`) never breaks inside a box that
+  scrolls, so a table row or code box split shows only in a real PDF (2026-11-12).
+- **A devtools mouse wheel over an artifact can hang the next `Runtime.evaluate`.** A wheel
+  sent to a full-page artifact once ended in an evaluate that never answered (2026-11-12).
+  Scroll the artifact through its own target instead: `artifactSession` in
+  `test/browser-check-download.mjs`, then `window.scrollTo` there.
+- **A print break rule is only tested where a page's edge falls inside an item.** Two lines must
+  stay either side of a break (`orphans`, `widows`), so an item under four lines is never split
+  whatever the rules say, and a fixture of short, equal items stays green with its
+  `break-inside: avoid` deleted (2026-11-12). An option's label and description are one
+  `inline-flex` box (`.opt-main`) no page can part; only a preview under them can be. The download
+  check's `contestedKinds` asserts an edge fell inside each kind it claims.
+- **Shortening a stage's document for a read pulls a reader at its end up.** A forced layout
+  clamps the scroll offset at once: with the band's padding taken off to measure the artifact
+  alone, a reader at 2276px landed on 2200px and stayed there after the padding came back
+  (2026-11-12). Putting the offset back is no cure: a `scrollTop` assignment follows the
+  artifact's own `scroll-behavior`, so a smooth-scrolling one animates back, and an artifact
+  scrolling in an inner pane is not reached at all. So the stage reports its height with the
+  band's padding in place (`reportHeight`), and a saved full-page mock ends in that much blank.

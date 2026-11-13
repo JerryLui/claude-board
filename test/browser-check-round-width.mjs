@@ -316,7 +316,7 @@ const LAYOUT_FN = `function (chOf) {
   return { column: column, head: box(document.querySelector('.board-head')),
     title: box(h1), meta: box(document.querySelector('.board-head .meta')),
     boardTitle: parseFloat(getComputedStyle(h1).fontSize), paragraphs: paragraphs,
-    label: box(document.querySelector('.round-current > .round-label')), cards: cards, reach: reach, beyond: beyond,
+    label: box(document.querySelector('.round-current > .round-chips > .round-label')), cards: cards, reach: reach, beyond: beyond,
     questions: questions, compares: compares, diagrams: diagrams, texts: texts, pullOuts: pullOuts };
 }`;
 

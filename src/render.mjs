@@ -40,6 +40,8 @@
 import { palettes, faviconLink, markSvg } from './styles.mjs';
 import { SCRIPT_ASSET, STYLE_ASSET } from './assets.mjs';
 import { STATUS_TONES } from './card-status.mjs';
+import { ROUND_DOWNLOAD_BUTTON } from './round-export.mjs';
+import { MAX_IMAGE_BYTES, megabytes } from './post-limit.mjs';
 import { themeBootScript, themeToggle } from './theme.mjs';
 import { resolveComments, stripDaemonOnly } from './board.mjs';
 import { buildSteps, stepsToPath, pathToSteps, resolveSteps, videoIdentity, videoSecond } from './anchor.mjs';
@@ -340,6 +342,15 @@ function anchorTag(c, lost) {
  * page board's own Tray (`renderPageCommentPanel`): one rendering of a block's
  * stored comments, so the two surfaces can never disagree about how a comment's
  * anchor tag or lost/resolved styling is drawn. */
+/** The images a sent answer or comment carries, drawn read-only. Each `src` is
+ * `<boardId>/<name>`, relative to the page, so it resolves to `GET /b/<boardId>/<name>`
+ * served and to `pages/<boardId>/<name>` opened from Finder (src/store.mjs). Never lazy:
+ * a round's download (src/ui.mjs) reads every drawn image, scrolled to or not. */
+function sentImagesHtml(boardId, names) {
+  if (!boardId || !Array.isArray(names) || !names.length) return '';
+  return `<div class="sent-images">${names.map((n, i) => `<img src="${escAttr(`${boardId}/${n}`)}" alt="Pasted image ${i + 1}">`).join('')}</div>`;
+}
+
 function commentItemsHtml(blockId, commentsByBlock) {
   const comments = commentsByBlock.get(blockId) || [];
   return comments.map(c => {
@@ -352,7 +363,7 @@ function commentItemsHtml(blockId, commentsByBlock) {
     // drawn on the thing it is about.)
     const kind = (c.anchor && c.anchor.kind) || 'block';
     const ref = (c.anchor && c.anchor.ref) || '';
-    return `<div class="comment-item" data-anchor-kind="${escAttr(kind)}"${ref ? ` data-anchor-ref="${escAttr(ref)}"` : ''} data-block-id="${escAttr(blockId)}"><span class="comment-anchor${lost ? ' comment-lost' : ''}">#${c.n} · ${escHtml(tag)}</span>${escHtml(c.text)}</div>`;
+    return `<div class="comment-item" data-anchor-kind="${escAttr(kind)}"${ref ? ` data-anchor-ref="${escAttr(ref)}"` : ''} data-block-id="${escAttr(blockId)}"><span class="comment-anchor${lost ? ' comment-lost' : ''}">#${c.n} · ${escHtml(tag)}</span>${escHtml(c.text)}${sentImagesHtml(commentsByBlock.boardId, c.images)}</div>`;
   }).join('');
 }
 
@@ -365,12 +376,34 @@ function commentArea(blockId, commentsByBlock, historical) {
   const items = commentItemsHtml(blockId, commentsByBlock);
   return `
     <div class="comment-target" id="comment-target-${escAttr(blockId)}">commenting on: whole block</div>
-    <form class="comment-form" id="comment-form-${escAttr(blockId)}" data-block-id="${escAttr(blockId)}" data-anchor-kind="block">
-      <input type="text" placeholder="Add a comment"${historical ? ' disabled' : ''}>
-      <button type="submit"${historical ? ' disabled' : ''}>Add</button>
-    </form>
+    ${commentFormHtml(blockId, historical, '')}
     <div class="comment-list" id="comment-list-${escAttr(blockId)}">${items}</div>`;
 }
+
+/** One block's comment composer: the text field, the images pasted or dropped on it
+ * (src/ui.mjs fills the row) and Add. `describedBy` is an id for the field's
+ * aria-describedby, or ''. */
+function commentFormHtml(blockId, historical, describedBy) {
+  return `<form class="comment-form" id="comment-form-${escAttr(blockId)}" data-block-id="${escAttr(blockId)}" data-anchor-kind="block">
+      <div class="comment-form-col">
+        <input type="text" placeholder="Add a comment"${describedBy ? ` aria-describedby="${describedBy}"` : ''}${historical ? ' disabled' : ''}>
+        ${imageTray(`comment:${blockId}`, historical, true)}
+      </div>
+      <button type="submit"${historical ? ' disabled' : ''}>Add</button>
+    </form>`;
+}
+
+/** Under a composer that takes images: the row src/ui.mjs draws each pasted or dropped
+ * image's thumbnail in, keyed by `key` ('note:<id>', 'answer:<id>' or 'comment:<id>'),
+ * and, with `hint`, the line saying so. Nothing on a sent round: what it sent is the
+ * round's own record. */
+function imageTray(key, historical, hint) {
+  if (historical) return '';
+  const hintHtml = hint ? `<p class="paste-hint">${PASTE_HINT}</p>` : '';
+  return `<div class="thumb-row" data-images-for="${escAttr(key)}"></div>${hintHtml}`;
+}
+
+const PASTE_HINT = `Paste or drop images, up to ${megabytes(MAX_IMAGE_BYTES)} each`;
 
 /** The generic element-level pin overlay for a block whose content lives in the
  * board's OWN document (as opposed to html/mermaid's stage-scoped one inside
@@ -615,7 +648,7 @@ function renderMultiChoice(block, answer, historical) {
  * capability the terminal tool lacks entirely. */
 function renderTextWidget(block, answer, historical) {
   const value = answer && typeof answer.choice === 'string' ? answer.choice : '';
-  return `<textarea class="answer-textarea" data-answer-for="${escAttr(block.id)}" rows="8" placeholder="Write your answer…"${historical ? ' disabled' : ''}>${escHtml(value)}</textarea>`;
+  return `<textarea class="answer-textarea" data-answer-for="${escAttr(block.id)}" rows="8" placeholder="Write your answer…"${historical ? ' disabled' : ''}>${escHtml(value)}</textarea>${imageTray(`answer:${block.id}`, historical, false)}`;
 }
 
 /** Drag-to-rank: every option, in the stored order if there is a prior answer, else
@@ -1004,6 +1037,8 @@ function renderQuestionBlock(block, board, commentsByBlock, historical) {
       <button type="button" class="btn-defer${isDeferred ? ' active' : ''}" data-defer-for="${escAttr(block.id)}"${historical ? ' disabled' : ''}>Defer</button>
     </div>
     <textarea id="note-${escAttr(block.id)}" data-note-for="${escAttr(block.id)}" placeholder="Optional note"${historical ? ' disabled' : ''}>${escHtml(answer ? answer.note : '')}</textarea>
+    ${sentImagesHtml(board.id, answer && answer.images)}
+    ${imageTray(`note:${block.id}`, historical, true)}
   </div>
   ${cardDetails(block)}
 </section>`;
@@ -2568,6 +2603,14 @@ export function stageAgentScript() {
       applyBand(data.top, data.bottom);
       return;
     }
+    if (data.type === 'height') {
+      // The inbound half: the parent asking for a report now. A frame the
+      // window does not show gets no animation frame and no ResizeObserver
+      // delivery, so its first report has not left; a message still reaches
+      // it, and measuring lays the document out.
+      reportHeight();
+      return;
+    }
     if (data.type === 'locate') {
       if (typeof data.requestId !== 'string' || !Array.isArray(data.refs)) return;
       // Answered in THIS FRAME'S VIEWPORT coordinates: the element's own client
@@ -3025,10 +3068,7 @@ function renderPageCommentPanel(block, round, commentsByBlock) {
   return `
     <div class="comment-list-wrap"><div class="comment-list" id="comment-list-${escAttr(blockId)}">${commentItemsHtml(blockId, commentsByBlock)}</div></div>
     <div class="comment-target" id="comment-target-${escAttr(blockId)}">commenting on: whole block</div>
-    <form class="comment-form" id="comment-form-${escAttr(blockId)}" data-block-id="${escAttr(blockId)}" data-anchor-kind="block">
-      <input type="text" placeholder="Add a comment"${showHint ? ` aria-describedby="${hintId}"` : ''}${historical ? ' disabled' : ''}>
-      <button type="submit"${historical ? ' disabled' : ''}>Add</button>
-    </form>
+    ${commentFormHtml(blockId, historical, showHint ? hintId : '')}
     <div class="page-send-bar" data-round="${round.n}">
       ${hint}
       <button type="button" class="btn-discuss page-discuss-btn" data-round="${round.n}"${historical ? ' disabled' : ''}>Discuss in chat</button>
@@ -3236,8 +3276,11 @@ export function renderBlock(block, board, commentsByBlock, historical = false, f
  * page -- resolving once per render, here, rather than once per call site, is
  * what keeps a pin's resolved/lost styling and its block's comment-list entry
  * from ever disagreeing about the same comment (see this file's header comment). */
-export function groupCommentsByBlock(resolvedComments) {
+export function groupCommentsByBlock(resolvedComments, boardId = null) {
   const map = new Map();
+  // The board the comments are on, which a comment's images are drawn under
+  // (`sentImagesHtml`); every comment in one map is from one board.
+  map.boardId = boardId;
   for (const resolved of resolvedComments) {
     if (!map.has(resolved.blockId)) map.set(resolved.blockId, []);
     map.get(resolved.blockId).push(resolved);
@@ -3312,15 +3355,23 @@ export function renderRoundSection(board, roundN, commentsByBlock) {
   const endRail = historical || fullpage ? '' : `
   <div class="round-end"><span class="line"></span><span class="tag">${escHtml(endTag)}</span><span class="line"></span></div>`;
   // An artifact round keeps its section (data-round is how a push, an amend and
-  // the pager all find a round, and the section IS the page) and loses only its
-  // two labels: the "Round N" chip and the closing rail are chrome ABOUT a
-  // round, printed over a full-viewport artifact, and the pager at the bottom of
-  // the page already names the round for anyone who needs it -- exactly the "no
-  // card, no kicker" noise this layout exists to remove. The rail carries a
-  // second meaning too (it is what docks the send bar), which a page with
-  // nothing to send has no use for either.
-  const roundLabel = fullpage ? '' : `
-  <div class="round-label">${escHtml(label)}</div>`;
+  // the pager all find a round, and the section IS the page). It never draws
+  // the closing rail, and draws its chip line only once sent: the "Round N"
+  // chip and the rail are chrome ABOUT a round, printed over a full-viewport
+  // artifact, and the pager at the bottom of the page already names the round
+  // for anyone who needs it -- exactly the "no card, no kicker" noise this
+  // layout exists to remove. The rail carries a second meaning too (it is what
+  // docks the send bar), which a page with nothing to send has no use for
+  // either. Sent, the chip line is there for Download round alone: it sits in
+  // the board's own top band, under the header, and the stage pads the band, so
+  // it never covers the artifact.
+  //
+  // The label sits in the round's chip line, whose right end holds Download round
+  // once the round is sent (src/round-export.mjs): a round still open has nothing
+  // settled to save. src/ui.mjs's markRoundHistory adds the same control to a
+  // round that goes sent under an open tab.
+  const roundLabel = fullpage && !historical ? '' : `
+  <div class="round-chips"><div class="round-label">${escHtml(label)}</div>${historical ? ROUND_DOWNLOAD_BUTTON : ''}</div>`;
   return `
 <section class="round ${historical ? 'round-history' : 'round-open'}${current ? ' round-current' : ''}" data-round="${roundN}" data-round-status="${historical ? 'sent' : 'open'}">${roundLabel}
   ${blocksHtml}
@@ -3501,7 +3552,7 @@ function roundPagerMarkup(board, currentN) {
  * pushed and archived never carries it. */
 export function renderBoardPage(board, { stageHtml = false } = {}) {
   const resolvedComments = resolveComments(board, board.comments);
-  const commentsByBlock = groupCommentsByBlock(resolvedComments);
+  const commentsByBlock = groupCommentsByBlock(resolvedComments, board.id);
   // The page-board layout (ADR.md entries 32 and 33) is carried two ways: down
   // into the round/block markup (no round label, no kicker -- renderRoundSection
   // decides that per round), and out onto <body> as a single class the whole

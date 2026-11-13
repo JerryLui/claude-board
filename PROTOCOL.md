@@ -65,16 +65,21 @@ $CLAUDE_BOARD_HOME/pages/ui-<hash>.js       the shared client script a page name
 $CLAUDE_BOARD_HOME/pages/styles-<hash>.css  the shared stylesheet a page names
 $CLAUDE_BOARD_HOME/pages/mermaid-<hash>.js  the shared diagram engine, named by ui.js
                                              rather than by any page (vendored, ADR 62)
+$CLAUDE_BOARD_HOME/pages/<boardId>/<name>   an image pasted into one of the board's answers
+                                             or comments, `<name>` the first 16 hex of its
+                                             sha256 then `.png`, `.jpg`, `.gif` or `.webp`
 $CLAUDE_BOARD_HOME/pomodoro.json            the pomodoro clock and its settings (ADR 8)
 $CLAUDE_BOARD_HOME/missions/<key>.json      one mission record (ADR 123), see "The missions
                                              routes" below
+$CLAUDE_BOARD_HOME/spin-down.json           the spin-down flag, present only while it is on,
+                                             see "The spin-down routes" below
 ```
 
 A page does not carry the client script or the stylesheet; it *names* them, as a bare
 sibling filename hashed from their contents (ADR 70). The diagram engine is a third such
 sibling, loaded the same content-addressed way, but named only by `ui.js` rather than by
 any page's own markup — a board loads it on demand, when it actually has a diagram. A bare
-name is the one reference that resolves the same served (`GET /b/<name>`, the daemon's only
+name is the one reference that resolves the same served (`GET /b/<name>`, the daemon's shared-asset
 static route) and opened from Finder (the file next to the page), so an archive still opens
 with the daemon stopped — as long as its folder travels with it. The assets are append-only:
 changing any payload mints a new name and leaves the old file untouched, so a page written a
@@ -90,7 +95,7 @@ store in place; that has not changed.
 Nothing in this directory expires. No read, no daemon start and no timer has ever removed
 a board, and none does now. What does exist is a **prune**, fired by hand from the
 settings panel on the index (`POST /api/store/prune`, ADR 71): it deletes every board
-older than a window the caller names — document and emitted page together — and then any
+older than a window the caller names — document, emitted page and image folder together — and then any
 shared asset no surviving page or asset still names, and every mission record whose `retiredAt`
 is at least 30 days old (ADR 123). The window has no default; a prune that does
 not name one is refused. This is the only thing in the system that ever deletes a board,
@@ -448,16 +453,19 @@ are not, anywhere. The rule is drawn on kind, never on position (ADR 28, which s
 comment half of entry 26 and narrows entry 28).
 
 ```js
-Answer  = { id, status, choice, note }
+Answer  = { id, status, choice, note, images? }
           // status: 'answered' | 'unanswered' | 'deferred'
           // choice: string (single, text) | string[] (multi) | string[] ordered (rank) | null
           // note is always present, '' when empty. unanswered is explicit, never a default --
           // with one widget-level exception: a rank always shows an order, so an untouched
           // rank list sends that order as `answered`, and only Defer leaves it open.
 
-Comment = { n, blockId, anchor, text, createdAt, round, mintBlockKind }
+Comment = { n, blockId, anchor, text, images?, createdAt, round, mintBlockKind }
           // mintBlockKind is the target block's kind at mint time, so an amend that
           // replaces a block with a different kind cannot silently re-point the anchor
+          // images (on either): the stored names of its pasted images, in
+          // pages/<boardId>/ (see "Paths"); absent when it has none. A comment may be
+          // an image with no text, its text then ''
 
 Anchor  = { kind: 'block' }                       // whole block
         | { kind: 'dom',     ref, hint, time? }   // "N.N.N" child-index path + a composed hint;
@@ -628,13 +636,18 @@ except for `cwd`.
 {
   board, thread, title, round,
   status,                           // 'posted' | 'submitted' | 'discuss' | 'timeout' | 'abandoned' | 'error'
-  answers:  [ { id, round, prompt, widget, status, choice, note } ],
-  comments: [ { n, blockId, blockKind, anchor, text, round, createdAt, lost? } ],
+  answers:  [ { id, round, prompt, widget, status, choice, note, images? } ],
+  comments: [ { n, blockId, blockKind, anchor, text, images?, round, createdAt, lost? } ],
   url,
   relayed?,                         // { words, at }: answered by a relay, not a Send
   watch?,                           // a `timeout` from a Claude Code shim: the answer watch
 }
 ```
+
+`images` is present only on an answer or comment the reviewer pasted images into: the absolute
+path of each file, which the agent opens to see it. The text channel names them too, as
+`[images: <path>, ...]` at the end of that answer's or comment's line. `read` gives the same
+paths. A text-only answer or comment carries no `images` key.
 
 `relayed` is present only on a round the Master Chief answered on the PM's typed words
 (`POST /api/board/:id/relay` below); the text channel says so in a `Relayed:` line carrying the
@@ -745,11 +758,16 @@ GET  /b/:boardId?stages=<sha>,...   the same page with every stage held but thos
                                     named: a tab's fill of the frames a push left held
 GET  /b/<asset>                     the shared script or stylesheet a page names, by
                                     content-addressed filename (ADR.md entry 70); the
-                                    daemon's only static route. Disjoint from the line
+                                    daemon's shared-asset route. Disjoint from the line
                                     above: an asset name contains a dot, which a board id
                                     cannot. `mermaid-<hash>.js` alone is open (the caller
                                     is a sandboxed stage, which holds no credential);
                                     `ui-`/`styles-` are gated like every other read
+GET  /b/:boardId/<name>             one of the board's pasted images (see "Paths"), gated.
+                                    A sent round's page draws each as
+                                    `<img src="<boardId>/<name>">`, relative to the page, so
+                                    the same src is this route served and the stored file
+                                    beside `pages/<boardId>.html` opened from Finder
 GET  /api/health                    { ok: true, version, daemon, pid }  (open: install.sh polls it)
 GET  /api/probe/documents           { ok: true } or { ok: false, code } -- whether macOS lets
                                     the daemon open a file under ~/Documents (install.sh asks
@@ -1165,8 +1183,11 @@ board document as `suppressed` and stripped from everything a client sees, like 
 beside it, because the stranded rule reads it back long after the response is spent — and that rule
 **spends** it the first time a Watcher reports the board focused, since a board the reviewer has
 reached needs no banner telling them it exists. A push into a board reports the stored value, which
-is therefore false once it has been visited; only a thread's first board consults it at all. A
-daemon older than the field omits it, and a caller then opens exactly as it always has.
+is therefore false once it has been visited; only a thread's first board consults it at all. The
+one exception is a post moved onto its mission's board (`moved: true`, "One board per mission"
+below): that board is the session's first, so the answer is decided again at that post, by the
+same condition. A daemon older than the field omits it, and a caller then opens exactly as it
+always has.
 
 A **retry** carrying a `requestId` this board has already applied is answered from what that id
 already did (`deduped: true`) while the round it guarded is still `open`, **its wait has not
@@ -1216,6 +1237,8 @@ page the reviewer sent from, which may be any unsent round (ADR 134).
                                                   // any question block with no entry here is
                                                   // synthesised as unanswered server-side
   comments: [ { blockId, anchor, text } ],        // n, createdAt, round assigned server-side
+  // either an answer or a comment may also carry
+  //   images: [ 'data:image/<png|jpeg|gif|webp>;base64,...' ]
   via: 'card',                                    // optional: sent by a mission card's
                                                   // Fire or Merge, absent from the page
   stages: 'held',                                 // optional: sent by the page, asking for
@@ -1231,6 +1254,15 @@ whose stream worker ended delivers no push to any of its tabs until a beat finds
 (ADR 144). It applies the one that lands first of the two, and this one only while its own copy
 still has the round unsent. A relay never carries it, its answer reaching an agent whole, and a
 payload that fails to build is left out: the round is stored by then.
+
+**Pasted images.** Each data URL's bytes must be a real image of the type it names (its leading
+bytes are checked), at most 10 MB decoded, and a submit's images together at most 20 MB
+(`MAX_IMAGE_BYTES`, `MAX_SEND_IMAGE_BYTES` in `src/post-limit.mjs`); anything else is a **400**
+naming the fault or the limit, and nothing of the submit is kept. The page refuses past the same
+limits before sending; this is the backstop. Kept images are written to `pages/<boardId>/<name>`
+before the board that names them, and the stored answer or comment holds `images: [<name>]`.
+This route's body cap is its own, `MAX_SUBMIT_BYTES`: a post's 25,000,000 bytes plus the 20 MB
+of images as base64.
 
 `round` names the round the page believed it was answering when the reviewer pressed the button:
 the page on screen. Send's check, its count of questions left and the answers it posts cover that
@@ -1659,7 +1691,7 @@ summaries.
 Mission = {
   key, title, cwd?,
   phase,                     // 'grill' | 'direct' | 'landing'
-  state,                     // stored: 'needs-you' | 'working' | 'waiting' | 'queued' | 'released'
+  state,                     // stored: 'needs-you' | 'working' | 'waiting' | 'queued' | 'released' | 'parked'
   summary?,                  // at most 280 characters
   waitingOn?, next?,         // short phrases, at most 280 characters each
   prs: [ { repo, number, url, order? } ],          // the session names its PRs (a `state` is dropped)
@@ -1684,7 +1716,8 @@ fields derived on each read and never stored. `view` is the column the mission s
 `released` while stored released; else `waiting` while it is retired (its `retiredAt` parses,
 ADR 147), whatever its rounds, its session or its `waitingOn`; else `needs-you` when a linked
 board's newest round is open and asks a question or was minted awaited (a lapsed wait still counts; an older round left open does
-not, ADR 134), whatever its session is doing (ADR 140); else `stalled` when its session is gone (a
+not, ADR 134), whatever its session is doing (ADR 140); else `parked` while stored parked (a
+mission stopped at a spin-down, its session ended on purpose); else `stalled` when its session is gone (a
 bound `pid` that no longer exists, or a reservation no `pid` or `id` bound within 5 minutes) or it
 is stored `working` and has not been heard from for 15 minutes; else the stored `state`. A session
 is heard from at its last heartbeat (`session.seenAt`) and at the time of the session watcher's
@@ -1696,7 +1729,7 @@ lists the session's `id` in another live process is not gone: the session runs o
 no launch made). `listedAt` is that snapshot's time while it lists the bound session, else `null`.
 `retired` is whether its `retiredAt` parses.
 `gone` is `{ lastSeenAt }`, the session's `seenAt`, while that session is gone and the mission has
-neither recorded its end nor retired, else `null`. `rejoin` is `{ reason, since, id }` while the snapshot lists the bound
+neither recorded its end, retired nor parked, else `null`. `rejoin` is `{ reason, since, id }` while the snapshot lists the bound
 session needing `/mission` again and no heartbeat has come from it since `since`, else `null`:
 `reason` is `'clear'` when its process is listed under another `id` (a `/clear`, which drops the
 skill's hooks), `'resume'` when its `id` is listed in another process (a resume or respawn no launch
@@ -1723,8 +1756,8 @@ question block's id, and `choice` option 0's label, the one a click submits thro
 
 ```
 GET  /api/missions[?all=1]
-       -> { missions: [View], tabs: [Tab], counts: { needsYou, working, waiting, stalled, released, queued },
-            live: { working, alive }, slotFree, now, watcher: { up, lastAt } }
+       -> { missions: [View], tabs: [Tab], counts: { needsYou, working, waiting, stalled, released, queued, parked },
+            live: { working, alive }, slotFree, now, watcher: { up, lastAt }, spinDown: { on, at? } }
 ```
 
 Newest change first. A released mission is listed until 24 hours after `releasedAt`, or always with
@@ -1779,7 +1812,7 @@ POST /api/mission/:key/leave        { id, pid?, procStart? } -> { left: true, se
        -> 409 { error: 'not bound', session }
 GET  /api/binding?id=<session id>[&pid=&procStart=]
        -> { key | null, takeover: { by, at } | null, orders: [Order], handoff | null,
-            rejoin: { reason, since, id } | null }
+            rejoin: { reason, since, id } | null, spinDown: { on, at? } }
 ```
 
 **A session is bound to a mission by its own session id** (ADR 141), which the agent reads fresh
@@ -1871,6 +1904,34 @@ either.
 
 Every write publishes `missions` on the daemon-wide stream ("SSE events"). A refusal is
 `{ error }` with its status.
+
+## The spin-down routes
+
+One flag, in `$CLAUDE_BOARD_HOME/spin-down.json` while it is on and absent while it is off, that
+the Master Chief's `/spin-down` sets. While it is on no session runs a merge, deploy or release
+step; the sessions' own rules hold that gate, and the daemon only stores and answers the flag.
+
+```
+GET  /api/spin-down                 -> { on: false } | { on: true, at, by? }
+POST /api/spin-down  { on: true | false, by? }   -> the flag as GET answers it
+```
+
+`at` is when it went on, `by` who turned it on, as written (at most 200 characters). Turning it
+on while it is on keeps the first `at` and `by`; turning it off removes the file. Any other
+field, an `on` that is not a boolean or a `by` off its shape is a 400 that writes nothing. The
+read takes the secret or the cookie; the write the secret alone. A write publishes `missions`
+on the daemon-wide stream, so an open Missions view shows the flag at once.
+
+The flag reaches every session without a message of its own: `GET /api/binding` carries it as
+`spinDown: { on, at? }` whether the session is bound or not, so a successor launched or joined
+during the spin-down reads it on its first binding read, and `GET /api/missions` carries the
+same `spinDown`, which the Missions view shows as a Spin-down chip at the end of its counts row.
+
+A mission stops at a spin-down by writing `state: 'parked'` as its last act, with `next` the
+line that resumes it (the card shows it as Resume). It reads `parked`, its card under Waiting
+tagged Parked; while a round on its boards still waits on the PM it reads `needs-you`, its card
+under Needs you tagged Parked. A parked mission never reads `stalled` or `gone`. A launch or a
+join moves it on as from any other state.
 
 ## The session routes
 
@@ -2258,9 +2319,11 @@ the parent cannot observe it short of being told.
 | `band` | `{ top, bottom }` | the board's own chrome band, right now (ADR 59) |
 | `scroll` | `{ top }` | "put yourself at this offset" |
 | `scrollBy` | `{ delta }` | "move yourself this many pixels" — one forwarded wheel notch |
+| `height` | — | "report your height now". Sent by Download round to each stage of the round that has reported none: a frame the window does not show is given no animation frame, so its first report has not left |
 | `diagrams` | `{ requestId, svgs }` | response to `mermaid`: one entry per requested source, in the same order — the rendered SVG as a string, or `null` for one the board could not draw |
 
-`scroll` is the one bidirectional type on this channel. Inbound it is sent only as a reset,
+`scroll` and `height` are the two bidirectional types on this channel: inbound, `height` asks for
+the report the stage otherwise sends unasked. Inbound `scroll` is sent only as a reset,
 `top: 0`, by the board's back-to-top control, since the parent cannot scroll a cross-origin
 document itself. Both directions aim at whichever element most recently identified itself as the
 scroller, never at the document by assumption.
@@ -2315,7 +2378,8 @@ again on every theme change while the Lens is open, the board posts it one `mode
 comment mode. So the copy carries the same `data-theme` as the stage in its block, a template
 draws the same side of its palette in both, and the Lens stays view-only.
 
-`band` exists because the parent's header, dock and comment rail float **over** the frame rather
+`band` exists because the parent's header, a sent full-page round's chip line under it, the dock
+and the comment rail float **over** the frame rather
 than pushing it down, so an artifact that pads nothing loses its own opening under them. No fixed
 number is baked in on either side — the header's real height moves with the title's wrap and the
 viewport width — so the parent measures its live chrome (`reportStageBand`) and the stage tops its
@@ -2836,3 +2900,56 @@ here; it was "five" for long enough to go stale twice. No browser, no network, n
 temp `CLAUDE_BOARD_HOME`. Every check that touches the local secret points
 `CLAUDE_BOARD_SECRET_FILE` at its own temp dir first: the real `~/.config/claude-board/secret` is
 never read, written, or rotated by a check run.
+
+## One board per mission (ADR 150)
+
+Added on top of the sections above, which still hold for a board one conversation posts to.
+
+**Choosing the board.** A `POST /api/board` from a session bound to a mission (`session` names
+its process, no `mission` in the body) lands on the mission's board: the latest board in the
+mission's `boards` that is still stored, whatever `boardId` the post names. A mission with none
+gets a new board at that round. When the board differs from the one the post named (or the post
+named none and the board already existed), the response carries `moved: true`; a client takes
+`boardId` and `thread` from the response as its own from then on. The rounds the posting session
+left open on the board it named are closed as by a scoped abandon (below). A post naming its
+mission explicitly keeps the board it names.
+
+**What a round records.** A round minted by a post naming `session` carries:
+
+```
+  session: { pid, procStart, id },   // the posting session; id from the session list, else null
+  cwd?: '<absolute folder>',         // the folder its file references read from, when not the board's
+  handedFrom?: '<session id>',       // set by a takeover: the session that posted it
+```
+
+A round with no `session` (posted before this) is the board's first poster's (`board.session`).
+On a mission's board a session bound to that mission posts from its own folder: `cwd` is
+accepted on every round, not only the first. Elsewhere a `cwd` other than the board's is still a
+400.
+
+**Amend, `fresh`.** A post amends the latest open question round only when the posting session
+posted it (by its id, or its pid and start) and, on a mission's board, from the folder that round
+reads from; another session's first question, or one from another folder, opens a round of its own. `fresh: true` on a post
+says it starts a new conversation: it never amends, and on a board that already holds rounds it
+closes the posting session's other open rounds there in the same write (each with an
+`awaitExpired` event). `bin/mcp.mjs` sends it on a `fresh` ask and on the first ask after a
+mission join or leave, and sends `cwd` on every post while its folder exists: once it is gone (a
+worktree removed after its merge) it sends none, and the round reads from the board's folder.
+
+**Scoped abandon.** `POST /api/board/:id/abandon` takes an optional body `{ session: { pid,
+procStart } }`: with it, only the open rounds that session posted close (by its id, or its pid
+and start); without a body, every open round, as before, except on a mission's board, where it
+closes only rounds no session posted. The stranded announcement is withdrawn only once no round is left open.
+
+**Owed answers and comments** ride only packets of a round the same session posted (by its id,
+or its pid and start): a shared board's late answer reaches the session that asked.
+
+**Takeover.** When a leave binds the session that asked to take over (`POST
+/api/mission/:key/leave` with a takeover pending), the giver's open rounds on every board the
+mission links become the taker's: `session` is rewritten to the taker and `handedFrom` names the giver. The
+answer the PM sends on such a round rides the taker's next packet. A join that binds in place of a
+session that went or that a launch replaced (the joined record's `session.ended`) hands that
+session's open rounds over the same way. Only rounds whose own `session` names the giver are
+handed: one recording none stays where it is.
+
+**Needs you** reads, on each board, the newest round of every session that posted there, one session being one by its id, or its pid and start to the second.

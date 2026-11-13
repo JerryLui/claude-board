@@ -2518,6 +2518,33 @@ async function layerTwo() {
     }
   });
 
+  await check('ADR 150: on a shared board a scoped abandon that leaves another session\'s round open leaves the banner standing', async () => {
+    process.env.STUB_OSASCRIPT_LINGER_MS = '5000';
+    const one = { pid: 4242, procStart: '2026-11-11T08:00:00Z' };
+    const two = { pid: 4343, procStart: '2026-11-11T08:00:00Z' };
+    try {
+      const { boardId } = await postBoard(port, SECRET, askBoard('shared-banner', { session: one }));
+      await waitForCount(() => rowsFor(LOG, 'shared-banner'), 1, { timeoutMs: 2000, intervalMs: 10 });
+      const rec = bannerOn(boardId);
+      assert.ok(rec && rec.pid != null, 'the board really is in an announced state');
+      const second = await postBoard(port, SECRET, { boardId, title: 'Second session', blocks: [QUESTION('Two asks')], session: two });
+      assert.equal(second.round, 2, 'setup: the second session\'s question is a round of its own');
+
+      const r = await rawRequest(port, 'POST', `/api/board/${boardId}/abandon`, {
+        headers: { 'content-type': 'application/json', [SECRET_HEADER]: SECRET },
+        body: JSON.stringify({ session: two }),
+      });
+      assert.deepEqual([r.status, JSON.parse(r.body).closed], [200, [2]]);
+      assert.equal(bannerOn(boardId).pid, rec.pid, 'the first session\'s round is still open, so its banner stays');
+      await rawRequest(port, 'POST', `/api/board/${boardId}/abandon`, {
+        headers: { 'content-type': 'application/json', [SECRET_HEADER]: SECRET },
+        body: JSON.stringify({ session: one }),
+      });
+    } finally {
+      process.env.STUB_OSASCRIPT_LINGER_MS = '0';
+    }
+  });
+
   await check('criterion 7: the look-away window survives a daemon restart, so an install.sh update raises nothing', async () => {
     // The scenario ticket 01 forces on every reviewer: they look at a board, switch to the
     // terminal, and run `./install.sh`. The daemon restarts, EventSource reconnects, and
