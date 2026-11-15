@@ -41,9 +41,9 @@
       "id": "d1",
       "kind": "markdown",
       "source": null,
-      "text": "# Order-routing redesign\n\nThe kitchen display one page back is the mockup. Three things change for the pass, and the routing rewrite underneath them is what this round is asking about:\n\n- Fewer manual status updates per ticket\n- A single \"Ready for pickup\" state visible to front-of-house\n- Rush tickets float to the top automatically\n\nThe payload each station receives on a status transition:\n\n```json\n{\n  \"ticketId\": 482,\n  \"status\": \"ready_for_pickup\",\n  \"notifiedStations\": [\"grill\", \"expo\"]\n}\n```\n\n| Station | Avg. ticket time (today) | Avg. ticket time (proposed) |\n| --- | --- | --- |\n| Grill | 46s | 33s |\n| Salad | 28s | 24s |\n| Expo | 19s | 15s |",
-      "sha": "30f276f0b30161582322dcef1c9a3c4466f1619e8f63611f292a5a08d3b6b303",
-      "html": "<h1 id=\"order-routing-redesign\">Order-routing redesign</h1><p>The kitchen display one page back is the mockup. Three things change for the pass, and the routing rewrite underneath them is what this round is asking about:</p><ul><li id=\"order-routing-redesign-li1\">Fewer manual status updates per ticket</li><li id=\"order-routing-redesign-li2\">A single \"Ready for pickup\" state visible to front-of-house</li><li id=\"order-routing-redesign-li3\">Rush tickets float to the top automatically</li></ul><p>The payload each station receives on a status transition:</p><div class=\"fence-lang\" data-lang=\"json\"><pre><code>{\n  \"ticketId\": <span class=\"tok-number\">482</span>,\n  \"status\": <span class=\"tok-string\">\"ready_for_pickup\"</span>,\n  \"notifiedStations\": [<span class=\"tok-string\">\"grill\"</span>, <span class=\"tok-string\">\"expo\"</span>]\n}</code></pre></div><div class=\"table-scroll\"><table><tr><th>Station</th><th>Avg. ticket time (today)</th><th>Avg. ticket time (proposed)</th></tr><tr><td>Grill</td><td>46s</td><td>33s</td></tr><tr><td>Salad</td><td>28s</td><td>24s</td></tr><tr><td>Expo</td><td>19s</td><td>15s</td></tr></table></div>",
+      "text": "# Order-routing redesign\n\nThree things change for the pass. This round asks about the routing rewrite underneath them and the ticket that shows it:\n\n- Fewer manual status updates per ticket\n- A single \"Ready for pickup\" state visible to front-of-house\n- Rush tickets float to the top automatically\n\nThe payload each station receives on a status transition:\n\n```json\n{\n  \"ticketId\": 482,\n  \"status\": \"ready_for_pickup\",\n  \"notifiedStations\": [\"grill\", \"expo\"]\n}\n```\n\n| Station | Avg. ticket time (today) | Avg. ticket time (proposed) |\n| --- | --- | --- |\n| Grill | 46s | 33s |\n| Salad | 28s | 24s |\n| Expo | 19s | 15s |",
+      "sha": "01aa0b12a2e3f11625684927462801aff3d549fc9d772d70ab68e0a567c6fde1",
+      "html": "<h1 id=\"order-routing-redesign\">Order-routing redesign</h1><p>Three things change for the pass. This round asks about the routing rewrite underneath them and the ticket that shows it:</p><ul><li id=\"order-routing-redesign-li1\">Fewer manual status updates per ticket</li><li id=\"order-routing-redesign-li2\">A single \"Ready for pickup\" state visible to front-of-house</li><li id=\"order-routing-redesign-li3\">Rush tickets float to the top automatically</li></ul><p>The payload each station receives on a status transition:</p><div class=\"fence-lang\" data-lang=\"json\"><pre><code>{\n  \"ticketId\": <span class=\"tok-number\">482</span>,\n  \"status\": <span class=\"tok-string\">\"ready_for_pickup\"</span>,\n  \"notifiedStations\": [<span class=\"tok-string\">\"grill\"</span>, <span class=\"tok-string\">\"expo\"</span>]\n}</code></pre></div><div class=\"table-scroll\"><table><tr><th>Station</th><th>Avg. ticket time (today)</th><th>Avg. ticket time (proposed)</th></tr><tr><td>Grill</td><td>46s</td><td>33s</td></tr><tr><td>Salad</td><td>28s</td><td>24s</td></tr><tr><td>Expo</td><td>19s</td><td>15s</td></tr></table></div>",
       "anchors": [
         {
           "kind": "md",
@@ -124,19 +124,17 @@
       "round": 2,
       "id": "q1",
       "kind": "question",
-      "prompt": "Does the kitchen display in round 1 match the routing flow (Placed -> In prep -> Ready -> Served) we discussed?",
-      "explainer": "This decides whether round 1's mockup ships as drawn. A tweak here changes the display only; the routing rewrite underneath it ships either way.",
-      "explainerHtml": "<p>This decides whether round 1's mockup ships as drawn. A tweak here changes the display only; the routing rewrite underneath it ships either way.</p>",
+      "prompt": "Does the redesigned ticket match the routing flow (Placed -> In prep -> Ready -> Served) we discussed?",
+      "explainer": "This decides whether the ticket ships as drawn. A tweak here changes the display only; the routing rewrite underneath it ships either way.",
+      "explainerHtml": "<p>This decides whether the ticket ships as drawn. A tweak here changes the display only; the routing rewrite underneath it ships either way.</p>",
       "context": [
         {
           "round": 2,
-          "id": "d2",
-          "kind": "markdown",
+          "id": "h4",
+          "kind": "html",
           "source": null,
-          "text": "Background: average ticket time today is 31 seconds across the three prep stations (grill, salad, expo).",
-          "sha": "05178d55126abc3fe8e2f881c14f407099dbd591085b71844695445ef041d892",
-          "html": "<p>Background: average ticket time today is 31 seconds across the three prep stations (grill, salad, expo).</p>",
-          "anchors": []
+          "html": "<style>\n  body { margin: 0; padding: 16px 56px 16px 16px; font-family: system-ui, sans-serif; background: #f3f4f6; }\n  .flow { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }\n  .ticket { background: #fff; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.15); overflow: hidden; border: 1px solid #e2e2e2; }\n  .head { background: #1f2937; color: #fff; padding: 10px 14px; display: flex; justify-content: space-between; font-size: 13px; font-weight: 700; }\n  .body { padding: 10px 14px 12px; font-size: 13px; color: #111; }\n  .chip { display: inline-block; margin-top: 8px; padding: 3px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; }\n  .chip.placed { background: #dbeafe; color: #1e40af; }\n  .chip.prep { background: #fef3c7; color: #92400e; }\n  .chip.ready { background: #dcfce7; color: #166534; }\n  .chip.served { background: #e5e7eb; color: #374151; }\n  button { width: 100%; padding: 9px 0; border: none; background: #2563eb; color: #fff; font-size: 14px; font-weight: 600; cursor: pointer; }\n  button:disabled { background: #9ca3af; cursor: default; }\n</style>\n<div class=\"flow\">\n  <div class=\"ticket\">\n    <div class=\"head\"><span>#482</span><span>Table 6</span></div>\n    <div class=\"body\"><div>Grilled salmon x1</div><span class=\"chip placed\">Placed</span></div>\n    <button>Confirm</button>\n  </div>\n  <div class=\"ticket\">\n    <div class=\"head\"><span>#482</span><span>Table 6</span></div>\n    <div class=\"body\"><div>Grilled salmon x1</div><span class=\"chip prep\">In prep</span></div>\n    <button>Mark ready</button>\n  </div>\n  <div class=\"ticket\">\n    <div class=\"head\"><span>#482</span><span>Table 6</span></div>\n    <div class=\"body\"><div>Grilled salmon x1</div><span class=\"chip ready\">Ready for pickup</span></div>\n    <button>Mark served</button>\n  </div>\n  <div class=\"ticket\">\n    <div class=\"head\"><span>#482</span><span>Table 6</span></div>\n    <div class=\"body\"><div>Grilled salmon x1</div><span class=\"chip served\">Served</span></div>\n    <button disabled>Served</button>\n  </div>\n</div>",
+          "sha": "9d0ad678b12596af38759fb6939c55383200e962827a32b06870b935ad86d709"
         }
       ],
       "widget": "single",
@@ -162,8 +160,19 @@
       "round": 2,
       "id": "q2",
       "kind": "question",
-      "prompt": "Which stations need their ticket displays updated to match the round 1 mockup?",
-      "context": [],
+      "prompt": "Which stations get the redesigned ticket?",
+      "context": [
+        {
+          "round": 2,
+          "id": "d2",
+          "kind": "markdown",
+          "source": null,
+          "text": "Background: average ticket time today is 31 seconds across the three prep stations (grill, salad, expo).",
+          "sha": "05178d55126abc3fe8e2f881c14f407099dbd591085b71844695445ef041d892",
+          "html": "<p>Background: average ticket time today is 31 seconds across the three prep stations (grill, salad, expo).</p>",
+          "anchors": []
+        }
+      ],
       "widget": "multi",
       "options": [
         {
@@ -206,8 +215,17 @@
       "round": 2,
       "id": "q4",
       "kind": "question",
-      "prompt": "Rank these three palettes for the status chips (In prep / Rush / Ready for pickup) by legibility under kitchen pass lighting, most legible first. The display one page back uses the first of them.",
-      "context": [],
+      "prompt": "Rank these three palettes for the status chips (In prep / Rush / Ready for pickup) by legibility under kitchen pass lighting, most legible first.",
+      "context": [
+        {
+          "round": 2,
+          "id": "h5",
+          "kind": "html",
+          "source": null,
+          "html": "<style>\n  body { margin: 0; padding: 16px 56px 16px 16px; font-family: system-ui, sans-serif; background: #f3f4f6; }\n  .palettes { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }\n  .palette { background: #fff; border: 1px solid #e2e2e2; border-radius: 10px; padding: 12px 14px 8px; }\n  .name { font-size: 12px; font-weight: 700; color: #374151; padding-bottom: 8px; }\n  .chip { display: inline-block; margin: 0 6px 6px 0; padding: 4px 10px; border-radius: 999px; border: 1px solid transparent; font-size: 12px; font-weight: 600; }\n  .contrast .prep { background: #92400e; color: #fff; }\n  .contrast .rush { background: #991b1b; color: #fff; }\n  .contrast .ready { background: #166534; color: #fff; }\n  .pastel .prep { background: #fef3c7; color: #92400e; }\n  .pastel .rush { background: #fee2e2; color: #991b1b; }\n  .pastel .ready { background: #dcfce7; color: #166534; }\n  .mono .prep { background: #e5e7eb; color: #111827; }\n  .mono .rush { background: #111827; color: #fff; }\n  .mono .ready { background: #fff; color: #111827; border-color: #111827; }\n</style>\n<div class=\"palettes\">\n  <div class=\"palette contrast\">\n    <div class=\"name\">High-contrast</div>\n    <span class=\"chip prep\">In prep</span><span class=\"chip rush\">Rush</span><span class=\"chip ready\">Ready for pickup</span>\n  </div>\n  <div class=\"palette pastel\">\n    <div class=\"name\">Pastel</div>\n    <span class=\"chip prep\">In prep</span><span class=\"chip rush\">Rush</span><span class=\"chip ready\">Ready for pickup</span>\n  </div>\n  <div class=\"palette mono\">\n    <div class=\"name\">Monochrome</div>\n    <span class=\"chip prep\">In prep</span><span class=\"chip rush\">Rush</span><span class=\"chip ready\">Ready for pickup</span>\n  </div>\n</div>",
+          "sha": "1c0e0cece57adbad19130c165d8e4def5b917cc8202ed9e9b2f3063368abcc5d"
+        }
+      ],
       "widget": "rank",
       "options": [
         {
@@ -240,7 +258,7 @@
           "description": "Compact, single line",
           "block": {
             "round": 2,
-            "id": "h4",
+            "id": "h6",
             "kind": "html",
             "source": null,
             "html": "<style>\n  body { margin: 0; padding: 16px 0; font-family: system-ui, sans-serif; }\n  .row { display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: #fff; border: 1px solid #e2e2e2; border-radius: 8px; max-width: 340px; margin: 0 auto; font-size: 14px; color: #111; }\n  .row b { font-weight: 700; }\n  .dot { width: 6px; height: 6px; border-radius: 50%; background: #9ca3af; }\n</style>\n<div class=\"row\"><b>#482</b><span class=\"dot\"></span><span>Table 6</span><span class=\"dot\"></span><span>3 items</span></div>",
@@ -252,7 +270,7 @@
           "description": "Spacious, three lines",
           "block": {
             "round": 2,
-            "id": "h5",
+            "id": "h7",
             "kind": "html",
             "source": null,
             "html": "<style>\n  body { margin: 0; padding: 16px 0; font-family: system-ui, sans-serif; }\n  .card { max-width: 340px; margin: 0 auto; padding: 18px; background: #fff; border: 1px solid #e2e2e2; border-radius: 10px; }\n  .line { padding: 6px 0; font-size: 15px; color: #111; border-bottom: 1px solid #f0f0f0; }\n  .line:last-child { border-bottom: none; }\n  .line.title { font-size: 18px; font-weight: 700; }\n</style>\n<div class=\"card\">\n  <div class=\"line title\">Order #482</div>\n  <div class=\"line\">Table 6</div>\n  <div class=\"line\">3 items</div>\n</div>",
