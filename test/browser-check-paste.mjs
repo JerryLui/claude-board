@@ -3,9 +3,13 @@
 // block comment shows as a thumbnail before Send, its remove control takes it back,
 // and Send posts each as a data: URL on its answer or comment. An image over the 10 MB
 // limit, or a Send whose images add up past 20 MB, is refused in the page with a line
-// naming the limit, nothing is posted and everything typed stays. The DOM stand-in has
-// no clipboard, no drag and no image decoding (QUIRKS.md "The DOM stand-in's
-// ceilings"); test/check-paste.mjs keeps what happens to the images after they land.
+// naming the limit, nothing is posted and everything typed stays. An image that cannot
+// be read is named in the same place and the rest of its paste or drop still land. Send
+// and Discuss pressed in turn while a pasted image is still being read: the first press
+// is the one that goes, and the other button is off until the image has loaded. The DOM
+// stand-in has no clipboard, no drag and no image decoding (QUIRKS.md "The DOM
+// stand-in's ceilings"); test/check-paste.mjs keeps what happens to the images after
+// they land.
 //
 // NOT wired into test/run.mjs's `checks` array, on purpose: that suite has to pass on a
 // machine with no Chrome installed. Run this one by hand:
@@ -25,12 +29,12 @@
 // posts a data: URL by hand, never one a browser actually built from a pasted File.
 
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { sessionToken } from '../src/secret.mjs';
 import { readBoard } from '../src/store.mjs';
 import { runMain, skipFile, sleep } from './support.mjs';
-import { CHROME, guardRun, openTab, postJson, row, startScratchDaemon, withChrome } from './browser-support.mjs';
+import { CHROME, guardRun, openTab, postJson, row, scratchDir, startScratchDaemon, withChrome } from './browser-support.mjs';
 
 if (!existsSync(CHROME)) skipFile('browser-check-paste', `browser-check-paste: no Chrome at ${CHROME} (set CLAUDE_BOARD_CHROME_BIN to override)`);
 
@@ -50,6 +54,13 @@ const BOARD = {
   ],
 };
 
+// A mock alone, awaited: a full page with its own Send and Discuss beside the comments.
+const PAGE_BOARD = {
+  title: 'paste browser check, a full-page mock',
+  wait: true,
+  blocks: [{ kind: 'html', html: '<p>A full-page mock to comment on.</p>' }],
+};
+
 // Installed before the board's own scripts: every submit body, parsed, in
 // window.__submits, the request itself failed as a dropped network would.
 const SUBMIT_CATCHER = `(function () {
@@ -66,17 +77,25 @@ const SUBMIT_CATCHER = `(function () {
 })();`;
 
 // Helpers in the tab. 'field(name)' is a composer's field: the note on the first
-// question, the text answer, or the html block's comment input (opened first).
+// question, the text answer, or the html block's comment input (opened first). A
+// full-page mock has no questions and no comment button: its form opens on a click
+// inside the mock, which Chrome drops for a while after the frame last moved, so
+// there the form stays closed and the field takes the paste as it is.
 const PAGE_HELPERS = `(function () {
-  var q1 = document.querySelector('.question-block[data-widget="single"]').getAttribute('data-block-id');
-  var q2 = document.querySelector('.question-block[data-widget="text"]').getAttribute('data-block-id');
-  var h = document.querySelector('.comment-btn').getAttribute('data-block-id');
+  var idOf = function (selector) {
+    var el = document.querySelector(selector);
+    return el ? el.getAttribute('data-block-id') : null;
+  };
+  var q1 = idOf('.question-block[data-widget="single"]');
+  var q2 = idOf('.question-block[data-widget="text"]');
+  var h = idOf('.comment-btn') || idOf('.comment-form');
   window.__keys = { note: 'note:' + q1, answer: 'answer:' + q2, comment: 'comment:' + h };
   window.__field = function (name) {
     if (name === 'note') return document.querySelector('textarea[data-note-for="' + q1 + '"]');
     if (name === 'answer') return document.querySelector('textarea[data-answer-for="' + q2 + '"]');
     var form = document.querySelector('form#comment-form-' + h);
-    if (!form.classList.contains('open')) document.querySelector('.comment-btn').click();
+    var opener = document.querySelector('.comment-btn');
+    if (opener && !form.classList.contains('open')) opener.click();
     return form.querySelector('input[type=text]');
   };
   window.__png = function (bytes, name) {
@@ -89,16 +108,44 @@ const PAGE_HELPERS = `(function () {
     }
     return new File([data], name || 'shot.png', { type: 'image/png' });
   };
-  window.__give = function (name, how, bytes) {
+  window.__hand = function (name, how, files) {
     var el = window.__field(name);
     el.focus();
     var dt = new DataTransfer();
-    dt.items.add(window.__png(bytes, how === 'drop' ? 'dropped.png' : 'image.png'));
+    [].forEach.call(files, function (f) { dt.items.add(f); });
     var ev = how === 'drop'
       ? new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true })
       : new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true });
     el.dispatchEvent(ev);
     return ev.defaultPrevented;
+  };
+  window.__give = function (name, how, bytes) {
+    return window.__hand(name, how, [window.__png(bytes, how === 'drop' ? 'dropped.png' : 'image.png')]);
+  };
+  // A file input the check fills with files on disk (DOM.setFileInputFiles): Chrome
+  // holds each by its path, as it does a file copied or dragged from a folder.
+  window.__picker = function () {
+    var input = document.querySelector('input#check-picker');
+    if (!input) {
+      input = document.createElement('input');
+      input.type = 'file';
+      input.multiple = true;
+      input.id = 'check-picker';
+      input.hidden = true;
+      document.body.appendChild(input);
+    }
+    return input;
+  };
+  // Pastes one image on 'name' and, in the same task, so before it can have been
+  // read, presses 'first' and then 'second' ('add' presses the comment's Add ahead
+  // of both): was 'second' off when its turn came.
+  window.__pressInTurn = function (name, first, second, add) {
+    window.__give(name, 'paste');
+    if (add) window.__field(name).closest('form').querySelector('button[type=submit]').click();
+    document.querySelector(first).click();
+    var off = document.querySelector(second).disabled;
+    document.querySelector(second).click();
+    return off;
   };
   window.__thumbs = function (name) {
     return [].map.call(document.querySelectorAll('div.thumb-row[data-images-for="' + window.__keys[name] + '"] .thumb'), function (t) {
@@ -120,6 +167,8 @@ const PAGE_HELPERS = `(function () {
 })()`;
 
 const COMPOSERS = ['note', 'answer', 'comment'];
+// A submit's action, as the button that posts it reads.
+const LABEL = { send: 'Send', discuss: 'Discuss' };
 
 async function main() {
   const daemon = await startScratchDaemon('cb-paste');
@@ -129,8 +178,8 @@ async function main() {
     const cookie = sessionToken(daemon.secret);
 
     await withChrome({ tag: 'cb-paste' }, async ({ send, onEvent }) => {
-      const open = async ({ intercept = true } = {}) => {
-        const posted = await postJson(`${origin}/api/board`, BOARD, daemon.secret);
+      const open = async ({ intercept = true, board = BOARD } = {}) => {
+        const posted = await postJson(`${origin}/api/board`, board, daemon.secret);
         const tab = await openTab(send, onEvent, `${origin}${new URL(posted.url).pathname}`, cookie, {
           width: 1280, height: 900, theme: 'light', expr: PAGE_HELPERS,
           ...(intercept ? { prepare: sp => sp('Page.addScriptToEvaluateOnNewDocument', { source: SUBMIT_CATCHER }) } : {}),
@@ -150,6 +199,18 @@ async function main() {
         for (const type of ['mousePressed', 'mouseReleased']) {
           await tab.sp('Input.dispatchMouseEvent', { type, x: box.x, y: box.y, button: 'left', clickCount: 1 });
         }
+      };
+
+      // Both buttons on offer again: a caught Send has failed and handed them back.
+      const bothOn = (first, second) => `!document.querySelector('${first}').disabled && !document.querySelector('${second}').disabled`;
+      // Presses 'first' then 'second' while a pasted image is read, and waits for what
+      // goes out: was 'second' off at its turn, and the actions posted since.
+      const pressedInTurn = async (t, name, first, second, add) => {
+        const before = await t.evalPage('window.__submits.length');
+        const off = await t.evalPage(`window.__pressInTurn('${name}', '${first}', '${second}', ${add})`);
+        await t.until(`window.__submits.length > ${before}`, 'the held press going out');
+        await t.until(bothOn(first, second), 'both buttons on offer again after the caught Send');
+        return { off, actions: (await t.evalPage('window.__submits')).slice(before).map(s => s.action) };
       };
 
       const tab = await open();
@@ -201,6 +262,53 @@ async function main() {
         await tab.close();
       }
 
+      const turns = await open();
+      try {
+        await row('an image that cannot be read is named under its composer, and the other images of that paste or drop still land', async note => {
+          // Three files on disk, the middle one gone before the page reads it.
+          const dir = scratchDir('cb-paste-files-');
+          const files = ['kept.png', 'gone.png', 'also-kept.png'].map(name => path.join(dir, name));
+          for (const file of files) writeFileSync(file, Buffer.from(PNG_BASE64, 'base64'));
+          const picker = await turns.sp('Runtime.evaluate', { expression: 'window.__picker()' });
+          await turns.sp('DOM.setFileInputFiles', { files, objectId: picker.result.objectId });
+          rmSync(files[1]);
+          for (const [name, how] of [['note', 'paste'], ['answer', 'drop']]) {
+            assert.equal(await turns.evalPage(`window.__hand('${name}', '${how}', window.__picker().files)`), true, `the ${how} was taken`);
+            const said = await turns.until(`window.__refusal('${name}')`, `the ${how}'s line naming the file`);
+            const captions = (await turns.evalPage(`window.__thumbs('${name}')`)).map(t => t.caption);
+            note(`${how}: ${captions.join(' | ')}; "${said}"`);
+            assert.equal(said, 'gone.png could not be loaded. Nothing was sent; your answers are kept.');
+            assert.equal(captions.length, 2, 'the two readable images of the three are kept');
+            if (how === 'drop') assert.deepEqual(captions, ['kept.png, 1 KB', 'also-kept.png, 1 KB']);
+            else for (const caption of captions) assert.match(caption, /^pasted-\d+\.png, 1 KB$/);
+          }
+        });
+
+        await turns.evalPage(`(function () {
+          window.__type('answer', 'because');
+          [].find.call(document.querySelectorAll('.choice-single'), function (b) { return b.textContent.trim() === 'Keep'; }).click();
+          return true;
+        })()`);
+        for (const [first, second] of [['send', 'discuss'], ['discuss', 'send']]) {
+          await row(`${LABEL[first]} then ${LABEL[second]} pressed while a pasted image is still being read: ${LABEL[second]} is off, and the one submit that goes is the ${LABEL[first]}`, async () => {
+            assert.deepEqual(await pressedInTurn(turns, 'note', `button#${first}-btn`, `button#${second}-btn`, false), { off: true, actions: [first] });
+          });
+        }
+      } finally {
+        await turns.close();
+      }
+
+      const page = await open({ board: PAGE_BOARD });
+      try {
+        for (const [first, second] of [['send', 'discuss'], ['discuss', 'send']]) {
+          await row(`a full-page mock's own ${LABEL[first]} then ${LABEL[second]} pressed while a comment's pasted image is still being read: ${LABEL[second]} is off, and the one submit that goes is the ${LABEL[first]}`, async () => {
+            assert.deepEqual(await pressedInTurn(page, 'comment', `.page-${first}-btn`, `.page-${second}-btn`, true), { off: true, actions: [first] });
+          });
+        }
+      } finally {
+        await page.close();
+      }
+
       const big = await open();
       try {
         await row('an 11 MB image is refused as it lands, naming the limit; nothing is posted and the typed note stays', async () => {
@@ -228,6 +336,13 @@ async function main() {
           assert.deepEqual(await big.evalPage('[window.__field("note").value, window.__field("answer").value]'), ['kept note', 'kept answer']);
           assert.equal(await big.evalPage('document.querySelectorAll(".comment-item.comment-pending .thumb").length'), 1, 'the queued comment keeps its image');
           assert.equal(await big.evalPage('document.querySelector("button#send-btn").disabled'), false, 'Send is still on offer');
+        });
+
+        await row('a Send held for a pasted image and then refused over the limit hands Discuss back once the image has loaded', async () => {
+          const off = await big.evalPage(`window.__pressInTurn('note', 'button#send-btn', 'button#discuss-btn', false)`);
+          await thumbsSettle(big, 'note', 2);
+          assert.deepEqual({ off, bothOnAfter: await big.evalPage(bothOn('button#send-btn', 'button#discuss-btn')) }, { off: true, bothOnAfter: true });
+          assert.deepEqual(await big.evalPage('window.__submits'), [], 'refused, so nothing is posted');
         });
       } finally {
         await big.close();
