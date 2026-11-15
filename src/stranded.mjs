@@ -596,7 +596,9 @@ export function createStrandedWatch({
         deadlineAt,
       });
       // Recorded durably, all six parts together. `round` is the load-bearing one: it is
-      // the MARK, permanent for the life of that round, `rounds` every round a banner has
+      // the MARK, permanent for the life of that round. A banner never lowers it: one for
+      // a round reopened behind it (ADR.md entry 151) leaves it on the higher round, whose
+      // amend still finds it (`amended`). `rounds` is every round a banner has
       // named here, this one included (`nextToAnnounce`), and `returned` beside it is the
       // gate -- shut from the moment a banner is raised until the reviewer comes back
       // (ADR.md entry 74). A record read off disk by a successor daemon that predates this
@@ -612,10 +614,11 @@ export function createStrandedWatch({
       // only under-estimate the banner's life, which costs a withdrawal not attempted
       // rather than a stranger signalled). `notify` swallows its own failures and never
       // throws, so this cannot record a banner that never appeared.
+      const prior = recordOn(board);
       const rec = {
         at: new Date(at).toISOString(),
-        round: oldest.n,
-        rounds: namedWith(recordOn(board), oldest.n),
+        round: Math.max(oldest.n, prior && Number.isInteger(prior.round) ? prior.round : 0),
+        rounds: namedWith(prior, oldest.n),
         returned: false,
         pid: (child && child.pid) || null,
         until: new Date(Number.isFinite(deadlineAt)

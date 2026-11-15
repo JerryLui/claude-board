@@ -20,7 +20,9 @@
 // src/handoff.mjs's, which the shim's text about the watch reads too. Port and credential as
 // the shim's: `daemonPort()` and the local secret (src/secret.mjs). Each call names the
 // processes this watch runs under, the session that started it among them: a round handed to
-// another session answers that session's watch alone, and any other `abandoned`.
+// another session answers that session's watch alone, and any other `abandoned`. Each also
+// names the time this watch started: a round reopened since is the conversation's that
+// joined after it (a /clear keeps the process), and answers this watch `abandoned` too.
 
 import { execFileSync } from 'node:child_process';
 import http from 'node:http';
@@ -73,13 +75,13 @@ function runningUnder() {
   return under;
 }
 
-/** One collect call, naming `session`, the processes this watch runs under. Resolves
- * `{ status, json }` for any HTTP answer; rejects when the daemon cannot be reached or does
- * not answer in time. */
-function collect(port, board, round, session) {
+/** One collect call, naming `session`, the processes this watch runs under, and `startedAt`,
+ * when it started. Resolves `{ status, json }` for any HTTP answer; rejects when the daemon
+ * cannot be reached or does not answer in time. */
+function collect(port, board, round, session, startedAt) {
   return new Promise((resolve, reject) => {
     const secret = readSecret();
-    const body = JSON.stringify({ round, session });
+    const body = JSON.stringify({ round, session, startedAt });
     const req = http.request({
       host: '127.0.0.1',
       port,
@@ -113,7 +115,9 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 async function watch({ board, round, hours }) {
   const port = daemonPort();
-  const deadline = Date.now() + hours * 3_600_000;
+  const started = Date.now();
+  const startedAt = new Date(started).toISOString();
+  const deadline = started + hours * 3_600_000;
   const session = runningUnder();
   process.stderr.write(`watch: board ${board} round ${round}, every ${INTERVAL_MS / 1000}s, until ${new Date(deadline).toISOString()}\n`);
   let downs = 0;
@@ -121,7 +125,7 @@ async function watch({ board, round, hours }) {
     let answer = null;
     let why;
     try {
-      answer = await collect(port, board, round, session);
+      answer = await collect(port, board, round, session, startedAt);
       if (answer.status === 200 && typeof answer.json?.status !== 'string') why = 'the daemon answered no round status';
       else if (answer.status !== 200 && answer.status !== 404) why = `the daemon answered ${answer.status}${answer.json?.error ? `: ${answer.json.error}` : ''}`;
     } catch (err) {

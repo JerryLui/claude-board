@@ -1754,9 +1754,13 @@ async function missionTool(args) {
   // Each round reopened under this session (ADR 151), as its join names it or, after a
   // takeover, its binding: with the answer watch that wakes the session on its Send, as a
   // `timeout` packet names one (ADR 146), and the board's url built here, never the response
-  // body's (see safeBoardUrl).
+  // body's (see safeBoardUrl): on every entry, null where its board is no board id. The
+  // watch is named only where the entry names a board and a round.
   if ((action === 'join' || action === 'binding') && Array.isArray(answer?.reopened)) {
-    answer.reopened = answer.reopened.map(r => (BOARD_ID_RE.test(r?.board) && Number.isInteger(r.round) ? { ...r, url: safeBoardUrl(r.board), ...answerWatch(r.board, r.round) } : r));
+    answer.reopened = answer.reopened.map(r => {
+      const url = safeBoardUrl(r?.board);
+      return { ...r, url, ...(url && Number.isInteger(r.round) ? answerWatch(r.board, r.round) : {}) };
+    });
   }
   // A join or leave changes the mission this conversation's boards link to, and the board
   // this shim reuses keeps the mission it linked first (src/server.mjs): the next ask

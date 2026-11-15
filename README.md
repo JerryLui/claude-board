@@ -26,7 +26,7 @@ tab. No Linux or Windows path exists or is planned.
 
 ![A reviewer working through round 2 of the sample board: they turn comment mode on and leave a comment on the mermaid flowchart, then answer all five widgets in turn - picking a single choice and typing a note, ticking two of four checkboxes, writing a free-text answer, dragging a rank row up so the list renumbers, and choosing between two rendered mocks - before scrolling to the send bar and stopping on Send.](examples/sample-board-session.gif)
 
-![Round 2 of the sample board, the block gallery it opens on: a markdown block with a comparison table, a mermaid flowchart carrying two comments, one on the whole block and one pinned to a node, a highlighted javascript block and a diff block, a before/after compare of two rendered mocks, and an answered single-choice question with a full-width mock above its options.](examples/sample-board.png)
+![Round 2 of the sample board, the block gallery it opens on: a markdown block with a comparison table, a mermaid flowchart carrying two comments, one on the whole block and one pinned to a node, a highlighted javascript block and a diff block, a before/after compare of two rendered mocks, and an answered single-choice question with its own context panel.](examples/sample-board.png)
 
 ![Round 1 of the same board, one pager flip back: a full-viewport kitchen-display mock with no card or column around it, a numbered pin on its "Confirm" button, the comment it anchors floating over the artifact, and the round pager at the bottom naming both rounds.](examples/sample-board-comments.png)
 

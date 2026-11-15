@@ -7,8 +7,11 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
 import { startServer } from '../src/server.mjs';
+import { SECRET_HEADER } from '../src/secret.mjs';
+import { WAIT_CEILING_MS } from '../src/handoff.mjs';
 import { readBoard, readMission, writeBoard } from '../src/store.mjs';
 import { linkBoard } from '../src/missions.mjs';
 import { abandonOpenRounds, addRound, createBoard } from '../src/board.mjs';
@@ -80,6 +83,48 @@ async function sessionShim(folder, env = {}) {
     return r.result;
   };
   return { child, shim, call };
+}
+
+/** The daemon-wide stream the Boards page holds, once the daemon has it: `events` is every
+ * event since, as `{ event, data }`, and `named(event)` the data of each one so named. */
+function openIndexStream() {
+  return new Promise((resolve, reject) => {
+    const events = [];
+    let pending = '';
+    const req = http.request({ host: '127.0.0.1', port, method: 'GET', path: '/api/events', headers: { host: `127.0.0.1:${port}`, [SECRET_HEADER]: SECRET } }, res => {
+      res.setEncoding('utf8');
+      res.on('data', chunk => {
+        pending += chunk;
+        const frames = pending.split('\n\n');
+        pending = frames.pop();
+        for (const frame of frames) {
+          const event = /^event: (.+)$/m.exec(frame);
+          const data = /^data: (.*)$/m.exec(frame);
+          if (event && data) events.push({ event: event[1], data: JSON.parse(data[1]) });
+        }
+      });
+      resolve({ events, named: name => events.filter(e => e.event === name).map(e => e.data), close: () => req.destroy() });
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+/** A daemon that is not the board's: whatever holds its port answers `POST route` with
+ * `answer`, and anything else 404. */
+function startPeer(route, answer) {
+  const srv = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      const hit = req.method === 'POST' && req.url === route;
+      const body = JSON.stringify(hit ? answer : { error: 'not found' });
+      res.writeHead(hit ? 200 : 404, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body) });
+      res.end(body);
+    });
+  });
+  return new Promise(resolve => {
+    srv.listen(0, '127.0.0.1', () => resolve({ port: srv.address().port, close: () => { srv.close(); srv.closeAllConnections?.(); } }));
+  });
 }
 
 async function main() {
@@ -475,7 +520,7 @@ async function main() {
     assert.equal((await leave('LAPSED', 'lapsed-taker', taker)).status, 200);
   });
 
-  await check('a join that reopens rounds tells a tab already open on the board of each one: a deadline event naming the round, its new deadline and that it reopened, which the tab re-reads the board on', async () => {
+  await check('a join that reopens rounds tells a tab already open on the board of each one: a deadline event naming the round, its new deadline and that it reopened, which the tab re-reads the board on; and it tells the Boards page\'s stream of each one, a deadline event naming the board, the round and its new deadline, with one waiting count that holds them', async () => {
     const gone = sessionProcess();
     const next = sessionProcess();
     const folder = folderWith('open-tab', 'x\n');
@@ -484,14 +529,22 @@ async function main() {
     await ask(gone, folder, [question('Left to lapse?')], { fresh: true });
     lapse(asked.boardId, 2);
     await kill(gone);
+    const waitingBefore = (await (await fetch(`${base}/api/waiting`)).json()).waiting;
+    assert.deepEqual(waitingBefore.filter(r => r.boardId === asked.boardId), [], 'neither round waits before the join');
     const tab = await openSseClient(port, asked.boardId, { secret: SECRET, comments: false });
+    const index = await openIndexStream();
     try {
       assert.equal((await join('OPENTAB', 'opentab-next', next)).status, 200);
       const told = () => tab.events.filter(e => e.event === 'deadline').map(e => e.data);
       await waitFor(() => told().length === 2, { what: 'a deadline event for each reopened round on the open tab' });
-      assert.deepEqual(told(), readBoard(asked.boardId, home).rounds.map(r => ({ round: r.n, awaitDeadline: r.awaitDeadline, reopened: true })));
+      const rounds = readBoard(asked.boardId, home).rounds;
+      assert.deepEqual(told(), rounds.map(r => ({ round: r.n, awaitDeadline: r.awaitDeadline, reopened: true })));
+      await waitFor(() => index.named('waiting').length > 0, { what: 'the waiting count on the Boards page\'s stream' });
+      assert.deepEqual(index.named('deadline'), rounds.map(r => ({ board: asked.boardId, round: r.n, awaitDeadline: r.awaitDeadline })));
+      assert.deepEqual(index.named('waiting').map(w => w.total), [waitingBefore.length + 2]);
     } finally {
       tab.req.destroy();
+      index.close();
     }
     assert.equal((await leave('OPENTAB', 'opentab-next', next)).status, 200);
   });
@@ -545,20 +598,22 @@ async function main() {
     assert.equal((await leave('DEPARTED', 'departed-taker', taker)).status, 200);
   });
 
+  // The answer watch as a session runs it, polling every 100 ms.
+  const watchBin = path.join(repoRoot, 'bin', 'watch.mjs');
+  const env = { ...process.env, CLAUDE_BOARD_HOME: home, CLAUDE_BOARD_PORT: String(port), CLAUDE_BOARD_WATCH_INTERVAL_MS: '100' };
+  /** A watch `child` to its exit: `{ code, out }`, its exit code and what it printed. */
+  const run = (child, limitMs = 10_000) => new Promise((resolve, reject) => {
+    let out = '';
+    child.stdout.on('data', c => { out += c; });
+    const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('the watch was still running')); }, limitMs);
+    child.on('close', code => { clearTimeout(timer); resolve({ code, out: out.trim() }); });
+  });
+
   await check('the answer watch names the processes it runs under: started by the session a reopened round was handed to, it prints the round\'s answer, and started by any other, abandoned', async () => {
     const gone = sessionProcess();
     const folder = folderWith('watched', 'x\n');
-    const env = { ...process.env, CLAUDE_BOARD_HOME: home, CLAUDE_BOARD_PORT: String(port), CLAUDE_BOARD_WATCH_INTERVAL_MS: '100' };
-    /** A watch `child` to its exit: `{ code, out }`, its exit code and what it printed. */
-    const run = (child, limitMs = 10_000) => new Promise((resolve, reject) => {
-      let out = '';
-      child.stdout.on('data', c => { out += c; });
-      const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('the watch was still running')); }, limitMs);
-      child.on('close', code => { clearTimeout(timer); resolve({ code, out: out.trim() }); });
-    });
     // The session that takes the round: a shell that starts the watch on the board it reads
     // from its stdin, as a session starts one in the background.
-    const watchBin = path.join(repoRoot, 'bin', 'watch.mjs');
     const shell = spawn('/bin/sh', ['-c', `read board; "${process.execPath}" "${watchBin}" --board "$board" --round 1; exit $?`], { env, stdio: ['pipe', 'pipe', 'ignore'] });
     children.add(shell);
     const taker = { ref: { pid: shell.pid, procStart: processStartUtc(shell.pid) } };
@@ -580,6 +635,53 @@ async function main() {
     const packet = JSON.parse(out);
     assert.deepEqual([packet.round, packet.status, packet.delivered, packet.answers.map(x => x.choice)], [1, 'submitted', false, ['No']]);
     assert.equal((await leave('WATCHED', 'watched-taker', taker)).status, 200);
+  });
+
+  await check('an answer watch a session started before its /clear is refused the round its join after the /clear reopened: it prints abandoned and spends nothing, and the watch the session starts after that join prints the answer; a start that is no time is refused', async () => {
+    const folder = folderWith('cleared-watch', 'x\n');
+    // The session: a shell that starts a watch on the board it reads from its stdin, says how
+    // that one ended, and starts another once it is told to go on.
+    const watch = `"${process.execPath}" "${watchBin}" --board "$board" --round 1`;
+    const shell = spawn('/bin/sh', ['-c', `read board; ${watch}; echo "exit $?"; read go; ${watch}; exit $?`], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+    children.add(shell);
+    let err = '';
+    shell.stderr.on('data', c => { err += c; });
+    const ended = run(shell);
+    ended.catch(() => {}); // a failing assertion below is the report
+    let out = '';
+    shell.stdout.on('data', c => { out += c; });
+    const s = { ref: { pid: shell.pid, procStart: processStartUtc(shell.pid) } };
+    assert.ok(s.ref.procStart, 'the shell\'s start reads');
+    const listed = id => post('/api/sessions', { intervalMs: 30_000, sessions: id ? [{ id, pid: s.ref.pid, procStart: s.ref.procStart, kind: 'interactive', jobId: null, cwd: folder, login: null, name: null, status: 'idle', reason: null }] : [] });
+    try {
+      assert.equal((await listed('watch-before')).status, 200);
+      assert.equal((await join('CLEARED_WATCH', 'watch-before', s)).status, 200);
+      const asked = await ask(s, folder, [question('Sent after the /clear?')]);
+      shell.stdin.write(`${asked.boardId}\n`);
+      // The first watch says the bound it runs to, a day from its start; the join comes later.
+      await waitFor(() => /until \S+\n/.test(err), { what: 'the first watch to start' });
+      const started = Date.parse(/until (\S+)/.exec(err)[1]) - WAIT_CEILING_MS;
+      await waitFor(() => Date.now() > started, { intervalMs: 1, what: 'the clock to pass the watch\'s start' });
+
+      assert.equal((await listed('watch-after')).status, 200);
+      assert.deepEqual((await join('CLEARED_WATCH', 'watch-after', s)).body.reopened.map(r => r.round), [1]);
+      assert.deepEqual(state(asked.boardId, 1), ['open', true, s.ref.pid], 'the round was open through the /clear, and is the same process\'s');
+      assert.equal((await send(asked.boardId, 1, 'Yes')).status, 200);
+      await waitFor(() => /exit \d+\n/.test(out), { what: 'the first watch to end' });
+      assert.equal(out, 'abandoned\nexit 2\n');
+      assert.deepEqual(readBoard(asked.boardId, home).answersDelivered, [], 'a refused collect spends nothing');
+      const unread = await post(`/api/board/${asked.boardId}/collect`, { round: 1, session: s.ref, startedAt: 'before the /clear' });
+      assert.deepEqual([unread.status, unread.body], [400, { error: 'collect "startedAt" must be the time the caller\'s watch started, as an ISO string' }]);
+
+      shell.stdin.end('go\n');
+      const { code, out: all } = await ended;
+      assert.equal(code, 0, all);
+      const packet = JSON.parse(all.split('\n').pop());
+      assert.deepEqual([packet.round, packet.status, packet.delivered, packet.answers.map(x => x.choice)], [1, 'submitted', false, ['Yes']]);
+      assert.equal((await leave('CLEARED_WATCH', 'watch-after', s)).status, 200);
+    } finally {
+      await listed(null);
+    }
   });
 
   await check('close by number closes only a round a hand-over reopened under the session that names it: for a round that session asked itself, and for a round reopened under another session, it answers closed: [] and the round stays open; naming a round and no session is refused', async () => {
@@ -653,7 +755,7 @@ async function main() {
     }
   });
 
-  await check('a taker reads the round its takeover reopened from the shim\'s binding: with its answer watch, and the board\'s url as the shim builds it, not the one the giver\'s leave came by', async () => {
+  await check('a taker reads the round its takeover reopened from the shim\'s binding: with its answer watch, and the board\'s url, which the daemon\'s binding does not carry', async () => {
     const giver = sessionProcess();
     const folder = folderWith('shim-takeover', 'x\n');
     assert.equal((await join('SHIM_TAKEN', 'shim-taken-giver', giver)).status, 200);
@@ -663,9 +765,7 @@ async function main() {
     try {
       const pending = (await call('mission', { action: 'join', key: 'SHIM_TAKEN', session: 'shim-taken-taker', takeover: true })).structuredContent;
       assert.equal(pending.takeover, 'pending');
-      // The giver leaves by another name for this machine than the shim's own.
-      const left = await rawRequest(port, 'POST', '/api/mission/SHIM_TAKEN/leave', { host: `localhost:${port}`, headers: writeHeaders(SECRET), body: JSON.stringify({ id: 'shim-taken-giver', ...giver.ref }) });
-      assert.equal(left.status, 200, left.body);
+      assert.equal((await leave('SHIM_TAKEN', 'shim-taken-giver', giver)).status, 200);
       const binding = (await call('mission', { action: 'binding', session: 'shim-taken-taker' })).structuredContent;
       assert.deepEqual([binding.key, binding.reopened.map(r => [r.board, r.round])], ['SHIM_TAKEN', [[asked.boardId, 1]]]);
       assert.match(binding.reopened[0].watch, watchOf(asked.boardId, 1));
@@ -673,6 +773,32 @@ async function main() {
       await call('mission', { action: 'leave', key: 'SHIM_TAKEN', session: 'shim-taken-taker' });
     } finally {
       shim.close();
+    }
+  });
+
+  await check('the shim builds each reopened round\'s url itself and relays none a join answered: this shim\'s own for the entry\'s board, null when that is no board id, and the answer watch only on an entry naming a board and a round', async () => {
+    const folder = folderWith('shim-peer', 'x\n');
+    const theirs = '/Applications/Evil.app';
+    const named = { board: 'b_peer_round', round: 1, title: 'Round', awaitDeadline: '2026-11-15T10:40:00.000Z' };
+    const peer = await startPeer('/api/mission/PEER/join', { bound: true, session: { id: 'peer-session' }, reopened: [
+      { ...named, url: theirs },
+      { board: `-a ${theirs}`, round: 2, url: theirs },
+      { board: 'b_peer_round', round: 'two', url: theirs },
+    ] });
+    const { shim, call } = await sessionShim(folder, { CLAUDE_BOARD_PORT: String(peer.port) });
+    try {
+      const joined = (await call('mission', { action: 'join', key: 'PEER', session: 'peer-session' })).structuredContent;
+      const own = `http://127.0.0.1:${peer.port}/b/b_peer_round`;
+      const { watch, ...first } = joined.reopened[0];
+      assert.match(watch, new RegExp(`^CLAUDE_BOARD_PORT=${peer.port} node \\S*watch\\.mjs\\S* --board b_peer_round --round 1$`));
+      assert.deepEqual([first, ...joined.reopened.slice(1)], [
+        { ...named, url: own },
+        { board: `-a ${theirs}`, round: 2, url: null },
+        { board: 'b_peer_round', round: 'two', url: own },
+      ]);
+    } finally {
+      shim.close();
+      peer.close();
     }
   });
 

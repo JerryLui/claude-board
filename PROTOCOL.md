@@ -797,7 +797,7 @@ GET  /api/board/:id/read            one board's rounds, answers and comments, in
                                     delivered and nothing is written, so the same call twice
                                     answers the same twice. Secret only, like /wait: a tool
                                     calls it, never a page
-POST /api/board/:id/collect         { round, session? } -> the round's packet plus `delivered`, once it
+POST /api/board/:id/collect         { round, session?, startedAt? } -> the round's packet plus `delivered`, once it
                                     is sent, spending it; `status: 'open'` or `'abandoned'`
                                     before then (ADR 146). The answer watch's poll. Secret only
 GET  /api/board/:id/events          SSE: round pushes, state changes; `?stages=held`
@@ -1618,10 +1618,11 @@ which already sends the secret on every request, reads included.
 ## `POST /api/board/:id/collect`
 
 ```js
-{ round: 1, 2, 3…, session?: { pid, procStart } | [ { pid, procStart }, … ] }
+{ round: 1, 2, 3…, session?: { pid, procStart } | [ { pid, procStart }, … ], startedAt?: ISO time }
   -> 200 { board, thread, title, round, status, answers, comments, url, relayed?, delivered }
   -> 404 { error }   an unknown board, or a round not on it
-  -> 400 { error }   a round that is not a positive integer, or a `session` of another shape
+  -> 400 { error }   a round that is not a positive integer, a `session` of another shape, or a
+                     `startedAt` that is not an ISO time string
 ```
 
 `session` names the caller: its session's process, or the processes it runs under, nearest first,
@@ -1631,6 +1632,13 @@ decides one thing. A round a hand-over gave another session (it carries `handedF
 watcher's list holds for it: any other, and one naming no `session` (a watch from before it named
 one), gets `status: 'abandoned'` with empty `answers` and `comments` and `delivered: false`, as on
 an abandoned round, and nothing is spent. On every other round `session` changes nothing.
+
+`startedAt` is when the caller's watch started (the watch sends it on every poll). A `/clear` keeps
+the process, so after one the conversation that left a round and the one whose join reopened it
+are the same `session`, and only time tells their watches apart: a round whose `reopenedAt` is
+later than `startedAt` answers `status: 'abandoned'` in the same shape, nothing spent, so the
+answer stays owed to the conversation the round was reopened under. A caller that sends no
+`startedAt` (a watch from before it sent one) is answered by `session` alone.
 
 The answer watch's poll (ADR 146; `bin/watch.mjs`, see "The answer watch" under "MCP surface"), on
 a round whose wait ended unanswered. While the round is `open`, `status` is `'open'`, and once it
@@ -2753,7 +2761,9 @@ node bin/watch.mjs --board <id> --round <n> [--hours <h>]
 
 `--hours` defaults to 24 and is clamped to 24. One `POST /api/board/:id/collect` per poll, every
 30 s (`CLAUDE_BOARD_WATCH_INTERVAL_MS` overrides, for checks), the last landing on the bound, so a
-Send reaches the session within a poll and its wake. Port and credential as the shim's:
+Send reaches the session within a poll and its wake. Each poll names the processes the watch runs
+under (`session`) and the time it started (`startedAt`), so a round handed to another session, or
+reopened since the watch started, ends it `abandoned`. Port and credential as the shim's:
 `CLAUDE_BOARD_PORT`, else the port record beside the secret, else 7391, and the local secret
 (`CLAUDE_BOARD_SECRET_FILE` relocates it). A Send after the bound is stored like any late Send and
 read back through `read`.
