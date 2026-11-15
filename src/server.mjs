@@ -2746,7 +2746,8 @@ function broadcastDeadline(board, round, sse, stream, { reopened = false } = {})
  * minted for a poster that follows its stored deadline and not yet lapsed, and the report
  * moves it by `deadlineMoveMinMs()` or more. A round from a shim that waits on a clock of
  * its own cannot be moved, since that shim would give up at its own cap whatever the board
- * said; a lapsed round cannot come back. A report that gains less, the commonest one while
+ * said; a report never brings a lapsed round back (a hand-over alone does, ADR 151). A
+ * report that gains less, the commonest one while
  * the reviewer types, answers `moved: false` and writes nothing.
  *
  * One accepted report per round every `activityMinMs()` (src/activity.mjs, the value the

@@ -1,6 +1,6 @@
 // Real-browser check for Download round (src/round-export.mjs, src/ui.mjs's
-// downloadRound): a question round offers it at the right end of its chip line, sent or
-// not; the file a sent round saves opens from disk with the network off and holds the
+// downloadRound): a sent question round offers it at the right end of its chip line (a
+// round not yet sent, test/check-round-download.mjs); the file a sent round saves opens from disk with the network off and holds the
 // board's title, the round's number and date, the decisions table first, every option
 // with the pick marked, the diagram as SVG at full height, the mock at its full height
 // with none of its scripts run, each comment under what it points at and every image as
@@ -473,18 +473,6 @@ async function main() {
         expr: `document.querySelector('.round-current').getAttribute('data-round')` });
 
       const offline = async sp => { await sp('Network.emulateNetworkConditions', { offline: true, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }); };
-
-      const open = await board.evalPage(`(function () {
-        var round = document.querySelector('.round[data-round="2"]');
-        var chips = round.querySelector('.round-chips');
-        var btn = chips && chips.querySelector('.round-download');
-        return { status: round.getAttribute('data-round-status'), text: btn && btn.textContent.trim(),
-          last: !!btn && chips.lastElementChild === btn, disabled: btn && btn.disabled };
-      })()`);
-      await row('a round not yet sent shows Download round at the right end of its chip line, live, as a sent round does', () => {
-        assert.equal(board.measured, '2', 'setup: the board opens on its open round');
-        assert.deepEqual(open, { status: 'open', text: 'Download round', last: true, disabled: false });
-      });
 
       await board.evalPage(`document.querySelector('[data-block-id="q6"] .card-choice').click()`);
       await board.until(`document.querySelector('[data-block-id="q6"] .card-choice.selected')`, 'the pick on the open round');

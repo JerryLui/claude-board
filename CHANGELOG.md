@@ -12,6 +12,28 @@
   sent line and marks each pick so far as unsent. Pull-out, the full-window view of one mock or
   diagram, has a download of its own that saves that one alone. A board opened from Finder offers
   none of these.
+- **A mission's next session picks up the questions the last one left (ADR 151)**: when a session
+  joins a mission in place of the one before it, or takes the mission over, each round that
+  session left unanswered goes back to waiting in place, whether it was closed at a `/clear` or
+  the session's end, had timed out, or was still waiting at the takeover. It keeps its round
+  number and everything the board holds for it, gets a fresh 40-minute clock, and shows under
+  Waiting on you again; a tab you still have open on it takes answers again with no reload. Your
+  Send reaches the new session, which is told of each reopened round when it joins. A round you
+  already sent stays read-only, rounds of earlier sessions stay closed, and so do those of a
+  session that left the mission with nobody taking over. A round nobody answers reopens again for
+  the session after, until you send it or a session declines it: `mission close` closes one
+  reopened round whose question no longer stands, for good. Before, such a round stayed
+  read-only and a late Send reached a session only when it thought to read the board.
+- **The top strip lets clicks through**: a click on the empty part of a board's top strip now
+  lands on the page under it, so the buttons of a mock's or diagram's full-size view take their
+  click where the strip floats over them. The strip's title and controls take theirs as before.
+- **The top strip leaves for a mock's own full-size view**: while a mock drawn full page shows a
+  full-size view of its own, the top strip is hidden so it does not cover that view's buttons,
+  and it is back when the view closes.
+- **An image that fails to load is named**: a pasted or dropped image the board cannot load now
+  shows a line naming the file, and the other images of that paste are kept.
+- **Send and Discuss while pasted images load**: the first of the two you press is the one that
+  acts, once the images have loaded; the other button is off until then.
 - **A screen run's sign-in can be a link**: a session can now mint a one-time link that, clicked,
   opens the sign-in browser on the Mac running the board; you still sign in there. It logs nobody
   into the board, is good until used or until the board restarts, and lives only in memory. A used

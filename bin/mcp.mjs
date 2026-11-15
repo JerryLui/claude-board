@@ -1724,8 +1724,11 @@ async function missionTool(args) {
     if (!Number.isInteger(args.round) || args.round < 1) throw new ToolError(`mission close requires "round": the round to close, not ${JSON.stringify(args.round ?? null)}`);
     method = 'POST';
     route = `/api/board/${boardId}/abandon`;
-    // This shim's own session, so the round closes only when it is this session's.
-    body = { ...sessionField(), round: args.round };
+    // This shim's own session, so the round closes only when it is this session's. With no
+    // session to name there is no round of its own to close.
+    const own = sessionField();
+    if (!own.session) throw new ToolError('mission close cannot name this session: its process\'s start did not read. Nothing was closed.');
+    body = { ...own, round: args.round };
   } else {
     throw new ToolError(`mission requires "action": one of ${MISSION_ACTIONS.join(', ')}, not ${JSON.stringify(action ?? null)}`);
   }
@@ -1748,10 +1751,12 @@ async function missionTool(args) {
   // the board has no session to beat, and the write creates it.
   if (heartbeat) await call('POST', `/api/mission/${key}/session`, heartbeat, { absentOk: true });
   const answer = await call(method, route, body);
-  // Each round the join reopened under this session (ADR 151) with the answer watch that
-  // wakes the session on its Send, as a `timeout` packet names one (ADR 146).
-  if (action === 'join' && Array.isArray(answer?.reopened)) {
-    answer.reopened = answer.reopened.map(r => (BOARD_ID_RE.test(r?.board) && Number.isInteger(r.round) ? { ...r, ...answerWatch(r.board, r.round) } : r));
+  // Each round reopened under this session (ADR 151), as its join names it or, after a
+  // takeover, its binding: with the answer watch that wakes the session on its Send, as a
+  // `timeout` packet names one (ADR 146), and the board's url built here, never the response
+  // body's (see safeBoardUrl).
+  if ((action === 'join' || action === 'binding') && Array.isArray(answer?.reopened)) {
+    answer.reopened = answer.reopened.map(r => (BOARD_ID_RE.test(r?.board) && Number.isInteger(r.round) ? { ...r, url: safeBoardUrl(r.board), ...answerWatch(r.board, r.round) } : r));
   }
   // A join or leave changes the mission this conversation's boards link to, and the board
   // this shim reuses keeps the mission it linked first (src/server.mjs): the next ask

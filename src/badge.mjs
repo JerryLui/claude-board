@@ -268,8 +268,9 @@ export function roundIsCurrentlyAwaited(round, nowMs) {
 
 // May the reviewer's activity move this round's deadline right now (ADR 145)? Only a
 // round minted for a poster that follows the stored deadline (`movingDeadline`, stamped
-// by `mintAwait` in src/board.mjs), and only while its wait is still live: a lapsed,
-// sent or abandoned round never comes back. The daemon's activity route moves on this
+// by `mintAwait` in src/board.mjs), and only while its wait is still live: activity never
+// brings back a lapsed, sent or abandoned round (a hand-over alone reopens one, ADR 151).
+// The daemon's activity route moves on this
 // answer; a page asks the same question before it reports.
 export function roundDeadlineMoves(round, nowMs) {
   return roundIsCurrentlyAwaited(round, nowMs) && round.movingDeadline === true;
