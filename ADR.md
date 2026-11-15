@@ -37,7 +37,7 @@ link where it is worth reading.
 | 35 | [An undelivered comment rides the thread's next packet](.agents/adr/0035-undelivered-comment-rides-the-thread-s-next-packet.md) | 2026-08-07 | narrowed by 45 and 46; widened by 107 |
 | 36 | [An upgrade widens a carried-forward root record back to the current defaults](.agents/adr/0036-upgrade-widens-a-carried-forward-root-record-back.md) | 2026-08-07 | accepted |
 | 38 | [`/file/` is deleted; the board is the only way to see a rendered page](.agents/adr/0038-file-is-deleted-the-board-is-the-only.md) | 2026-08-07 | accepted |
-| 40 | [A board header condenses into a centred pill on reading](.agents/adr/0040-board-header-condenses-into-a-centred-pill.md) | 2026-08-07 | narrowed by 59, 89 |
+| 40 | [A board header condenses into a centred pill on reading](.agents/adr/0040-board-header-condenses-into-a-centred-pill.md) | 2026-08-07 | narrowed by 59, 89; amended by 152 |
 | 42 | [Rounds are the board's pages, flipped left and right](.agents/adr/0042-rounds-are-the-board-s-pages-flipped-left.md) | 2026-08-07 | accepted |
 | 44 | ["A page board is never sent" is a browser rule, not a daemon rule](.agents/adr/0044-page-board-is-never-sent-is-a-browser.md) | 2026-08-07 | narrowed by 45 |
 | 45 | [A page board may be awaited, and the caller declares it](.agents/adr/0045-page-board-may-be-awaited-and-the-caller.md) | 2026-08-07 | narrows 35 and 44; completed by 50 |
@@ -136,3 +136,4 @@ link where it is worth reading.
 | 149 | [Ten background sessions work at once, fourteen alive; the PM's tab holds no slot](.agents/adr/0149-ten-background-sessions-work-the-pms-tab-holds-no-slot.md) | 2026-11-09 | amends 129, 148 |
 | 150 | [One board per mission, each round its session's](.agents/adr/0150-one-board-per-mission-each-round-its-sessions.md) | 2026-11-11 | amends 69, 131, 134, 141; amended by 151 |
 | 151 | [A hand-over reopens the last session's unanswered rounds in place](.agents/adr/0151-a-hand-over-reopens-the-last-sessions-unanswered-rounds-in-place.md) | 2026-11-15 | amends 150; relates to 69, 114, 145, 146 |
+| 152 | [The top strip takes clicks on its controls only, holds Download round on a full-page round, and leaves for a mock's full-size view](.agents/adr/0152-the-top-strip-takes-clicks-on-its-controls-only-and-leaves-for-a-mocks-full-size-view.md) | 2026-11-15 | amends 40; relates to 33, 59, 120 |

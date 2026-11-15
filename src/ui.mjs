@@ -4866,7 +4866,11 @@ export const ui = `
     if (--imageReads) return;
     var waiting = afterReads;
     afterReads = {};
-    Object.keys(waiting).forEach(function (k) { waiting[k](); });
+    // Each on its own: one that throws must not keep the next from running, since
+    // a held Send or Discuss hands its buttons back only inside its own.
+    Object.keys(waiting).forEach(function (k) {
+      try { waiting[k](); } catch (e) { if (window.console) console.error('A press held for an image failed', e); }
+    });
   }
 
   /** The image files in a clipboard or a drop, in order. */

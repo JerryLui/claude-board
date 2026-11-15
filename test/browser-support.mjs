@@ -444,6 +444,15 @@ export async function measureTab(send, onEvent, url, cookie, opts) {
   return tab.measured;
 }
 
+/** One real left click at the point `at` (`{ x, y }`) of `tab`'s window: the
+ * move, press and release a mouse sends, hit-tested by the browser. `tab` is
+ * `openTab`'s answer. */
+export async function clickAt(tab, at) {
+  await tab.sp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: at.x, y: at.y });
+  await tab.sp('Input.dispatchMouseEvent', { type: 'mousePressed', x: at.x, y: at.y, button: 'left', clickCount: 1 });
+  await tab.sp('Input.dispatchMouseEvent', { type: 'mouseReleased', x: at.x, y: at.y, button: 'left', clickCount: 1 });
+}
+
 /** The page plus every sibling it names, copied out of the scratch store's pages/
  * into a plain temp dir: the file set a reviewer has when they open an archived
  * board from Finder, with no daemon behind it. */

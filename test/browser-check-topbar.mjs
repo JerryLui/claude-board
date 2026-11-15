@@ -26,7 +26,7 @@ import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { sessionToken } from '../src/secret.mjs';
 import { runMain, skipFile, waitFor } from './support.mjs';
-import { CHROME, guardRun, measureTab, openTab, postJson, row, startScratchDaemon, withChrome } from './browser-support.mjs';
+import { CHROME, clickAt, guardRun, measureTab, openTab, postJson, row, startScratchDaemon, withChrome } from './browser-support.mjs';
 
 if (!existsSync(CHROME)) skipFile('browser-check-topbar', `browser-check-topbar: no Chrome at ${CHROME} (set CLAUDE_BOARD_CHROME_BIN to override)`);
 
@@ -207,15 +207,10 @@ async function main() {
           note(`board scrolled to ${at.scrollY}px: header ${at.header}px, ${label} under it at ${px(at.x)},${px(at.y)}`);
           assert.ok(at.x !== null && at.inHeader, 'setup: the option lies under the header, clear of the boxes the header holds');
           assert.equal(at.picked, false, 'setup: the option is not picked yet');
-          const press = async p => {
-            await tab.sp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: p.x, y: p.y });
-            await tab.sp('Input.dispatchMouseEvent', { type: 'mousePressed', x: p.x, y: p.y, button: 'left', clickCount: 1 });
-            await tab.sp('Input.dispatchMouseEvent', { type: 'mouseReleased', x: p.x, y: p.y, button: 'left', clickCount: 1 });
-          };
-          await press(at);
+          await clickAt(tab, at);
           const picked = await waitFor(() => tab.evalPage(`(${option}).classList.contains('selected')`), { timeoutMs: 1500 });
           assert.equal(picked, true, 'the click went through the header to the option');
-          await press(at.theme);
+          await clickAt(tab, at.theme);
           const scheme = await waitFor(() => tab.evalPage(`(function () { var t = document.documentElement.getAttribute('data-theme'); return t !== ${JSON.stringify(at.scheme)} && (t || 'none'); })()`), { timeoutMs: 1500 });
           note(`theme control: data-theme ${at.scheme} then ${scheme}`);
           assert.ok(scheme, 'the theme control still takes its click');

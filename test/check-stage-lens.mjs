@@ -755,6 +755,48 @@ check('the close control closes the lens, returns focus, and ends the copy\'s do
     'the frame must be dropped, not merely hidden -- a mock left mounted behind a closed dialog goes on running its own timers');
 });
 
+/** One control of the open mock lens's bar, by its `data-lens` action. */
+function stageLensControl(document, action) {
+  const control = document.querySelector(`.stage-lens .lens-btn[data-lens="${action}"]`);
+  assert.ok(control, `setup failure: the open lens's bar has no ${action} control`);
+  return control;
+}
+
+// The stand-in has no dialog semantics, so where focus lands when the dialog
+// opens is not observable here: the attribute a browser reads for it is.
+check('the mock lens\'s bar reads title, the pick slot, Download, then close, and close alone is marked to take the focus the dialog opens with', () => {
+  const document = loadBoard(pageHtml);
+  openStageLens(document);
+  assert.deepEqual(
+    document.querySelector('.stage-lens .lens-bar').children.map(c => c.getAttribute('data-lens') || c.className),
+    ['lens-title', 'lens-actions', 'download', 'close'],
+  );
+  assert.equal(stageLensControl(document, 'close').hasAttribute('autofocus'), true,
+    'Enter straight after a Pull-out must close the lens');
+  assert.equal(stageLensControl(document, 'download').hasAttribute('autofocus'), false,
+    'and must not save a file');
+});
+
+// A save turns its button off while the file is made, which is as far as this
+// stand-in follows one: the file itself is test/browser-check-download.mjs's.
+check('the mock lens\'s Download shows and starts a save on a live board; in a read-only archive it is hidden and a click on it starts none', () => {
+  const live = loadBoard(pageHtml);
+  openStageLens(live);
+  const liveDownload = stageLensControl(live, 'download');
+  assert.notEqual(computed(liveDownload, 'display'), 'none', 'a live board shows it');
+  liveDownload.dispatchEvent(new StandInEvent('click'));
+  assert.equal(liveDownload.disabled, true, 'a click starts a save, its button off while the file is made');
+
+  const archive = loadBoard(pageHtml, { protocol: 'file:' });
+  assert.equal(archive.body.classList.contains('readonly'), true, 'setup: the page opened from disk is read-only');
+  openStageLens(archive);
+  const download = stageLensControl(archive, 'download');
+  assert.equal(computed(download, 'display'), 'none', 'an archive cannot save a file, so its bar shows no Download');
+  assert.notEqual(computed(stageLensControl(archive, 'close'), 'display'), 'none', 'and still shows close');
+  download.dispatchEvent(new StandInEvent('click'));
+  assert.equal(download.disabled, false, 'a click that reaches it anyway starts no save');
+});
+
 check('closing and reopening works, and a second open while already open is refused rather than stacking frames', () => {
   const document = loadBoard(pageHtml);
   const first = openStageLens(document);
