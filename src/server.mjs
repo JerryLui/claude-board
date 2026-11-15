@@ -902,13 +902,15 @@ function sleep(ms) {
  * machine.
  *
  * `abandoned` is the fourth way out, and it is not a nicety: `abandonOpenRounds`
- * (src/board.mjs) invented a THIRD terminal state, and a loop that only recognises
+ * (src/board.mjs) invented a THIRD round state, and a loop that only recognises
  * `sent` cannot see it. A backgrounded first `ask` -- the ordinary `fresh: true` path
  * after a context compaction -- therefore polled a round the daemon had already closed
  * for the full forty-minute cap and then reported a `timeout` whose text says the board
- * is "still open ... reopen it", which is false in both halves. A round that is
- * abandoned is exactly as final as one that is sent; the only difference is what the
- * caller is told, which is the caller's branch to make, not this loop's. */
+ * is "still open ... reopen it", which is false in both halves. For this wait an abandoned
+ * round is as final as a sent one: it still takes a Send (ADR 114) and a hand-over can
+ * reopen it (ADR 151), but neither reaches this caller, whose session closed the round.
+ * The only difference is what the caller is told, which is the caller's branch to make,
+ * not this loop's. */
 async function waitForRound(boardId, round, home, { intervalMs = 120, isAborted = () => false, deadlineAt = Infinity, followDeadline = false } = {}) {
   activeWaits++;
   try {
@@ -2162,7 +2164,13 @@ function handleReadBoard(req, res, id, home) {
  * runs under, its session among them. A round a hand-over gave another session (ADR 150,
  * 151) is that session's alone: a caller that is not it, or that names none (a watch from
  * before it named one), is answered `status: 'abandoned'` as on a round abandoned, and
- * nothing is spent. On any other round `session` decides nothing. */
+ * nothing is spent. On any other round `session` decides nothing.
+ *
+ * `startedAt` is when the caller's watch started, an ISO time. A /clear keeps the process, so
+ * after one the giver and the taker of a round are one `session`, and only time tells the
+ * cleared conversation's watch from the new one's: a round reopened after `startedAt` is
+ * answered `status: 'abandoned'` the same way, nothing spent. A caller that sends none (a
+ * watch from before it sent one) is answered by `session` alone. */
 async function handleCollect(req, res, id, home, sessions) {
   let body;
   try {
@@ -2185,13 +2193,21 @@ async function handleCollect(req, res, id, home, sessions) {
       return sendJson(res, 400, { error: err.message });
     }
   }
+  let startedAt = null;
+  if (body.startedAt != null) {
+    startedAt = typeof body.startedAt === 'string' ? Date.parse(body.startedAt) : NaN;
+    if (!Number.isFinite(startedAt)) {
+      return sendJson(res, 400, { error: 'collect "startedAt" must be the time the caller\'s watch started, as an ISO string' });
+    }
+  }
   const board = readBoard(id, home);
   if (!board) return sendJson(res, 404, { error: 'board not found' });
   const r = board.rounds.find(x => x.n === round);
   if (!r) return sendJson(res, 404, { error: 'round not found' });
   const url = boardUrl(req, id);
   const handed = r.handedFrom != null || r.reopenedAt != null;
-  const departed = handed && !callers.some(s => sessionMatches(r.session, s));
+  const outlived = startedAt !== null && r.reopenedAt != null && Date.parse(r.reopenedAt) > startedAt;
+  const departed = outlived || (handed && !callers.some(s => sessionMatches(r.session, s)));
   if (r.status !== 'sent' || departed) {
     const status = departed || r.status === 'abandoned' ? 'abandoned' : 'open';
     return sendJson(res, 200, { board: board.id, thread: board.thread, title: board.title, round, status, answers: [], comments: [], delivered: false, url });
@@ -2266,8 +2282,10 @@ async function handleWait(req, res, id, url, home, sse, stream, waiting) {
     // exactly as the timeout branch does, and rides the same undelivered-comment path:
     // a comment left before the session walked away is owed to this packet as much as
     // to any other. `status: 'abandoned'` is additive -- PROTOCOL.md's packet statuses
-    // gain a third terminal one beside `submitted`/`discuss`/`timeout`, matching the
-    // third terminal ROUND state `abandonOpenRounds` (src/board.mjs) already invented.
+    // gain one beside `submitted`/`discuss`/`timeout`, matching the third ROUND state
+    // `abandonOpenRounds` (src/board.mjs) already invented. It ends this wait, not the
+    // round: an abandoned round still takes a Send (ADR 114), and a hand-over can reopen
+    // it (ADR 151).
     const built = buildPacketWithUndelivered(result.board, round, boardUrl(req, id), home);
     spendWhenSent(res, built);
     return sendJson(res, 200, { ...built.packet, status: 'abandoned' });
@@ -2344,9 +2362,10 @@ async function handleWait(req, res, id, url, home, sse, stream, waiting) {
  * project directory out of each other's way: nothing here reads `cwd`, `thread`, or any
  * other board.
  *
- * Takes no body. The round-closing rule is `abandonOpenRounds` (src/board.mjs) and the
- * request has nothing to add to it; `req.resume()` drains whatever a caller sent anyway
- * rather than leaving the socket half-read.
+ * Its body is optional: `{ session?, round? }`, read below, which scope the close to one
+ * session's rounds or to one reopened round. The round-closing rule is `abandonOpenRounds`
+ * (src/board.mjs); a request with no body closes by it unscoped, and `req.resume()` then
+ * drains the socket rather than leaving it half-read.
  *
  * Rendered before either persist, and the page written as well as the document — the same
  * ordering and the same pair `handleSubmit` below uses, for the same reason. What that
@@ -2359,8 +2378,9 @@ async function handleWait(req, res, id, url, home, sse, stream, waiting) {
  * `stranded.abandoned` last, after the write has landed. That single call is the whole of
  * criterion "its Banner does not fire afterwards", and it has two halves: it cancels a
  * grace still counting down, and it withdraws the banner already on screen by SIGTERMing
- * the process serving its click. Nothing re-arms it, because only a round landing on this
- * board could, and no round ever will.
+ * the process serving its click. Nothing re-arms it until a round waits on this board
+ * again: a later post, or a hand-over reopening one closed here (ADR 151), each of which
+ * asks the stranded rule itself.
  *
  * `abandoned`, not `evaluate`, and the difference is load-bearing since ADR 74 made the
  * announcement mark permanent. `evaluate` alone now cancels the pending grace and stops:
@@ -2472,8 +2492,9 @@ async function handleSubmit(req, res, id, home, sse, stranded, stream, waiting, 
   // they had typed and no draft saving to fall back on (nine answers lost, 2026-09-09).
   // Nothing else about the transition changes: `applySubmit` marks the round `sent` from
   // whichever state it was in, and its answers are owed to the thread's next packet
-  // (`drainUndeliveredAnswers` above) or collected by `read` (ADR 115) -- which is the
-  // only way an abandoned board's answers reach anyone, since no thread waits on it again.
+  // (`drainUndeliveredAnswers` above) or collected by `read` (ADR 115) -- which is how an
+  // abandoned board's answers reach anyone while no thread waits on it. A round a
+  // hand-over reopens (ADR 151) is waited on again, by the session it was handed to.
   //
   // The check is PER-ROUND -- does `claimed` name a round that has not been sent -- and
   // not "is it the single most-recent unsent round", because a board can hold more
