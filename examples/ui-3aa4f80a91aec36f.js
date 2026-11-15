@@ -2338,7 +2338,8 @@
     var blockId = section.getAttribute('data-block-id');
     var layer = section.querySelector('.pin-layer');
 
-    if (data.type === 'ready') { handleStageReady(frame, section, blockId, layer); return; }
+    // A stage announcing itself is a fresh document, with no view open yet.
+    if (data.type === 'ready') { section.classList.remove('stage-modal'); handleStageReady(frame, section, blockId, layer); return; }
     if (data.type === 'click') { handleStageClick(data, section, blockId); return; }
     if (data.type === 'link') {
       // A link the reviewer clicked inside the frame (ADR 113). It arrives
@@ -2387,6 +2388,16 @@
       // reads as a broken feature rather than as rejected input.
       if (typeof data.top !== 'number' || !isFinite(data.top)) return;
       handleStageScroll(data, frame, blockId, layer);
+      return;
+    }
+    if (data.type === 'modal') {
+      // The stage's own full-size view (a modal dialog) opening or closing.
+      // The class on the stage's block is all this sets: the stylesheet takes
+      // the top strip off a page board while the round on screen holds one.
+      // Stage-authored like every field here: anything but a real boolean is
+      // dropped.
+      if (typeof data.open !== 'boolean') return;
+      section.classList.toggle('stage-modal', data.open);
       return;
     }
   });

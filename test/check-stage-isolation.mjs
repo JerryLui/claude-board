@@ -1768,7 +1768,7 @@ check('every live message type (a real post()/postToStage() call site) has an en
   assert.deepEqual(missing, [], `undocumented live message type(s): ${missing.join(', ')}`);
 });
 
-check('the thirteen live types are exactly ready/hover/click/link/positions/height/scroll/mermaid/scrollBy/mode/locate/band/diagrams', () => {
+check('the fourteen live types are exactly ready/hover/click/link/positions/height/scroll/modal/mermaid/scrollBy/mode/locate/band/diagrams', () => {
   // Pinned by hand once, so a type silently renamed (not just added) is also
   // caught: the check above only ever notices ADDITIONS relative to the
   // comment, never a live type and its comment entry drifting to two
@@ -1790,7 +1790,7 @@ check('the thirteen live types are exactly ready/hover/click/link/positions/heig
   // ('top' in place of 'url'), so the board scrolling to it added no type.
   const live = liveMessageTypes(renderSrcText, uiSrcText);
   assert.deepEqual([...live].sort(),
-    ['band', 'click', 'diagrams', 'height', 'hover', 'link', 'locate', 'mermaid', 'mode', 'positions', 'ready', 'scroll', 'scrollBy'].sort());
+    ['band', 'click', 'diagrams', 'height', 'hover', 'link', 'locate', 'mermaid', 'modal', 'mode', 'positions', 'ready', 'scroll', 'scrollBy'].sort());
   // The deleted 'select' type (ADR.md entry 78) is absent from the live set
   // above, and PROTOCOL.md must not grow a table row for it either: the
   // "There is no `select` message" passage names it only in prose, and a row
@@ -2241,6 +2241,41 @@ check('criterion 3: the sandbox stays allow-scripts alone, and the parent takes 
   document.defaultView.dispatchEvent({ type: 'message', data: good, origin: 'null', source: stageWindow });
   assert.equal(opens.length, 2, 'a genuine open request must still work after a batch of hostile ones');
   assert.equal(opens[1][0], 'https://example.com/ok');
+});
+
+// --- 7. A stage's own full-size view --------------------------------------------
+//
+// The stage says when a modal dialog of its own opens and closes, and the board
+// marks the stage's block, which is what the stylesheet takes the top strip off
+// a page board by (test/browser-check-mock-lens.mjs holds the strip itself, in a
+// real browser). The report is stage-authored input like the rest.
+check('A stage\'s "modal" report marks its block only on a real boolean, a malformed one changes nothing, and the stage announcing itself again clears the mark', () => {
+  const { document, frame } = mountStage(linkBoard('<dialog id="view">A full-size view</dialog>', true));
+  const block = frame.closest('.html-block');
+  const marked = () => block.classList.contains('stage-modal');
+  const say = data => document.defaultView.dispatchEvent({
+    type: 'message', data: { cb: 'cb-stage', ...data }, origin: 'null', source: frame.contentWindow,
+  });
+  assert.equal(marked(), false, 'setup: no view is open before any report');
+
+  for (const open of ['true', 1, {}, null, undefined]) {
+    say({ type: 'modal', open });
+    assert.equal(marked(), false, `a malformed report must not mark the block: ${JSON.stringify({ open })}`);
+  }
+  say({ type: 'modal', open: true });
+  assert.equal(marked(), true, 'an opened view marks the block');
+  for (const open of ['false', 0, '', null, undefined]) {
+    say({ type: 'modal', open });
+    assert.equal(marked(), true, `a malformed report must not clear the mark: ${JSON.stringify({ open })}`);
+  }
+  say({ type: 'modal', open: false });
+  assert.equal(marked(), false, 'a closed view clears it');
+
+  // A stage that announces itself is a new document (an amended mock, say): the
+  // view its old document had open went with it, and no close was ever reported.
+  say({ type: 'modal', open: true });
+  say({ type: 'ready' });
+  assert.equal(marked(), false, 'a fresh stage document starts with no view open');
 });
 
 finish('stage-isolation');

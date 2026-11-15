@@ -1,0 +1,114 @@
+<!-- A mock with its own full-size diagram view, for test/browser-check-mock-lens.mjs.
+     The dialog, its bar (zoom out, zoom in, fit, 1:1, close) and its script follow the
+     rendered templates' lens: a click on a diagram opens it with showModal(). The
+     diagram is a plain inline SVG, so the stage asks the board for no diagram engine.
+     A second, small dialog opens in the middle of the mock, clear of its top edge. -->
+<style>
+  body { margin: 0; font: 14px/1.5 system-ui, sans-serif; background: #f4f1ea; color: #1c2430; }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px; }
+  figure.diagram { margin: 0 0 24px; }
+  figure.diagram svg { cursor: zoom-in; max-width: 100%; height: auto; display: block; }
+  section { height: 420px; border-top: 1px solid #c9c2b2; padding-top: 12px; }
+  dialog#lens { width: 96vw; height: 94vh; max-width: none; max-height: none; padding: 0;
+    border: 1px solid #c9c2b2; background: #fbf9f4; color: #1c2430; }
+  dialog#lens[open] { display: flex; flex-direction: column; }
+  dialog#lens::backdrop { background: rgba(12, 16, 22, 0.55); }
+  .lens-bar { display: flex; align-items: center; gap: 8px; padding: 8px 14px;
+    border-bottom: 1px solid #c9c2b2; font-size: 11px; }
+  .lens-bar .lens-title { letter-spacing: 0.06em; margin-right: auto; }
+  .lens-bar .lens-hint { color: #6b7280; }
+  #lens-pct { color: #6b7280; min-width: 40px; text-align: right; font-variant-numeric: tabular-nums; }
+  .lens-bar button { font: inherit; background: none; border: 1px solid #c9c2b2; border-radius: 3px;
+    color: #374151; padding: 2px 8px; cursor: pointer; }
+  #lens-stage { flex: 1; overflow: hidden; position: relative; cursor: grab; touch-action: none; user-select: none; }
+  #lens-canvas { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
+</style>
+<main data-mock="lens">
+  <figure class="diagram"><svg id="diagram" viewBox="0 0 2400 1500" width="600" height="375" xmlns="http://www.w3.org/2000/svg">
+    <rect width="2400" height="1500" fill="#e8eef9"/>
+    <rect x="200" y="200" width="800" height="400" fill="#3251c9"/>
+    <rect x="1400" y="900" width="800" height="400" fill="#c9503a"/>
+    <path d="M1000 400 L1400 1100" stroke="#1c2430" stroke-width="12" fill="none"/>
+  </svg></figure>
+  <section>Section one <button type="button" id="ask">Ask</button></section>
+  <section>Section two</section>
+  <section>Section three</section>
+</main>
+
+<dialog id="lens" aria-label="Diagram viewer">
+  <div class="lens-bar">
+    <span class="lens-title">diagram lens</span>
+    <span class="lens-hint">drag pans, scroll zooms, double-click zooms in</span>
+    <span id="lens-pct">100%</span>
+    <button type="button" data-lens="out" aria-label="Zoom out">&minus;</button>
+    <button type="button" data-lens="in" aria-label="Zoom in">+</button>
+    <button type="button" data-lens="fit">fit</button>
+    <button type="button" data-lens="one">1:1</button>
+    <button type="button" data-lens="close">&#10005; close</button>
+  </div>
+  <div id="lens-stage"><div id="lens-canvas"></div></div>
+</dialog>
+
+<dialog id="small" style="width: 300px; height: 120px;">A small dialog</dialog>
+
+<script>
+document.getElementById('ask').addEventListener('click', () => document.getElementById('small').showModal());
+function lensZoomAt(view, px, py, factor, min, max) {
+  const s = Math.min(max, Math.max(min, view.s * factor));
+  const k = s / view.s;
+  return { x: px - k * (px - view.x), y: py - k * (py - view.y), s };
+}
+function lensFit(sw, sh, w, h) {
+  const s = Math.min(sw / w, sh / h, 1);
+  return { x: (sw - w * s) / 2, y: (sh - h * s) / 2, s };
+}
+let lensView = { x: 0, y: 0, s: 1 };
+let lensSize = { w: 1, h: 1 };
+const lensRect = () => document.getElementById('lens-stage').getBoundingClientRect();
+function lensApply() {
+  document.getElementById('lens-canvas').style.transform =
+    'translate(' + lensView.x + 'px, ' + lensView.y + 'px) scale(' + lensView.s + ')';
+  document.getElementById('lens-pct').textContent = Math.round(lensView.s * 100) + '%';
+}
+function lensDoFit() {
+  const r = lensRect();
+  lensView = lensFit(r.width, r.height, lensSize.w, lensSize.h);
+  lensApply();
+}
+function lensOpen(svg) {
+  const vb = svg.viewBox && svg.viewBox.baseVal;
+  const box = svg.getBoundingClientRect();
+  lensSize = { w: vb && vb.width ? vb.width : (box.width || 800),
+               h: vb && vb.height ? vb.height : (box.height || 600) };
+  const clone = svg.cloneNode(true);
+  clone.setAttribute('width', lensSize.w);
+  clone.setAttribute('height', lensSize.h);
+  clone.style.maxWidth = 'none';
+  document.getElementById('lens-canvas').replaceChildren(clone);
+  document.getElementById('lens').showModal();
+  lensDoFit();
+}
+function lensInit() {
+  const dlg = document.getElementById('lens');
+  const stage = document.getElementById('lens-stage');
+  if (!dlg || !stage) return;
+  document.addEventListener('click', e => {
+    if (!e.target.closest || e.target.closest('#lens')) return;
+    const svg = e.target.closest('figure.diagram svg');
+    if (svg) lensOpen(svg);
+  });
+  dlg.querySelectorAll('.lens-bar button').forEach(b => {
+    b.addEventListener('click', () => {
+      const act = b.dataset.lens;
+      const r = lensRect();
+      if (act === 'close') { dlg.close(); return; }
+      if (act === 'fit') { lensDoFit(); return; }
+      if (act === 'one') lensView = { x: (r.width - lensSize.w) / 2, y: (r.height - lensSize.h) / 2, s: 1 };
+      else lensView = lensZoomAt(lensView, r.width / 2, r.height / 2, act === 'in' ? 1.4 : 1 / 1.4, 0.1, 8);
+      lensApply();
+    });
+  });
+  dlg.addEventListener('click', e => { if (e.target === dlg) dlg.close(); });
+}
+lensInit();
+</script>
