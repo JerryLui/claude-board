@@ -2,13 +2,16 @@
 
 ## Unreleased
 
-- **Download round**: a sent round's page has a Download round button at the right end of the
-  round's chip line. It saves that one round as a single HTML file that opens offline: the board's
-  title, the round's number and date, a table of each question with its pick and note, then the
-  round in full, with every option and the pick marked, diagrams as pictures, mocks at full height
-  with their scripts left out, comments under what they point at and images inside the file. The
-  browser's Print makes a PDF of it. A round not yet sent, and a board opened from Finder, offer
-  none.
+- **Download round**: a round's page has a Download round button at the right end of the
+  round's chip line, or in the top strip when the round is one mock drawn full page, where it stays
+  in view as the mock scrolls. It saves that one round as a single HTML file that opens offline: the
+  board's title, the round's number and date, a table of each question with its pick and note, then
+  the round in full, with every option and the pick marked, diagrams as pictures, mocks at full
+  height with their scripts left out, comments under what they point at and images inside the file.
+  The browser's Print makes a PDF of it. A round not yet sent saves too: its file opens on a Not
+  sent line and marks each pick so far as unsent. Pull-out, the full-window view of one mock or
+  diagram, has a download of its own that saves that one alone. A board opened from Finder offers
+  none of these.
 - **A screen run's sign-in can be a link**: a session can now mint a one-time link that, clicked,
   opens the sign-in browser on the Mac running the board; you still sign in there. It logs nobody
   into the board, is good until used or until the board restarts, and lives only in memory. A used

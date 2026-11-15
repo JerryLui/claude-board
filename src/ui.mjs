@@ -65,7 +65,7 @@ import { MERMAID_ASSET } from './vendor/mermaid/index.mjs';
 import { openSharedStream, STREAM_WORKER_URL } from './stream-worker.mjs';
 import { activityMinMs } from './activity.mjs';
 import {
-  ROUND_DOWNLOAD_BUTTON, EXPORT_CSS, PRINT_PAGE_H, decisionRows, exportDate, exportFileName, exportDocument, printScale,
+  EXPORT_CSS, PRINT_PAGE_H, decisionRows, exportDate, exportFileName, exportDocument, printScale,
 } from './round-export.mjs';
 // The one source of truth for both image limits -- the daemon's own
 // src/images.mjs checks a submit against these same two constants, so a page
@@ -1959,13 +1959,7 @@ export const ui = `
     var head = document.querySelector('.board-head');
     if (head && head.getBoundingClientRect && !document.body.classList.contains('stage-scrolled')) {
       lastTopBand = head.getBoundingClientRect().height;
-      // A sent artifact round's chip line runs on under the header at rest
-      // ('body.page-board .round-chips', src/styles.mjs), so the band ends at
-      // its bottom.
-      document.body.style.setProperty('--page-head-h', lastTopBand + 'px');
     }
-    var chips = document.querySelector('.round-current .round-chips');
-    var top = Math.max(lastTopBand, chips && chips.getBoundingClientRect ? chips.getBoundingClientRect().bottom : 0);
     var bottom = 0;
     var dock = document.querySelector('.round-pager-dock');
     if (dock && dock.getBoundingClientRect) {
@@ -1988,7 +1982,7 @@ export const ui = `
         bandObservedRail = rail;
       }
     }
-    postToStage(frame, { type: 'band', top: top, bottom: bottom });
+    postToStage(frame, { type: 'band', top: lastTopBand, bottom: bottom });
   }
 
   /** ADR.md entry 40: an ordinary board's own
@@ -2594,6 +2588,7 @@ export const ui = `
     bar.appendChild(pct);
     bar.appendChild(lensButton('fit', 'fit'));
     bar.appendChild(lensButton('one', '1:1'));
+    bar.appendChild(lensButton('download', 'download'));
     bar.appendChild(lensButton('close', 'close'));
 
     var formHost = document.createElement('div');
@@ -2868,6 +2863,10 @@ export const ui = `
       b.addEventListener('click', function () {
         var act = b.getAttribute('data-lens');
         if (act === 'close') { lensClose(); return; }
+        if (act === 'download') {
+          lensDownload(b, l.section, l.svg && l.svg.closest && l.svg.closest('pre.mermaid'), 'diagram', l.blockId);
+          return;
+        }
         if (act === 'one') lensDoOneToOne();
         else lensDoFit();
       });
@@ -3082,7 +3081,12 @@ export const ui = `
     actions.className = 'lens-actions';
     bar.appendChild(title);
     bar.appendChild(actions);
-    bar.appendChild(lensButton('close', 'close'));
+    bar.appendChild(lensButton('download', 'download'));
+    // The dialog opens with its focus on close, as it did while close was the
+    // bar's first control: Enter straight after a Pull-out still closes it.
+    var close = lensButton('close', 'close');
+    close.setAttribute('autofocus', '');
+    bar.appendChild(close);
 
     var body = document.createElement('div');
     body.className = 'stage-lens-body';
@@ -3338,6 +3342,9 @@ export const ui = `
     qsa('.lens-btn', l.bar).forEach(function (b) {
       b.addEventListener('click', function () {
         if (b.getAttribute('data-lens') === 'close') stageLensClose();
+        if (b.getAttribute('data-lens') === 'download') {
+          lensDownload(b, l.section, l.section && l.section.querySelector('.stage-wrap'), 'mock', l.blockId);
+        }
       });
     });
     // Esc. A real browser closes a modal <dialog> on Esc by itself
@@ -4329,7 +4336,8 @@ export const ui = `
     if (block) toggleStageFold(block);
   });
 
-  // --- Download round: a sent round saved as one HTML file ------------------
+  // --- Download round: a round saved as one HTML file, sent or not, and one
+  // mock or diagram saved alone from its Pull-out ---------------------------
   //
   // Made here, from the round as drawn, so a diagram is already SVG and the
   // file carries no engine (src/round-export.mjs holds the pure half and says
@@ -4339,7 +4347,6 @@ export const ui = `
   // script removed, in a frame sandboxed with no allow-scripts, as tall as the
   // stage last reported itself. The file's own policy admits no script at all.
   // Its diagrams are drawn again in the light palette, since a file is printed.
-  var ROUND_DOWNLOAD_BUTTON = ${JSON.stringify(ROUND_DOWNLOAD_BUTTON)};
   var EXPORT_CSS = ${JSON.stringify(EXPORT_CSS)};
   var EXPORT_MERMAID_VARS = ${JSON.stringify(EXPORT_MERMAID_VARS)};
   var decisionRows = ${decisionRows.toString()};
@@ -4352,7 +4359,7 @@ export const ui = `
   // said. The round's chip line goes too: the file's own head names the round.
   var EXPORT_DROP = '.round-chips, .round-end, .comment-btn, .comment-form, .comment-target, .pin-layer, '
     + '.pull-out, .stage-fold, .fold-toggle, .btn-defer, .rank-grip, .question-picks, .note-head, '
-    + '.page-send-bar, '
+    + '.page-send-bar, .paste-hint, .thumb-remove, '
     + 'script, noscript, source, object, embed, base, meta';
   var nextExportDiagramId = 0;
 
@@ -4431,9 +4438,12 @@ export const ui = `
     });
   }
 
-  // The round's markup, made into the file's content.
-  async function exportRoundContent(section) {
+  // The round's markup, made into the file's content. With 'only', an element
+  // inside 'section', the content is that element's copy alone.
+  async function exportRoundContent(section, only) {
+    if (only) only.setAttribute('data-export-only', '');
     var copy = section.cloneNode(true);
+    if (only) only.removeAttribute('data-export-only');
     // Paired by position before anything in the copy moves.
     var pairs = function (sel) {
       var a = qsa(sel, section), b = qsa(sel, copy);
@@ -4528,7 +4538,10 @@ export const ui = `
       el.removeAttribute('aria-disabled');
     });
     stripActiveAttributes(copy);
-    return copy.innerHTML;
+    if (!only) return copy.innerHTML;
+    var one = copy.querySelector('[data-export-only]');
+    one.removeAttribute('data-export-only');
+    return one.outerHTML;
   }
 
   function saveHtmlFile(name, html) {
@@ -4551,17 +4564,30 @@ export const ui = `
     for (var i = 0; i < 10 && asked.some(unheard); i++) await new Promise(function (done) { setTimeout(done, 30); });
   }
 
+  // A round not yet sent has no stored answer: its picks so far are this tab's
+  // own, read as a Send would post them.
+  function picksSoFar(questions) {
+    var answers = {};
+    questions.forEach(function (q) {
+      var result = currentAnswer(q.id, q.widget);
+      answers[q.id] = { status: answerStatus(q.id, result), choice: result.choice, note: notes[q.id] || '' };
+    });
+    return answers;
+  }
+
   async function downloadRound(section) {
     await askStageHeights(section);
     var n = Number(section.getAttribute('data-round'));
     var round = (board.rounds || []).find(function (r) { return r.n === n; }) || {};
     var questions = questionBlocks({ blocks: (board.blocks || []).filter(function (b) { return b.round === n; }) });
+    var unsent = section.getAttribute('data-round-status') !== 'sent';
     var html = exportDocument({
       title: board.title || '',
       roundN: n,
       roundTitle: round.title || '',
+      unsent: unsent,
       sentDate: exportDate(round.sentAt),
-      rows: decisionRows(questions, board.answers || {}),
+      rows: decisionRows(questions, unsent ? picksSoFar(questions) : board.answers || {}),
       css: pageCssText(),
       exportCss: EXPORT_CSS,
       contentHtml: await exportRoundContent(section),
@@ -4569,16 +4595,47 @@ export const ui = `
     saveHtmlFile(exportFileName(board.title, n), html);
   }
 
-  // Delegated, so a round that arrives sent over a push needs no wiring.
+  // One mock or diagram saved alone: 'only' is its holder inside 'block', the
+  // block its Pull-out was opened from, and 'kind' says which it is.
+  async function downloadArtifact(block, only, kind, blockId) {
+    await askStageHeights(block);
+    var section = block.closest('.round');
+    var n = Number(section && section.getAttribute('data-round'));
+    var round = (board.rounds || []).find(function (r) { return r.n === n; }) || {};
+    var html = exportDocument({
+      title: board.title || '',
+      roundN: n,
+      roundTitle: round.title || '',
+      only: 'One ' + kind,
+      css: pageCssText(),
+      exportCss: EXPORT_CSS,
+      contentHtml: await exportRoundContent(block, only),
+    });
+    saveHtmlFile(exportFileName(board.title, n, kind + '-' + blockId), html);
+  }
+
+  // 'btn' is off while its file is made, so a second press saves no second one.
+  function saveBehind(btn, saving) {
+    btn.disabled = true;
+    saving.catch(function (e) {
+      if (window.console) console.error('Download failed', e);
+    }).then(function () { btn.disabled = false; });
+  }
+
+  // Pull-out's Download, in either lens's bar.
+  function lensDownload(btn, block, only, kind, blockId) {
+    if (readonly || btn.disabled || !block || !only) return;
+    saveBehind(btn, downloadArtifact(block, only, kind, blockId));
+  }
+
+  // Delegated, so a round that arrives over a push needs no wiring. The top
+  // strip's control saves the round in view.
   document.addEventListener('click', function (ev) {
     var btn = ev.target && ev.target.closest && ev.target.closest('button.round-download');
     if (!btn || readonly || btn.disabled) return;
-    var section = btn.closest('.round');
+    var section = btn.classList.contains('head-download') ? document.querySelector('.round.round-current') : btn.closest('.round');
     if (!section) return;
-    btn.disabled = true;
-    downloadRound(section).catch(function (e) {
-      if (window.console) console.error('Download round failed', e);
-    }).then(function () { btn.disabled = false; });
+    saveBehind(btn, downloadRound(section));
   });
 
   // Keyboard focus reaching into the clipped part opens the fold: a Tab that
@@ -7270,8 +7327,9 @@ export const ui = `
     // into history makes its ANSWERS immutable; it does not make its stages and
     // diagrams unreadable or its long context unreadable, and a settled round is
     // precisely where someone re-reads one.
+    // So is the round's Download round: a sent round is still saved.
     qsa('textarea, input, button', section).forEach(function (el) {
-      if (staysLive(el)) return;
+      if (staysLive(el) || el.classList.contains('round-download')) return;
       el.disabled = true;
     });
     // Mirror renderRoundSection's server-side markup exactly (draggable="false"
@@ -7279,25 +7337,6 @@ export const ui = `
     // li tag's own controls does nothing to its native HTML5 drag capability,
     // which lives on the draggable attribute of the list item itself.
     qsa('.rank-list li[draggable]', section).forEach(function (li) { li.removeAttribute('draggable'); });
-    // A sent round offers Download round at the right end of its chip line, as
-    // renderRoundSection draws one rendered sent. An artifact round drew no chip
-    // line while open, and gets the one renderRoundSection draws it sent.
-    var chips = section.querySelector('.round-chips');
-    if (!chips) {
-      var entry = roundEntry(n);
-      chips = document.createElement('div');
-      chips.className = 'round-chips';
-      var chipLabel = document.createElement('div');
-      chipLabel.className = 'round-label';
-      chipLabel.textContent = roundPageLabel(n, (entry && entry.title) || '') + ' · sent';
-      chips.appendChild(chipLabel);
-      section.insertBefore(chips, section.firstChild);
-    }
-    if (!chips.querySelector('.round-download')) {
-      var holder = document.createElement('div');
-      holder.innerHTML = ROUND_DOWNLOAD_BUTTON;
-      if (holder.firstElementChild) chips.appendChild(holder.firstElementChild);
-    }
   }
 
   /** Find a block element by id without splicing the (potentially caller-chosen,
