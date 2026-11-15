@@ -1135,7 +1135,8 @@ export function amendRound(board, { blocks, cwd, title, ownFolder = false }) {
  * Two narrowings (ADR 151). `keepReopened` spares a round a hand-over reopened
  * (`handOverRounds`): a `fresh` post closes what its session's last conversation asked, and
  * such a round is the mission's question, asked again of the session. `only` closes that one
- * round and stamps it `declined`: its session does not want it, and no hand-over reopens it. */
+ * round, when a hand-over reopened it, and stamps it `declined`: its session does not want it,
+ * and no hand-over reopens it. A round never reopened is not closed by number. */
 export function abandonOpenRounds(board, { session = null, except = null, only = null, keepReopened = false } = {}) {
   const now = new Date().toISOString();
   const closed = [];
@@ -1144,7 +1145,7 @@ export function abandonOpenRounds(board, { session = null, except = null, only =
     // A mission's board is shared (ADR 150): a session's boundary closes only the rounds it
     // posted, and never the round its own post just opened. A close naming no session there
     // (a shim from before it named one) closes only rounds no session posted.
-    if (r.n === except || (only !== null && r.n !== only)) continue;
+    if (r.n === except || (only !== null && (r.n !== only || !r.reopenedAt))) continue;
     if (keepReopened && r.reopenedAt) continue;
     if (session ? !roundOwnedBy(board, r, session) : board.mission && posterOf(board, r)) continue;
     r.status = 'abandoned';
@@ -1777,7 +1778,7 @@ export function buildPacket(board, round, url) {
 // that case. One field holding one record rather than three parallel ones that must be
 // written, cleared and stripped together:
 //
-//   board.strandedBanner = { at, until, round, returned, pid } | null
+//   board.strandedBanner = { at, until, round, rounds, returned, pid } | null
 //
 //   at        when the banner went up, an ISO stamp like `sentAt`/`postedAt` beside it.
 //             Also what bounds src/stranded.mjs's `pid`: a process that started before this
@@ -1789,7 +1790,11 @@ export function buildPacket(board, round, url) {
 //             screen still counts as this board's one announcement.
 //   round     the highest round the reviewer has been told about: THE MARK, permanent for
 //             the life of that round (ADR.md entry 74). A round at or below it is never
-//             announced again, whatever happens to it.
+//             announced again, whatever happens to it, but one a hand-over reopened that
+//             `rounds` does not list.
+//   rounds    every round a banner has named, in round order (ADR.md entry 151): what tells
+//             a reopened round that has had its banner from one that never did. Absent on a
+//             record written before this field existed, where the mark alone decides.
 //   returned  whether the reviewer has genuinely returned to this board since. False from
 //             the moment a banner is raised, and only a Watcher reporting its tab focused
 //             sets it true -- not a round ending, not the banner expiring, not a restart.

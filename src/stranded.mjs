@@ -218,8 +218,11 @@ export function createStrandedWatch({
    * round, so the announced set is exactly "every round up to and including `rec.round`"
    * and one number holds it. The oldest waiting round only ever moves FORWARD -- rounds
    * are appended, and a round that has been answered never becomes awaited again. One a
-   * hand-over reopened (ADR.md entry 151) does, and at or below the mark it was announced
-   * once already -- so nothing below the mark comes back needing a banner of its own.
+   * hand-over reopened (ADR.md entry 151) does, and at or below the mark it may never have
+   * had a banner: its wait ended, or its session closed it, before one went up. `rec.rounds`
+   * lists the rounds a banner named, so such a round earns its one banner and a listed round
+   * never a second, whichever side of the mark it is on. A record from before the list was
+   * kept has none, and its mark alone decides, as it always did.
    *
    * `roundIsAwaitedOpen` (via `waitingRounds`) is the same predicate the countdown and the
    * read-only downgrade already read, so "the wait ended" arrives here as a fact
@@ -261,7 +264,17 @@ export function createStrandedWatch({
     const mark = (rec && Number.isInteger(rec.round)) ? rec.round : 0;
     const first = (board && board.rounds && board.rounds[0]) || null;
     if (mark < 1 && board && board[SUPPRESSED] && first && first.status === 'open' && first.awaitDeadline == null) return first;
-    return waitingRounds(board).find(r => r.n > mark) || null;
+    const named = rec && Array.isArray(rec.rounds) ? rec.rounds : null;
+    return waitingRounds(board).find(r => !(named && named.includes(r.n)) && (r.n > mark || (named && r.reopenedAt))) || null;
+  }
+
+  /** The rounds a banner has named on this board once one names round `n`, in round order:
+   * `rec.rounds` with `n`. A record from before the list was kept counts every round up to
+   * its mark, the reading its mark alone had. */
+  function namedWith(rec, n) {
+    const mark = (rec && Number.isInteger(rec.round)) ? rec.round : 0;
+    const before = rec && Array.isArray(rec.rounds) ? rec.rounds : Array.from({ length: mark }, (_, i) => i + 1);
+    return [...new Set([...before, n])].sort((a, b) => a - b);
   }
 
   /** Is there something to announce about this board, and may it be announced?
@@ -582,8 +595,9 @@ export function createStrandedWatch({
         port: (target && target.port) || null,
         deadlineAt,
       });
-      // Recorded durably, all five parts together. `round` is the load-bearing one: it is
-      // the MARK, permanent for the life of that round, and `returned` beside it is the
+      // Recorded durably, all six parts together. `round` is the load-bearing one: it is
+      // the MARK, permanent for the life of that round, `rounds` every round a banner has
+      // named here, this one included (`nextToAnnounce`), and `returned` beside it is the
       // gate -- shut from the moment a banner is raised until the reviewer comes back
       // (ADR.md entry 74). A record read off disk by a successor daemon that predates this
       // field carries no `returned`, which reads as a shut gate: conservative, and the
@@ -601,6 +615,7 @@ export function createStrandedWatch({
       const rec = {
         at: new Date(at).toISOString(),
         round: oldest.n,
+        rounds: namedWith(recordOn(board), oldest.n),
         returned: false,
         pid: (child && child.pid) || null,
         until: new Date(Number.isFinite(deadlineAt)
@@ -797,8 +812,10 @@ export function createStrandedWatch({
       // the delivered banner by when this daemon has no child handle of its own.
       const withdrawable = { ...rec };
       const saved = board[STRANDED_BANNER];
+      // The amended round comes off the rounds a banner named, with the mark: it rings again.
+      const unnamed = r => (Array.isArray(r.rounds) ? { rounds: r.rounds.filter(n => n !== round) } : {});
       if (saved) {
-        board[STRANDED_BANNER] = { ...saved, round: round - 1, returned: true, pid: null };
+        board[STRANDED_BANNER] = { ...saved, round: round - 1, ...unnamed(saved), returned: true, pid: null };
         if (!persist(board)) {
           board[STRANDED_BANNER] = saved; // the document goes back exactly as it was
           return;
@@ -808,7 +825,7 @@ export function createStrandedWatch({
       // memory, so the move happens there instead. Mutated rather than replaced --
       // `recordOn` handed back this very object.
       const held = unpersisted.get(boardId);
-      if (held) { held.round = round - 1; held.returned = true; held.pid = null; }
+      if (held) { Object.assign(held, unnamed(held)); held.round = round - 1; held.returned = true; held.pid = null; }
       terminate(boardId, withdrawable);
     },
 

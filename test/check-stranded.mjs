@@ -29,7 +29,7 @@ import path from 'node:path';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { SECRET_HEADER } from '../src/secret.mjs';
-import { createBoard, addRound, amendRound } from '../src/board.mjs';
+import { createBoard, addRound, amendRound, abandonOpenRounds, handOverRounds } from '../src/board.mjs';
 import { readBoard, writeBoard } from '../src/store.mjs';
 import { STRANDED_BANNER, SUPPRESSED } from '../src/board.mjs';
 import { roundIsAwaitedOpen } from '../src/badge.mjs';
@@ -633,6 +633,40 @@ async function layerOne() {
     await sleep(40);
     assert.equal(banners.length, 1, 'the twentieth round rings exactly as the first would');
     assert.equal(bannerOn(board.id).round, 20, 'and names the round actually waiting, not round 1');
+    watch.close();
+  });
+
+  await check('ADR 151: a round a hand-over reopens behind the mark rings once when no banner ever named it, and a reopened round a banner did name stays silent', async () => {
+    const { looking, banners, watch } = stand();
+    const giver = { pid: 4101, procStart: '2026-11-11T08:00:00Z', id: 'giver' };
+    const taker = { pid: 4102, procStart: '2026-11-11T08:00:00Z', id: 'taker' };
+    // Round 1 closed by its session's boundary before any banner; round 2 is the one announced.
+    const board = createBoard({ title: 'Stranded', blocks: [QUESTION('Closed before any banner')], cwd: projectDir, awaitTimeoutMs: AWAIT_MS, session: giver });
+    assert.deepEqual(abandonOpenRounds(board, { session: giver }), [1]);
+    addRound(board, { blocks: [QUESTION('The one announced')], awaitTimeoutMs: AWAIT_MS, session: giver });
+    writeBoard(board, home);
+    watch.evaluate(board.id, target(board.id));
+    await sleep(40);
+    assert.equal(banners.length, 1);
+    assert.equal(bannerOn(board.id).round, 2);
+
+    looking.set(board.id, true); // the reviewer comes back, and the mission changes hands
+    watch.evaluate(board.id, target(board.id));
+    const handed = readBoard(board.id, home);
+    assert.deepEqual(handOverRounds(handed, giver, taker, { awaitTimeoutMs: AWAIT_MS }).reopened, [1, 2]);
+    writeBoard(handed, home);
+    looking.delete(board.id);
+    watch.evaluate(board.id, target(board.id));
+    await sleep(40);
+    assert.equal(banners.length, 2, 'round 1 waits again and no banner ever named it');
+    assert.equal(bannerOn(board.id).round, 1);
+
+    looking.set(board.id, true);
+    watch.evaluate(board.id, target(board.id));
+    looking.delete(board.id);
+    watch.evaluate(board.id, target(board.id));
+    await sleep(40);
+    assert.equal(banners.length, 2, 'round 2 was announced before it was reopened, and round 1 has had its one');
     watch.close();
   });
 

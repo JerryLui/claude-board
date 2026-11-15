@@ -995,14 +995,16 @@ export function bindingFor(records, ref, { listed = null } = {}) {
 }
 
 /** Records on mission `key`'s bound session the rounds reopened under it and still waiting
- * (ADR 151), `[{ board, round, title, url, awaitDeadline }]`, as its join or the takeover
- * that bound it found them: what `bindingFor` answers as `reopened`, which reads no board.
- * None drops the field. A mission with no session bound records nothing. */
+ * (ADR 151), as its join or the takeover that bound it found them: what `bindingFor` answers
+ * as `reopened`, which reads no board. Each is stored as `{ board, round, awaitDeadline }`
+ * and nothing else of what it is given: a mission record holds no round's text, and no url,
+ * which is the origin of whoever asks. None drops the field. A mission with no session bound
+ * records nothing. */
 export function recordReopened(key, reopened, { home = boardHome() } = {}) {
   const m = readMission(key, home);
   const s = m && currentSession(m);
   if (!s || (!reopened.length && !s.reopened)) return;
-  if (reopened.length) s.reopened = reopened;
+  if (reopened.length) s.reopened = reopened.map(({ board, round, awaitDeadline }) => ({ board, round, awaitDeadline }));
   else delete s.reopened;
   writeMission(m, home);
 }
