@@ -3444,8 +3444,8 @@ function linkedMissionBoards(key, home) {
  * that asks for an answer reopened in place (`handOverRounds`, ADR 151): needs you reads
  * every linked board, so an older one's round is handed too. A reopened round's new
  * deadline goes to the board's tabs, marked `reopened`, and the index streams as a moved
- * one does, the waiting count is published and the stranded rule asked again. A board that fails is warned and
- * the rest go on: the leave or join has happened. */
+ * one does, the waiting count is published and the stranded rule asked again. A board
+ * that fails is warned and the rest go on: the leave or join has happened. */
 function handOverMissionRounds(key, giver, taker, home, { req, sse, stranded, stream, waiting }) {
   for (const board of linkedMissionBoards(key, home)) {
     try {
