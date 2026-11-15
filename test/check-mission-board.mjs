@@ -56,11 +56,12 @@ function folderWith(name, text) {
 }
 
 /** The real shim, run in `folder` under its own shell, so its parent process, the session it
- * names, is not this one. `call` answers a tool call's result, refused on an error. */
-async function sessionShim(folder) {
+ * names, is not this one. `call` answers a tool call's result, refused on an error; `env`
+ * adds to the shim's environment. */
+async function sessionShim(folder, env = {}) {
   const child = spawn('/bin/sh', ['-c', `"${process.execPath}" "${mcpBin}"; exit $?`], {
     cwd: folder,
-    env: { ...process.env, CLAUDE_BOARD_HOME: home, CLAUDE_BOARD_PORT: String(port), CLAUDE_BOARD_NO_OPEN: '1', CLAUDE_CODE_ENTRYPOINT: 'cli' },
+    env: { ...process.env, CLAUDE_BOARD_HOME: home, CLAUDE_BOARD_PORT: String(port), CLAUDE_BOARD_NO_OPEN: '1', CLAUDE_CODE_ENTRYPOINT: 'cli', ...env },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   children.add(child);
@@ -479,21 +480,66 @@ async function main() {
     }
   });
 
-  await check('the shim\'s join names each reopened round with its answer watch, and its close closes the one named', async () => {
+  const watchOf = (boardId, n) => new RegExp(`^CLAUDE_BOARD_PORT=${port} node \\S*watch\\.mjs\\S* --board ${boardId} --round ${n}$`);
+
+  await check('the shim\'s join names each reopened round with its answer watch, and its close closes the one named of two, marked declined, and leaves the other waiting', async () => {
     const gone = sessionProcess();
     const folder = folderWith('shim-reopen', 'x\n');
     assert.equal((await join('SHIM_REOPEN', 'shim-reopen-gone', gone)).status, 200);
-    const asked = await ask(gone, folder, [question('Left for the shim\'s session?')]);
+    const asked = await ask(gone, folder, [question('Left at its clear, for the shim\'s session?')]);
+    assert.equal((await ask(gone, folder, [question('Left when it went?')], { fresh: true })).round, 2);
     await kill(gone);
     const { shim, call } = await sessionShim(folder);
     try {
       const joined = (await call('mission', { action: 'join', key: 'SHIM_REOPEN', session: 'shim-reopen-next' })).structuredContent;
-      assert.deepEqual(joined.reopened.map(r => [r.board, r.round]), [[asked.boardId, 1]]);
-      assert.match(joined.reopened[0].watch, new RegExp(`^CLAUDE_BOARD_PORT=${port} node \\S*watch\\.mjs\\S* --board ${asked.boardId} --round 1$`));
-      const closed = (await call('mission', { action: 'close', board: asked.boardId, round: 1 })).structuredContent;
-      assert.deepEqual(closed.closed, [1]);
-      assert.equal(readBoard(asked.boardId, home).rounds[0].status, 'abandoned');
+      assert.deepEqual(joined.reopened.map(r => [r.board, r.round]), [[asked.boardId, 1], [asked.boardId, 2]]);
+      for (const r of joined.reopened) assert.match(r.watch, watchOf(asked.boardId, r.round));
+      const closed = (await call('mission', { action: 'close', board: asked.boardId, round: 2 })).structuredContent;
+      assert.deepEqual(closed.closed, [2]);
+      assert.deepEqual(readBoard(asked.boardId, home).rounds.map(r => [r.n, r.status, r.declined]), [[1, 'open', undefined], [2, 'abandoned', true]]);
       await call('mission', { action: 'leave', key: 'SHIM_REOPEN', session: 'shim-reopen-next' });
+    } finally {
+      shim.close();
+    }
+  });
+
+  await check('a taker reads the round its takeover reopened from the shim\'s binding: with its answer watch, and the board\'s url as the shim builds it, not the one the giver\'s leave came by', async () => {
+    const giver = sessionProcess();
+    const folder = folderWith('shim-takeover', 'x\n');
+    assert.equal((await join('SHIM_TAKEN', 'shim-taken-giver', giver)).status, 200);
+    const asked = await ask(giver, folder, [question('Lapsed before the shim took over?')]);
+    lapse(asked.boardId, 1);
+    const { shim, call } = await sessionShim(folder);
+    try {
+      const pending = (await call('mission', { action: 'join', key: 'SHIM_TAKEN', session: 'shim-taken-taker', takeover: true })).structuredContent;
+      assert.equal(pending.takeover, 'pending');
+      // The giver leaves by another name for this machine than the shim's own.
+      const left = await rawRequest(port, 'POST', '/api/mission/SHIM_TAKEN/leave', { host: `localhost:${port}`, headers: writeHeaders(SECRET), body: JSON.stringify({ id: 'shim-taken-giver', ...giver.ref }) });
+      assert.equal(left.status, 200, left.body);
+      const binding = (await call('mission', { action: 'binding', session: 'shim-taken-taker' })).structuredContent;
+      assert.deepEqual([binding.key, binding.reopened.map(r => [r.board, r.round])], ['SHIM_TAKEN', [[asked.boardId, 1]]]);
+      assert.match(binding.reopened[0].watch, watchOf(asked.boardId, 1));
+      assert.equal(binding.reopened[0].url, `${base}/b/${asked.boardId}`);
+      await call('mission', { action: 'leave', key: 'SHIM_TAKEN', session: 'shim-taken-taker' });
+    } finally {
+      shim.close();
+    }
+  });
+
+  await check('a shim that cannot read its parent process\'s start, so names no session, refuses mission close, and the round stays open', async () => {
+    const s = sessionProcess();
+    const folder = folderWith('shim-no-session', 'x\n');
+    const asked = await ask(s, folder, [question('Closed by a shim naming no session?')]);
+    // A `ps` that answers nothing, first on the shim's PATH.
+    const bin = path.join(home, 'no-ps');
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(path.join(bin, 'ps'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    const { shim } = await sessionShim(folder, { PATH: `${bin}:${process.env.PATH}` });
+    try {
+      const r = await shim.request('tools/call', { name: 'mission', arguments: { action: 'close', board: asked.boardId, round: 1 } });
+      assert.equal(r.result.isError, true, JSON.stringify(r));
+      assert.equal(r.result.content[0].text, 'mission close cannot name this session: its process\'s start did not read. Nothing was closed.');
+      assert.equal(readBoard(asked.boardId, home).rounds[0].status, 'open');
     } finally {
       shim.close();
     }

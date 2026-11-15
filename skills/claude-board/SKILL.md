@@ -113,6 +113,8 @@ A comment anchored to a block (`blockId`, `anchor`) is feedback on that block, n
 
 **What no packet has carried is owed to the next packet the same thread returns, once**, tagged with its own `round`: comments on a page board posted without `wait` (or whose wait timed out), and answers sent after a round's wait ended. Any packet can carry them, `timeout` and `abandoned` included, so check `round` on every answer and comment before assuming it belongs to the round you just posted; the same check spots an entry `read` already showed you. A round the watch handed you is spent: no later packet carries it.
 
+**A `mission` join lists `reopened` rounds**, as `binding` does after a takeover: each is a round the mission's last session left unanswered, open again under your session, so its answer is yours, through your next `ask` packet, `read`, or its `watch` run as a timeout's. `mission({ action: 'close', board, round })` declines one whose question no longer stands, and it stays closed.
+
 ## Collecting a late answer
 
 `read`, on the same server (`mcp__claude-board__read` in Claude Code), returns one board: every round, answer and comment on it, each naming its round. A round whose action reads `discuss` means what a `discuss` packet means. It only reads: nothing is marked delivered.

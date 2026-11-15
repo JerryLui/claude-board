@@ -685,7 +685,9 @@ round — an empty `answers` and no comments of its own — plus whatever the tw
 owe the thread, which are owed to a timed-out round exactly as they are to any other. `abandoned`
 is the round being closed under a blocked call — the
 conversation that owned the board declared itself over (`fresh`, ADR.md entry 69) or the board was
-abandoned directly — and it is terminal in a way `timeout` is not: the round will never reopen, so
+abandoned directly — and it is terminal for the caller in a way `timeout` is not: the round never
+reopens for the conversation that left it (on a mission's board a hand-over may reopen it under
+the mission's next session, ADR 151), so
 the caller posts to the current board rather than to this one. It carries whatever the store held
 plus the same owed comments and answers, and the shim names it as its own outcome, never as a
 submit.
@@ -1359,7 +1361,8 @@ is empty when there was nothing left open. Idempotent by construction: a second 
 round and closes none. A board id that names nothing is a **404**.
 
 The board document and its `pages/<id>.html` are both rewritten, unlike the `/wait` timeout branch
-which writes only the document: this is the last write an abandoned board will ever get, and since
+which writes only the document: this is the last write the board gets unless a late Send arrives
+or, on a mission's board, a hand-over reopens the round (ADR 151), and since
 ADR 114 what it has to carry is the opposite of what it once did. The round keeps its widgets and
 its Send bar live in the stored page, because a reviewer who reloads after the abandon can still
 answer and that answer is stored (`POST /api/board/:id/submit` above); freezing the page would
@@ -2110,9 +2113,9 @@ whichever of the two lands first; a tab that missed both takes the round on from
 
 `deadline` is also what a hand-over sends for each round it reopens (ADR 151), on the board's
 stream and, with `board`, on the daemon-wide one, beside a `waiting` event there: the round's
-deadline moved to one wait from now. A tab that still holds the round as lapsed counts down
-again at once; one that holds it as abandoned shows the countdown after a reload, its Send live
-either way.
+deadline moved to one wait from now. A tab already open takes the round up again with no reload,
+whether it held it as lapsed or as abandoned: it counts down again, and its widgets and Send are
+live.
 
 `awaitExpired` is the one event that carries no board: it fires from `GET /api/board/:id/wait`'s
 own timeout branch, at the moment that wall clock gives up, and is a wake-up nudge rather than a
@@ -2403,7 +2406,7 @@ again on every theme change while the Lens is open, the board posts it one `mode
 comment mode. So the copy carries the same `data-theme` as the stage in its block, a template
 draws the same side of its palette in both, and the Lens stays view-only.
 
-`band` exists because the parent's header, a sent full-page round's chip line under it, the dock
+`band` exists because the parent's header, the dock
 and the comment rail float **over** the frame rather
 than pushing it down, so an artifact that pads nothing loses its own opening under them. No fixed
 number is baked in on either side — the header's real height moves with the title's wrap and the
@@ -2769,11 +2772,14 @@ close   { board, round }                      POST /api/board/:id/abandon, with 
                                               session and round as the body
 ```
 
-A join's `reopened` entries (ADR 151) each gain `watch` from a Claude Code shim, the answer
-watch's command for that board and round, as a `timeout` packet names one (ADR 146). `close`
-closes one round of the calling session's for good, answering `{ ok, board, closed }`: the way
-out of a reopened round it does not want. `closed: []` says the round was not this session's, or
-not open.
+The `reopened` entries of a join and of a binding (ADR 151), the second being where a takeover's
+taker reads them, each carry `url`, the board's page as the shim builds it from its own port,
+never the one in the daemon's answer, and from a Claude Code shim `watch`, the answer watch's
+command for that board and round, as a `timeout` packet names one (ADR 146). `close` closes one
+reopened round of the calling session's for good, answering `{ ok, board, closed }`: the way out
+of a reopened round it does not want. `closed: []` says the round was not this session's, not a
+reopened one, or not open. A shim that cannot name its session (its parent process's start did
+not read) refuses `close` and sends nothing.
 
 `session` is the caller's own current session id (Claude Code's `CLAUDE_CODE_SESSION_ID`, read at
 the call, since a `/clear` changes it), passed by the agent; the shim never supplies one, since
@@ -2985,7 +2991,8 @@ mission links become the taker's: `session` is rewritten to the taker and `hande
 session that went or that a launch replaced (the joined record's `session.ended`) hands that
 session's rounds over the same way, and so does the bound process joining under a new id after a
 `/clear`, for the rounds recorded under the id it had. Only rounds whose own `session` names the giver are
-handed: one recording none stays where it is, and so do an earlier session's.
+handed: one recording none stays where it is, and so do an earlier session's. A session that left
+with no takeover pending is no giver: the rounds it left unanswered stay closed.
 
 Each handed round that asks for an answer (it was minted with an `awaitDeadline`) is **reopened in
 place**, whether the giver's boundary abandoned it, its wait lapsed or it still waited: `open`,
@@ -2995,6 +3002,8 @@ holds. It counts in `GET /api/waiting` and the Boards page's Waiting on you agai
 the binding names it (`reopened`, "The missions routes" above). The answer the PM sends on it
 reaches the new session as a round of its own does: its next packet, `read`, or
 `POST /api/board/:id/collect`. A sent round, a `declined` one and an abandoned round that asked
-nothing are left as they are; an open round that asked nothing is handed without a wait.
+nothing are left as they are; an open round that asked nothing is handed without a wait. A
+reopened round is the taker's from then on, so one it leaves unanswered reopens again at each
+later hand-over, until it is sent or declined.
 
-**Needs you** reads, on each board, the newest round of every session that posted there, one session being one by its id, or its pid and start to the second.
+**Needs you** reads, on each board, the newest round of every session that posted there, one session being one by its id, or its pid and start to the second. A reopened round is its new session's, so one with a later round of that session after it does not hold the mission's card at needs you: it shows under Waiting on you on the Boards page alone.

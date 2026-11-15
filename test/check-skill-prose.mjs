@@ -270,6 +270,15 @@ const TIMEOUT_RULES = {
     patterns: [/a late pick that differs from a default already built, fired or merged goes to the user as a question: undo nothing on your own/i],
     lost: ['the late-pick rule', /goes to the user as a question/g],
   },
+  // ADR 151: the join's answer names the rounds; what the session does with them is here.
+  'a mission join\'s reopened rounds are the joining session\'s, to answer or to decline': {
+    patterns: [
+      /a `mission` join lists `reopened` rounds\*\*, as `binding` does after a takeover/i,
+      /open again under your session, so its answer is yours, through your next `ask` packet, `read`, or its `watch`/i,
+      /`mission\(\{ action: 'close', board, round \}\)` declines one whose question no longer stands/i,
+    ],
+    lost: ['the reopened-rounds rule', /lists `reopened` rounds/g],
+  },
 };
 for (const [rule, { patterns }] of Object.entries(TIMEOUT_RULES)) {
   check(`the manual states that ${rule}`, () => statesAll(patterns)(prose));
