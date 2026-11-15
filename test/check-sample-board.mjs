@@ -151,14 +151,20 @@ check("the multi question carries a None option, rendered as one of its choices"
     'the rendered choices do not match the multi question\'s options, in order');
 });
 
+// The sample holds both placements (ADR.md entry 26): a context that carries a mock sits at the
+// card's full width above the options, one with none is the panel beside them.
 check("a question's context renders as one panel of its items, in posted order", () => {
   const withContext = questionBlocks(committedBoard).filter(b => Array.isArray(b.context) && b.context.length > 0);
-  assert.ok(withContext.length > 0, 'no question block on the committed board carries a context block');
-  for (const q of withContext) {
+  const placements = withContext.map(q => (q.context.some(c => c.kind === 'html') ? '.question-context-prose' : '.question-context'));
+  assert.deepEqual([...new Set(placements)].sort(), ['.question-context', '.question-context-prose'],
+    'the committed board no longer shows both a mock-carrying context and a mock-free one');
+  for (const [n, q] of withContext.entries()) {
     const section = document.querySelector(`.question-block[data-block-id="${q.id}"]`);
     assert.ok(section, `question ${q.id} does not render`);
-    const panel = section.querySelector('.question-context');
-    assert.ok(panel, `question ${q.id} does not render its context as one .question-context panel`);
+    const panels = [...section.querySelectorAll('.question-context, .question-context-prose')];
+    assert.equal(panels.length, 1, `question ${q.id} renders ${panels.length} context panels, expected one`);
+    const panel = section.querySelector(placements[n]);
+    assert.ok(panel, `question ${q.id} does not render its context as one ${placements[n]} panel`);
     const items = [...panel.querySelectorAll('.context-item')];
     assert.equal(items.length, q.context.length, `question ${q.id} renders ${items.length} context items, posted ${q.context.length}`);
     for (const [i, item] of items.entries()) {

@@ -110,8 +110,8 @@ check('AC 7: the pill holds mark, comment toggle, theme, then the state label --
   assert.equal(head.children[0], titleGroup, 'setup: the mark/identity group leads the header');
   assert.equal(head.children[1], actions, 'setup: the actions group follows it');
   assert.ok(titleGroup.children[0].classList.contains('back-to-index'), 'the mark is the first thing in that group');
-  assert.deepEqual(actions.children.map((c) => c.id), ['comment-mode-toggle', 'theme-toggle', 'round-meta'],
-    'comment toggle, theme, state label -- ADR.md entry 42\'s order, with no round badge back between theme and the label');
+  assert.deepEqual(actions.children.map((c) => c.id || c.className), ['comment-mode-toggle', 'theme-toggle', 'round-download head-download', 'round-meta'],
+    'comment toggle, theme, state label -- ADR.md entry 42\'s order, with no round badge back between theme and the label; Download round, which only a full-page round shows, sits ahead of the label');
 
   scrollDocumentTo(document, 800);
   assert.equal(condensed(document), true, 'setup: condensed');

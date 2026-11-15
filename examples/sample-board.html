@@ -139,7 +139,7 @@
   }
 })();
 </script>
-<link rel="stylesheet" href="styles-c63e70da84f01781.css">
+<link rel="stylesheet" href="styles-b696fa90278e5b63.css">
 </head>
 <body class="sent-page">
 <div class="board-shell">
@@ -155,6 +155,7 @@
     <div class="board-head-actions">
       <button type="button" id="comment-mode-toggle" class="mode-toggle" aria-pressed="false"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><span class="mode-toggle-label">Comment</span></button>
       <button type="button" id="theme-toggle" class="mode-toggle mode-toggle-icon" aria-label="Theme: System" title="Theme: System"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg></button>
+      <button type="button" class="round-download head-download" title="Save this round as one HTML file"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="M7 11l5 5 5-5"/><path d="M5 21h14"/></svg>Download round</button>
       <span class="round-meta" id="round-meta" title="This round was submitted -- the answer already went out.">submitted</span>
     </div>
   </header>
@@ -1224,7 +1225,7 @@
   
 <section class="block markdown-block folded" data-block-id="d1" data-block-kind="markdown">
   <div class="card-head"><h1 class="card-title" id="order-routing-redesign">Order-routing redesign</h1></div>
-  <div class="md-content fold-body" id="fold-d1"><p>The kitchen display one page back is the mockup. Three things change for the pass, and the routing rewrite underneath them is what this round is asking about:</p><ul><li id="order-routing-redesign-li1">Fewer manual status updates per ticket</li><li id="order-routing-redesign-li2">A single "Ready for pickup" state visible to front-of-house</li><li id="order-routing-redesign-li3">Rush tickets float to the top automatically</li></ul><p>The payload each station receives on a status transition:</p><div class="fence-lang" data-lang="json"><pre><code>{
+  <div class="md-content fold-body" id="fold-d1"><p>Three things change for the pass. This round asks about the routing rewrite underneath them and the ticket that shows it:</p><ul><li id="order-routing-redesign-li1">Fewer manual status updates per ticket</li><li id="order-routing-redesign-li2">A single "Ready for pickup" state visible to front-of-house</li><li id="order-routing-redesign-li3">Rush tickets float to the top automatically</li></ul><p>The payload each station receives on a status transition:</p><div class="fence-lang" data-lang="json"><pre><code>{
   "ticketId": <span class="tok-number">482</span>,
   "status": <span class="tok-string">"ready_for_pickup"</span>,
   "notifiedStations": [<span class="tok-string">"grill"</span>, <span class="tok-string">"expo"</span>]
@@ -3331,14 +3332,1046 @@
   
 </section>
 
-<section class="block question-block question-split" data-block-id="q1" data-block-kind="question" data-widget="single">
+<section class="block question-block" data-block-id="q1" data-block-kind="question" data-widget="single">
   <div class="question-head">
-    <div class="card-head"><p class="question-prompt card-title">Does the kitchen display in round 1 match the routing flow (Placed -&gt; In prep -&gt; Ready -&gt; Served) we discussed?</p><span class="card-status answer-status" data-status="answered">Answered</span></div>
+    <div class="card-head"><p class="question-prompt card-title">Does the redesigned ticket match the routing flow (Placed -&gt; In prep -&gt; Ready -&gt; Served) we discussed?</p><span class="card-status answer-status" data-status="answered">Answered</span></div>
     
-    <div class="question-explainer md-content"><p>This decides whether round 1's mockup ships as drawn. A tweak here changes the display only; the routing rewrite underneath it ships either way.</p></div>
+    <div class="question-explainer md-content"><p>This decides whether the ticket ships as drawn. A tweak here changes the display only; the routing rewrite underneath it ships either way.</p></div>
   </div>
   <div class="question-main">
-    
+    <div class="question-context-prose"><div class="context-item html-block" data-block-id="h4" data-block-kind="html"><div class="stage-wrap">
+    <iframe class="html-stage" sandbox="allow-scripts" data-sha="9d0ad678b12596af38759fb6939c55383200e962827a32b06870b935ad86d709" srcdoc="&lt;style&gt;html,body{margin:0;padding:0}&lt;/style&gt;&lt;style&gt;
+  body { margin: 0; padding: 16px 56px 16px 16px; font-family: system-ui, sans-serif; background: #f3f4f6; }
+  .flow { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+  .ticket { background: #fff; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.15); overflow: hidden; border: 1px solid #e2e2e2; }
+  .head { background: #1f2937; color: #fff; padding: 10px 14px; display: flex; justify-content: space-between; font-size: 13px; font-weight: 700; }
+  .body { padding: 10px 14px 12px; font-size: 13px; color: #111; }
+  .chip { display: inline-block; margin-top: 8px; padding: 3px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .chip.placed { background: #dbeafe; color: #1e40af; }
+  .chip.prep { background: #fef3c7; color: #92400e; }
+  .chip.ready { background: #dcfce7; color: #166534; }
+  .chip.served { background: #e5e7eb; color: #374151; }
+  button { width: 100%; padding: 9px 0; border: none; background: #2563eb; color: #fff; font-size: 14px; font-weight: 600; cursor: pointer; }
+  button:disabled { background: #9ca3af; cursor: default; }
+&lt;/style&gt;
+&lt;div class=&quot;flow&quot;&gt;
+  &lt;div class=&quot;ticket&quot;&gt;
+    &lt;div class=&quot;head&quot;&gt;&lt;span&gt;#482&lt;/span&gt;&lt;span&gt;Table 6&lt;/span&gt;&lt;/div&gt;
+    &lt;div class=&quot;body&quot;&gt;&lt;div&gt;Grilled salmon x1&lt;/div&gt;&lt;span class=&quot;chip placed&quot;&gt;Placed&lt;/span&gt;&lt;/div&gt;
+    &lt;button&gt;Confirm&lt;/button&gt;
+  &lt;/div&gt;
+  &lt;div class=&quot;ticket&quot;&gt;
+    &lt;div class=&quot;head&quot;&gt;&lt;span&gt;#482&lt;/span&gt;&lt;span&gt;Table 6&lt;/span&gt;&lt;/div&gt;
+    &lt;div class=&quot;body&quot;&gt;&lt;div&gt;Grilled salmon x1&lt;/div&gt;&lt;span class=&quot;chip prep&quot;&gt;In prep&lt;/span&gt;&lt;/div&gt;
+    &lt;button&gt;Mark ready&lt;/button&gt;
+  &lt;/div&gt;
+  &lt;div class=&quot;ticket&quot;&gt;
+    &lt;div class=&quot;head&quot;&gt;&lt;span&gt;#482&lt;/span&gt;&lt;span&gt;Table 6&lt;/span&gt;&lt;/div&gt;
+    &lt;div class=&quot;body&quot;&gt;&lt;div&gt;Grilled salmon x1&lt;/div&gt;&lt;span class=&quot;chip ready&quot;&gt;Ready for pickup&lt;/span&gt;&lt;/div&gt;
+    &lt;button&gt;Mark served&lt;/button&gt;
+  &lt;/div&gt;
+  &lt;div class=&quot;ticket&quot;&gt;
+    &lt;div class=&quot;head&quot;&gt;&lt;span&gt;#482&lt;/span&gt;&lt;span&gt;Table 6&lt;/span&gt;&lt;/div&gt;
+    &lt;div class=&quot;body&quot;&gt;&lt;div&gt;Grilled salmon x1&lt;/div&gt;&lt;span class=&quot;chip served&quot;&gt;Served&lt;/span&gt;&lt;/div&gt;
+    &lt;button disabled&gt;Served&lt;/button&gt;
+  &lt;/div&gt;
+&lt;/div&gt;&lt;script&gt;(function () {
+  var CB = 'cb-stage';
+  var HOVER_CLASS = 'cb-anchor-hover';
+  // Applied instead of HOVER_CLASS to
+  // an element whose own ref is already in 'sentRefs' below -- the stage-side
+  // half of the same de-affordance src/ui.mjs applies page-side via its own
+  // .cb-anchor-sent (same class name, by the convention QUIRKS.md &quot;Two
+  // stylesheets, one palette&quot; already documents for HOVER_CLASS -- two
+  // separate documents, one name).
+  var SENT_CLASS = 'cb-anchor-sent';
+  var commentMode = false;
+  var hovered = null;
+  var styleInjected = false;
+  // The dom refs (this block's own, index-chain form -- stepsToPath's output)
+  // that already carry a SENT comment, as told by the parent's 'mode' message
+  // below. The stage cannot know this on its own: 'sent' is a fact about
+  // board.comments, which lives only in the parent document (the stage's
+  // isolation -- this document never sees the board JSON at all).
+  var sentRefs = [];
+  // The seconds of this block's videos that already carry a SENT comment, as
+  // '{ ref, time }' pairs from the same 'mode' message. A video comment's
+  // second is part of its anchor (src/anchor.mjs's findPendingCommentForAnchor),
+  // so a video is marked sent only while it shows one of these seconds; a timed
+  // ref is never in 'sentRefs', or the whole video would read as done.
+  var sentTimes = [];
+  // The videos whose native controls comment mode took away (holdVideoControls
+  // below), to give back when it ends.
+  var heldControls = [];
+  // The MutationObserver that takes the controls a video gains while comment
+  // mode is on, or null while it is off.
+  var controlsWatch = null;
+  // The ref of 'hovered', kept so a video's second moving under a resting
+  // pointer can re-mark it without walking the tree again.
+  var hoveredRef = null;
+  // The board's own top chrome band, as last reported by the parent's 'band'
+  // message (applyBand below). Kept because an in-page anchor has to land
+  // BELOW that band rather than under it (scrollToAnchor) -- one measurement,
+  // taken once by the side that can see its own chrome, used for both the
+  // padding and the anchor offset, so the two can never disagree.
+  var bandTop = 0;
+
+  var buildSteps = function buildSteps(root, el) {
+  const steps = [];
+  let node = el;
+  while (node &amp;&amp; node !== root) {
+    const parent = node.parentElement;
+    if (!parent) return null;
+    const idx = Array.prototype.indexOf.call(parent.children, node);
+    if (idx === -1) return null;
+    steps.unshift(idx + 1);
+    node = parent;
+  }
+  if (node !== root) return null;
+  return steps;
+};
+  var stepsToPath = function stepsToPath(steps) {
+  return (steps || []).join('.');
+};
+  var pathToSteps = function pathToSteps(path) {
+  if (!path) return [];
+  return String(path)
+    .split('.')
+    .map(s =&gt; parseInt(s, 10))
+    .filter(n =&gt; Number.isInteger(n) &amp;&amp; n &gt; 0);
+};
+  var resolveSteps = function resolveSteps(root, steps) {
+  let node = root;
+  for (const i of steps || []) {
+    const kids = node &amp;&amp; node.children;
+    const child = kids ? kids[i - 1] : undefined;
+    if (!child) return null;
+    node = child;
+  }
+  return node;
+};
+  var videoIdentity = function videoIdentity(ariaLabel, title) {
+  var label = String(ariaLabel == null ? '' : ariaLabel).replace(/\s+/g, ' ').trim();
+  if (label) return label;
+  return String(title == null ? '' : title).replace(/\s+/g, ' ').trim();
+};
+  var videoSecond = function videoSecond(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value &lt; 0 || value &gt; 86400) return null;
+  return Math.floor(value);
+};
+
+  function post(msg) {
+    try {
+      var out = { cb: CB };
+      for (var k in msg) if (Object.prototype.hasOwnProperty.call(msg, k)) out[k] = msg[k];
+      window.parent.postMessage(out, '*');
+    } catch (e) { /* no parent reachable -- nothing to anchor to */ }
+  }
+
+  /** Top-up, not add (ADR.md entry 59): 'top'/'bottom' are the
+   * board's OWN chrome bands, never simply written -- padding-top/-bottom
+   * become the LARGER of this document's own CURRENT cascade padding and
+   * whatever the board just reported, so an artifact that already cleared the
+   * band on its own keeps its own number untouched and one that
+   * pads nothing gets exactly the band. Padding only, on
+   * 'document.body' itself -- no background, colour or border is ever set
+   * here.
+   *
+   * &quot;Own&quot; is read FRESH on every call, never cached from the first one --
+   * clear this document's own previous inline write before measuring, so the
+   * read reflects the artifact's live stylesheet cascade rather than an
+   * earlier call's own number. A once-only baseline (this function's first
+   * cut) gets this wrong in both directions the moment the artifact's own
+   * padding is RESPONSIVE (a media query, say: 12px narrow, 64px past
+   * 900px) -- a baseline captured narrow stays 12 forever even once the
+   * reader widens past 900px and the artifact's own CSS asks for 64
+   * (silently under-cleared), and a
+   * baseline captured wide pins the artifact at 64px on a phone width where
+   * its own CSS asks for 12 (over-cleared, permanently, for the rest of the
+   * session). Clearing before every read is what keeps the artifact's own
+   * responsive rules authoritative instead of frozen at whatever they were on
+   * first contact -- and it defeats compounding the same way the once-only
+   * capture did, since each call starts from the artifact's own true cascade
+   * value, never from a previous 'band' call's inline write.
+   *
+   * getComputedStyle is feature-detected exactly like every other real-layout
+   * read in this repo (QUIRKS.md &quot;The stand-in has no layout&quot;): unsupported or
+   * unreadable leaves the reading at 0, which is the same answer a genuinely
+   * unpadded artifact would give.
+   *
+   * ponytail: this pads 'document.body' unconditionally, which is correct for
+   * a document that scrolls as a whole (the shape SKILL.md's own &quot;a top
+   * padding on its own body&quot; convention already assumed, and the common
+   * case). It is wrong for the artifact shape this file's own design comment
+   * records above (&quot;The thing that scrolls a rendered artifact is often not
+   * its document&quot; -- a fixed sidebar beside a 'height: 100vh' pane, measured
+   * in Chrome 151): there, body padding pushes the 100vh pane down by exactly
+   * the padding amount, its own bottom falls out of the frame, and the
+   * artifact gains a body scrollbar it never had while the fixed sidebar
+   * stays put -- worse than unpadded. The ceiling is not lifted here: a
+   * static &quot;does the document currently scroll&quot; check
+   * ('document.scrollingElement.scrollHeight &lt;= clientHeight') cannot tell
+   * that shape apart from an ordinary SHORT artifact that fits one screen and
+   * still needs the top clearance -- both read true before any band is ever
+   * applied, and wrongly skipping the far more common short-artifact case
+   * would trade a rare regression for a common one (criterion 1 failing on
+   * exactly the simplest artifacts). The real upgrade path is a signal this
+   * function does not have yet -- an artifact that opts itself out, or a
+   * shape test sturdier than a single geometry snapshot -- not a guess from
+   * one number. */
+  function applyBand(top, bottom) {
+    bandTop = top;
+    if (!document.body) return;
+    document.body.style.paddingTop = '';
+    document.body.style.paddingBottom = '';
+    var ownTop = 0;
+    var ownBottom = 0;
+    try {
+      if (typeof getComputedStyle === 'function') {
+        var cs = getComputedStyle(document.body);
+        var parsedTop = parseFloat(cs.getPropertyValue('padding-top'));
+        var parsedBottom = parseFloat(cs.getPropertyValue('padding-bottom'));
+        if (isFinite(parsedTop)) ownTop = parsedTop;
+        if (isFinite(parsedBottom)) ownBottom = parsedBottom;
+      }
+    } catch (e) { /* no computed style reachable -- treat the artifact as padding nothing */ }
+    document.body.style.paddingTop = Math.max(ownTop, top) + 'px';
+    document.body.style.paddingBottom = Math.max(ownBottom, bottom) + 'px';
+  }
+
+  // Discoverability CSS, applied inside THIS document only -- see QUIRKS.md
+  // &quot;Two stylesheets, one palette&quot;: the outer page's tokens deliberately do
+  // not reach in here (isolation is the point), so this injected stylesheet
+  // is a literal hex (STAGE_ACCENT_HEX's own comment, above, explains why a
+  // custom property would defeat that isolation rather than merely being
+  // redundant with it, and why it tracks --accent's LIGHT value: the stage's
+  // artboard is a light neutral in BOTH palettes -- two different ones -- and
+  // this one hex clears 3:1 on each). Injected
+  // LAZILY (only once comment mode has
+  // genuinely turned on at least once) rather than unconditionally at script
+  // start -- a read-only archive never sends 'mode' with commentMode true at
+  // all, so its stage document never gains this stylesheet, matching this
+  // ticket's unchanged behavioural contract (test/check-archive.mjs: &quot;no
+  // hover stylesheet is even injected&quot; in a read-only archive).
+  function ensureHoverStyle() {
+    if (styleInjected) return;
+    styleInjected = true;
+    try {
+      var style = document.createElement('style');
+      // A SENT_CLASS rule alongside the
+      // ordinary hover one. The hover rule's colour is STAGE_ACCENT_HEX, kept in
+      // step with src/styles.mjs by hand (QUIRKS.md &quot;Two stylesheets, one
+      // palette&quot;) because this stylesheet cannot reach the page's tokens -- one
+      // value for both palettes, since it clears 3:1 on either artboard; the
+      // SENT_CLASS rule needs no colour of its own, only a cursor, so it adds
+      // nothing new to keep in step. No outline at all (not even 'none' -- there
+      // is simply no rule adding one), so an already-sent element reads as inert
+      // rather than as a differently-styled target.
+      style.textContent = '.' + HOVER_CLASS + ' { outline: 2px solid #3251c9 !important; outline-offset: 2px; cursor: pointer !important; } '
+        + '.' + SENT_CLASS + ' { cursor: not-allowed !important; } '
+        + 'body { cursor: default; }';
+      (document.head || document.body).appendChild(style);
+    } catch (e) { /* no hover highlight; the click below still anchors */ }
+  }
+
+  function clearHover() {
+    if (hovered &amp;&amp; hovered.classList) {
+      hovered.classList.remove(HOVER_CLASS);
+      hovered.classList.remove(SENT_CLASS);
+    }
+    hovered = null;
+    hoveredRef = null;
+  }
+
+  function isVideo(el) {
+    return !!el &amp;&amp; el.nodeType === 1 &amp;&amp; String(el.tagName).toLowerCase() === 'video';
+  }
+
+  /** Whether a click on 'el' (at 'ref') would name an anchor that already
+   * carries a sent comment: the anchor src/ui.mjs's handleStageClick builds
+   * from this click, matched the way its isSentAnchor matches it. A video
+   * showing a second is that second's anchor; anything else, or a video
+   * showing no valid second, is its bare ref. */
+  function isSentTarget(el, ref) {
+    if (ref === null) return false;
+    var second = isVideo(el) ? videoSecond(el.currentTime) : null;
+    if (second === null) return sentRefs.indexOf(ref) !== -1;
+    for (var i = 0; i &lt; sentTimes.length; i++) {
+      if (sentTimes[i].ref === ref &amp;&amp; sentTimes[i].time === second) return true;
+    }
+    return false;
+  }
+
+  function markHovered() {
+    if (!hovered || !hovered.classList) return;
+    var sent = isSentTarget(hovered, hoveredRef);
+    hovered.classList.remove(sent ? HOVER_CLASS : SENT_CLASS);
+    hovered.classList.add(sent ? SENT_CLASS : HOVER_CLASS);
+  }
+
+  document.body.addEventListener('mouseover', function (ev) {
+    if (!commentMode) return;
+    var el = ev.target;
+    clearHover();
+    if (!el || el.nodeType !== 1 || el === document.body || !el.classList) return;
+    hovered = el;
+    var steps = buildSteps(document.body, el);
+    var ref = (steps &amp;&amp; steps.length) ? stepsToPath(steps) : null;
+    hoveredRef = ref;
+    // The VISIBILITY half only: an element whose own ref already carries a SENT
+    // comment is de-affordanced (SENT_CLASS) rather than marked as an ordinary
+    // target (HOVER_CLASS), while the click handler below still posts 'click'
+    // unconditionally. &quot;Clicking it does nothing&quot; is enforced on the other side
+    // of the channel (src/ui.mjs's handleStageClick calls isSentAnchor before
+    // ever opening a form), which is the side that holds board.comments and can
+    // tell a resolved sent comment from a stale ref this document has no way to
+    // distinguish on its own.
+    markHovered();
+    post({ type: 'hover', ref: ref, tag: el.tagName, text: el.textContent });
+  });
+  // A hovered video's second moves under a resting pointer when it plays
+  // (autoplay or the stage's script), and whether that second is already sent
+  // moves with it. The browser fires 'timeupdate' as it moves; it does not
+  // bubble, so this listens in the capture phase.
+  document.addEventListener('timeupdate', function (ev) {
+    if (commentMode &amp;&amp; hovered &amp;&amp; ev.target === hovered) markHovered();
+  }, true);
+  document.body.addEventListener('mouseout', function () {
+    clearHover();
+    post({ type: 'hover', ref: null, tag: null, text: null });
+  });
+
+  // --- links: the board handles them, this frame never navigates (ADR 113) ---
+
+  /** The '&lt;a href&gt;' a click landed on or inside, or null. 'closest', not
+   * 'ev.target' itself: a click on the '&lt;code&gt;' inside a link is a click on
+   * the link as far as the browser's own default action is concerned, and
+   * this has to see exactly what that default would have followed. */
+  function linkTarget(el) {
+    if (!el || el.nodeType !== 1 || typeof el.closest !== 'function') return null;
+    return el.closest('a[href]');
+  }
+
+  /** The element a fragment names, looked up by attribute rather than by
+   * 'getElementById' or a '#id' selector. The rule test/check-archive-ids.mjs
+   * enforces on every client script is &quot;never look an id up bare, qualify it
+   * with the tag src/render.mjs emits&quot; -- and here there is no tag to qualify
+   * with, since a fragment may legitimately name any element in an artifact
+   * nobody in this repo wrote. The attribute form is the same lookup with the
+   * same tree-order answer a browser's own fragment navigation would give,
+   * without reintroducing the shape that rule exists to keep out.
+   *
+   * ponytail: an id carrying a double quote is refused rather than escaped, so
+   * an anchor naming one never scrolls at all. The escape would have to be
+   * spelled inside this script's own template literal, where a backslash is
+   * not a backslash, and a fragment naming nothing simply scrolls nothing. The
+   * upgrade path, if an artifact ever ships such an id, is to find the target
+   * by walking this document's elements and comparing 'id' as a plain string,
+   * which needs no selector escaping anywhere. */
+  function elementWithId(id) {
+    if (id.indexOf('&quot;') !== -1) return null;
+    try { return document.querySelector('[id=&quot;' + id + '&quot;]'); } catch (e) { return null; }
+  }
+
+  /** An in-page anchor: put the target where the reviewer can read it, with no
+   * navigation of any kind.
+   *
+   * WHICH element scrolls is not knowable up front: an app-shell artifact
+   * scrolls an inner pane and its document never moves (onScroll's own comment
+   * below), and the 'scroller' this script remembers is only known once
+   * something has already scrolled, while a table-of-contents link is exactly
+   * the click that comes first. So the boxes are found from this document's
+   * own geometry at the click (frameScrollBoxes, below), innermost first, and
+   * each is moved by its OWN 'scrollTo' (scrollBoxTo).
+   *
+   * Never 'scrollIntoView'. Measured in Chrome 154
+   * (test/browser-check-stage-fold.mjs): a frame's scroll-into-view does not
+   * stop at the frame. It carries on into the board, through the opaque-origin
+   * boundary, and scrolls the board until the frame's top meets the window's:
+   * a second scroll the reader did not ask for, which leaves the target under
+   * the board's sticky header. A box's own 'scrollTo' moves that box and
+   * nothing past it.
+   *
+   * On a page board the board's header floats OVER the top of this frame
+   * (ADR 59), so a target aligned to a box's top edge would land under it.
+   * Each box puts the target 'bandTop' below its visible top: the band the
+   * parent last reported, never a number invented here.
+   *
+   * A fragment naming nothing ('#', '#top', a stale id) scrolls nothing. The
+   * click is cancelled either way, so it can never reach the blocked page.
+   *
+   * A frame with nothing of its own to scroll hands the move to the board
+   * instead: a stage that fits its content, or one opened by Show full height,
+   * shows the whole document, so the only thing that can bring its target into
+   * view is the BOARD scrolling (ADR 119). This document cannot see the board,
+   * so it says where the target sits in its own viewport ('link' with 'top' and
+   * no 'url') and src/ui.mjs's handleStageAnchor decides how far the board
+   * moves. It does not also scroll itself: there is nothing here to move.
+   *
+   * A frame that does scroll still tells the board where the target ended up
+   * ('top' as above, plus 'scrolled: true'). Off a page board no band reaches
+   * this frame, so the target lands at the frame's own top, and the reader may
+   * have scrolled that top above the window or under the board's sticky
+   * header. A target near the document's end stops lower, where this frame's
+   * scroll runs out, which may be past the window's bottom edge. This document
+   * cannot see either edge of the window. The board can: it stays still when
+   * the target landed in its visible band, from '--head-clear' under the
+   * window top to '--head-clear' above the window bottom (window.innerHeight
+   * less '--head-clear'), and otherwise moves once, bringing the target to
+   * '--head-clear' under the top. The frame's move and the board's add up to
+   * one, and neither box scrolls twice. */
+  function scrollToAnchor(id) {
+    if (!id) return;
+    var el = elementWithId(id);
+    if (!el) {
+      // A percent-encoded fragment ('#%C3%B6versikt') names an id stored
+      // decoded, which is how a browser matches one too.
+      try { el = elementWithId(decodeURIComponent(id)); } catch (e) { /* malformed escape: no such target */ }
+    }
+    if (!el || typeof el.getBoundingClientRect !== 'function') return;
+    var box = el.getBoundingClientRect();
+    if (!box || !isFinite(box.top)) return;
+    var boxes = frameScrollBoxes(el);
+    if (!boxes.length) { post({ type: 'link', top: box.top }); return; }
+    // An inner pane first brings the target to its own top, then each box
+    // around it takes it the rest of the way, by what is left after the moves
+    // before it: the walk the browser's own scroll-into-view makes, stopped at
+    // this frame's edge.
+    var moved = 0;
+    for (var i = 0; i &lt; boxes.length; i++) moved += scrollBoxTo(boxes[i], box.top - moved);
+    post({ type: 'link', top: box.top - moved, scrolled: true });
+  }
+
+  /** The boxes inside this frame that can scroll vertically toward 'el',
+   * innermost first, empty when none can. Asked of this document's own
+   * geometry rather than told by the board, because only this side can see an
+   * app-shell's inner pane: a mock whose '100vh' main pane scrolls on its own
+   * fits its frame exactly and still has somewhere to go.
+   *
+   * Each ancestor of 'el' that holds more than it shows AND is a scroll box
+   * ('overflow-y' anything but visible or clip): a box whose content simply
+   * spills out visibly has nowhere to scroll it. Then the frame's own viewport
+   * (the scrolling element), when the document reaches past the frame's
+   * height: a folded stage, a page board, and a stage whose growth has not
+   * landed yet. 1px of slack each, since a box fitted to a rounded-up
+   * measurement can still read a pixel over. Without a computed style (the DOM
+   * stand-in has none for an inner element) no ancestor counts, the same answer
+   * as an artifact with no inner pane. */
+  function frameScrollBoxes(el) {
+    var boxes = [];
+    var root = document.scrollingElement || document.documentElement;
+    if (typeof getComputedStyle === 'function') {
+      for (var a = el.parentElement; a &amp;&amp; a !== document.documentElement; a = a.parentElement) {
+        if (a === root || !(a.scrollHeight - a.clientHeight &gt; 1)) continue;
+        var oy = '';
+        try { oy = getComputedStyle(a).getPropertyValue('overflow-y'); } catch (e) { /* unreadable: not a scroll box */ }
+        if (oy === 'auto' || oy === 'scroll' || oy === 'hidden' || oy === 'overlay') boxes.push(a);
+      }
+    }
+    if (root &amp;&amp; root.scrollHeight - root.clientHeight &gt; 1) boxes.push(root);
+    return boxes;
+  }
+
+  /** Scroll 'box' so a point 'top' down this frame's viewport lands 'bandTop'
+   * below the box's visible top, as far as the box can scroll, and return how
+   * far it moves. The viewport's visible top is 0; any other box's is its
+   * border edge plus its top border. Only the vertical offset is written, so a
+   * wide mock keeps its sideways scroll. Rounded down to a whole pixel, so the
+   * target never sits a fraction above 'bandTop', and so what this returns is
+   * where the browser actually stops. Feature-detected with 'scrollTop' as the
+   * floor, the same shape as scrollTo below. */
+  function scrollBoxTo(box, top) {
+    var root = document.scrollingElement || document.documentElement;
+    var visibleTop = 0;
+    if (box !== root) visibleTop = box.getBoundingClientRect().top + (box.clientTop || 0);
+    var from = box.scrollTop || 0;
+    var max = Math.max(0, box.scrollHeight - box.clientHeight);
+    var to = Math.floor(Math.min(max, Math.max(0, from + top - visibleTop - bandTop)));
+    if (typeof box.scrollTo === 'function') {
+      try {
+        box.scrollTo({ top: to, behavior: 'smooth' });
+        return to - from;
+      } catch (e) { /* no options form: the floor below */ }
+    }
+    box.scrollTop = to;
+    return to - from;
+  }
+
+  /** A link the reviewer clicked with comment mode off. Two outcomes and no
+   * third: an in-page anchor scrolls to its target (this document, or the
+   * board when this frame has nothing to scroll), an http/https address is
+   * handed to the board page -- which opens it in a new tab, at once, on the
+   * click that asked for it. Every other scheme
+   * ('javascript:', 'file:', 'data:', a relative path) is dropped in silence:
+   * nothing is shown and nothing is navigated.
+   *
+   * Read off getAttribute, never the resolved '.href' property. This
+   * document's base URL is the BOARD's address, so '#s1' resolves to
+   * 'http://127.0.0.1:PORT/b/&lt;id&gt;#s1' and '.href' reports it as an ordinary
+   * http link -- the in-page case would post the board's own URL to the
+   * parent instead of scrolling. The raw attribute is the one place the
+   * author's own intent survives. A protocol-relative '//host/x' therefore
+   * reads as a relative path here and opens nothing, which is the safe
+   * direction to be wrong in. */
+  function followLink(link) {
+    var href = link.getAttribute('href');
+    if (typeof href !== 'string') return;
+    href = href.trim();
+    if (href.charAt(0) === '#') { scrollToAnchor(href.slice(1)); return; }
+    var scheme = href.slice(0, 8).toLowerCase();
+    if (scheme.indexOf('http://') !== 0 &amp;&amp; scheme.indexOf('https://') !== 0) return;
+    // The parent re-validates and re-parses this before it opens anything --
+    // it never takes a stage's word for what it just sent (src/ui.mjs's
+    // stageLinkAddress).
+    post({ type: 'link', url: href });
+  }
+
+  // In comment mode a press on a video comments on the second it shows, so
+  // the video carries no native controls while the mode is on: a press on them
+  // would seek or play it and never reach this document. Measured in headless
+  // Chrome 154 and 155 with a CDP press on the timeline, which
+  // test/browser-check-video.mjs repeats: the video seeked, and no
+  // pointerdown, mousedown or click reached even a capture listener on this
+  // document, so nothing here could cancel it. Without the controls the press
+  // lands on the video itself and the click listener below takes it. A video
+  // the stage's own script gives controls while the mode is on (it adds a
+  // '&lt;video controls&gt;', or a player puts 'controls' back) loses them in the
+  // microtask after, before any press can land: a MutationObserver, connected
+  // only while the mode is on, reads an attribute change or an added element
+  // and nothing else. Only the videos taken get controls back when it ends.
+  function takeVideoControls() {
+    var videos = document.querySelectorAll('video[controls]');
+    for (var i = 0; i &lt; videos.length; i++) {
+      if (heldControls.indexOf(videos[i]) === -1) heldControls.push(videos[i]);
+      videos[i].removeAttribute('controls');
+    }
+  }
+
+  function onControlsMutation(records) {
+    for (var i = 0; i &lt; records.length; i++) {
+      var r = records[i];
+      var gained = r.type === 'attributes'
+        ? isVideo(r.target) &amp;&amp; r.target.hasAttribute('controls')
+        : Array.prototype.some.call(r.addedNodes, function (n) { return n.nodeType === 1; });
+      if (gained) { takeVideoControls(); return; }
+    }
+  }
+
+  function holdVideoControls(on) {
+    if (on) {
+      takeVideoControls();
+      if (!controlsWatch &amp;&amp; typeof MutationObserver === 'function') {
+        controlsWatch = new MutationObserver(onControlsMutation);
+        controlsWatch.observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ['controls'] });
+      }
+      return;
+    }
+    if (controlsWatch) { controlsWatch.disconnect(); controlsWatch = null; }
+    for (var j = 0; j &lt; heldControls.length; j++) heldControls[j].setAttribute('controls', '');
+    heldControls = [];
+  }
+
+  document.body.addEventListener('click', function (ev) {
+    // A link inside a stage never navigates this frame, whichever mode is on:
+    // 'srcdoc' resolves an href against the BOARD's own address, so the
+    // browser's default for '#s1' is a navigation of this frame to
+    // '/b/&lt;id&gt;#s1' -- which the page's CSP ('default-src none', no
+    // 'frame-src', inherited through srcdoc) refuses, painting Chrome's
+    // blocked page over the artifact. Cancelled here, once, ahead of both
+    // branches below: with comment mode on the click mints an anchor and does
+    // nothing else (it neither scrolls nor opens), with it off followLink
+    // decides.
+    var link = linkTarget(ev.target);
+    if (link &amp;&amp; typeof ev.preventDefault === 'function') ev.preventDefault();
+    if (!commentMode) {
+      if (link) followLink(link);
+      return;
+    }
+    var el = ev.target;
+    if (!el || el.nodeType !== 1 || el === document.body) return;
+    var steps = buildSteps(document.body, el);
+    if (!steps || !steps.length) return;
+    clearHover();
+    var click = { type: 'click', ref: stepsToPath(steps), tag: el.tagName, text: el.textContent };
+    if (isVideo(el)) {
+      // A video comment carries the second it was paused at, and the video's
+      // own name rather than its fallback text (videoIdentity). The click is
+      // cancelled so a browser that plays or pauses a video on a click on its
+      // picture cannot move the second being commented on. Headless Chrome 154
+      // measured no such toggle (a real CDP click, comment mode off): the
+      // video stayed paused either way.
+      if (typeof ev.preventDefault === 'function') ev.preventDefault();
+      click.text = videoIdentity(el.getAttribute('aria-label'), el.getAttribute('title'));
+      var second = videoSecond(el.currentTime);
+      if (second !== null) click.time = second;
+    }
+    post(click);
+  });
+
+  function resolveRef(ref) {
+    var steps = pathToSteps(ref);
+    if (!steps.length) return null;
+    return resolveSteps(document.body, steps);
+  }
+
+  // This document is the only thing that can
+  // ever know its own rendered height -- the parent cannot reach
+  // 'contentDocument' at all (PROTOCOL.md &quot;Stage postMessage channel&quot; for why the
+  // frame is opaque by design, and &quot;Origin validation&quot; for what each side checks
+  // instead),
+  // so the stage measures and reports over this same channel, the same shape
+  // as 'hover'/'positions' already use, rather than the parent ever trying to
+  // reach in for it. Every html stage sends this, standalone or nested inside
+  // a '.choice-variant' card -- renderHtmlBlock/stageAgentScript are the same
+  // function either way, and this script has no way to know which kind of
+  // card it ended up in -- so src/ui.mjs is the one that decides whether a
+  // report is acted on (applyStageHeight there: fit, fold or clip, ADR.md
+  // entry 119).
+  //
+  // WHAT it measures is the whole document, not 'document.body' alone
+  // (measureHeight, below), and the viewport's own horizontal scrollbar with
+  // it. A mock's first heading's top margin collapses through '&lt;body&gt;' and
+  // sits outside it, so a box sized to 'body.scrollHeight' came up that
+  // margin short and showed a stray inner scrollbar -- the one thing a fitted
+  // stage exists not to have. The same goes for a wide mock's sideways
+  // scrollbar, which takes its height out of the frame's own viewport.
+  //
+  // WHEN this runs matters as much as WHAT it reads, and got it wrong on the
+  // first cut: calling this synchronously (here, at script scope) measures
+  // BEFORE this document has ever been through a layout pass. Measured
+  // directly in real Chrome (a throwaway probe frame outside this repo,
+  // QUIRKS.md's &quot;Preview harness&quot;): inside a sandboxed srcdoc frame with no
+  // allow-same-origin, 'document.body.scrollHeight' reads 0 not only
+  // synchronously but at 'DOMContentLoaded', at 'load', and even a
+  // zero-delay 'setTimeout' -- there is no external subresource for 'load' to
+  // wait for, so it fires before this frame ever gets a rendering
+  // opportunity. See reportHeightAfterLayout, below, for where the real first
+  // call comes from; this function itself stays the plain, unconditional
+  // measure-and-post -- ResizeObserver (below) also calls it directly, once a
+  // real layout pass has actually happened.
+  //
+  // A NEW height is posted twice: now, and again after one more full rendering
+  // update (heightConfirm). The parent believes a height under its 320px
+  // placeholder only when two reports in a row agree, so a mock that settles
+  // short says so twice, while one measured mid-build -- a sliver before its
+  // own script has laid it out -- is followed by a different number and moves
+  // nothing.
+  var heightLast = -1;
+  var heightConfirmQueued = false;
+  function reportHeight() {
+    var h = measureHeight();
+    post({ type: 'height', height: h });
+    if (h === heightLast) return;
+    heightLast = h;
+    heightConfirm();
+  }
+  function heightConfirm() {
+    if (heightConfirmQueued || typeof requestAnimationFrame !== 'function') return;
+    heightConfirmQueued = true;
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () {
+        heightConfirmQueued = false;
+        reportHeight();
+      });
+    });
+  }
+
+  // The height a frame needs to show this whole document with no vertical
+  // scrollbar. Three readings, the largest wins:
+  //   - the root element's own box: the body plus every margin collapsed
+  //     through it, and unlike the root's scrollHeight it can come out
+  //     SHORTER than the frame, which is what lets a stage shrink to fit;
+  //   - the root's scrollHeight, but only once the document overflows the
+  //     viewport (until then it reads the viewport itself, never less): what
+  //     reaches past the root's box, a body pinned to 'height: 100%' with
+  //     content spilling out of it, say;
+  //   - the body's own scrollHeight, for content spilling out of a short body
+  //     while the document still fits.
+  // Then the horizontal scrollbar, if the viewport has one ('innerHeight'
+  // counts it, the root's 'clientHeight' does not), except for a document
+  // exactly the viewport's height: one laid out from the viewport itself (a
+  // 'min-height: 100vh' body), where 100vh is 'innerHeight' with the bar
+  // already in it. Adding the bar there asks for a frame 15px taller, which
+  // the document fills in turn, and so on up to the fold. A document of its
+  // own height that happens to land on the viewport's to the pixel is read the
+  // same way and keeps a bar's worth of vertical scroll, the cheaper miss.
+  // Rounded up, since a fraction of a pixel short is still a scrollbar. Every
+  // read is guarded: the DOM stand-in has no layout and answers 0, undefined
+  // or a fixture's declared value.
+  function measureHeight() {
+    var root = document.documentElement;
+    var body = document.body;
+    var h = 0;
+    if (root &amp;&amp; root.getBoundingClientRect) {
+      var box = root.getBoundingClientRect();
+      if (box &amp;&amp; isFinite(box.height)) h = box.height;
+    }
+    if (root &amp;&amp; root.scrollHeight &gt; root.clientHeight) h = Math.max(h, root.scrollHeight);
+    if (body &amp;&amp; body.scrollHeight &gt; h) h = body.scrollHeight;
+    var view = window.innerHeight;
+    var bar = root ? view - root.clientHeight : 0;
+    if (bar &gt; 0 &amp;&amp; root.clientHeight &gt; 0 &amp;&amp; !(Math.abs(h - view) &lt; 1)) h += bar;
+    return Math.ceil(h);
+  }
+
+  // requestAnimationFrame's callback runs as part of the SAME per-frame
+  // &quot;update the rendering&quot; step that performs style/layout for this document
+  // -- nested twice is the standard idiom for &quot;wait until layout has
+  // genuinely settled&quot;: a single rAF can still land on the frame that
+  // establishes this document's first rendering opportunity, before that
+  // opportunity's own layout has run, so by the time the SECOND callback
+  // fires, at least one full rendering update is guaranteed complete. This is
+  // the fix for the timing measured above -- 'load' doesn't tell you layout
+  // happened, rAF does. Guarded exactly like ResizeObserver below (absent
+  // from the DOM stand-in, QUIRKS.md &quot;The stand-in has no layout&quot;), and
+  // requested unconditionally at script start regardless of this document's
+  // current visibility: a real browser does not drop an outstanding
+  // requestAnimationFrame request while its page is hidden, only slows its
+  // cadence, so a stage opened into a background tab (a link opened while
+  // reading something else, say) still gets a correct report the moment it
+  // is actually looked at, with no separate visibilitychange plumbing
+  // needed. Until either this or ResizeObserver's own first delivery lands,
+  // '.html-stage''s own starting height in src/styles.mjs (320px) is what
+  // every stage shows -- see that rule's own comment.
+  function reportHeightAfterLayout() {
+    if (typeof requestAnimationFrame !== 'function') return;
+    requestAnimationFrame(function () { requestAnimationFrame(reportHeight); });
+  }
+
+  // --- scroll, the one thing the parent genuinely cannot see -----------------
+  //
+  // ADR.md entry 40: on a page board the DOCUMENT does not scroll at all -- the
+  // artifact scrolls inside this frame -- and this frame is an opaque-origin
+  // browsing context, so the parent can neither read a scrollTop from it nor
+  // observe one with an IntersectionObserver of its own. That is why scroll
+  // state is a thing agent-authored markup REPORTS, over the same channel
+  // 'height'/'click'/'hover' already use, and therefore gets the same shape
+  // check on arrival as everything else on it (src/ui.mjs's listener).
+  //
+  // ONE type, both directions, which is what keeps entry 40's &quot;one more message
+  // type&quot; literally true: outbound this says &quot;I am at this offset&quot;, inbound
+  // (the handler below) it says &quot;put me at this offset&quot; -- the back-to-top
+  // control's whole mechanism, since the parent cannot scroll this document
+  // either. 'top' is a plain number in both directions and is validated as one
+  // on both sides.
+  //
+  // A real scroll listener, deliberately: the no-scroll-handler rule
+  // (src/badge.mjs) is a rule about the BOARD page, where an
+  // IntersectionObserver can see everything a scroll handler could. Nothing can
+  // observe this document from outside it, so the listener lives here, in the
+  // one place that can see the fact. Deduplicated on the last reported value,
+  // so a scroll that ends where it began posts nothing; within a gesture the
+  // cadence is one message per scroll event, same as any native handler.
+  //
+  // WHICH ELEMENT SCROLLS IS NOT KNOWABLE UP FRONT, and assuming it is the
+  // document was a real defect, measured in Chrome 151 against an app-shell
+  // artifact (a fixed sidebar beside a 'height: 100vh; overflow-y: auto' pane,
+  // an ordinary shape for a page designed as a page). There the document never
+  // scrolls at all: 'window.scrollY' stays 0 while the frame visibly shows the
+  // third section, no 'scroll' event ever reaches 'window', so no report was
+  // ever sent -- the header never condensed and the back-to-top control never
+  // appeared -- and an inbound request moved nothing, because 'window.scrollTo'
+  // does not touch an inner pane. Read, write and listener all have to name the
+  // SAME element, and none of them can name it in advance.
+  //
+  // So the element identifies ITSELF, by scrolling. A capture-phase listener on
+  // 'document' sees a scroll of any element (a scroll event on an element does
+  // not bubble, but capture still walks down to it) as well as the viewport's
+  // own, and 'ev.target' IS the thing that moved. That target is remembered and
+  // is thereafter what gets read and what gets written -- correct by
+  // construction rather than by a heuristic scan for scrollable boxes.
+  //
+  // The ordering makes this airtight for the inbound direction too: back-to-top
+  // is only ever VISIBLE after a report, a report only ever follows a scroll
+  // event, and the scroll event is what sets 'scroller'. The control cannot be
+  // clicked before the scroller is known.
+  //
+  // ponytail: the most recently scrolled element wins. An artifact with two
+  // independent scrolling panes reports whichever the reviewer touched last,
+  // which is the one they are reading; the upgrade path, if a real artifact
+  // ever needs it, is to report the target's own ref alongside the offset.
+  var lastScrollTop = -1;
+  var scroller = null; // null means &quot;this document's viewport&quot;
+
+  function isViewportTarget(t) {
+    return !t || t === document || t === window
+      || t === document.documentElement || t === document.body;
+  }
+
+  function scrollTopNow() {
+    if (scroller) return scroller.scrollTop;
+    if (typeof window.pageYOffset === 'number') return window.pageYOffset;
+    var el = document.scrollingElement || document.documentElement || document.body;
+    return (el &amp;&amp; typeof el.scrollTop === 'number') ? el.scrollTop : 0;
+  }
+
+  function reportScroll() {
+    var top = scrollTopNow();
+    if (top === lastScrollTop) return;
+    lastScrollTop = top;
+    post({ type: 'scroll', top: top });
+  }
+
+  function onScroll(ev) {
+    scroller = isViewportTarget(ev.target) ? null : ev.target;
+    reportScroll();
+  }
+
+  /** Put this document at 'top' -- the inbound half of the one message type.
+   * Aimed at whatever last scrolled (see above), never at the viewport by
+   * assumption. Feature-detected rather than try/caught into: a 'scrollTo' that
+   * silently does nothing never throws, so a catch block is no guard at all
+   * against the case this function exists to fix -- the catch below is only for
+   * a browser that has 'scrollTo' but rejects the options object, and
+   * 'scrollTop' is the floor under both. */
+  function scrollTo(top) {
+    var target = scroller || window;
+    if (typeof target.scrollTo === 'function') {
+      try {
+        target.scrollTo({ top: top, left: 0, behavior: 'smooth' });
+        return;
+      } catch (e) { /* older two-argument signature only; fall through */ }
+      target.scrollTo(0, top);
+      return;
+    }
+    if (scroller) scroller.scrollTop = top;
+  }
+
+  /** Move this document BY 'delta' -- one wheel notch a reviewer turned over a
+   * variant card, forwarded by the parent (src/ui.mjs's wheel listener).
+   * A clipped option's stage is the one surface where no real wheel can ever
+   * reach this document at all: the frame is 'pointer-events: none' inside a
+   * '.choice-variant' card (ADR.md entry 78, unchanged by this), so the
+   * gesture lands on the card in the parent -- which cannot scroll an
+   * opaque-origin document either. Hence a message, aimed at whatever last
+   * scrolled, exactly like scrollTo above.
+   *
+   * 'auto', never the 'smooth' scrollTo uses: a notch is already the reader's
+   * own granularity, and a per-notch animation has the next notch arriving on
+   * top of an unfinished one -- the whole gesture stutters. Same
+   * feature-detection floor as scrollTo, for the same reason (a 'scrollBy'
+   * that silently does nothing never throws). */
+  function scrollByStep(delta) {
+    var target = scroller || window;
+    if (typeof target.scrollBy === 'function') {
+      try {
+        target.scrollBy({ top: delta, left: 0, behavior: 'auto' });
+        return;
+      } catch (e) { /* older two-argument signature only; fall through */ }
+      target.scrollBy(0, delta);
+      return;
+    }
+    if (scroller) { scroller.scrollTop += delta; return; }
+    if (typeof target.scrollTo === 'function') target.scrollTo(0, scrollTopNow() + delta);
+  }
+
+  // The board tells this document its theme, so a rendered artifact needs no
+  // theme control of its own. The parent resolves its own three-state control
+  // (light / dark / the attribute's ABSENCE, meaning System) down to a concrete
+  // 'light' or 'dark' before sending -- see src/ui.mjs's activeTheme -- so this
+  // side never queries a media it would then have to re-query on every OS flip.
+  // 'data-theme' on &lt;html&gt; is the same attribute src/styles.mjs keys the board's
+  // own palette off, so a template that already themes itself needs no new
+  // vocabulary.
+  //
+  // The attribute is ALL this sets. 'color-scheme' stays whatever the artifact
+  // made it, which for one that sets no colour is the light scheme, in a dark
+  // board too: the artboard behind this document is a light neutral in both
+  // palettes, and the frame it renders in is declared 'color-scheme: light' to
+  // match (src/styles.mjs's '.html-stage' and '.stage-lens-frame'). So the UA's
+  // default ink here is always the light scheme's: black text, the #0000ee link
+  // blue, light form controls and scrollbars. Measured in real Chrome on the
+  // dark artboard (#c3c6cd): stamping the board's scheme on this root turns that
+  // ink white, 1.71:1, and the link #9e9eff, 1.40:1; black reads 12.28:1 and
+  // the link blue 5.50:1. An artifact that paints a dark palette of its own
+  // under [data-theme=&quot;dark&quot;] declares 'color-scheme: dark' there itself, which
+  // darkens its controls and scrollbars and, where it paints no background, puts
+  // the UA's dark canvas under its light ink in place of the artboard.
+  function applyTheme(theme) {
+    var root = document.documentElement;
+    if (!root) return;
+    try {
+      root.setAttribute('data-theme', theme);
+    } catch (e) { /* nothing to theme; the artifact keeps its own colours */ }
+  }
+
+  window.addEventListener('message', function (ev) {
+    // See PROTOCOL.md &quot;Origin validation&quot;, last bullet, for why identity and not
+    // an origin string is the correct and sufficient check on this side of the
+    // channel.
+    if (ev.source !== window.parent) return;
+    var data = ev.data;
+    if (!data || typeof data !== 'object' || data.cb !== CB || typeof data.type !== 'string') return;
+    if (data.type === 'mode') {
+      commentMode = !!data.commentMode;
+      // 'sentRefs' widens this message (still 'mode',
+      // not a new type -- sent-ness is exactly the kind of fact that matters
+      // precisely when mode changes). Shape-checked like every other field this
+      // channel carries: an absent or malformed list leaves 'sentRefs'
+      // whatever it already was, rather than guessing or throwing, and a
+      // non-string entry is dropped rather than compared against later.
+      if (Array.isArray(data.sentRefs)) {
+        sentRefs = data.sentRefs.filter(function (r) { return typeof r === 'string'; });
+      }
+      // 'sentTimes' widens it the same way, and is checked the same way: an
+      // entry is kept only as a string ref beside a second videoSecond keeps
+      // unchanged.
+      if (Array.isArray(data.sentTimes)) {
+        sentTimes = data.sentTimes.filter(function (s) {
+          return !!s &amp;&amp; typeof s.ref === 'string' &amp;&amp; videoSecond(s.time) === s.time;
+        }).map(function (s) { return { ref: s.ref, time: s.time }; });
+      }
+      // 'theme' widens this message the same way 'sentRefs' above already does
+      // (over the channel that already carries comment mode), rather than
+      // minting a type of its own: same tolerance, same
+      // convention. An absent or unrecognised value leaves this document's
+      // theme exactly as it was, so a stage that is never told stays on
+      // whatever its own markup chose.
+      if (data.theme === 'light' || data.theme === 'dark') applyTheme(data.theme);
+      if (commentMode) ensureHoverStyle(); else clearHover();
+      holdVideoControls(commentMode);
+      return;
+    }
+    if (data.type === 'scroll') {
+      // The inbound half of the one type (see reportScroll above): the parent's
+      // back-to-top control asking this document to go somewhere, since it
+      // cannot scroll this document itself. Shape-checked before it reaches
+      // anything -- a non-finite 'top' is exactly the kind of value that would
+      // otherwise be handed to scrollTo.
+      if (typeof data.top !== 'number' || !isFinite(data.top)) return;
+      scrollTo(data.top);
+      return;
+    }
+    if (data.type === 'scrollBy') {
+      // Parent -&gt; stage only, no outbound half: a wheel notch turned over a
+      // clipped variant card, which is a gesture this document can never
+      // receive on its own (scrollByStep's own comment above). Relative, not
+      // absolute, deliberately -- the parent knows how far the reviewer just
+      // turned, never where this document currently is; the offset is this
+      // side's fact, and the browser clamps it at both ends for free.
+      // Shape-checked the same way every other inbound number on this channel
+      // is.
+      if (typeof data.delta !== 'number' || !isFinite(data.delta)) return;
+      scrollByStep(data.delta);
+      return;
+    }
+    if (data.type === 'band') {
+      // Parent -&gt; stage only, no outbound half: the board telling this
+      // document how tall its own chrome bands are right now (ADR 59).
+      // Shape-checked the same way every other inbound number on
+      // this channel is -- a non-finite or negative value never reaches
+      // applyBand, which would otherwise hand it straight to a style
+      // property.
+      if (typeof data.top !== 'number' || !isFinite(data.top) || data.top &lt; 0) return;
+      if (typeof data.bottom !== 'number' || !isFinite(data.bottom) || data.bottom &lt; 0) return;
+      applyBand(data.top, data.bottom);
+      reportModal();
+      return;
+    }
+    if (data.type === 'height') {
+      // The inbound half: the parent asking for a report now. A frame the
+      // window does not show gets no animation frame and no ResizeObserver
+      // delivery, so its first report has not left; a message still reaches
+      // it, and measuring lays the document out.
+      reportHeight();
+      return;
+    }
+    if (data.type === 'locate') {
+      if (typeof data.requestId !== 'string' || !Array.isArray(data.refs)) return;
+      // Answered in THIS FRAME'S VIEWPORT coordinates: the element's own client
+      // rect, read straight off getBoundingClientRect with nothing subtracted.
+      // The pin layer overlays the frame's viewport, so the old &quot;minus the body
+      // box&quot; shape was a document coordinate answering a viewport question --
+      // the two agree only at scroll 0 and only for a marginless body, and they
+      // agree for exactly one scroller: the body box moves with whichever
+      // element actually scrolled (QUIRKS.md &quot;The thing that scrolls a rendered
+      // artifact is often not its document&quot;), while the layer stays where it
+      // was. The raw client rect is correct for every scroller at once, with no
+      // offset to remember. An element scrolled out of the frame reports a
+      // position outside the frame's box, which the layer's own overflow clip
+      // (src/styles.mjs .pin-layer) hides rather than drawing over the chrome;
+      // it comes back on its own when the element scrolls back in.
+      var positions = {};
+      for (var i = 0; i &lt; data.refs.length; i++) {
+        var ref = data.refs[i];
+        if (typeof ref !== 'string') continue;
+        var el = resolveRef(ref);
+        if (el &amp;&amp; el.getBoundingClientRect) {
+          var box = el.getBoundingClientRect();
+          positions[ref] = { left: box.left, top: box.top };
+        } else {
+          positions[ref] = null;
+        }
+      }
+      post({ type: 'positions', requestId: data.requestId, positions: positions });
+      return;
+    }
+  });
+
+  reportHeightAfterLayout();
+  // Keeps the report tracking a mock whose content changes size AFTER first
+  // paint (an image loading in, a toggle revealing more copy) -- guarded
+  // exactly the way src/ui.mjs's setupSendBarDock guards
+  // 'IntersectionObserver' (QUIRKS.md &quot;The stand-in has no layout&quot;): this
+  // repo's DOM stand-in defines neither this nor requestAnimationFrame, so
+  // neither the first, layout-deferred report nor a later resize-driven one
+  // is directly exerciseable there -- see QUIRKS.md's new entry on this
+  // feature's own measurement for what that leaves untestable, and
+  // test/check-pure.mjs's stubbed requestAnimationFrame for how far the
+  // stand-in check goes anyway (the real entry point, not a fabricated
+  // scrollHeight fed straight into reportHeight).
+  // The root is observed beside the body because the root's box is what
+  // measureHeight reads first: a margin collapsing through the body moves the
+  // root and leaves the body's own box exactly as it was.
+  if (typeof ResizeObserver === 'function') {
+    var heightObserver = new ResizeObserver(reportHeight);
+    heightObserver.observe(document.body);
+    if (document.documentElement) heightObserver.observe(document.documentElement);
+  }
+  // Capture phase, on 'document', is what makes this one listener see BOTH the
+  // viewport's own scroll and an inner pane's -- an element's scroll event does
+  // not bubble, so a plain 'window' listener is blind to exactly the artifact
+  // shape that broke this (see onScroll's own comment above).
+  document.addEventListener('scroll', onScroll, true);
+  // A full-size view the mock opens over itself: a modal dialog that runs to
+  // this frame's top edge, where it keeps its own bar, and where on a page
+  // board the board's top strip floats ('bandTop', which stays 0 anywhere
+  // else). The parent cannot see into this document, so the stage says when
+  // such a dialog reaches into that band and when the last one has left it,
+  // and the board takes its strip away meanwhile (src/ui.mjs). A dialog that
+  // stays clear of the band, a small one centred in the mock, reports nothing
+  // and keeps the strip. showModal() and close() both move the dialog's
+  // 'open' attribute, so one observer on it sees every dialog, one added
+  // later too; the band and the window changing size re-ask.
+  var modalOpen = false;
+  function reportModal() {
+    var open = false;
+    try {
+      var views = document.querySelectorAll('dialog:modal');
+      for (var i = 0; i &lt; views.length &amp;&amp; !open; i++) open = views[i].getBoundingClientRect().top &lt; bandTop;
+    } catch (e) { /* no ':modal' here: nothing to report */ }
+    if (open === modalOpen) return;
+    modalOpen = open;
+    post({ type: 'modal', open: open });
+  }
+  if (typeof MutationObserver === 'function') {
+    new MutationObserver(reportModal).observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ['open'] });
+  }
+  window.addEventListener('resize', reportModal);
+  post({ type: 'ready' });
+})();&lt;/script&gt;"></iframe>
+    <div class="pin-layer" data-block-id="h4"></div>
+    <button type="button" class="pull-out" data-pull-out-for="h4" aria-label="Open this stage full size" title="Open full size"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6"/><path d="M10 20H4v-6"/><path d="M20 4l-7 7"/><path d="M4 20l7-7"/></svg></button>
+  </div><div class="stage-fold"><button type="button" class="stage-fold-toggle" aria-expanded="false">Show full height</button></div><div class="context-tools"><button type="button" class="comment-btn" data-block-id="h4" data-anchor-kind="block"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>comment</button></div>
+    <div class="comment-target" id="comment-target-h4">commenting on: whole block</div>
+    <form class="comment-form" id="comment-form-h4" data-block-id="h4" data-anchor-kind="block">
+      <div class="comment-form-col">
+        <input type="text" placeholder="Add a comment" disabled>
+        
+      </div>
+      <button type="submit" disabled>Add</button>
+    </form>
+    <div class="comment-list" id="comment-list-h4"></div></div></div>
     <div class="options"><button type="button" class="card-choice choice-single" data-question-id="q1" data-choice="Yes, ship it" disabled>
       <span class="opt-main">
       <span class="opt-label">Yes, ship it</span>
@@ -3356,7 +4389,7 @@
     </span>
     </button></div>
   </div>
-  <div class="question-context"><div class="context-item" data-block-id="d2" data-block-kind="markdown"><div class="md-content"><p>Background: average ticket time today is 31 seconds across the three prep stations (grill, salad, expo).</p></div></div></div>
+  
   <div class="note-field">
     <div class="note-head">
       <label for="note-q1">Note</label>
@@ -3371,7 +4404,7 @@
 
 <section class="block question-block question-split" data-block-id="q2" data-block-kind="question" data-widget="multi">
   <div class="question-head">
-    <div class="card-head"><p class="question-prompt card-title">Which stations need their ticket displays updated to match the round 1 mockup?</p><span class="card-status answer-status" data-status="answered">Answered</span></div>
+    <div class="card-head"><p class="question-prompt card-title">Which stations get the redesigned ticket?</p><span class="card-status answer-status" data-status="answered">Answered</span></div>
     <p class="question-picks">Pick as many as apply.</p>
     
   </div>
@@ -3409,7 +4442,7 @@
     </span>
     </button></div>
   </div>
-  
+  <div class="question-context"><div class="context-item" data-block-id="d2" data-block-kind="markdown"><div class="md-content"><p>Background: average ticket time today is 31 seconds across the three prep stations (grill, salad, expo).</p></div></div></div>
   <div class="note-field">
     <div class="note-head">
       <label for="note-q2">Note</label>
@@ -3445,14 +4478,1040 @@
   
 </section>
 
-<section class="block question-block question-split" data-block-id="q4" data-block-kind="question" data-widget="rank">
+<section class="block question-block" data-block-id="q4" data-block-kind="question" data-widget="rank">
   <div class="question-head">
-    <div class="card-head"><p class="question-prompt card-title">Rank these three palettes for the status chips (In prep / Rush / Ready for pickup) by legibility under kitchen pass lighting, most legible first. The display one page back uses the first of them.</p><span class="card-status answer-status" data-status="answered">Answered</span></div>
+    <div class="card-head"><p class="question-prompt card-title">Rank these three palettes for the status chips (In prep / Rush / Ready for pickup) by legibility under kitchen pass lighting, most legible first.</p><span class="card-status answer-status" data-status="answered">Answered</span></div>
     <p class="question-picks">Drag them into order, most important first.</p>
     
   </div>
   <div class="question-main">
-    
+    <div class="question-context-prose"><div class="context-item html-block" data-block-id="h5" data-block-kind="html"><div class="stage-wrap">
+    <iframe class="html-stage" sandbox="allow-scripts" data-sha="1c0e0cece57adbad19130c165d8e4def5b917cc8202ed9e9b2f3063368abcc5d" srcdoc="&lt;style&gt;html,body{margin:0;padding:0}&lt;/style&gt;&lt;style&gt;
+  body { margin: 0; padding: 16px 56px 16px 16px; font-family: system-ui, sans-serif; background: #f3f4f6; }
+  .palettes { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+  .palette { background: #fff; border: 1px solid #e2e2e2; border-radius: 10px; padding: 12px 14px 8px; }
+  .name { font-size: 12px; font-weight: 700; color: #374151; padding-bottom: 8px; }
+  .chip { display: inline-block; margin: 0 6px 6px 0; padding: 4px 10px; border-radius: 999px; border: 1px solid transparent; font-size: 12px; font-weight: 600; }
+  .contrast .prep { background: #92400e; color: #fff; }
+  .contrast .rush { background: #991b1b; color: #fff; }
+  .contrast .ready { background: #166534; color: #fff; }
+  .pastel .prep { background: #fef3c7; color: #92400e; }
+  .pastel .rush { background: #fee2e2; color: #991b1b; }
+  .pastel .ready { background: #dcfce7; color: #166534; }
+  .mono .prep { background: #e5e7eb; color: #111827; }
+  .mono .rush { background: #111827; color: #fff; }
+  .mono .ready { background: #fff; color: #111827; border-color: #111827; }
+&lt;/style&gt;
+&lt;div class=&quot;palettes&quot;&gt;
+  &lt;div class=&quot;palette contrast&quot;&gt;
+    &lt;div class=&quot;name&quot;&gt;High-contrast&lt;/div&gt;
+    &lt;span class=&quot;chip prep&quot;&gt;In prep&lt;/span&gt;&lt;span class=&quot;chip rush&quot;&gt;Rush&lt;/span&gt;&lt;span class=&quot;chip ready&quot;&gt;Ready for pickup&lt;/span&gt;
+  &lt;/div&gt;
+  &lt;div class=&quot;palette pastel&quot;&gt;
+    &lt;div class=&quot;name&quot;&gt;Pastel&lt;/div&gt;
+    &lt;span class=&quot;chip prep&quot;&gt;In prep&lt;/span&gt;&lt;span class=&quot;chip rush&quot;&gt;Rush&lt;/span&gt;&lt;span class=&quot;chip ready&quot;&gt;Ready for pickup&lt;/span&gt;
+  &lt;/div&gt;
+  &lt;div class=&quot;palette mono&quot;&gt;
+    &lt;div class=&quot;name&quot;&gt;Monochrome&lt;/div&gt;
+    &lt;span class=&quot;chip prep&quot;&gt;In prep&lt;/span&gt;&lt;span class=&quot;chip rush&quot;&gt;Rush&lt;/span&gt;&lt;span class=&quot;chip ready&quot;&gt;Ready for pickup&lt;/span&gt;
+  &lt;/div&gt;
+&lt;/div&gt;&lt;script&gt;(function () {
+  var CB = 'cb-stage';
+  var HOVER_CLASS = 'cb-anchor-hover';
+  // Applied instead of HOVER_CLASS to
+  // an element whose own ref is already in 'sentRefs' below -- the stage-side
+  // half of the same de-affordance src/ui.mjs applies page-side via its own
+  // .cb-anchor-sent (same class name, by the convention QUIRKS.md &quot;Two
+  // stylesheets, one palette&quot; already documents for HOVER_CLASS -- two
+  // separate documents, one name).
+  var SENT_CLASS = 'cb-anchor-sent';
+  var commentMode = false;
+  var hovered = null;
+  var styleInjected = false;
+  // The dom refs (this block's own, index-chain form -- stepsToPath's output)
+  // that already carry a SENT comment, as told by the parent's 'mode' message
+  // below. The stage cannot know this on its own: 'sent' is a fact about
+  // board.comments, which lives only in the parent document (the stage's
+  // isolation -- this document never sees the board JSON at all).
+  var sentRefs = [];
+  // The seconds of this block's videos that already carry a SENT comment, as
+  // '{ ref, time }' pairs from the same 'mode' message. A video comment's
+  // second is part of its anchor (src/anchor.mjs's findPendingCommentForAnchor),
+  // so a video is marked sent only while it shows one of these seconds; a timed
+  // ref is never in 'sentRefs', or the whole video would read as done.
+  var sentTimes = [];
+  // The videos whose native controls comment mode took away (holdVideoControls
+  // below), to give back when it ends.
+  var heldControls = [];
+  // The MutationObserver that takes the controls a video gains while comment
+  // mode is on, or null while it is off.
+  var controlsWatch = null;
+  // The ref of 'hovered', kept so a video's second moving under a resting
+  // pointer can re-mark it without walking the tree again.
+  var hoveredRef = null;
+  // The board's own top chrome band, as last reported by the parent's 'band'
+  // message (applyBand below). Kept because an in-page anchor has to land
+  // BELOW that band rather than under it (scrollToAnchor) -- one measurement,
+  // taken once by the side that can see its own chrome, used for both the
+  // padding and the anchor offset, so the two can never disagree.
+  var bandTop = 0;
+
+  var buildSteps = function buildSteps(root, el) {
+  const steps = [];
+  let node = el;
+  while (node &amp;&amp; node !== root) {
+    const parent = node.parentElement;
+    if (!parent) return null;
+    const idx = Array.prototype.indexOf.call(parent.children, node);
+    if (idx === -1) return null;
+    steps.unshift(idx + 1);
+    node = parent;
+  }
+  if (node !== root) return null;
+  return steps;
+};
+  var stepsToPath = function stepsToPath(steps) {
+  return (steps || []).join('.');
+};
+  var pathToSteps = function pathToSteps(path) {
+  if (!path) return [];
+  return String(path)
+    .split('.')
+    .map(s =&gt; parseInt(s, 10))
+    .filter(n =&gt; Number.isInteger(n) &amp;&amp; n &gt; 0);
+};
+  var resolveSteps = function resolveSteps(root, steps) {
+  let node = root;
+  for (const i of steps || []) {
+    const kids = node &amp;&amp; node.children;
+    const child = kids ? kids[i - 1] : undefined;
+    if (!child) return null;
+    node = child;
+  }
+  return node;
+};
+  var videoIdentity = function videoIdentity(ariaLabel, title) {
+  var label = String(ariaLabel == null ? '' : ariaLabel).replace(/\s+/g, ' ').trim();
+  if (label) return label;
+  return String(title == null ? '' : title).replace(/\s+/g, ' ').trim();
+};
+  var videoSecond = function videoSecond(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value &lt; 0 || value &gt; 86400) return null;
+  return Math.floor(value);
+};
+
+  function post(msg) {
+    try {
+      var out = { cb: CB };
+      for (var k in msg) if (Object.prototype.hasOwnProperty.call(msg, k)) out[k] = msg[k];
+      window.parent.postMessage(out, '*');
+    } catch (e) { /* no parent reachable -- nothing to anchor to */ }
+  }
+
+  /** Top-up, not add (ADR.md entry 59): 'top'/'bottom' are the
+   * board's OWN chrome bands, never simply written -- padding-top/-bottom
+   * become the LARGER of this document's own CURRENT cascade padding and
+   * whatever the board just reported, so an artifact that already cleared the
+   * band on its own keeps its own number untouched and one that
+   * pads nothing gets exactly the band. Padding only, on
+   * 'document.body' itself -- no background, colour or border is ever set
+   * here.
+   *
+   * &quot;Own&quot; is read FRESH on every call, never cached from the first one --
+   * clear this document's own previous inline write before measuring, so the
+   * read reflects the artifact's live stylesheet cascade rather than an
+   * earlier call's own number. A once-only baseline (this function's first
+   * cut) gets this wrong in both directions the moment the artifact's own
+   * padding is RESPONSIVE (a media query, say: 12px narrow, 64px past
+   * 900px) -- a baseline captured narrow stays 12 forever even once the
+   * reader widens past 900px and the artifact's own CSS asks for 64
+   * (silently under-cleared), and a
+   * baseline captured wide pins the artifact at 64px on a phone width where
+   * its own CSS asks for 12 (over-cleared, permanently, for the rest of the
+   * session). Clearing before every read is what keeps the artifact's own
+   * responsive rules authoritative instead of frozen at whatever they were on
+   * first contact -- and it defeats compounding the same way the once-only
+   * capture did, since each call starts from the artifact's own true cascade
+   * value, never from a previous 'band' call's inline write.
+   *
+   * getComputedStyle is feature-detected exactly like every other real-layout
+   * read in this repo (QUIRKS.md &quot;The stand-in has no layout&quot;): unsupported or
+   * unreadable leaves the reading at 0, which is the same answer a genuinely
+   * unpadded artifact would give.
+   *
+   * ponytail: this pads 'document.body' unconditionally, which is correct for
+   * a document that scrolls as a whole (the shape SKILL.md's own &quot;a top
+   * padding on its own body&quot; convention already assumed, and the common
+   * case). It is wrong for the artifact shape this file's own design comment
+   * records above (&quot;The thing that scrolls a rendered artifact is often not
+   * its document&quot; -- a fixed sidebar beside a 'height: 100vh' pane, measured
+   * in Chrome 151): there, body padding pushes the 100vh pane down by exactly
+   * the padding amount, its own bottom falls out of the frame, and the
+   * artifact gains a body scrollbar it never had while the fixed sidebar
+   * stays put -- worse than unpadded. The ceiling is not lifted here: a
+   * static &quot;does the document currently scroll&quot; check
+   * ('document.scrollingElement.scrollHeight &lt;= clientHeight') cannot tell
+   * that shape apart from an ordinary SHORT artifact that fits one screen and
+   * still needs the top clearance -- both read true before any band is ever
+   * applied, and wrongly skipping the far more common short-artifact case
+   * would trade a rare regression for a common one (criterion 1 failing on
+   * exactly the simplest artifacts). The real upgrade path is a signal this
+   * function does not have yet -- an artifact that opts itself out, or a
+   * shape test sturdier than a single geometry snapshot -- not a guess from
+   * one number. */
+  function applyBand(top, bottom) {
+    bandTop = top;
+    if (!document.body) return;
+    document.body.style.paddingTop = '';
+    document.body.style.paddingBottom = '';
+    var ownTop = 0;
+    var ownBottom = 0;
+    try {
+      if (typeof getComputedStyle === 'function') {
+        var cs = getComputedStyle(document.body);
+        var parsedTop = parseFloat(cs.getPropertyValue('padding-top'));
+        var parsedBottom = parseFloat(cs.getPropertyValue('padding-bottom'));
+        if (isFinite(parsedTop)) ownTop = parsedTop;
+        if (isFinite(parsedBottom)) ownBottom = parsedBottom;
+      }
+    } catch (e) { /* no computed style reachable -- treat the artifact as padding nothing */ }
+    document.body.style.paddingTop = Math.max(ownTop, top) + 'px';
+    document.body.style.paddingBottom = Math.max(ownBottom, bottom) + 'px';
+  }
+
+  // Discoverability CSS, applied inside THIS document only -- see QUIRKS.md
+  // &quot;Two stylesheets, one palette&quot;: the outer page's tokens deliberately do
+  // not reach in here (isolation is the point), so this injected stylesheet
+  // is a literal hex (STAGE_ACCENT_HEX's own comment, above, explains why a
+  // custom property would defeat that isolation rather than merely being
+  // redundant with it, and why it tracks --accent's LIGHT value: the stage's
+  // artboard is a light neutral in BOTH palettes -- two different ones -- and
+  // this one hex clears 3:1 on each). Injected
+  // LAZILY (only once comment mode has
+  // genuinely turned on at least once) rather than unconditionally at script
+  // start -- a read-only archive never sends 'mode' with commentMode true at
+  // all, so its stage document never gains this stylesheet, matching this
+  // ticket's unchanged behavioural contract (test/check-archive.mjs: &quot;no
+  // hover stylesheet is even injected&quot; in a read-only archive).
+  function ensureHoverStyle() {
+    if (styleInjected) return;
+    styleInjected = true;
+    try {
+      var style = document.createElement('style');
+      // A SENT_CLASS rule alongside the
+      // ordinary hover one. The hover rule's colour is STAGE_ACCENT_HEX, kept in
+      // step with src/styles.mjs by hand (QUIRKS.md &quot;Two stylesheets, one
+      // palette&quot;) because this stylesheet cannot reach the page's tokens -- one
+      // value for both palettes, since it clears 3:1 on either artboard; the
+      // SENT_CLASS rule needs no colour of its own, only a cursor, so it adds
+      // nothing new to keep in step. No outline at all (not even 'none' -- there
+      // is simply no rule adding one), so an already-sent element reads as inert
+      // rather than as a differently-styled target.
+      style.textContent = '.' + HOVER_CLASS + ' { outline: 2px solid #3251c9 !important; outline-offset: 2px; cursor: pointer !important; } '
+        + '.' + SENT_CLASS + ' { cursor: not-allowed !important; } '
+        + 'body { cursor: default; }';
+      (document.head || document.body).appendChild(style);
+    } catch (e) { /* no hover highlight; the click below still anchors */ }
+  }
+
+  function clearHover() {
+    if (hovered &amp;&amp; hovered.classList) {
+      hovered.classList.remove(HOVER_CLASS);
+      hovered.classList.remove(SENT_CLASS);
+    }
+    hovered = null;
+    hoveredRef = null;
+  }
+
+  function isVideo(el) {
+    return !!el &amp;&amp; el.nodeType === 1 &amp;&amp; String(el.tagName).toLowerCase() === 'video';
+  }
+
+  /** Whether a click on 'el' (at 'ref') would name an anchor that already
+   * carries a sent comment: the anchor src/ui.mjs's handleStageClick builds
+   * from this click, matched the way its isSentAnchor matches it. A video
+   * showing a second is that second's anchor; anything else, or a video
+   * showing no valid second, is its bare ref. */
+  function isSentTarget(el, ref) {
+    if (ref === null) return false;
+    var second = isVideo(el) ? videoSecond(el.currentTime) : null;
+    if (second === null) return sentRefs.indexOf(ref) !== -1;
+    for (var i = 0; i &lt; sentTimes.length; i++) {
+      if (sentTimes[i].ref === ref &amp;&amp; sentTimes[i].time === second) return true;
+    }
+    return false;
+  }
+
+  function markHovered() {
+    if (!hovered || !hovered.classList) return;
+    var sent = isSentTarget(hovered, hoveredRef);
+    hovered.classList.remove(sent ? HOVER_CLASS : SENT_CLASS);
+    hovered.classList.add(sent ? SENT_CLASS : HOVER_CLASS);
+  }
+
+  document.body.addEventListener('mouseover', function (ev) {
+    if (!commentMode) return;
+    var el = ev.target;
+    clearHover();
+    if (!el || el.nodeType !== 1 || el === document.body || !el.classList) return;
+    hovered = el;
+    var steps = buildSteps(document.body, el);
+    var ref = (steps &amp;&amp; steps.length) ? stepsToPath(steps) : null;
+    hoveredRef = ref;
+    // The VISIBILITY half only: an element whose own ref already carries a SENT
+    // comment is de-affordanced (SENT_CLASS) rather than marked as an ordinary
+    // target (HOVER_CLASS), while the click handler below still posts 'click'
+    // unconditionally. &quot;Clicking it does nothing&quot; is enforced on the other side
+    // of the channel (src/ui.mjs's handleStageClick calls isSentAnchor before
+    // ever opening a form), which is the side that holds board.comments and can
+    // tell a resolved sent comment from a stale ref this document has no way to
+    // distinguish on its own.
+    markHovered();
+    post({ type: 'hover', ref: ref, tag: el.tagName, text: el.textContent });
+  });
+  // A hovered video's second moves under a resting pointer when it plays
+  // (autoplay or the stage's script), and whether that second is already sent
+  // moves with it. The browser fires 'timeupdate' as it moves; it does not
+  // bubble, so this listens in the capture phase.
+  document.addEventListener('timeupdate', function (ev) {
+    if (commentMode &amp;&amp; hovered &amp;&amp; ev.target === hovered) markHovered();
+  }, true);
+  document.body.addEventListener('mouseout', function () {
+    clearHover();
+    post({ type: 'hover', ref: null, tag: null, text: null });
+  });
+
+  // --- links: the board handles them, this frame never navigates (ADR 113) ---
+
+  /** The '&lt;a href&gt;' a click landed on or inside, or null. 'closest', not
+   * 'ev.target' itself: a click on the '&lt;code&gt;' inside a link is a click on
+   * the link as far as the browser's own default action is concerned, and
+   * this has to see exactly what that default would have followed. */
+  function linkTarget(el) {
+    if (!el || el.nodeType !== 1 || typeof el.closest !== 'function') return null;
+    return el.closest('a[href]');
+  }
+
+  /** The element a fragment names, looked up by attribute rather than by
+   * 'getElementById' or a '#id' selector. The rule test/check-archive-ids.mjs
+   * enforces on every client script is &quot;never look an id up bare, qualify it
+   * with the tag src/render.mjs emits&quot; -- and here there is no tag to qualify
+   * with, since a fragment may legitimately name any element in an artifact
+   * nobody in this repo wrote. The attribute form is the same lookup with the
+   * same tree-order answer a browser's own fragment navigation would give,
+   * without reintroducing the shape that rule exists to keep out.
+   *
+   * ponytail: an id carrying a double quote is refused rather than escaped, so
+   * an anchor naming one never scrolls at all. The escape would have to be
+   * spelled inside this script's own template literal, where a backslash is
+   * not a backslash, and a fragment naming nothing simply scrolls nothing. The
+   * upgrade path, if an artifact ever ships such an id, is to find the target
+   * by walking this document's elements and comparing 'id' as a plain string,
+   * which needs no selector escaping anywhere. */
+  function elementWithId(id) {
+    if (id.indexOf('&quot;') !== -1) return null;
+    try { return document.querySelector('[id=&quot;' + id + '&quot;]'); } catch (e) { return null; }
+  }
+
+  /** An in-page anchor: put the target where the reviewer can read it, with no
+   * navigation of any kind.
+   *
+   * WHICH element scrolls is not knowable up front: an app-shell artifact
+   * scrolls an inner pane and its document never moves (onScroll's own comment
+   * below), and the 'scroller' this script remembers is only known once
+   * something has already scrolled, while a table-of-contents link is exactly
+   * the click that comes first. So the boxes are found from this document's
+   * own geometry at the click (frameScrollBoxes, below), innermost first, and
+   * each is moved by its OWN 'scrollTo' (scrollBoxTo).
+   *
+   * Never 'scrollIntoView'. Measured in Chrome 154
+   * (test/browser-check-stage-fold.mjs): a frame's scroll-into-view does not
+   * stop at the frame. It carries on into the board, through the opaque-origin
+   * boundary, and scrolls the board until the frame's top meets the window's:
+   * a second scroll the reader did not ask for, which leaves the target under
+   * the board's sticky header. A box's own 'scrollTo' moves that box and
+   * nothing past it.
+   *
+   * On a page board the board's header floats OVER the top of this frame
+   * (ADR 59), so a target aligned to a box's top edge would land under it.
+   * Each box puts the target 'bandTop' below its visible top: the band the
+   * parent last reported, never a number invented here.
+   *
+   * A fragment naming nothing ('#', '#top', a stale id) scrolls nothing. The
+   * click is cancelled either way, so it can never reach the blocked page.
+   *
+   * A frame with nothing of its own to scroll hands the move to the board
+   * instead: a stage that fits its content, or one opened by Show full height,
+   * shows the whole document, so the only thing that can bring its target into
+   * view is the BOARD scrolling (ADR 119). This document cannot see the board,
+   * so it says where the target sits in its own viewport ('link' with 'top' and
+   * no 'url') and src/ui.mjs's handleStageAnchor decides how far the board
+   * moves. It does not also scroll itself: there is nothing here to move.
+   *
+   * A frame that does scroll still tells the board where the target ended up
+   * ('top' as above, plus 'scrolled: true'). Off a page board no band reaches
+   * this frame, so the target lands at the frame's own top, and the reader may
+   * have scrolled that top above the window or under the board's sticky
+   * header. A target near the document's end stops lower, where this frame's
+   * scroll runs out, which may be past the window's bottom edge. This document
+   * cannot see either edge of the window. The board can: it stays still when
+   * the target landed in its visible band, from '--head-clear' under the
+   * window top to '--head-clear' above the window bottom (window.innerHeight
+   * less '--head-clear'), and otherwise moves once, bringing the target to
+   * '--head-clear' under the top. The frame's move and the board's add up to
+   * one, and neither box scrolls twice. */
+  function scrollToAnchor(id) {
+    if (!id) return;
+    var el = elementWithId(id);
+    if (!el) {
+      // A percent-encoded fragment ('#%C3%B6versikt') names an id stored
+      // decoded, which is how a browser matches one too.
+      try { el = elementWithId(decodeURIComponent(id)); } catch (e) { /* malformed escape: no such target */ }
+    }
+    if (!el || typeof el.getBoundingClientRect !== 'function') return;
+    var box = el.getBoundingClientRect();
+    if (!box || !isFinite(box.top)) return;
+    var boxes = frameScrollBoxes(el);
+    if (!boxes.length) { post({ type: 'link', top: box.top }); return; }
+    // An inner pane first brings the target to its own top, then each box
+    // around it takes it the rest of the way, by what is left after the moves
+    // before it: the walk the browser's own scroll-into-view makes, stopped at
+    // this frame's edge.
+    var moved = 0;
+    for (var i = 0; i &lt; boxes.length; i++) moved += scrollBoxTo(boxes[i], box.top - moved);
+    post({ type: 'link', top: box.top - moved, scrolled: true });
+  }
+
+  /** The boxes inside this frame that can scroll vertically toward 'el',
+   * innermost first, empty when none can. Asked of this document's own
+   * geometry rather than told by the board, because only this side can see an
+   * app-shell's inner pane: a mock whose '100vh' main pane scrolls on its own
+   * fits its frame exactly and still has somewhere to go.
+   *
+   * Each ancestor of 'el' that holds more than it shows AND is a scroll box
+   * ('overflow-y' anything but visible or clip): a box whose content simply
+   * spills out visibly has nowhere to scroll it. Then the frame's own viewport
+   * (the scrolling element), when the document reaches past the frame's
+   * height: a folded stage, a page board, and a stage whose growth has not
+   * landed yet. 1px of slack each, since a box fitted to a rounded-up
+   * measurement can still read a pixel over. Without a computed style (the DOM
+   * stand-in has none for an inner element) no ancestor counts, the same answer
+   * as an artifact with no inner pane. */
+  function frameScrollBoxes(el) {
+    var boxes = [];
+    var root = document.scrollingElement || document.documentElement;
+    if (typeof getComputedStyle === 'function') {
+      for (var a = el.parentElement; a &amp;&amp; a !== document.documentElement; a = a.parentElement) {
+        if (a === root || !(a.scrollHeight - a.clientHeight &gt; 1)) continue;
+        var oy = '';
+        try { oy = getComputedStyle(a).getPropertyValue('overflow-y'); } catch (e) { /* unreadable: not a scroll box */ }
+        if (oy === 'auto' || oy === 'scroll' || oy === 'hidden' || oy === 'overlay') boxes.push(a);
+      }
+    }
+    if (root &amp;&amp; root.scrollHeight - root.clientHeight &gt; 1) boxes.push(root);
+    return boxes;
+  }
+
+  /** Scroll 'box' so a point 'top' down this frame's viewport lands 'bandTop'
+   * below the box's visible top, as far as the box can scroll, and return how
+   * far it moves. The viewport's visible top is 0; any other box's is its
+   * border edge plus its top border. Only the vertical offset is written, so a
+   * wide mock keeps its sideways scroll. Rounded down to a whole pixel, so the
+   * target never sits a fraction above 'bandTop', and so what this returns is
+   * where the browser actually stops. Feature-detected with 'scrollTop' as the
+   * floor, the same shape as scrollTo below. */
+  function scrollBoxTo(box, top) {
+    var root = document.scrollingElement || document.documentElement;
+    var visibleTop = 0;
+    if (box !== root) visibleTop = box.getBoundingClientRect().top + (box.clientTop || 0);
+    var from = box.scrollTop || 0;
+    var max = Math.max(0, box.scrollHeight - box.clientHeight);
+    var to = Math.floor(Math.min(max, Math.max(0, from + top - visibleTop - bandTop)));
+    if (typeof box.scrollTo === 'function') {
+      try {
+        box.scrollTo({ top: to, behavior: 'smooth' });
+        return to - from;
+      } catch (e) { /* no options form: the floor below */ }
+    }
+    box.scrollTop = to;
+    return to - from;
+  }
+
+  /** A link the reviewer clicked with comment mode off. Two outcomes and no
+   * third: an in-page anchor scrolls to its target (this document, or the
+   * board when this frame has nothing to scroll), an http/https address is
+   * handed to the board page -- which opens it in a new tab, at once, on the
+   * click that asked for it. Every other scheme
+   * ('javascript:', 'file:', 'data:', a relative path) is dropped in silence:
+   * nothing is shown and nothing is navigated.
+   *
+   * Read off getAttribute, never the resolved '.href' property. This
+   * document's base URL is the BOARD's address, so '#s1' resolves to
+   * 'http://127.0.0.1:PORT/b/&lt;id&gt;#s1' and '.href' reports it as an ordinary
+   * http link -- the in-page case would post the board's own URL to the
+   * parent instead of scrolling. The raw attribute is the one place the
+   * author's own intent survives. A protocol-relative '//host/x' therefore
+   * reads as a relative path here and opens nothing, which is the safe
+   * direction to be wrong in. */
+  function followLink(link) {
+    var href = link.getAttribute('href');
+    if (typeof href !== 'string') return;
+    href = href.trim();
+    if (href.charAt(0) === '#') { scrollToAnchor(href.slice(1)); return; }
+    var scheme = href.slice(0, 8).toLowerCase();
+    if (scheme.indexOf('http://') !== 0 &amp;&amp; scheme.indexOf('https://') !== 0) return;
+    // The parent re-validates and re-parses this before it opens anything --
+    // it never takes a stage's word for what it just sent (src/ui.mjs's
+    // stageLinkAddress).
+    post({ type: 'link', url: href });
+  }
+
+  // In comment mode a press on a video comments on the second it shows, so
+  // the video carries no native controls while the mode is on: a press on them
+  // would seek or play it and never reach this document. Measured in headless
+  // Chrome 154 and 155 with a CDP press on the timeline, which
+  // test/browser-check-video.mjs repeats: the video seeked, and no
+  // pointerdown, mousedown or click reached even a capture listener on this
+  // document, so nothing here could cancel it. Without the controls the press
+  // lands on the video itself and the click listener below takes it. A video
+  // the stage's own script gives controls while the mode is on (it adds a
+  // '&lt;video controls&gt;', or a player puts 'controls' back) loses them in the
+  // microtask after, before any press can land: a MutationObserver, connected
+  // only while the mode is on, reads an attribute change or an added element
+  // and nothing else. Only the videos taken get controls back when it ends.
+  function takeVideoControls() {
+    var videos = document.querySelectorAll('video[controls]');
+    for (var i = 0; i &lt; videos.length; i++) {
+      if (heldControls.indexOf(videos[i]) === -1) heldControls.push(videos[i]);
+      videos[i].removeAttribute('controls');
+    }
+  }
+
+  function onControlsMutation(records) {
+    for (var i = 0; i &lt; records.length; i++) {
+      var r = records[i];
+      var gained = r.type === 'attributes'
+        ? isVideo(r.target) &amp;&amp; r.target.hasAttribute('controls')
+        : Array.prototype.some.call(r.addedNodes, function (n) { return n.nodeType === 1; });
+      if (gained) { takeVideoControls(); return; }
+    }
+  }
+
+  function holdVideoControls(on) {
+    if (on) {
+      takeVideoControls();
+      if (!controlsWatch &amp;&amp; typeof MutationObserver === 'function') {
+        controlsWatch = new MutationObserver(onControlsMutation);
+        controlsWatch.observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ['controls'] });
+      }
+      return;
+    }
+    if (controlsWatch) { controlsWatch.disconnect(); controlsWatch = null; }
+    for (var j = 0; j &lt; heldControls.length; j++) heldControls[j].setAttribute('controls', '');
+    heldControls = [];
+  }
+
+  document.body.addEventListener('click', function (ev) {
+    // A link inside a stage never navigates this frame, whichever mode is on:
+    // 'srcdoc' resolves an href against the BOARD's own address, so the
+    // browser's default for '#s1' is a navigation of this frame to
+    // '/b/&lt;id&gt;#s1' -- which the page's CSP ('default-src none', no
+    // 'frame-src', inherited through srcdoc) refuses, painting Chrome's
+    // blocked page over the artifact. Cancelled here, once, ahead of both
+    // branches below: with comment mode on the click mints an anchor and does
+    // nothing else (it neither scrolls nor opens), with it off followLink
+    // decides.
+    var link = linkTarget(ev.target);
+    if (link &amp;&amp; typeof ev.preventDefault === 'function') ev.preventDefault();
+    if (!commentMode) {
+      if (link) followLink(link);
+      return;
+    }
+    var el = ev.target;
+    if (!el || el.nodeType !== 1 || el === document.body) return;
+    var steps = buildSteps(document.body, el);
+    if (!steps || !steps.length) return;
+    clearHover();
+    var click = { type: 'click', ref: stepsToPath(steps), tag: el.tagName, text: el.textContent };
+    if (isVideo(el)) {
+      // A video comment carries the second it was paused at, and the video's
+      // own name rather than its fallback text (videoIdentity). The click is
+      // cancelled so a browser that plays or pauses a video on a click on its
+      // picture cannot move the second being commented on. Headless Chrome 154
+      // measured no such toggle (a real CDP click, comment mode off): the
+      // video stayed paused either way.
+      if (typeof ev.preventDefault === 'function') ev.preventDefault();
+      click.text = videoIdentity(el.getAttribute('aria-label'), el.getAttribute('title'));
+      var second = videoSecond(el.currentTime);
+      if (second !== null) click.time = second;
+    }
+    post(click);
+  });
+
+  function resolveRef(ref) {
+    var steps = pathToSteps(ref);
+    if (!steps.length) return null;
+    return resolveSteps(document.body, steps);
+  }
+
+  // This document is the only thing that can
+  // ever know its own rendered height -- the parent cannot reach
+  // 'contentDocument' at all (PROTOCOL.md &quot;Stage postMessage channel&quot; for why the
+  // frame is opaque by design, and &quot;Origin validation&quot; for what each side checks
+  // instead),
+  // so the stage measures and reports over this same channel, the same shape
+  // as 'hover'/'positions' already use, rather than the parent ever trying to
+  // reach in for it. Every html stage sends this, standalone or nested inside
+  // a '.choice-variant' card -- renderHtmlBlock/stageAgentScript are the same
+  // function either way, and this script has no way to know which kind of
+  // card it ended up in -- so src/ui.mjs is the one that decides whether a
+  // report is acted on (applyStageHeight there: fit, fold or clip, ADR.md
+  // entry 119).
+  //
+  // WHAT it measures is the whole document, not 'document.body' alone
+  // (measureHeight, below), and the viewport's own horizontal scrollbar with
+  // it. A mock's first heading's top margin collapses through '&lt;body&gt;' and
+  // sits outside it, so a box sized to 'body.scrollHeight' came up that
+  // margin short and showed a stray inner scrollbar -- the one thing a fitted
+  // stage exists not to have. The same goes for a wide mock's sideways
+  // scrollbar, which takes its height out of the frame's own viewport.
+  //
+  // WHEN this runs matters as much as WHAT it reads, and got it wrong on the
+  // first cut: calling this synchronously (here, at script scope) measures
+  // BEFORE this document has ever been through a layout pass. Measured
+  // directly in real Chrome (a throwaway probe frame outside this repo,
+  // QUIRKS.md's &quot;Preview harness&quot;): inside a sandboxed srcdoc frame with no
+  // allow-same-origin, 'document.body.scrollHeight' reads 0 not only
+  // synchronously but at 'DOMContentLoaded', at 'load', and even a
+  // zero-delay 'setTimeout' -- there is no external subresource for 'load' to
+  // wait for, so it fires before this frame ever gets a rendering
+  // opportunity. See reportHeightAfterLayout, below, for where the real first
+  // call comes from; this function itself stays the plain, unconditional
+  // measure-and-post -- ResizeObserver (below) also calls it directly, once a
+  // real layout pass has actually happened.
+  //
+  // A NEW height is posted twice: now, and again after one more full rendering
+  // update (heightConfirm). The parent believes a height under its 320px
+  // placeholder only when two reports in a row agree, so a mock that settles
+  // short says so twice, while one measured mid-build -- a sliver before its
+  // own script has laid it out -- is followed by a different number and moves
+  // nothing.
+  var heightLast = -1;
+  var heightConfirmQueued = false;
+  function reportHeight() {
+    var h = measureHeight();
+    post({ type: 'height', height: h });
+    if (h === heightLast) return;
+    heightLast = h;
+    heightConfirm();
+  }
+  function heightConfirm() {
+    if (heightConfirmQueued || typeof requestAnimationFrame !== 'function') return;
+    heightConfirmQueued = true;
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () {
+        heightConfirmQueued = false;
+        reportHeight();
+      });
+    });
+  }
+
+  // The height a frame needs to show this whole document with no vertical
+  // scrollbar. Three readings, the largest wins:
+  //   - the root element's own box: the body plus every margin collapsed
+  //     through it, and unlike the root's scrollHeight it can come out
+  //     SHORTER than the frame, which is what lets a stage shrink to fit;
+  //   - the root's scrollHeight, but only once the document overflows the
+  //     viewport (until then it reads the viewport itself, never less): what
+  //     reaches past the root's box, a body pinned to 'height: 100%' with
+  //     content spilling out of it, say;
+  //   - the body's own scrollHeight, for content spilling out of a short body
+  //     while the document still fits.
+  // Then the horizontal scrollbar, if the viewport has one ('innerHeight'
+  // counts it, the root's 'clientHeight' does not), except for a document
+  // exactly the viewport's height: one laid out from the viewport itself (a
+  // 'min-height: 100vh' body), where 100vh is 'innerHeight' with the bar
+  // already in it. Adding the bar there asks for a frame 15px taller, which
+  // the document fills in turn, and so on up to the fold. A document of its
+  // own height that happens to land on the viewport's to the pixel is read the
+  // same way and keeps a bar's worth of vertical scroll, the cheaper miss.
+  // Rounded up, since a fraction of a pixel short is still a scrollbar. Every
+  // read is guarded: the DOM stand-in has no layout and answers 0, undefined
+  // or a fixture's declared value.
+  function measureHeight() {
+    var root = document.documentElement;
+    var body = document.body;
+    var h = 0;
+    if (root &amp;&amp; root.getBoundingClientRect) {
+      var box = root.getBoundingClientRect();
+      if (box &amp;&amp; isFinite(box.height)) h = box.height;
+    }
+    if (root &amp;&amp; root.scrollHeight &gt; root.clientHeight) h = Math.max(h, root.scrollHeight);
+    if (body &amp;&amp; body.scrollHeight &gt; h) h = body.scrollHeight;
+    var view = window.innerHeight;
+    var bar = root ? view - root.clientHeight : 0;
+    if (bar &gt; 0 &amp;&amp; root.clientHeight &gt; 0 &amp;&amp; !(Math.abs(h - view) &lt; 1)) h += bar;
+    return Math.ceil(h);
+  }
+
+  // requestAnimationFrame's callback runs as part of the SAME per-frame
+  // &quot;update the rendering&quot; step that performs style/layout for this document
+  // -- nested twice is the standard idiom for &quot;wait until layout has
+  // genuinely settled&quot;: a single rAF can still land on the frame that
+  // establishes this document's first rendering opportunity, before that
+  // opportunity's own layout has run, so by the time the SECOND callback
+  // fires, at least one full rendering update is guaranteed complete. This is
+  // the fix for the timing measured above -- 'load' doesn't tell you layout
+  // happened, rAF does. Guarded exactly like ResizeObserver below (absent
+  // from the DOM stand-in, QUIRKS.md &quot;The stand-in has no layout&quot;), and
+  // requested unconditionally at script start regardless of this document's
+  // current visibility: a real browser does not drop an outstanding
+  // requestAnimationFrame request while its page is hidden, only slows its
+  // cadence, so a stage opened into a background tab (a link opened while
+  // reading something else, say) still gets a correct report the moment it
+  // is actually looked at, with no separate visibilitychange plumbing
+  // needed. Until either this or ResizeObserver's own first delivery lands,
+  // '.html-stage''s own starting height in src/styles.mjs (320px) is what
+  // every stage shows -- see that rule's own comment.
+  function reportHeightAfterLayout() {
+    if (typeof requestAnimationFrame !== 'function') return;
+    requestAnimationFrame(function () { requestAnimationFrame(reportHeight); });
+  }
+
+  // --- scroll, the one thing the parent genuinely cannot see -----------------
+  //
+  // ADR.md entry 40: on a page board the DOCUMENT does not scroll at all -- the
+  // artifact scrolls inside this frame -- and this frame is an opaque-origin
+  // browsing context, so the parent can neither read a scrollTop from it nor
+  // observe one with an IntersectionObserver of its own. That is why scroll
+  // state is a thing agent-authored markup REPORTS, over the same channel
+  // 'height'/'click'/'hover' already use, and therefore gets the same shape
+  // check on arrival as everything else on it (src/ui.mjs's listener).
+  //
+  // ONE type, both directions, which is what keeps entry 40's &quot;one more message
+  // type&quot; literally true: outbound this says &quot;I am at this offset&quot;, inbound
+  // (the handler below) it says &quot;put me at this offset&quot; -- the back-to-top
+  // control's whole mechanism, since the parent cannot scroll this document
+  // either. 'top' is a plain number in both directions and is validated as one
+  // on both sides.
+  //
+  // A real scroll listener, deliberately: the no-scroll-handler rule
+  // (src/badge.mjs) is a rule about the BOARD page, where an
+  // IntersectionObserver can see everything a scroll handler could. Nothing can
+  // observe this document from outside it, so the listener lives here, in the
+  // one place that can see the fact. Deduplicated on the last reported value,
+  // so a scroll that ends where it began posts nothing; within a gesture the
+  // cadence is one message per scroll event, same as any native handler.
+  //
+  // WHICH ELEMENT SCROLLS IS NOT KNOWABLE UP FRONT, and assuming it is the
+  // document was a real defect, measured in Chrome 151 against an app-shell
+  // artifact (a fixed sidebar beside a 'height: 100vh; overflow-y: auto' pane,
+  // an ordinary shape for a page designed as a page). There the document never
+  // scrolls at all: 'window.scrollY' stays 0 while the frame visibly shows the
+  // third section, no 'scroll' event ever reaches 'window', so no report was
+  // ever sent -- the header never condensed and the back-to-top control never
+  // appeared -- and an inbound request moved nothing, because 'window.scrollTo'
+  // does not touch an inner pane. Read, write and listener all have to name the
+  // SAME element, and none of them can name it in advance.
+  //
+  // So the element identifies ITSELF, by scrolling. A capture-phase listener on
+  // 'document' sees a scroll of any element (a scroll event on an element does
+  // not bubble, but capture still walks down to it) as well as the viewport's
+  // own, and 'ev.target' IS the thing that moved. That target is remembered and
+  // is thereafter what gets read and what gets written -- correct by
+  // construction rather than by a heuristic scan for scrollable boxes.
+  //
+  // The ordering makes this airtight for the inbound direction too: back-to-top
+  // is only ever VISIBLE after a report, a report only ever follows a scroll
+  // event, and the scroll event is what sets 'scroller'. The control cannot be
+  // clicked before the scroller is known.
+  //
+  // ponytail: the most recently scrolled element wins. An artifact with two
+  // independent scrolling panes reports whichever the reviewer touched last,
+  // which is the one they are reading; the upgrade path, if a real artifact
+  // ever needs it, is to report the target's own ref alongside the offset.
+  var lastScrollTop = -1;
+  var scroller = null; // null means &quot;this document's viewport&quot;
+
+  function isViewportTarget(t) {
+    return !t || t === document || t === window
+      || t === document.documentElement || t === document.body;
+  }
+
+  function scrollTopNow() {
+    if (scroller) return scroller.scrollTop;
+    if (typeof window.pageYOffset === 'number') return window.pageYOffset;
+    var el = document.scrollingElement || document.documentElement || document.body;
+    return (el &amp;&amp; typeof el.scrollTop === 'number') ? el.scrollTop : 0;
+  }
+
+  function reportScroll() {
+    var top = scrollTopNow();
+    if (top === lastScrollTop) return;
+    lastScrollTop = top;
+    post({ type: 'scroll', top: top });
+  }
+
+  function onScroll(ev) {
+    scroller = isViewportTarget(ev.target) ? null : ev.target;
+    reportScroll();
+  }
+
+  /** Put this document at 'top' -- the inbound half of the one message type.
+   * Aimed at whatever last scrolled (see above), never at the viewport by
+   * assumption. Feature-detected rather than try/caught into: a 'scrollTo' that
+   * silently does nothing never throws, so a catch block is no guard at all
+   * against the case this function exists to fix -- the catch below is only for
+   * a browser that has 'scrollTo' but rejects the options object, and
+   * 'scrollTop' is the floor under both. */
+  function scrollTo(top) {
+    var target = scroller || window;
+    if (typeof target.scrollTo === 'function') {
+      try {
+        target.scrollTo({ top: top, left: 0, behavior: 'smooth' });
+        return;
+      } catch (e) { /* older two-argument signature only; fall through */ }
+      target.scrollTo(0, top);
+      return;
+    }
+    if (scroller) scroller.scrollTop = top;
+  }
+
+  /** Move this document BY 'delta' -- one wheel notch a reviewer turned over a
+   * variant card, forwarded by the parent (src/ui.mjs's wheel listener).
+   * A clipped option's stage is the one surface where no real wheel can ever
+   * reach this document at all: the frame is 'pointer-events: none' inside a
+   * '.choice-variant' card (ADR.md entry 78, unchanged by this), so the
+   * gesture lands on the card in the parent -- which cannot scroll an
+   * opaque-origin document either. Hence a message, aimed at whatever last
+   * scrolled, exactly like scrollTo above.
+   *
+   * 'auto', never the 'smooth' scrollTo uses: a notch is already the reader's
+   * own granularity, and a per-notch animation has the next notch arriving on
+   * top of an unfinished one -- the whole gesture stutters. Same
+   * feature-detection floor as scrollTo, for the same reason (a 'scrollBy'
+   * that silently does nothing never throws). */
+  function scrollByStep(delta) {
+    var target = scroller || window;
+    if (typeof target.scrollBy === 'function') {
+      try {
+        target.scrollBy({ top: delta, left: 0, behavior: 'auto' });
+        return;
+      } catch (e) { /* older two-argument signature only; fall through */ }
+      target.scrollBy(0, delta);
+      return;
+    }
+    if (scroller) { scroller.scrollTop += delta; return; }
+    if (typeof target.scrollTo === 'function') target.scrollTo(0, scrollTopNow() + delta);
+  }
+
+  // The board tells this document its theme, so a rendered artifact needs no
+  // theme control of its own. The parent resolves its own three-state control
+  // (light / dark / the attribute's ABSENCE, meaning System) down to a concrete
+  // 'light' or 'dark' before sending -- see src/ui.mjs's activeTheme -- so this
+  // side never queries a media it would then have to re-query on every OS flip.
+  // 'data-theme' on &lt;html&gt; is the same attribute src/styles.mjs keys the board's
+  // own palette off, so a template that already themes itself needs no new
+  // vocabulary.
+  //
+  // The attribute is ALL this sets. 'color-scheme' stays whatever the artifact
+  // made it, which for one that sets no colour is the light scheme, in a dark
+  // board too: the artboard behind this document is a light neutral in both
+  // palettes, and the frame it renders in is declared 'color-scheme: light' to
+  // match (src/styles.mjs's '.html-stage' and '.stage-lens-frame'). So the UA's
+  // default ink here is always the light scheme's: black text, the #0000ee link
+  // blue, light form controls and scrollbars. Measured in real Chrome on the
+  // dark artboard (#c3c6cd): stamping the board's scheme on this root turns that
+  // ink white, 1.71:1, and the link #9e9eff, 1.40:1; black reads 12.28:1 and
+  // the link blue 5.50:1. An artifact that paints a dark palette of its own
+  // under [data-theme=&quot;dark&quot;] declares 'color-scheme: dark' there itself, which
+  // darkens its controls and scrollbars and, where it paints no background, puts
+  // the UA's dark canvas under its light ink in place of the artboard.
+  function applyTheme(theme) {
+    var root = document.documentElement;
+    if (!root) return;
+    try {
+      root.setAttribute('data-theme', theme);
+    } catch (e) { /* nothing to theme; the artifact keeps its own colours */ }
+  }
+
+  window.addEventListener('message', function (ev) {
+    // See PROTOCOL.md &quot;Origin validation&quot;, last bullet, for why identity and not
+    // an origin string is the correct and sufficient check on this side of the
+    // channel.
+    if (ev.source !== window.parent) return;
+    var data = ev.data;
+    if (!data || typeof data !== 'object' || data.cb !== CB || typeof data.type !== 'string') return;
+    if (data.type === 'mode') {
+      commentMode = !!data.commentMode;
+      // 'sentRefs' widens this message (still 'mode',
+      // not a new type -- sent-ness is exactly the kind of fact that matters
+      // precisely when mode changes). Shape-checked like every other field this
+      // channel carries: an absent or malformed list leaves 'sentRefs'
+      // whatever it already was, rather than guessing or throwing, and a
+      // non-string entry is dropped rather than compared against later.
+      if (Array.isArray(data.sentRefs)) {
+        sentRefs = data.sentRefs.filter(function (r) { return typeof r === 'string'; });
+      }
+      // 'sentTimes' widens it the same way, and is checked the same way: an
+      // entry is kept only as a string ref beside a second videoSecond keeps
+      // unchanged.
+      if (Array.isArray(data.sentTimes)) {
+        sentTimes = data.sentTimes.filter(function (s) {
+          return !!s &amp;&amp; typeof s.ref === 'string' &amp;&amp; videoSecond(s.time) === s.time;
+        }).map(function (s) { return { ref: s.ref, time: s.time }; });
+      }
+      // 'theme' widens this message the same way 'sentRefs' above already does
+      // (over the channel that already carries comment mode), rather than
+      // minting a type of its own: same tolerance, same
+      // convention. An absent or unrecognised value leaves this document's
+      // theme exactly as it was, so a stage that is never told stays on
+      // whatever its own markup chose.
+      if (data.theme === 'light' || data.theme === 'dark') applyTheme(data.theme);
+      if (commentMode) ensureHoverStyle(); else clearHover();
+      holdVideoControls(commentMode);
+      return;
+    }
+    if (data.type === 'scroll') {
+      // The inbound half of the one type (see reportScroll above): the parent's
+      // back-to-top control asking this document to go somewhere, since it
+      // cannot scroll this document itself. Shape-checked before it reaches
+      // anything -- a non-finite 'top' is exactly the kind of value that would
+      // otherwise be handed to scrollTo.
+      if (typeof data.top !== 'number' || !isFinite(data.top)) return;
+      scrollTo(data.top);
+      return;
+    }
+    if (data.type === 'scrollBy') {
+      // Parent -&gt; stage only, no outbound half: a wheel notch turned over a
+      // clipped variant card, which is a gesture this document can never
+      // receive on its own (scrollByStep's own comment above). Relative, not
+      // absolute, deliberately -- the parent knows how far the reviewer just
+      // turned, never where this document currently is; the offset is this
+      // side's fact, and the browser clamps it at both ends for free.
+      // Shape-checked the same way every other inbound number on this channel
+      // is.
+      if (typeof data.delta !== 'number' || !isFinite(data.delta)) return;
+      scrollByStep(data.delta);
+      return;
+    }
+    if (data.type === 'band') {
+      // Parent -&gt; stage only, no outbound half: the board telling this
+      // document how tall its own chrome bands are right now (ADR 59).
+      // Shape-checked the same way every other inbound number on
+      // this channel is -- a non-finite or negative value never reaches
+      // applyBand, which would otherwise hand it straight to a style
+      // property.
+      if (typeof data.top !== 'number' || !isFinite(data.top) || data.top &lt; 0) return;
+      if (typeof data.bottom !== 'number' || !isFinite(data.bottom) || data.bottom &lt; 0) return;
+      applyBand(data.top, data.bottom);
+      reportModal();
+      return;
+    }
+    if (data.type === 'height') {
+      // The inbound half: the parent asking for a report now. A frame the
+      // window does not show gets no animation frame and no ResizeObserver
+      // delivery, so its first report has not left; a message still reaches
+      // it, and measuring lays the document out.
+      reportHeight();
+      return;
+    }
+    if (data.type === 'locate') {
+      if (typeof data.requestId !== 'string' || !Array.isArray(data.refs)) return;
+      // Answered in THIS FRAME'S VIEWPORT coordinates: the element's own client
+      // rect, read straight off getBoundingClientRect with nothing subtracted.
+      // The pin layer overlays the frame's viewport, so the old &quot;minus the body
+      // box&quot; shape was a document coordinate answering a viewport question --
+      // the two agree only at scroll 0 and only for a marginless body, and they
+      // agree for exactly one scroller: the body box moves with whichever
+      // element actually scrolled (QUIRKS.md &quot;The thing that scrolls a rendered
+      // artifact is often not its document&quot;), while the layer stays where it
+      // was. The raw client rect is correct for every scroller at once, with no
+      // offset to remember. An element scrolled out of the frame reports a
+      // position outside the frame's box, which the layer's own overflow clip
+      // (src/styles.mjs .pin-layer) hides rather than drawing over the chrome;
+      // it comes back on its own when the element scrolls back in.
+      var positions = {};
+      for (var i = 0; i &lt; data.refs.length; i++) {
+        var ref = data.refs[i];
+        if (typeof ref !== 'string') continue;
+        var el = resolveRef(ref);
+        if (el &amp;&amp; el.getBoundingClientRect) {
+          var box = el.getBoundingClientRect();
+          positions[ref] = { left: box.left, top: box.top };
+        } else {
+          positions[ref] = null;
+        }
+      }
+      post({ type: 'positions', requestId: data.requestId, positions: positions });
+      return;
+    }
+  });
+
+  reportHeightAfterLayout();
+  // Keeps the report tracking a mock whose content changes size AFTER first
+  // paint (an image loading in, a toggle revealing more copy) -- guarded
+  // exactly the way src/ui.mjs's setupSendBarDock guards
+  // 'IntersectionObserver' (QUIRKS.md &quot;The stand-in has no layout&quot;): this
+  // repo's DOM stand-in defines neither this nor requestAnimationFrame, so
+  // neither the first, layout-deferred report nor a later resize-driven one
+  // is directly exerciseable there -- see QUIRKS.md's new entry on this
+  // feature's own measurement for what that leaves untestable, and
+  // test/check-pure.mjs's stubbed requestAnimationFrame for how far the
+  // stand-in check goes anyway (the real entry point, not a fabricated
+  // scrollHeight fed straight into reportHeight).
+  // The root is observed beside the body because the root's box is what
+  // measureHeight reads first: a margin collapsing through the body moves the
+  // root and leaves the body's own box exactly as it was.
+  if (typeof ResizeObserver === 'function') {
+    var heightObserver = new ResizeObserver(reportHeight);
+    heightObserver.observe(document.body);
+    if (document.documentElement) heightObserver.observe(document.documentElement);
+  }
+  // Capture phase, on 'document', is what makes this one listener see BOTH the
+  // viewport's own scroll and an inner pane's -- an element's scroll event does
+  // not bubble, so a plain 'window' listener is blind to exactly the artifact
+  // shape that broke this (see onScroll's own comment above).
+  document.addEventListener('scroll', onScroll, true);
+  // A full-size view the mock opens over itself: a modal dialog that runs to
+  // this frame's top edge, where it keeps its own bar, and where on a page
+  // board the board's top strip floats ('bandTop', which stays 0 anywhere
+  // else). The parent cannot see into this document, so the stage says when
+  // such a dialog reaches into that band and when the last one has left it,
+  // and the board takes its strip away meanwhile (src/ui.mjs). A dialog that
+  // stays clear of the band, a small one centred in the mock, reports nothing
+  // and keeps the strip. showModal() and close() both move the dialog's
+  // 'open' attribute, so one observer on it sees every dialog, one added
+  // later too; the band and the window changing size re-ask.
+  var modalOpen = false;
+  function reportModal() {
+    var open = false;
+    try {
+      var views = document.querySelectorAll('dialog:modal');
+      for (var i = 0; i &lt; views.length &amp;&amp; !open; i++) open = views[i].getBoundingClientRect().top &lt; bandTop;
+    } catch (e) { /* no ':modal' here: nothing to report */ }
+    if (open === modalOpen) return;
+    modalOpen = open;
+    post({ type: 'modal', open: open });
+  }
+  if (typeof MutationObserver === 'function') {
+    new MutationObserver(reportModal).observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ['open'] });
+  }
+  window.addEventListener('resize', reportModal);
+  post({ type: 'ready' });
+})();&lt;/script&gt;"></iframe>
+    <div class="pin-layer" data-block-id="h5"></div>
+    <button type="button" class="pull-out" data-pull-out-for="h5" aria-label="Open this stage full size" title="Open full size"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6"/><path d="M10 20H4v-6"/><path d="M20 4l-7 7"/><path d="M4 20l7-7"/></svg></button>
+  </div><div class="stage-fold"><button type="button" class="stage-fold-toggle" aria-expanded="false">Show full height</button></div><div class="context-tools"><button type="button" class="comment-btn" data-block-id="h5" data-anchor-kind="block"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>comment</button></div>
+    <div class="comment-target" id="comment-target-h5">commenting on: whole block</div>
+    <form class="comment-form" id="comment-form-h5" data-block-id="h5" data-anchor-kind="block">
+      <div class="comment-form-col">
+        <input type="text" placeholder="Add a comment" disabled>
+        
+      </div>
+      <button type="submit" disabled>Add</button>
+    </form>
+    <div class="comment-list" id="comment-list-h5"></div></div></div>
     <ul class="rank-list" data-question-id="q4"><li draggable="false" data-choice="High-contrast">
       <span class="rank-index">1</span>
       <span class="rank-grip" aria-hidden="true"><svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg></span>
@@ -3503,8 +5562,8 @@
       <span class="opt-desc">Compact, single line</span>
     </div>
     
-<section class="block html-block" data-block-id="h4" data-block-kind="html">
-  <div class="card-head"><button type="button" class="comment-btn" data-block-id="h4" data-anchor-kind="block"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>comment</button></div>
+<section class="block html-block" data-block-id="h6" data-block-kind="html">
+  <div class="card-head"><button type="button" class="comment-btn" data-block-id="h6" data-anchor-kind="block"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>comment</button></div>
   <div class="stage-wrap">
     <iframe class="html-stage" sandbox="allow-scripts" data-sha="f9a5a0eae4bfb8e37f564df601089bf20340fd0664dc81f55ce23de254ede822" srcdoc="&lt;style&gt;html,body{margin:0;padding:0}&lt;/style&gt;&lt;style&gt;
   body { margin: 0; padding: 16px 0; font-family: system-ui, sans-serif; }
@@ -4497,21 +6556,21 @@
   window.addEventListener('resize', reportModal);
   post({ type: 'ready' });
 })();&lt;/script&gt;"></iframe>
-    <div class="pin-layer" data-block-id="h4"></div>
-    <button type="button" class="pull-out" data-pull-out-for="h4" aria-label="Open this stage full size" title="Open full size"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6"/><path d="M10 20H4v-6"/><path d="M20 4l-7 7"/><path d="M4 20l7-7"/></svg></button>
+    <div class="pin-layer" data-block-id="h6"></div>
+    <button type="button" class="pull-out" data-pull-out-for="h6" aria-label="Open this stage full size" title="Open full size"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6"/><path d="M10 20H4v-6"/><path d="M20 4l-7 7"/><path d="M4 20l7-7"/></svg></button>
   </div>
   
   
   
-    <div class="comment-target" id="comment-target-h4">commenting on: whole block</div>
-    <form class="comment-form" id="comment-form-h4" data-block-id="h4" data-anchor-kind="block">
+    <div class="comment-target" id="comment-target-h6">commenting on: whole block</div>
+    <form class="comment-form" id="comment-form-h6" data-block-id="h6" data-anchor-kind="block">
       <div class="comment-form-col">
         <input type="text" placeholder="Add a comment" disabled>
         
       </div>
       <button type="submit" disabled>Add</button>
     </form>
-    <div class="comment-list" id="comment-list-h4"></div>
+    <div class="comment-list" id="comment-list-h6"></div>
 </section>
   </div><div class="variant-card choice-variant variant-card--stage" role="button" tabindex="-1" aria-disabled="true" data-question-id="q5" data-choice="Layout B">
     <div class="variant-label">
@@ -4519,8 +6578,8 @@
       <span class="opt-desc">Spacious, three lines</span>
     </div>
     
-<section class="block html-block" data-block-id="h5" data-block-kind="html">
-  <div class="card-head"><button type="button" class="comment-btn" data-block-id="h5" data-anchor-kind="block"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>comment</button></div>
+<section class="block html-block" data-block-id="h7" data-block-kind="html">
+  <div class="card-head"><button type="button" class="comment-btn" data-block-id="h7" data-anchor-kind="block"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>comment</button></div>
   <div class="stage-wrap">
     <iframe class="html-stage" sandbox="allow-scripts" data-sha="ae7daf4d634328cacbb56dbdd5a5c4451e4a93dfc4b032a54c4b478386cbd39c" srcdoc="&lt;style&gt;html,body{margin:0;padding:0}&lt;/style&gt;&lt;style&gt;
   body { margin: 0; padding: 16px 0; font-family: system-ui, sans-serif; }
@@ -5518,21 +7577,21 @@
   window.addEventListener('resize', reportModal);
   post({ type: 'ready' });
 })();&lt;/script&gt;"></iframe>
-    <div class="pin-layer" data-block-id="h5"></div>
-    <button type="button" class="pull-out" data-pull-out-for="h5" aria-label="Open this stage full size" title="Open full size"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6"/><path d="M10 20H4v-6"/><path d="M20 4l-7 7"/><path d="M4 20l7-7"/></svg></button>
+    <div class="pin-layer" data-block-id="h7"></div>
+    <button type="button" class="pull-out" data-pull-out-for="h7" aria-label="Open this stage full size" title="Open full size"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6"/><path d="M10 20H4v-6"/><path d="M20 4l-7 7"/><path d="M4 20l7-7"/></svg></button>
   </div>
   
   
   
-    <div class="comment-target" id="comment-target-h5">commenting on: whole block</div>
-    <form class="comment-form" id="comment-form-h5" data-block-id="h5" data-anchor-kind="block">
+    <div class="comment-target" id="comment-target-h7">commenting on: whole block</div>
+    <form class="comment-form" id="comment-form-h7" data-block-id="h7" data-anchor-kind="block">
       <div class="comment-form-col">
         <input type="text" placeholder="Add a comment" disabled>
         
       </div>
       <button type="submit" disabled>Add</button>
     </form>
-    <div class="comment-list" id="comment-list-h5"></div>
+    <div class="comment-list" id="comment-list-h7"></div>
 </section>
   </div></div>
   </div>
@@ -5566,7 +7625,7 @@
     <button type="button" class="btn-send" id="send-btn" disabled>Send</button>
   </div>
 </div>
-<script id="board-data" type="application/json">{"id":"b_00112233445566778899aabbccddeeff","thread":"th_01234567","title":"feature/kitchen-routing-v2","createdAt":"2026-07-14T09:12:00.000Z","updatedAt":"2026-07-15T10:31:00.000Z","state":"submitted","rounds":[{"n":1,"postedAt":"2026-07-14T09:12:00.000Z","status":"open","sentAt":null,"title":"feature/kitchen-routing-v2","awaited":false,"awaitDeadline":null},{"n":2,"postedAt":"2026-07-15T10:05:00.000Z","status":"sent","sentAt":"2026-07-15T10:31:00.000Z","title":"Routing walkthrough","awaited":true,"awaitDeadline":"2026-07-15T10:45:00.000Z","action":"submitted"}],"blocks":[{"round":1,"id":"h1","kind":"html","source":null,"sha":"e66bfc1cdc4d618e4e0813f9628a8f013292841fadcb16cd7eca5cbf20f6165f"},{"round":2,"id":"d1","kind":"markdown","source":null,"text":"# Order-routing redesign\n\nThe kitchen display one page back is the mockup. Three things change for the pass, and the routing rewrite underneath them is what this round is asking about:\n\n- Fewer manual status updates per ticket\n- A single \"Ready for pickup\" state visible to front-of-house\n- Rush tickets float to the top automatically\n\nThe payload each station receives on a status transition:\n\n```json\n{\n  \"ticketId\": 482,\n  \"status\": \"ready_for_pickup\",\n  \"notifiedStations\": [\"grill\", \"expo\"]\n}\n```\n\n| Station | Avg. ticket time (today) | Avg. ticket time (proposed) |\n| --- | --- | --- |\n| Grill | 46s | 33s |\n| Salad | 28s | 24s |\n| Expo | 19s | 15s |","sha":"30f276f0b30161582322dcef1c9a3c4466f1619e8f63611f292a5a08d3b6b303","html":"\u003ch1 id=\"order-routing-redesign\">Order-routing redesign\u003c/h1>\u003cp>The kitchen display one page back is the mockup. Three things change for the pass, and the routing rewrite underneath them is what this round is asking about:\u003c/p>\u003cul>\u003cli id=\"order-routing-redesign-li1\">Fewer manual status updates per ticket\u003c/li>\u003cli id=\"order-routing-redesign-li2\">A single \"Ready for pickup\" state visible to front-of-house\u003c/li>\u003cli id=\"order-routing-redesign-li3\">Rush tickets float to the top automatically\u003c/li>\u003c/ul>\u003cp>The payload each station receives on a status transition:\u003c/p>\u003cdiv class=\"fence-lang\" data-lang=\"json\">\u003cpre>\u003ccode>{\n  \"ticketId\": \u003cspan class=\"tok-number\">482\u003c/span>,\n  \"status\": \u003cspan class=\"tok-string\">\"ready_for_pickup\"\u003c/span>,\n  \"notifiedStations\": [\u003cspan class=\"tok-string\">\"grill\"\u003c/span>, \u003cspan class=\"tok-string\">\"expo\"\u003c/span>]\n}\u003c/code>\u003c/pre>\u003c/div>\u003cdiv class=\"table-scroll\">\u003ctable>\u003ctr>\u003cth>Station\u003c/th>\u003cth>Avg. ticket time (today)\u003c/th>\u003cth>Avg. ticket time (proposed)\u003c/th>\u003c/tr>\u003ctr>\u003ctd>Grill\u003c/td>\u003ctd>46s\u003c/td>\u003ctd>33s\u003c/td>\u003c/tr>\u003ctr>\u003ctd>Salad\u003c/td>\u003ctd>28s\u003c/td>\u003ctd>24s\u003c/td>\u003c/tr>\u003ctr>\u003ctd>Expo\u003c/td>\u003ctd>19s\u003c/td>\u003ctd>15s\u003c/td>\u003c/tr>\u003c/table>\u003c/div>","anchors":[{"kind":"md","ref":"order-routing-redesign","label":"Order-routing redesign"},{"kind":"md","ref":"order-routing-redesign-li1","label":"Fewer manual status updates per ticket"},{"kind":"md","ref":"order-routing-redesign-li2","label":"A single \"Ready for pickup\" state visible to front-of-house"},{"kind":"md","ref":"order-routing-redesign-li3","label":"Rush tickets float to the top automatically"}]},{"round":2,"id":"m1","kind":"mermaid","source":null,"text":"flowchart LR\n  Placed[Order placed] --> Prepping[In prep] --> Ready[Ready for pickup] --> Served[Served]","sha":"0730e47488c90846e75d0577056f696c04cc7c4c4e64ad7a16ddc98d6ddba561"},{"round":2,"id":"c1","kind":"code","source":null,"text":"function priorityScore(ticket) {\n  const waitMs = Date.now() - ticket.placedAt;\n  const rushBonus = ticket.rush ? 500 : 0;\n  return waitMs + rushBonus;\n}","sha":"6e558853c35e89523f1588343da1ee9b1238bcb0df3d25b321582daa452fb690","lang":"javascript"},{"round":2,"id":"c2","kind":"code","source":null,"text":"--- a/routing.js\n+++ b/routing.js\n@@ -1,5 +1,7 @@\n function priorityScore(ticket) {\n   const waitMs = Date.now() - ticket.placedAt;\n   const rushBonus = ticket.rush ? 500 : 0;\n-  return waitMs + rushBonus;\n+  const recallBonus = ticket.recalled ? 1500 : 0;\n+  return waitMs + rushBonus + recallBonus;\n }","sha":"8144b07ac5240a2448b9475511c377247c069376848e0f05a115ac0f1ab61679","lang":"diff"},{"round":2,"id":"x1","kind":"compare","left":{"label":"Before","block":{"round":2,"id":"h2","kind":"html","source":null,"sha":"d2f4bf94fc4f9fb3efc463751e1b1558f6c726ee18d6c6cb32ce16e89d5afe7e"}},"right":{"label":"After","block":{"round":2,"id":"h3","kind":"html","source":null,"sha":"22d5a3e98bc92a5b3b0c9b31e3d273cdc5e44418a219e1c6e2c2e3c1d67d359c"}}},{"round":2,"id":"q1","kind":"question","prompt":"Does the kitchen display in round 1 match the routing flow (Placed -> In prep -> Ready -> Served) we discussed?","explainer":"This decides whether round 1's mockup ships as drawn. A tweak here changes the display only; the routing rewrite underneath it ships either way.","explainerHtml":"\u003cp>This decides whether round 1's mockup ships as drawn. A tweak here changes the display only; the routing rewrite underneath it ships either way.\u003c/p>","context":[{"round":2,"id":"d2","kind":"markdown","source":null,"text":"Background: average ticket time today is 31 seconds across the three prep stations (grill, salad, expo).","sha":"05178d55126abc3fe8e2f881c14f407099dbd591085b71844695445ef041d892","html":"\u003cp>Background: average ticket time today is 31 seconds across the three prep stations (grill, salad, expo).\u003c/p>","anchors":[]}],"widget":"single","options":[{"label":"Yes, ship it","description":"","preview":null},{"label":"Close, one tweak needed","description":"","preview":null},{"label":"No, rework it","description":"","preview":null}]},{"round":2,"id":"q2","kind":"question","prompt":"Which stations need their ticket displays updated to match the round 1 mockup?","context":[],"widget":"multi","options":[{"label":"Grill","description":"","preview":null},{"label":"Salad","description":"","preview":null},{"label":"Expo","description":"","preview":null},{"label":"Bar","description":"","preview":null},{"label":"None of these","description":"","preview":null}]},{"round":2,"id":"q3","kind":"question","prompt":"Anything else the kitchen team should flag before we ship?","context":[],"widget":"text","options":[]},{"round":2,"id":"q4","kind":"question","prompt":"Rank these three palettes for the status chips (In prep / Rush / Ready for pickup) by legibility under kitchen pass lighting, most legible first. The display one page back uses the first of them.","context":[],"widget":"rank","options":[{"label":"High-contrast","description":"","preview":null},{"label":"Pastel","description":"","preview":null},{"label":"Monochrome","description":"","preview":null}]},{"round":2,"id":"q5","kind":"question","prompt":"Which ticket-card layout reads faster at a glance?","context":[],"widget":"choose-between-rendered-variants","options":[{"label":"Layout A","description":"Compact, single line","block":{"round":2,"id":"h4","kind":"html","source":null,"sha":"f9a5a0eae4bfb8e37f564df601089bf20340fd0664dc81f55ce23de254ede822"}},{"label":"Layout B","description":"Spacious, three lines","block":{"round":2,"id":"h5","kind":"html","source":null,"sha":"ae7daf4d634328cacbb56dbdd5a5c4451e4a93dfc4b032a54c4b478386cbd39c"}}]}],"answers":{"q1":{"id":"q1","status":"answered","choice":"Close, one tweak needed","note":"Add a Recall step from Ready back to Prepping for remakes."},"q2":{"id":"q2","status":"answered","choice":["Grill","Expo"],"note":"Bar can wait until next sprint."},"q3":{"id":"q3","status":"answered","choice":"Make sure the Recall state also resets the rush-bonus timer, or repeat rush tickets will always sort to the top.","note":""},"q4":{"id":"q4","status":"answered","choice":["High-contrast","Monochrome","Pastel"],"note":"Pastel washes out completely under the heat-lamp lighting."},"q5":{"id":"q5","status":"answered","choice":"Layout A","note":""}},"comments":[{"n":1,"blockId":"m1","blockKind":"mermaid","anchor":{"kind":"block"},"text":"This matches the walkthrough from Tuesday's stand-up. Nice work.","round":2,"createdAt":"2026-07-15T10:31:00.000Z","resolved":true},{"n":2,"blockId":"h1","blockKind":"html","anchor":{"kind":"dom","ref":"1.2.1.3.1","hint":"Confirm"},"text":"Consider making this button say 'Confirm order' for clarity.","round":2,"createdAt":"2026-07-15T10:31:00.000Z","resolved":true},{"n":3,"blockId":"m1","blockKind":"mermaid","anchor":{"kind":"mermaid","ref":"Ready"},"text":"Should Ready also branch to a Recall state if an item comes back?","round":2,"createdAt":"2026-07-15T10:31:00.000Z","resolved":true}]}</script>
-<script defer src="ui-3aa4f80a91aec36f.js"></script>
+<script id="board-data" type="application/json">{"id":"b_00112233445566778899aabbccddeeff","thread":"th_01234567","title":"feature/kitchen-routing-v2","createdAt":"2026-07-14T09:12:00.000Z","updatedAt":"2026-07-15T10:31:00.000Z","state":"submitted","rounds":[{"n":1,"postedAt":"2026-07-14T09:12:00.000Z","status":"open","sentAt":null,"title":"feature/kitchen-routing-v2","awaited":false,"awaitDeadline":null},{"n":2,"postedAt":"2026-07-15T10:05:00.000Z","status":"sent","sentAt":"2026-07-15T10:31:00.000Z","title":"Routing walkthrough","awaited":true,"awaitDeadline":"2026-07-15T10:45:00.000Z","action":"submitted"}],"blocks":[{"round":1,"id":"h1","kind":"html","source":null,"sha":"e66bfc1cdc4d618e4e0813f9628a8f013292841fadcb16cd7eca5cbf20f6165f"},{"round":2,"id":"d1","kind":"markdown","source":null,"text":"# Order-routing redesign\n\nThree things change for the pass. This round asks about the routing rewrite underneath them and the ticket that shows it:\n\n- Fewer manual status updates per ticket\n- A single \"Ready for pickup\" state visible to front-of-house\n- Rush tickets float to the top automatically\n\nThe payload each station receives on a status transition:\n\n```json\n{\n  \"ticketId\": 482,\n  \"status\": \"ready_for_pickup\",\n  \"notifiedStations\": [\"grill\", \"expo\"]\n}\n```\n\n| Station | Avg. ticket time (today) | Avg. ticket time (proposed) |\n| --- | --- | --- |\n| Grill | 46s | 33s |\n| Salad | 28s | 24s |\n| Expo | 19s | 15s |","sha":"01aa0b12a2e3f11625684927462801aff3d549fc9d772d70ab68e0a567c6fde1","html":"\u003ch1 id=\"order-routing-redesign\">Order-routing redesign\u003c/h1>\u003cp>Three things change for the pass. This round asks about the routing rewrite underneath them and the ticket that shows it:\u003c/p>\u003cul>\u003cli id=\"order-routing-redesign-li1\">Fewer manual status updates per ticket\u003c/li>\u003cli id=\"order-routing-redesign-li2\">A single \"Ready for pickup\" state visible to front-of-house\u003c/li>\u003cli id=\"order-routing-redesign-li3\">Rush tickets float to the top automatically\u003c/li>\u003c/ul>\u003cp>The payload each station receives on a status transition:\u003c/p>\u003cdiv class=\"fence-lang\" data-lang=\"json\">\u003cpre>\u003ccode>{\n  \"ticketId\": \u003cspan class=\"tok-number\">482\u003c/span>,\n  \"status\": \u003cspan class=\"tok-string\">\"ready_for_pickup\"\u003c/span>,\n  \"notifiedStations\": [\u003cspan class=\"tok-string\">\"grill\"\u003c/span>, \u003cspan class=\"tok-string\">\"expo\"\u003c/span>]\n}\u003c/code>\u003c/pre>\u003c/div>\u003cdiv class=\"table-scroll\">\u003ctable>\u003ctr>\u003cth>Station\u003c/th>\u003cth>Avg. ticket time (today)\u003c/th>\u003cth>Avg. ticket time (proposed)\u003c/th>\u003c/tr>\u003ctr>\u003ctd>Grill\u003c/td>\u003ctd>46s\u003c/td>\u003ctd>33s\u003c/td>\u003c/tr>\u003ctr>\u003ctd>Salad\u003c/td>\u003ctd>28s\u003c/td>\u003ctd>24s\u003c/td>\u003c/tr>\u003ctr>\u003ctd>Expo\u003c/td>\u003ctd>19s\u003c/td>\u003ctd>15s\u003c/td>\u003c/tr>\u003c/table>\u003c/div>","anchors":[{"kind":"md","ref":"order-routing-redesign","label":"Order-routing redesign"},{"kind":"md","ref":"order-routing-redesign-li1","label":"Fewer manual status updates per ticket"},{"kind":"md","ref":"order-routing-redesign-li2","label":"A single \"Ready for pickup\" state visible to front-of-house"},{"kind":"md","ref":"order-routing-redesign-li3","label":"Rush tickets float to the top automatically"}]},{"round":2,"id":"m1","kind":"mermaid","source":null,"text":"flowchart LR\n  Placed[Order placed] --> Prepping[In prep] --> Ready[Ready for pickup] --> Served[Served]","sha":"0730e47488c90846e75d0577056f696c04cc7c4c4e64ad7a16ddc98d6ddba561"},{"round":2,"id":"c1","kind":"code","source":null,"text":"function priorityScore(ticket) {\n  const waitMs = Date.now() - ticket.placedAt;\n  const rushBonus = ticket.rush ? 500 : 0;\n  return waitMs + rushBonus;\n}","sha":"6e558853c35e89523f1588343da1ee9b1238bcb0df3d25b321582daa452fb690","lang":"javascript"},{"round":2,"id":"c2","kind":"code","source":null,"text":"--- a/routing.js\n+++ b/routing.js\n@@ -1,5 +1,7 @@\n function priorityScore(ticket) {\n   const waitMs = Date.now() - ticket.placedAt;\n   const rushBonus = ticket.rush ? 500 : 0;\n-  return waitMs + rushBonus;\n+  const recallBonus = ticket.recalled ? 1500 : 0;\n+  return waitMs + rushBonus + recallBonus;\n }","sha":"8144b07ac5240a2448b9475511c377247c069376848e0f05a115ac0f1ab61679","lang":"diff"},{"round":2,"id":"x1","kind":"compare","left":{"label":"Before","block":{"round":2,"id":"h2","kind":"html","source":null,"sha":"d2f4bf94fc4f9fb3efc463751e1b1558f6c726ee18d6c6cb32ce16e89d5afe7e"}},"right":{"label":"After","block":{"round":2,"id":"h3","kind":"html","source":null,"sha":"22d5a3e98bc92a5b3b0c9b31e3d273cdc5e44418a219e1c6e2c2e3c1d67d359c"}}},{"round":2,"id":"q1","kind":"question","prompt":"Does the redesigned ticket match the routing flow (Placed -> In prep -> Ready -> Served) we discussed?","explainer":"This decides whether the ticket ships as drawn. A tweak here changes the display only; the routing rewrite underneath it ships either way.","explainerHtml":"\u003cp>This decides whether the ticket ships as drawn. A tweak here changes the display only; the routing rewrite underneath it ships either way.\u003c/p>","context":[{"round":2,"id":"h4","kind":"html","source":null,"sha":"9d0ad678b12596af38759fb6939c55383200e962827a32b06870b935ad86d709"}],"widget":"single","options":[{"label":"Yes, ship it","description":"","preview":null},{"label":"Close, one tweak needed","description":"","preview":null},{"label":"No, rework it","description":"","preview":null}]},{"round":2,"id":"q2","kind":"question","prompt":"Which stations get the redesigned ticket?","context":[{"round":2,"id":"d2","kind":"markdown","source":null,"text":"Background: average ticket time today is 31 seconds across the three prep stations (grill, salad, expo).","sha":"05178d55126abc3fe8e2f881c14f407099dbd591085b71844695445ef041d892","html":"\u003cp>Background: average ticket time today is 31 seconds across the three prep stations (grill, salad, expo).\u003c/p>","anchors":[]}],"widget":"multi","options":[{"label":"Grill","description":"","preview":null},{"label":"Salad","description":"","preview":null},{"label":"Expo","description":"","preview":null},{"label":"Bar","description":"","preview":null},{"label":"None of these","description":"","preview":null}]},{"round":2,"id":"q3","kind":"question","prompt":"Anything else the kitchen team should flag before we ship?","context":[],"widget":"text","options":[]},{"round":2,"id":"q4","kind":"question","prompt":"Rank these three palettes for the status chips (In prep / Rush / Ready for pickup) by legibility under kitchen pass lighting, most legible first.","context":[{"round":2,"id":"h5","kind":"html","source":null,"sha":"1c0e0cece57adbad19130c165d8e4def5b917cc8202ed9e9b2f3063368abcc5d"}],"widget":"rank","options":[{"label":"High-contrast","description":"","preview":null},{"label":"Pastel","description":"","preview":null},{"label":"Monochrome","description":"","preview":null}]},{"round":2,"id":"q5","kind":"question","prompt":"Which ticket-card layout reads faster at a glance?","context":[],"widget":"choose-between-rendered-variants","options":[{"label":"Layout A","description":"Compact, single line","block":{"round":2,"id":"h6","kind":"html","source":null,"sha":"f9a5a0eae4bfb8e37f564df601089bf20340fd0664dc81f55ce23de254ede822"}},{"label":"Layout B","description":"Spacious, three lines","block":{"round":2,"id":"h7","kind":"html","source":null,"sha":"ae7daf4d634328cacbb56dbdd5a5c4451e4a93dfc4b032a54c4b478386cbd39c"}}]}],"answers":{"q1":{"id":"q1","status":"answered","choice":"Close, one tweak needed","note":"Add a Recall step from Ready back to Prepping for remakes."},"q2":{"id":"q2","status":"answered","choice":["Grill","Expo"],"note":"Bar can wait until next sprint."},"q3":{"id":"q3","status":"answered","choice":"Make sure the Recall state also resets the rush-bonus timer, or repeat rush tickets will always sort to the top.","note":""},"q4":{"id":"q4","status":"answered","choice":["High-contrast","Monochrome","Pastel"],"note":"Pastel washes out completely under the heat-lamp lighting."},"q5":{"id":"q5","status":"answered","choice":"Layout A","note":""}},"comments":[{"n":1,"blockId":"m1","blockKind":"mermaid","anchor":{"kind":"block"},"text":"This matches the walkthrough from Tuesday's stand-up. Nice work.","round":2,"createdAt":"2026-07-15T10:31:00.000Z","resolved":true},{"n":2,"blockId":"h1","blockKind":"html","anchor":{"kind":"dom","ref":"1.2.1.3.1","hint":"Confirm"},"text":"Consider making this button say 'Confirm order' for clarity.","round":2,"createdAt":"2026-07-15T10:31:00.000Z","resolved":true},{"n":3,"blockId":"m1","blockKind":"mermaid","anchor":{"kind":"mermaid","ref":"Ready"},"text":"Should Ready also branch to a Recall state if an item comes back?","round":2,"createdAt":"2026-07-15T10:31:00.000Z","resolved":true}]}</script>
+<script defer src="ui-2099009e3e26b8cf.js"></script>
 </body>
 </html>

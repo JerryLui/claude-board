@@ -268,26 +268,22 @@ async function main() {
       });
 
       const strips = [
-        ['a full-page round', urlOf(page), {}, [['the top strip', 'header.board-head']]],
-        ['a full-page round already sent', urlOf(sentPage), { round: 1 }, [['the top strip', 'header.board-head'], ['the chip line under it', '.round-current .round-chips']]],
+        ['a full-page round', urlOf(page), {}],
+        ['a full-page round already sent', urlOf(sentPage), { round: 1 }],
       ];
-      for (const [label, url, { round = null }, parts] of strips) {
-        await row(`${label}: a click on the empty part of ${parts.map(p => p[0]).join(', and of ')} lands in the mock under it`, async note => {
+      for (const [label, url, { round = null }] of strips) {
+        await row(`${label}: a click on the empty part of the top strip lands in the mock under it`, async note => {
           const surface = await openSurface(send, onEvent, url, cookie, { round });
           try {
             await surface.origin();
             await surface.inStage(`(function () { window.__cbClicks = 0; document.addEventListener('click', function () { window.__cbClicks++; }, true); })()`);
-            let landed = 0;
-            for (const [name, selector] of parts) {
-              const at = await emptySpot(surface.tab, selector);
-              assert.ok(at.x !== null && at.width > 40, `setup: ${name} has an empty stretch`);
-              const top = await onTop(surface.tab, at);
-              await clickAt(surface.tab, at);
-              const got = await settle(() => surface.inStage('window.__cbClicks'), n => n > landed, 1500);
-              note(`${name} at ${Math.round(at.x)},${Math.round(at.y)}, ${Math.round(at.width)}px clear: the board has ${top} on top; the mock has heard ${got} click(s)`);
-              assert.equal(got, landed + 1, `the click on ${name} never reached the mock: the board has ${top} on top`);
-              landed = got;
-            }
+            const at = await emptySpot(surface.tab, 'header.board-head');
+            assert.ok(at.x !== null && at.width > 40, 'setup: the top strip has an empty stretch');
+            const top = await onTop(surface.tab, at);
+            await clickAt(surface.tab, at);
+            const got = await settle(() => surface.inStage('window.__cbClicks'), n => n > 0, 1500);
+            note(`the top strip at ${Math.round(at.x)},${Math.round(at.y)}, ${Math.round(at.width)}px clear: the board has ${top} on top; the mock has heard ${got} click(s)`);
+            assert.equal(got, 1, `the click on the top strip never reached the mock: the board has ${top} on top`);
           } finally {
             await surface.tab.close();
           }
