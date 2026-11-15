@@ -460,6 +460,13 @@ svg { flex: none; }
      contradicts it -- a hard line where the treatment has just said there is
      none. One or the other; the fade is the one that survives the scroll. */
 }
+/* A board page's strip takes a click on its controls only. Its box spans the
+   column, or the whole window over a full-page mock, around a wash or a pill
+   drawn far smaller, so a click on the rest of it goes to the page under it.
+   Stated by container: each child box holds controls, and one added to either
+   takes clicks with no rule of its own. */
+body:not(.home-page) .board-head { pointer-events: none; }
+body:not(.home-page) .board-head > * { pointer-events: auto; }
 .board-head-title { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
 .board-head h1 { font-size: 20px; margin: 0; font-weight: 600; letter-spacing: -0.01em; }
 .board-head .meta { color: var(--muted); font-size: 11.5px; font-family: ui-monospace, "SF Mono", Menlo, monospace; margin-top: 2px; }
@@ -2200,6 +2207,12 @@ body.page-board .round { gap: 0; }
 body.page-board .block, body.page-board .block:hover {
   background: none; border: none; border-radius: 0; padding: 0; box-shadow: none; }
 body.page-board .html-stage { height: 100vh; min-height: 0; border: none; border-radius: 0; resize: none; }
+/* A mock's own full-size view (a modal dialog inside the stage) runs to the
+   frame's top edge, under the header, which leaves while the mock on screen has
+   one open: src/ui.mjs puts 'stage-modal' on the stage's block when the stage
+   says so. Hidden, not removed: the header keeps its box, so the band the
+   stage pads for it holds still under the view. */
+body.page-board:has(.round-current .html-block.stage-modal) .board-head { visibility: hidden; }
 /* ADR.md entry 35: a page board is not sendable. Same idiom, same guarantee as
    'body.readonly .send-bar' above -- the bar stays in the markup because a round
    arriving over SSE turns this board into an ordinary one in place (src/ui.mjs's

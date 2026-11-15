@@ -2601,6 +2601,7 @@ export function stageAgentScript() {
       if (typeof data.top !== 'number' || !isFinite(data.top) || data.top < 0) return;
       if (typeof data.bottom !== 'number' || !isFinite(data.bottom) || data.bottom < 0) return;
       applyBand(data.top, data.bottom);
+      reportModal();
       return;
     }
     if (data.type === 'height') {
@@ -2668,6 +2669,31 @@ export function stageAgentScript() {
   // not bubble, so a plain 'window' listener is blind to exactly the artifact
   // shape that broke this (see onScroll's own comment above).
   document.addEventListener('scroll', onScroll, true);
+  // A full-size view the mock opens over itself: a modal dialog that runs to
+  // this frame's top edge, where it keeps its own bar, and where on a page
+  // board the board's top strip floats ('bandTop', which stays 0 anywhere
+  // else). The parent cannot see into this document, so the stage says when
+  // such a dialog reaches into that band and when the last one has left it,
+  // and the board takes its strip away meanwhile (src/ui.mjs). A dialog that
+  // stays clear of the band, a small one centred in the mock, reports nothing
+  // and keeps the strip. showModal() and close() both move the dialog's
+  // 'open' attribute, so one observer on it sees every dialog, one added
+  // later too; the band and the window changing size re-ask.
+  var modalOpen = false;
+  function reportModal() {
+    var open = false;
+    try {
+      var views = document.querySelectorAll('dialog:modal');
+      for (var i = 0; i < views.length && !open; i++) open = views[i].getBoundingClientRect().top < bandTop;
+    } catch (e) { /* no ':modal' here: nothing to report */ }
+    if (open === modalOpen) return;
+    modalOpen = open;
+    post({ type: 'modal', open: open });
+  }
+  if (typeof MutationObserver === 'function') {
+    new MutationObserver(reportModal).observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ['open'] });
+  }
+  window.addEventListener('resize', reportModal);
   post({ type: 'ready' });
 })();</script>`;
 }
