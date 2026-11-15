@@ -3500,7 +3500,7 @@
     qsa('.page-send-bar', document).forEach(function (bar) {
       // A frozen panel's control is no longer a count of what is queued: it has
       // been relabelled to say where those comments went (refreshAwaitDisplay
-      // below), and that freeze is one-directional. This function runs from
+      // below), and no repaint lifts that freeze. This function runs from
       // refreshPins, which the flush's OWN submit calls the moment it resolves --
       // so the last thing a reviewer saw as their comments left was this
       // overwriting that label with a dead "Nothing to add", on a disabled
@@ -4999,7 +4999,11 @@
     if (--imageReads) return;
     var waiting = afterReads;
     afterReads = {};
-    Object.keys(waiting).forEach(function (k) { waiting[k](); });
+    // Each on its own: one that throws must not keep the next from running, since
+    // a held Send or Discuss hands its buttons back only inside its own.
+    Object.keys(waiting).forEach(function (k) {
+      try { waiting[k](); } catch (e) { if (window.console) console.error('A press held for an image failed', e); }
+    });
   }
 
   /** The image files in a clipboard or a drop, in order. */
@@ -5880,8 +5884,9 @@
    * deadline has ALREADY passed at the moment this runs still rendered the live
    * surface. '.expired' is what downgrades it here, client-side, the moment
    * 'roundIsCurrentlyAwaited' stops agreeing with 'roundIsAwaitedOpen' for the
-   * same round -- one-directional by construction (a deadline never
-   * un-expires), and it never touches anything already in '.comment-list'
+   * same round -- one-directional here (no repaint lifts it; a round a
+   * hand-over reopened is thawed by its resync, adoptReopenedRounds), and it
+   * never touches anything already in '.comment-list'
    * ("comments already left stay on screen", AC 12). Locked twice, same
    * discipline as 'body.readonly' (QUIRKS.md): the class hides the surface in
    * CSS, and the disabled sweep just below stops a control that only LOOKS
@@ -8152,6 +8157,54 @@
     refreshPins(document);
   }
 
+  /** Take on each round this snapshot says a hand-over reopened (ADR 151): awaited
+   * again in the snapshot, by this tab's clock too, where this tab holds it closed
+   * unsent, lapsed, or as a page panel frozen. As silent in the patch as the close
+   * above, since no block changes. Only the round's own entry is taken, so the
+   * replays in applyResync still diff this tab's blocks against the snapshot's, and
+   * nothing the reviewer picked or typed is touched.
+   *
+   * The one way out of a page panel's freeze (refreshAwaitDisplay): both locks
+   * come off together, the class and the disabled sweep, and refreshPins puts the
+   * Send control back to counting what is queued. A page round this tab drew
+   * already closed has no composer or Send to hand back, so its panel is the
+   * snapshot's. refreshPager's repaint hands back the countdown. */
+  function adoptReopenedRounds(fresh, doc) {
+    var now = Date.now();
+    var reopened = false;
+    (board.rounds || []).forEach(function (prev, i) {
+      var r = null;
+      (fresh.rounds || []).forEach(function (f) { if (f.n === prev.n) r = f; });
+      if (!r || prev.status === 'sent' || !roundIsCurrentlyAwaited(r, now)) return;
+      var panelOf = '.round[data-round="' + prev.n + '"] .page-comments';
+      var panel = document.querySelector(panelOf);
+      var frozen = !!panel && panel.classList.contains('expired');
+      // Already waiting here: at most its deadline moved, which applyDeadline took.
+      if (roundIsAwaitedOpen(prev) && !frozen) return;
+      board.rounds[i] = r;
+      reopened = true;
+      if (frozen) {
+        panel.classList.remove('expired');
+        qsa('input, button', panel).forEach(function (el) { el.disabled = false; });
+        var thawedSend = panel.querySelector('.page-send-btn');
+        if (thawedSend) thawedSend.title = '';
+        return;
+      }
+      var drawn = doc.querySelector(panelOf);
+      if (!panel || !drawn || panel.querySelector('.page-send-bar')) return;
+      // Through markup, as a push's fragment goes in (applySubmittedPush).
+      var wrap = document.createElement('div');
+      wrap.innerHTML = drawn.outerHTML;
+      var live = wrap.firstElementChild;
+      if (!live) return;
+      wireRoot(live);
+      panel.replaceWith(live);
+    });
+    if (!reopened) return;
+    refreshPager();
+    refreshPins(document);
+  }
+
   function applyResync(fresh, doc) {
     var patch = computeBoardPatch(board, fresh);
     // A deadline moved while this tab's stream was down (ADR 145): the snapshot
@@ -8161,6 +8214,7 @@
     // Ahead of the patch's own early return (that return is what swallowed this)
     // and after computeBoardPatch has read the OLD board -- see the two functions
     // just above.
+    adoptReopenedRounds(fresh, doc);
     if (roundsClosedUnsent(fresh).length) adoptClosedRounds(fresh);
     if (!patch.addedBlockIds.length && !patch.changedBlockIds.length && !patch.roundsNowSent.length) return;
     lensClose(); // see applyRoundPush above -- after the no-op early return, not before
@@ -8482,11 +8536,14 @@
     // than guessed at -- one path for both, since a re-read on a wait that merely
     // lapsed diffs to nothing and applyResync returns without touching the DOM.
     es.addEventListener('awaitExpired', function () { refreshAwaitDisplay(); resync(); });
-    // ADR 145: a report from any tab of this board moved a round's deadline.
+    // ADR 145: a report from any tab of this board moved a round's deadline. A
+    // hand-over's reopen (ADR 151) comes marked 'reopened': the round's status
+    // moved too, which only a re-read of the board carries.
     es.addEventListener('deadline', function (ev) {
       try {
         var moved = JSON.parse(ev.data);
         applyDeadline(moved.round, moved.awaitDeadline);
+        if (moved.reopened) resync();
       } catch (e) { /* malformed; the next resync carries the deadline */ }
     });
   }

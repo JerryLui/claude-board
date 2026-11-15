@@ -926,6 +926,20 @@ await check('readonly: the Pull-out opens the diagram lens in a standalone archi
     'fit and 1:1 are view controls, so they stay live in readonly; download is built into the bar there too, hidden and disarmed',
   );
 
+  // Live: neither is turned off, and each still moves the view. The stand-in
+  // opens every lens at 100% and fits to 100% (no layout), so the wheel zooms
+  // in first and each control has somewhere to come back from.
+  const pct = () => document.querySelector('.diagram-lens .lens-pct').textContent;
+  const stage = document.querySelector('.diagram-lens .lens-stage');
+  for (const action of ['one', 'fit']) {
+    const control = lensControl(document, action);
+    assert.equal(control.disabled, false, `${action} must not be turned off in an archive`);
+    stage.dispatchEvent(new StandInEvent('wheel', { deltaY: -100, clientX: 200, clientY: 200 }));
+    assert.notEqual(pct(), '100%', `setup: the wheel zoomed in before ${action}`);
+    control.dispatchEvent(new StandInEvent('click'));
+    assert.equal(pct(), '100%', `a click on ${action} must change the view in an archive`);
+  }
+
   // Hidden: the archive's stylesheet takes the download out of the bar, read
   // as a real cascade over it, and leaves a view control showing.
   const download = lensControl(document, 'download');

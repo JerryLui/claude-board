@@ -25,7 +25,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { sessionToken } from '../src/secret.mjs';
 import { repoRoot, runMain, skipFile, sleep } from './support.mjs';
-import { CHROME, copyArchive, evalIn, guardRun, openTab, postJson, row, startScratchDaemon, withChrome } from './browser-support.mjs';
+import { CHROME, clickAt, copyArchive, evalIn, guardRun, openTab, postJson, row, startScratchDaemon, withChrome } from './browser-support.mjs';
 
 if (!existsSync(CHROME)) skipFile('browser-check-mock-lens', `browser-check-mock-lens: no Chrome at ${CHROME} (set CLAUDE_BOARD_CHROME_BIN to override)`);
 
@@ -60,13 +60,6 @@ async function settle(read, ok, timeoutMs = 4000) {
     if (ok(value) || Date.now() >= deadline) return value;
     await sleep(50);
   }
-}
-
-/** One real left click at a point of the board's window. */
-async function clickAt(tab, at) {
-  await tab.sp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: at.x, y: at.y });
-  await tab.sp('Input.dispatchMouseEvent', { type: 'mousePressed', x: at.x, y: at.y, button: 'left', clickCount: 1 });
-  await tab.sp('Input.dispatchMouseEvent', { type: 'mouseReleased', x: at.x, y: at.y, button: 'left', clickCount: 1 });
 }
 
 /** What the board's own document has on top at a point of its window. */

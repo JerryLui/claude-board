@@ -46,10 +46,19 @@ check('a question round\'s chip line ends in Download round, live, whether the r
   }
 });
 
-check('a round that goes sent under an open tab keeps its one Download round, still live, as a reload would draw it', () => {
+check('a round open under the page\'s script, the same round gone sent under the open tab and the round pushed after it each keep one Download round at the right end of the chip line, live', () => {
   const board = createBoard({ title: 'Download - live', blocks: [Q1] });
   const { document, es } = loadBoardWithEventSource(renderBoardPage(board));
-  assert.equal(downloadsIn(document, 1).length, 1, 'setup: the open round offers it');
+  // The round's one control, at the right end of its chip line, live, once the
+  // page's own script has run over it.
+  const liveAtTheEnd = (n, why) => {
+    const live = downloadsIn(document, n);
+    assert.equal(live.length, 1, why);
+    assert.equal(lastChild(live[0].parentElement), live[0], `${why}: at the right end of the chip line`);
+    assert.equal(live[0].textContent.trim(), 'Download round', why);
+    assert.equal(live[0].disabled, false, `${why}: live`);
+  };
+  liveAtTheEnd(1, 'the round still open');
 
   // A new round's push, marking round 1 sent (src/ui.mjs's markRoundHistory).
   applySubmit(board, { action: 'send', answers: [], comments: [] }, 1);
@@ -57,11 +66,8 @@ check('a round that goes sent under an open tab keeps its one Download round, st
   es.dispatch('round', JSON.stringify(buildRoundPushPayload(board, 2, 'new-round', [])));
 
   assert.equal(document.querySelector('.round[data-round="1"]').getAttribute('data-round-status'), 'sent', 'setup: round 1 went sent');
-  const live = downloadsIn(document, 1);
-  assert.equal(live.length, 1);
-  assert.equal(lastChild(live[0].parentElement), live[0], 'at the right end of the chip line');
-  assert.equal(live[0].disabled, false, 'the sent round\'s controls go disabled; this one does not');
-  assert.equal(downloadsIn(document, 2).length, 1, 'the round that just opened offers its own');
+  liveAtTheEnd(1, 'the sent round, whose other controls go disabled');
+  liveAtTheEnd(2, 'the round that just opened');
 });
 
 check('a round drawn full page draws no chip line, open, rendered sent or gone sent live: its Download round is the one in the top strip\'s controls', () => {
@@ -91,7 +97,7 @@ check('an unsent round\'s file opens on a Not sent line and heads its picks as u
   const unsent = parseHTML(exportDocument({ ...FILE, unsent: true, sentDate: '', rows }));
   const first = unsent.querySelector('main.export-doc').children[0];
   assert.equal(first.className, 'export-unsent-note', 'the first thing in the file');
-  assert.match(first.textContent, /^Not sent: /);
+  assert.equal(first.textContent, 'Not sent: these picks are a draft, not a decision.');
   assert.deepEqual(texts(unsent, '.export-meta span'), ['Round 2 · Density', 'Not sent']);
   assert.deepEqual(texts(unsent, 'h2.export-section'), ['Picks so far, not sent', 'Round content']);
   assert.deepEqual(texts(unsent, 'th'), ['Question', 'Pick, unsent', 'Note']);
