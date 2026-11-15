@@ -217,8 +217,9 @@ export function createStrandedWatch({
    * `rec.round` is where it is kept: the banner always names the oldest never-announced
    * round, so the announced set is exactly "every round up to and including `rec.round`"
    * and one number holds it. The oldest waiting round only ever moves FORWARD -- rounds
-   * are appended, and a round that has been answered, abandoned or lapsed never becomes
-   * awaited again -- so nothing below the mark can come back needing a banner of its own.
+   * are appended, and a round that has been answered never becomes awaited again. One a
+   * hand-over reopened (ADR.md entry 151) does, and at or below the mark it was announced
+   * once already -- so nothing below the mark comes back needing a banner of its own.
    *
    * `roundIsAwaitedOpen` (via `waitingRounds`) is the same predicate the countdown and the
    * read-only downgrade already read, so "the wait ended" arrives here as a fact

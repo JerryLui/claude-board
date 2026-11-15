@@ -134,4 +134,5 @@ link where it is worth reading.
 | 147 | [A retired mission asks nothing and leaves the lists once its work is done; a blocked job its mission moved on from is no card](.agents/adr/0147-a-retired-mission-asks-nothing-and-a-left-behind-job-is-no-card.md) | 2026-11-04 | amends 131, 140; relates to 123, 128, 141 |
 | 148 | [At most eight sessions work at once, twelve alive](.agents/adr/0148-at-most-eight-sessions-work-at-once.md) | 2026-11-06 | amends 129; amended by 149 |
 | 149 | [Ten background sessions work at once, fourteen alive; the PM's tab holds no slot](.agents/adr/0149-ten-background-sessions-work-the-pms-tab-holds-no-slot.md) | 2026-11-09 | amends 129, 148 |
-| 150 | [One board per mission, each round its session's](.agents/adr/0150-one-board-per-mission-each-round-its-sessions.md) | 2026-11-11 | amends 69, 131, 134, 141 |
+| 150 | [One board per mission, each round its session's](.agents/adr/0150-one-board-per-mission-each-round-its-sessions.md) | 2026-11-11 | amends 69, 131, 134, 141; amended by 151 |
+| 151 | [A hand-over reopens the last session's unanswered rounds in place](.agents/adr/0151-a-hand-over-reopens-the-last-sessions-unanswered-rounds-in-place.md) | 2026-11-15 | amends 150; relates to 69, 114, 145, 146 |

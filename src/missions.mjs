@@ -971,8 +971,9 @@ const unseenOrders = m => (m.orders || []).filter(o => o.kind === 'pm' && !o.ack
 
 /** `GET /api/binding`: the mission `ref` (`{ id, pid?, procStart? }`) is bound to among the
  * stored `records`, with its pending `takeover` (`{ by, at }`), its pm orders not yet seen,
- * its `handoff` and its `rejoin` (`rejoinOf`, read off `listed`, the watcher's latest
- * snapshot); all null and empty when it is bound to none. A released mission, a launch's
+ * its `handoff`, its `rejoin` (`rejoinOf`, read off `listed`, the watcher's latest
+ * snapshot) and `reopened`, the rounds reopened under it as its latest join or takeover
+ * recorded them (`recordReopened`); all null and empty when it is bound to none. A released mission, a launch's
  * bare reservation and a session that left bind no one. A plain scan of the records and the
  * snapshot in memory, no board or process read: a hook asks it every minute
  * (src/bindings.mjs keeps the records). */
@@ -982,14 +983,28 @@ export function bindingFor(records, ref, { listed = null } = {}) {
     if (m.state === 'released' || !boundTo(m, ref)) continue;
     if (!hit || String(m.session.seenAt) > String(hit.session.seenAt)) hit = m;
   }
-  if (!hit) return { key: null, takeover: null, orders: [], handoff: null, rejoin: null };
+  if (!hit) return { key: null, takeover: null, orders: [], handoff: null, rejoin: null, reopened: [] };
   return {
     key: hit.key,
     takeover: hit.takeover ? { by: hit.takeover.by, at: hit.takeover.at } : null,
     orders: unseenOrders(hit),
     handoff: hit.handoff ?? null,
     rejoin: rejoinOf(hit, listed),
+    reopened: hit.session.reopened ?? [],
   };
+}
+
+/** Records on mission `key`'s bound session the rounds reopened under it and still waiting
+ * (ADR 151), `[{ board, round, title, url, awaitDeadline }]`, as its join or the takeover
+ * that bound it found them: what `bindingFor` answers as `reopened`, which reads no board.
+ * None drops the field. A mission with no session bound records nothing. */
+export function recordReopened(key, reopened, { home = boardHome() } = {}) {
+  const m = readMission(key, home);
+  const s = m && currentSession(m);
+  if (!s || (!reopened.length && !s.reopened)) return;
+  if (reopened.length) s.reopened = reopened;
+  else delete s.reopened;
+  writeMission(m, home);
 }
 
 /** `POST /api/mission/:key/order`: appends an order and answers it. A card posts a stop or
