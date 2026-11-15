@@ -109,19 +109,6 @@ export const MERMAID_TOKEN_MAP = {
   edgeLabelBackground: '--panel',
 };
 
-/** Keeps `--doc-w` on the body at the window's width less its scrollbar, for the
- * header washes that run full-bleed out of a centred column (an ordinary board's
- * condensed wash and the home views' top bar, src/styles.mjs). Not `100vw`: `vw`
- * includes the scrollbar, and a page that scrolls would then scroll sideways too
- * (QUIRKS.md "`100vw` is wider than the page whenever the page actually scrolls").
- * `clientWidth` excludes it by definition.
- *
- * Spliced by `.toString()` into the board page's client script (`ui` below) and the
- * home views' (indexScript, src/indexpage.mjs), so both measure the same way. Read
- * again on resize, on load and whenever the root's box changes: in Chrome the first
- * read can come before the root's scrollbar has taken its width, and a scrollbar
- * appearing as the page grows fires no resize. Written only when the value changed.
- * Guarded for the check stand-ins, which may run it with no body or no listener API. */
 /** Mermaid's theme variables for a downloaded round (src/round-export.mjs):
  * mermaidThemeVariables' set, read off the light palette rather than the live
  * page, since the file is light whatever the board's theme. */
@@ -136,6 +123,19 @@ const EXPORT_MERMAID_VARS = (() => {
   return vars;
 })();
 
+/** Keeps `--doc-w` on the body at the window's width less its scrollbar, for the
+ * header washes that run full-bleed out of a centred column (an ordinary board's
+ * condensed wash and the home views' top bar, src/styles.mjs). Not `100vw`: `vw`
+ * includes the scrollbar, and a page that scrolls would then scroll sideways too
+ * (QUIRKS.md "`100vw` is wider than the page whenever the page actually scrolls").
+ * `clientWidth` excludes it by definition.
+ *
+ * Spliced by `.toString()` into the board page's client script (`ui` below) and the
+ * home views' (indexScript, src/indexpage.mjs), so both measure the same way. Read
+ * again on resize, on load and whenever the root's box changes: in Chrome the first
+ * read can come before the root's scrollbar has taken its width, and a scrollbar
+ * appearing as the page grows fires no resize. Written only when the value changed.
+ * Guarded for the check stand-ins, which may run it with no body or no listener API. */
 export function trackDocWidth() {
   function measureDocWidth() {
     if (!document.body || !document.documentElement) return;
@@ -4784,7 +4784,9 @@ export const ui = `
 
   // Images still being read, and what waits on them: a Send, or a comment's
   // Add, pressed while a pasted image is read is held until it lands, so the
-  // image goes with it. Keyed, so a second press while held still sends once.
+  // image goes with it. Keyed, so a second press while held still sends once;
+  // Send and Discuss share a key, and the first of the two pressed is the one
+  // held (heldWayOut, heldPageWayOut).
   var imageReads = 0;
   var afterReads = {};
   function afterImageReads(key, fn) {
@@ -4806,30 +4808,36 @@ export const ui = `
   }
 
   /** Adds 'files' to the key's row, refusing one of a type the board does not take
-   * or over IMAGE_MAX_BYTES with a line naming why; the rest still land. */
+   * or over IMAGE_MAX_BYTES with a line naming why, and one that cannot be read
+   * with a line naming the file; the rest still land. */
   function addImages(key, files, pasted, from) {
     var refusal = '';
     var taken = files.filter(function (f) {
       if (!IMAGE_TYPES[f.type]) {
-        refusal = refusal || 'Only PNG, JPEG, GIF or WebP images can be attached.' + KEPT_LINE;
+        refusal = refusal || 'Only PNG, JPEG, GIF or WebP images can be attached.';
         return false;
       }
       if (f.size > IMAGE_MAX_BYTES) {
-        refusal = refusal || 'This image is ' + megabytes(f.size) + '; the limit is ' + megabytes(IMAGE_MAX_BYTES) + '.' + KEPT_LINE;
+        refusal = refusal || 'This image is ' + megabytes(f.size) + '; the limit is ' + megabytes(IMAGE_MAX_BYTES) + '.';
         return false;
       }
       return true;
     });
-    if (refusal) showImageRefusal(key, refusal); else clearImageRefusal(key);
+    if (refusal) showImageRefusal(key, refusal + KEPT_LINE); else clearImageRefusal(key);
     if (!taken.length) return;
+    var unread = [];
     imageReads++;
     Promise.all(taken.map(function (f) {
       return readDataUrl(f).then(function (data) {
         var name = pasted || !f.name ? 'pasted-' + (++pastedCount) + '.' + IMAGE_TYPES[f.type] : f.name;
         return { name: name, size: f.size, data: data };
+      }, function () {
+        unread.push(f.name || 'A pasted image');
+        return null;
       });
     })).then(function (imgs) {
-      setDraftImages(key, (draftImages[key] || []).concat(imgs));
+      setDraftImages(key, (draftImages[key] || []).concat(imgs.filter(Boolean)));
+      if (unread.length) showImageRefusal(key, (refusal ? refusal + ' ' : '') + unread.join(', ') + ' could not be loaded.' + KEPT_LINE);
       reportActivity(from);
     }).then(imageReadDone, imageReadDone);
   }
@@ -6341,9 +6349,15 @@ export const ui = `
   function setSendBarEnabled(on) {
     if (readonly) return;
     if (on && isPageRound(blocksOfRound(currentRound))) on = false;
-    if (sendBtn) sendBtn.disabled = !on;
-    if (discussBtn) discussBtn.disabled = !on;
+    if (sendBtn) sendBtn.disabled = !on || heldWayOut === 'discuss';
+    if (discussBtn) discussBtn.disabled = !on || heldWayOut === 'send';
   }
+
+  /** The way out ('send' or 'discuss') pressed while pasted images were still being
+   * read, held until they land; null when none is. The first press is the one that
+   * goes: the other button is off until the images have loaded, and a press that
+   * reaches submitBoard anyway is dropped. */
+  var heldWayOut = null;
 
   /** The queued comments a Send from page 'n' posts. The daemon files every comment
    * a submit carries under the round it names, and an agent hears only that round's
@@ -6384,7 +6398,17 @@ export const ui = `
   function submitBoard(action) {
     if (readonly) return;
     if (isPageRound(blocksOfRound(currentRound))) return;
-    if (afterImageReads('send', function () { submitBoard(action); })) return;
+    if (heldWayOut) return;
+    if (afterImageReads('send', function () {
+      heldWayOut = null;
+      setSendBarEnabled(currentPageSendable());
+      submitBoard(action);
+    })) {
+      heldWayOut = action;
+      var other = action === 'discuss' ? sendBtn : discussBtn;
+      if (other) other.disabled = true;
+      return;
+    }
     var answers = collectAnswers();
     var comments = commentsSentFrom(currentRound);
     var sentImageKeys = answeredImageKeys(answers);
@@ -6533,6 +6557,23 @@ export const ui = `
     submitPageRound(roundN, 'send');
   }
 
+  /** A page round's way out held while pasted images are still being read, by round
+   * number: submitBoard's heldWayOut for the awaited page's own two buttons. */
+  var heldPageWayOut = {};
+
+  /** Turns off the button beside the page round's held 'action', or with 'held'
+   * false hands it back, unless the round has closed meanwhile (sent, or frozen at
+   * its deadline). */
+  function setPageWayOutHeld(roundN, action, held) {
+    var section = roundSectionEl(roundN);
+    var other = section && section.querySelector(action === 'discuss' ? '.page-send-btn' : '.page-discuss-btn');
+    if (!other) return;
+    var round = roundEntry(roundN);
+    var closed = !round || round.status === 'sent' || !!section.querySelector('.page-comments.expired');
+    if (held) other.disabled = true;
+    else if (!closed) other.disabled = false;
+  }
+
   /** The awaited page's own Send/Discuss --
    * submitBoard's analogue for a page round, deliberately never sharing that
    * function's path. submitBoard refuses outright on a page round (ADR.md
@@ -6561,7 +6602,16 @@ export const ui = `
     if (!round || round.status === 'sent') return;
     var blocks = blocksOfRound(roundN);
     if (!isPageRound(blocks)) return;
-    if (afterImageReads('page:' + roundN, function () { submitPageRound(roundN, action); })) return;
+    if (heldPageWayOut[roundN]) return;
+    if (afterImageReads('page:' + roundN, function () {
+      delete heldPageWayOut[roundN];
+      setPageWayOutHeld(roundN, action, false);
+      submitPageRound(roundN, action);
+    })) {
+      heldPageWayOut[roundN] = action;
+      setPageWayOutHeld(roundN, action, true);
+      return;
+    }
     var blockId = blocks[0].id;
     var mine = pendingComments.filter(function (c) { return c.blockId === blockId; });
     var tooMuch = sendImagesRefusal([], mine);
