@@ -6,17 +6,21 @@
 // what a filled-in board looks like without cloning the repo or installing
 // anything.
 //
-// Round 1 is a PAGE BOARD: one `html` block and nothing else, the rendered
-// kitchen-display mockup the rest of the review is about. Round 2 is the
+// Round 1 is a PAGE BOARD: one `html` block and nothing else, the kitchen
+// display handed over to look at, with nothing asked about it. Round 2 is the
 // block gallery -- markdown, mermaid, two code blocks (a highlighted
 // `javascript` one and a `diff` one, ticket 05/ADR.md entry 64), compare and
-// every question widget, each answered, reading as the follow-up discussion
-// about round 1's artifact. The round 2 markdown block also carries a fenced
+// every question widget, each answered. A question about a screen carries its
+// mock in its own `context` or as its rendered options, in round 2 itself
+// (skills/claude-board/SKILL.md): no prompt points the reader back at round 1.
+// The round 2 markdown block also carries a fenced
 // ```json snippet, exercising the fence-highlights-through-the-same-tokenizer
 // path ADR.md entry 65 added: a sample that never highlighted a diff or a
 // markdown fence would regenerate clean without ever showing either half of
 // the feature it is meant to demonstrate. The board opens on round 2 (its
 // newest round), one chevron ahead of the artifact that started the thread.
+// `npm run demo` posts every block here as ONE round (bin/demo.mjs), so each
+// question has to read right with no earlier round to flip back to.
 //
 // A page board is never sent (ADR.md entry 35: "a rendered page is a thing you
 // read, not a form you submit"). That is refused in the browser -- src/ui.mjs's
@@ -82,8 +86,9 @@ import path from 'node:path';
 // the frame IS derived from what the stage reports (skills/claude-board/SKILL.md).
 
 // The round-1 page board: a full kitchen-display screen, several tickets in
-// flight at once -- what the redesign in round 2 is actually discussing, not
-// one card in isolation. `ref: '1.2.1.3.1'`, the target of the dom-anchor
+// flight at once, posted to be read and commented on. Nothing is asked about
+// it: round 2's questions carry their own mocks. `ref: '1.2.1.3.1'`, the
+// target of the dom-anchor
 // comment below: this stage's only body child is `.kd-board` (1), whose 2nd
 // child is `.kd-grid` (2), whose 1st child is the #482 `.ticket` (1), whose
 // 3rd child is `.actions` (3), whose only child is the `<button>` (1) -- see
@@ -201,6 +206,81 @@ const TICKET_AFTER_HTML = `<style>
   <button>Confirm</button>
 </div>`;
 
+// The single question's context: the redesigned ticket in each state of the
+// routing flow the question asks about, so the mock and its options are read in
+// one card. The right padding keeps the last ticket's head clear of the
+// Pull-out button in the stage's top-right corner, and the grid fills whatever
+// width the card gives it (skills/claude-board/SKILL.md).
+const TICKET_FLOW_HTML = `<style>
+  body { margin: 0; padding: 16px 56px 16px 16px; font-family: system-ui, sans-serif; background: #f3f4f6; }
+  .flow { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+  .ticket { background: #fff; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.15); overflow: hidden; border: 1px solid #e2e2e2; }
+  .head { background: #1f2937; color: #fff; padding: 10px 14px; display: flex; justify-content: space-between; font-size: 13px; font-weight: 700; }
+  .body { padding: 10px 14px 12px; font-size: 13px; color: #111; }
+  .chip { display: inline-block; margin-top: 8px; padding: 3px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .chip.placed { background: #dbeafe; color: #1e40af; }
+  .chip.prep { background: #fef3c7; color: #92400e; }
+  .chip.ready { background: #dcfce7; color: #166534; }
+  .chip.served { background: #e5e7eb; color: #374151; }
+  button { width: 100%; padding: 9px 0; border: none; background: #2563eb; color: #fff; font-size: 14px; font-weight: 600; cursor: pointer; }
+  button:disabled { background: #9ca3af; cursor: default; }
+</style>
+<div class="flow">
+  <div class="ticket">
+    <div class="head"><span>#482</span><span>Table 6</span></div>
+    <div class="body"><div>Grilled salmon x1</div><span class="chip placed">Placed</span></div>
+    <button>Confirm</button>
+  </div>
+  <div class="ticket">
+    <div class="head"><span>#482</span><span>Table 6</span></div>
+    <div class="body"><div>Grilled salmon x1</div><span class="chip prep">In prep</span></div>
+    <button>Mark ready</button>
+  </div>
+  <div class="ticket">
+    <div class="head"><span>#482</span><span>Table 6</span></div>
+    <div class="body"><div>Grilled salmon x1</div><span class="chip ready">Ready for pickup</span></div>
+    <button>Mark served</button>
+  </div>
+  <div class="ticket">
+    <div class="head"><span>#482</span><span>Table 6</span></div>
+    <div class="body"><div>Grilled salmon x1</div><span class="chip served">Served</span></div>
+    <button disabled>Served</button>
+  </div>
+</div>`;
+
+// The rank question's context: the three palettes it ranks, drawn on the chips
+// they would colour, so the ranking is judged by looking rather than by name.
+const CHIP_PALETTES_HTML = `<style>
+  body { margin: 0; padding: 16px 56px 16px 16px; font-family: system-ui, sans-serif; background: #f3f4f6; }
+  .palettes { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+  .palette { background: #fff; border: 1px solid #e2e2e2; border-radius: 10px; padding: 12px 14px 8px; }
+  .name { font-size: 12px; font-weight: 700; color: #374151; padding-bottom: 8px; }
+  .chip { display: inline-block; margin: 0 6px 6px 0; padding: 4px 10px; border-radius: 999px; border: 1px solid transparent; font-size: 12px; font-weight: 600; }
+  .contrast .prep { background: #92400e; color: #fff; }
+  .contrast .rush { background: #991b1b; color: #fff; }
+  .contrast .ready { background: #166534; color: #fff; }
+  .pastel .prep { background: #fef3c7; color: #92400e; }
+  .pastel .rush { background: #fee2e2; color: #991b1b; }
+  .pastel .ready { background: #dcfce7; color: #166534; }
+  .mono .prep { background: #e5e7eb; color: #111827; }
+  .mono .rush { background: #111827; color: #fff; }
+  .mono .ready { background: #fff; color: #111827; border-color: #111827; }
+</style>
+<div class="palettes">
+  <div class="palette contrast">
+    <div class="name">High-contrast</div>
+    <span class="chip prep">In prep</span><span class="chip rush">Rush</span><span class="chip ready">Ready for pickup</span>
+  </div>
+  <div class="palette pastel">
+    <div class="name">Pastel</div>
+    <span class="chip prep">In prep</span><span class="chip rush">Rush</span><span class="chip ready">Ready for pickup</span>
+  </div>
+  <div class="palette mono">
+    <div class="name">Monochrome</div>
+    <span class="chip prep">In prep</span><span class="chip rush">Rush</span><span class="chip ready">Ready for pickup</span>
+  </div>
+</div>`;
+
 // The two choose-between-rendered-variants options: each rendered so it
 // actually looks like what its own description claims, since the whole point
 // of this widget is choosing between rendered variants.
@@ -243,8 +323,8 @@ export function buildSampleBoard() {
   // there is no packet for a submit to close out, and `applySubmit` is never
   // called for it. It stays `open` for good.
 
-  // Round 2: the block gallery, and the newest round -- the board opens here,
-  // reading as the follow-up discussion about the artifact one chevron back.
+  // Round 2: the block gallery, and the newest round -- the board opens here.
+  // Each question that asks about a screen carries that screen itself.
   addRound(board, {
     title: 'Routing walkthrough',
     blocks: [
@@ -261,7 +341,7 @@ export function buildSampleBoard() {
         text: [
           '# Order-routing redesign',
           '',
-          "The kitchen display one page back is the mockup. Three things change for the pass, and the routing rewrite underneath them is what this round is asking about:",
+          "Three things change for the pass. This round asks about the routing rewrite underneath them and the ticket that shows it:",
           '',
           '- Fewer manual status updates per ticket',
           '- A single "Ready for pickup" state visible to front-of-house',
@@ -339,18 +419,16 @@ export function buildSampleBoard() {
       },
       {
         kind: 'question',
-        prompt: 'Does the kitchen display in round 1 match the routing flow (Placed -> In prep -> Ready -> Served) we discussed?',
+        prompt: 'Does the redesigned ticket match the routing flow (Placed -> In prep -> Ready -> Served) we discussed?',
         // The explainer (ADR.md entry 111) is the sentence ahead of the options:
         // what this question decides. It sits under the prompt on the card's full
-        // row, with the options and the context panel side by side beneath it, so
-        // the sample shows the shape the manual asks callers for.
-        explainer: "This decides whether round 1's mockup ships as drawn. A tweak here changes the display only; the routing rewrite underneath it ships either way.",
+        // row. The context is the mock the question asks about, so it takes the
+        // card's full width with the options under it: the mock and its question in
+        // one round, the shape the manual asks callers for.
+        explainer: "This decides whether the ticket ships as drawn. A tweak here changes the display only; the routing rewrite underneath it ships either way.",
         widget: 'single',
         context: [
-          {
-            kind: 'markdown',
-            text: 'Background: average ticket time today is 31 seconds across the three prep stations (grill, salad, expo).',
-          },
+          { kind: 'html', html: TICKET_FLOW_HTML },
         ],
         options: [
           { label: 'Yes, ship it' },
@@ -360,8 +438,15 @@ export function buildSampleBoard() {
       },
       {
         kind: 'question',
-        prompt: 'Which stations need their ticket displays updated to match the round 1 mockup?',
+        prompt: 'Which stations get the redesigned ticket?',
         widget: 'multi',
+        // A context with no mock in it is one panel beside the options.
+        context: [
+          {
+            kind: 'markdown',
+            text: 'Background: average ticket time today is 31 seconds across the three prep stations (grill, salad, expo).',
+          },
+        ],
         options: [
           { label: 'Grill' },
           { label: 'Salad' },
@@ -381,8 +466,11 @@ export function buildSampleBoard() {
       },
       {
         kind: 'question',
-        prompt: 'Rank these three palettes for the status chips (In prep / Rush / Ready for pickup) by legibility under kitchen pass lighting, most legible first. The display one page back uses the first of them.',
+        prompt: 'Rank these three palettes for the status chips (In prep / Rush / Ready for pickup) by legibility under kitchen pass lighting, most legible first.',
         widget: 'rank',
+        context: [
+          { kind: 'html', html: CHIP_PALETTES_HTML },
+        ],
         options: [
           { label: 'High-contrast' },
           { label: 'Pastel' },

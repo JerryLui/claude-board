@@ -204,9 +204,10 @@ check('the manual points at no served file, and reinstating the old /file/ secti
 
 // --- what one round holds --------------------------------------------------------
 // Three rules that bind every round whoever posts it, so the manual is their one home: a round
-// is capped (the reviewer's confusion grows with round size), a question about a screen carries
-// its mock rather than a description of one, and no option hands the decision back, since a
-// "your call" option makes every recommended pick read as either agreement or delegation.
+// is capped (the reviewer's confusion grows with round size), a mock rides in the round that
+// asks about it (posted alone a round ahead, the reviewer pages back to see what each question
+// is about), and no option hands the decision back, since a "your call" option makes every
+// recommended pick read as either agreement or delegation.
 const ROUND_RULES = {
   'a round is capped, and a branch too big for one splits': {
     patterns: [
@@ -215,9 +216,17 @@ const ROUND_RULES = {
     ],
     lost: ['the cap', /at most 6 questions/g],
   },
-  'a question about a screen carries its mock in the same round': {
-    patterns: [/a question about a screen or control carries its mock in its own `context`, in the same round/i],
-    lost: ['the mock rule', /carries its mock/g],
+  'a mock and the questions about it share one round': {
+    patterns: [
+      /a mock and the questions about it share one round/i,
+      /the mock sits in its question's own `context`, or is the options themselves \(`choose-between-rendered-variants`\)/i,
+      /never a description or a pointer to another round/i,
+    ],
+    lost: ['the one-round rule', /a mock and the questions about it share one round/gi],
+  },
+  'a page board is for an artifact nothing is asked about': {
+    patterns: [/a page board is for an artifact nothing is asked about/i],
+    lost: ['the page-board purpose', /for an artifact nothing is asked about/g],
   },
   'no option delegates the decision': {
     patterns: [/never offer a "your call" or "you decide" option/i, /ambiguous between agreement and delegation/i],
@@ -227,6 +236,20 @@ const ROUND_RULES = {
 for (const [rule, { patterns }] of Object.entries(ROUND_RULES)) {
   check(`the manual states that ${rule}`, () => statesAll(patterns)(prose));
 }
+// The advice the one-round rule replaced sat in the page-board bullet: "post the artifact
+// alone and ask about it in a later round". It contradicted the mock rule two sections down,
+// and callers followed it. Stating the rule is half the guard; the old advice must not return.
+const sendsNoMockAheadOfItsQuestions = text => {
+  assert.doesNotMatch(norm(text), /ask about it in a later round|post the artifact alone/i,
+    'the manual tells a caller to post a mock alone, ahead of its questions');
+};
+check('the manual sends no mock ahead of its questions, and reinstating the old page-board advice fails that check', () => {
+  sendsNoMockAheadOfItsQuestions(prose);
+  const marker = 'anything beside it silently costs it that layout.';
+  assert.ok(prose.includes(marker), 'the sentence the old advice hung off no longer exists in the manual');
+  fails(sendsNoMockAheadOfItsQuestions, prose.replace(marker,
+    'anything beside it silently costs it that layout, so post the artifact alone and ask about it in a later round.'));
+});
 
 // --- a wait that ends unanswered (ADR 146) -----------------------------------------------
 // The shim's timeout text names the watch's command; what a session does with it, and with
