@@ -1092,7 +1092,8 @@ export function amendRound(board, { blocks, cwd, title, ownFolder = false }) {
  * to it declared a boundary and walked away (ADR 69). Returns the round numbers closed;
  * mutates `board` in place, caller persists it.
  *
- * `status: 'abandoned'` is a THIRD terminal state, and inventing one is the point. Until
+ * `status: 'abandoned'` is a THIRD closed state, final for the conversation that left it
+ * (a mission's hand-over may reopen the round, ADR 151), and inventing one is the point. Until
  * now exactly two things ended an awaited round, and neither is honest here:
  *
  *  - `applySubmit` above marks it `sent` with an `action` of `'submitted'`/`'discuss'`.
