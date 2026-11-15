@@ -1181,6 +1181,46 @@ async function layerOne() {
     crashed.watch.close();
   });
 
+  await check('ADR 151: after an unclean restart, sending a round reopened behind the mark withdraws its banner by the recorded pid, and sending the higher round the mark names does not; a record from before the banner\'s own round was kept reads its mark as that round', async () => {
+    const crashed = stand();
+    // One process through a /clear: round 1 closed at the /clear before any banner, round 2
+    // announced, then round 1 reopened by the join after it and announced behind the mark.
+    const before = { pid: 4301, procStart: '2026-11-11T08:00:00Z', id: 'before' };
+    const after = { ...before, id: 'after' };
+    const board = createBoard({ title: 'Stranded', blocks: [QUESTION('Closed at the /clear')], cwd: projectDir, awaitTimeoutMs: AWAIT_MS, session: before });
+    assert.deepEqual(abandonOpenRounds(board, { session: before }), [1]);
+    addRound(board, { blocks: [QUESTION('Asked after it')], awaitTimeoutMs: AWAIT_MS, session: after });
+    writeBoard(board, home);
+    crashed.watch.evaluate(board.id, target(board.id));
+    await sleep(40);
+    crashed.looking.set(board.id, true);
+    crashed.watch.evaluate(board.id, target(board.id));
+    const handed = readBoard(board.id, home);
+    assert.deepEqual(handOverRounds(handed, { id: 'before' }, after, { awaitTimeoutMs: AWAIT_MS }).reopened, [1]);
+    writeBoard(handed, home);
+    crashed.looking.delete(board.id);
+    crashed.watch.evaluate(board.id, target(board.id));
+    await sleep(40);
+    const rec = bannerOn(board.id);
+    assert.deepEqual([crashed.banners.length, rec.round, rec.rounds, rec.pid], [2, 2, [1, 2], 4242], 'setup: round 1\'s banner is up, the mark on round 2');
+
+    const successor = stand(); // no handle for that child anywhere in this process
+    assert.equal(successor.watch.answered(board.id, 2), false, 'round 2 is not what the banner is about');
+    assert.deepEqual(successor.withdrawn, [], 'so round 1, still waiting, keeps its banner');
+    assert.equal(successor.watch.answered(board.id, 1), true);
+    assert.deepEqual(successor.withdrawn, [{ pid: 4242, startedAtMs: Date.parse(rec.at) }]);
+
+    // The record as a daemon from before the field wrote it: the mark alone, the banner's round.
+    const older = readBoard(board.id, home);
+    delete older[STRANDED_BANNER].about;
+    writeBoard(older, home);
+    assert.equal(successor.watch.answered(board.id, 1), false);
+    assert.equal(successor.watch.answered(board.id, 2), true);
+    assert.equal(successor.withdrawn.length, 2);
+    successor.watch.close();
+    crashed.watch.close();
+  });
+
   await check('criterion 15: stopping the daemon leaves none of them running', async () => {
     const { banners, watch } = stand();
     const one = seedBoard();

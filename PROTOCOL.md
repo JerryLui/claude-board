@@ -1549,12 +1549,15 @@ bound port crosses to the launcher as its own argument so the two can be checked
 other.
 
 The banner is recorded on the board document as `strandedBanner`,
-`{ at, until, round, rounds, returned, pid } | null`: when it went up, when the process serving it will exit
+`{ at, until, round, about, rounds, returned, pid } | null`: when it went up, when the process serving it will exit
 and withdraw it (the round's deadline as stored when the banner went up, a moved one included, or
 the launcher's hard ceiling, whichever is sooner — a
 Suppressed board's content-only first round has no deadline at all, and that ceiling alone bounds
 it), the highest round announced — the **mark**, permanent for the life of that round unless an
-amend to it moves it back one (ADR.md entry 97) — every round a banner has named (`rounds`, in
+amend to it moves it back one (ADR.md entry 97) — the round the banner is for (`about`: the mark,
+except for a round a hand-over reopened below it, whose banner leaves the mark where it stood; a
+daemon holding no handle on the banner's process withdraws it when that round is sent, and a record
+from before the field reads its mark as that round) — every round a banner has named (`rounds`, in
 round order: a round a hand-over reopened at or below the mark earns a banner only when it is not
 among them, ADR 151; a record from before the list has none, and its mark alone decides), whether
 the reviewer has returned since, and the pid of the process serving the click. It is stripped from everything a

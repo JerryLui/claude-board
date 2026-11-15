@@ -595,10 +595,12 @@ export function createStrandedWatch({
         port: (target && target.port) || null,
         deadlineAt,
       });
-      // Recorded durably, all six parts together. `round` is the load-bearing one: it is
+      // Recorded durably, all seven parts together. `round` is the load-bearing one: it is
       // the MARK, permanent for the life of that round. A banner never lowers it: one for
       // a round reopened behind it (ADR.md entry 151) leaves it on the higher round, whose
-      // amend still finds it (`amended`). `rounds` is every round a banner has
+      // amend still finds it (`amended`). `about` is the round this banner is for, which
+      // is the mark except then, and what `answered` reaches the banner by when this
+      // daemon holds no handle. `rounds` is every round a banner has
       // named here, this one included (`nextToAnnounce`), and `returned` beside it is the
       // gate -- shut from the moment a banner is raised until the reviewer comes back
       // (ADR.md entry 74). A record read off disk by a successor daemon that predates this
@@ -618,6 +620,7 @@ export function createStrandedWatch({
       const rec = {
         at: new Date(at).toISOString(),
         round: Math.max(oldest.n, prior && Number.isInteger(prior.round) ? prior.round : 0),
+        about: oldest.n,
         rounds: namedWith(prior, oldest.n),
         returned: false,
         pid: (child && child.pid) || null,
@@ -741,12 +744,17 @@ export function createStrandedWatch({
      * it again to discard the answer would be a second parse of a document that can run to
      * megabytes. `terminate`'s own `until` bound is what keeps signalling a recorded pid
      * safe; being answered says nothing about whether the child has exited, since its
-     * lifetime is the round's DEADLINE. */
+     * lifetime is the round's DEADLINE.
+     *
+     * The record's `about` is the banner's round there, not its mark: a banner for a round
+     * reopened behind the mark (ADR.md entry 151) leaves the mark on the higher round, and
+     * answering that one must not take down a banner for a round still waiting. A record
+     * from before `about` was kept has only the mark, which was the banner's round then. */
     answered(boardId, round) {
       const held = children.get(boardId);
       if (held) return held.round === round ? terminate(boardId) : false;
       const rec = recordOn(boardOf(boardId));
-      if (!rec || rec.round !== round) return false;
+      if (!rec || (Number.isInteger(rec.about) ? rec.about : rec.round) !== round) return false;
       return terminate(boardId, rec);
     },
 
