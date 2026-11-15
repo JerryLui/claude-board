@@ -613,8 +613,8 @@ body.sent-page .comment-btn { display: none; }
    arriving page's top back under it. */
 .round { display: none; flex-direction: column; gap: var(--space-2); scroll-margin-top: var(--head-clear); }
 .round.round-current { display: flex; }
-/* the round's chip line: its label, and at the right end of a sent round
-   Download round (src/round-export.mjs), a ghost pill beside the chip */
+/* the round's chip line: its label, and at the right end Download round
+   (src/round-export.mjs), a ghost pill beside the chip */
 .round-chips { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
 .round-label {
   min-width: 0;
@@ -634,8 +634,13 @@ body.sent-page .comment-btn { display: none; }
   transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease); }
 .round-download:hover:not(:disabled) { border-color: var(--hairline-2); color: var(--ink); }
 .round-download:disabled { cursor: progress; opacity: 0.6; }
+/* the same control among the top strip's own ('.board-head-actions'), for a
+   round drawn full page, which has no chip line: there it stays in the pill
+   once the artifact scrolls under the header. Any other round has its own. */
+.head-download { display: none; margin-left: 0; }
+body.page-board .head-download { display: inline-flex; }
 /* a Finder-opened archive cannot read its own stylesheet back to save it */
-body.readonly .round-download { display: none; }
+body.readonly .round-download, body.readonly [data-lens="download"] { display: none; }
 .round-history .block { background: var(--history-bg); box-shadow: none; }
 .round-history .md-content, .round-history .question-prompt { opacity: 0.86; }
 /* the round's own bottom -- a divider with a tag
@@ -2195,19 +2200,6 @@ body.page-board .round { gap: 0; }
 body.page-board .block, body.page-board .block:hover {
   background: none; border: none; border-radius: 0; padding: 0; box-shadow: none; }
 body.page-board .html-stage { height: 100vh; min-height: 0; border: none; border-radius: 0; resize: none; }
-/* a SENT artifact round's chip line, there for Download round alone: a strip
-   behind the header at rest whose chips sit right under it, so the header's wash
-   runs on through it with no seam, inside the top band src/ui.mjs's
-   reportStageBand has the stage pad: it never covers the artifact. It leaves
-   with the header's identity text as the artifact scrolls under the pill, and
-   then lets a click through; at 560px and under the header never condenses
-   ('--stage-p' is pinned to 0 there), so the line stays drawn and stays live.
-   A Finder-opened archive offers no Download round, so it draws no line. */
-body.page-board .round-chips { position: fixed; z-index: 19; top: 0; left: 0; right: 0;
-  padding: var(--page-head-h, 76px) var(--space-5) var(--space-3); background: linear-gradient(to bottom, var(--bg) 80%, var(--bg-fade-0));
-  opacity: calc(1 - var(--stage-p) * 1.8); }
-@media (min-width: 561px) { body.page-board.stage-scrolled .round-chips { pointer-events: none; } }
-body.readonly.page-board .round-chips { display: none; }
 /* ADR.md entry 35: a page board is not sendable. Same idiom, same guarantee as
    'body.readonly .send-bar' above -- the bar stays in the markup because a round
    arriving over SSE turns this board into an ordinary one in place (src/ui.mjs's

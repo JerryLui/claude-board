@@ -1,5 +1,7 @@
-// A sent round saved as one HTML file: the Download round control on the round's
-// chip line, and the pure half of the file it saves. The file is made in the
+// A round saved as one HTML file, sent or not: the Download round control on a
+// question round's chip line and, for a round drawn full page, in the top strip;
+// one mock or diagram saved alone from its Pull-out; and the pure half of the
+// file each saves. The file is made in the
 // browser from the drawn round (src/ui.mjs's downloadRound), so a diagram is
 // already SVG and no engine rides in the file; this module holds what needs no
 // DOM, so test/check-round-download.mjs reads it in node and src/ui.mjs embeds
@@ -12,10 +14,14 @@
 
 const DOWNLOAD_ICON = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="M7 11l5 5 5-5"/><path d="M5 21h14"/></svg>';
 
-/** The ghost control at the right end of a sent round's chip line. One string for
- * both sides that draw it: src/render.mjs for a round rendered sent, and
- * src/ui.mjs's markRoundHistory for a round that goes sent under an open tab. */
+/** The ghost control at the right end of a question round's chip line, sent or
+ * not. */
 export const ROUND_DOWNLOAD_BUTTON = `<button type="button" class="round-download" title="Save this round as one HTML file">${DOWNLOAD_ICON}Download round</button>`;
+
+/** The same control among the top strip's own, for the round in view. It shows
+ * only while that round is drawn full page (src/styles.mjs), where the round has
+ * no chip line, and stays in the pill once the artifact scrolls under it. */
+export const HEAD_DOWNLOAD_BUTTON = `<button type="button" class="round-download head-download" title="Save this round as one HTML file">${DOWNLOAD_ICON}Download round</button>`;
 
 /** One decisions-table row per question of the round, in board order:
  * `{ question, pick, note }`, all plain text. `questions` is the round's question
@@ -44,10 +50,12 @@ export function exportDate(iso) {
   return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
 }
 
-/** The saved file's name: the board's title as a slug, then the round. */
-export function exportFileName(title, n) {
+/** The saved file's name: the board's title as a slug, then the round, then
+ * `part` where the file holds one mock or diagram of it ('mock-h1'). */
+export function exportFileName(title, n, part) {
   var slug = String(title || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60).replace(/-+$/, '');
-  return (slug || 'board') + '-round-' + n + '.html';
+  var tail = String(part || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  return (slug || 'board') + '-round-' + n + (tail ? '-' + tail : '') + '.html';
 }
 
 /** The height, in px, of the one printed page a taller diagram or mock is fitted to:
@@ -68,7 +76,15 @@ export function printScale(height) {
  * in `contentHtml` read as they did on the board; EXPORT_CSS lays out the rest
  * and prints it. The policy admits styles, fonts and images inline and nothing
  * else, so even a script that slipped past the strip could not run, and nothing
- * reaches the network. */
+ * reaches the network.
+ *
+ * `o.unsent` is a round not yet sent. Where it asked something, its picks are a
+ * draft: the file opens on a line saying so, heads the table as picks so far and
+ * marks the round's content, where EXPORT_CSS writes 'picked, unsent' after each
+ * picked option. A round that asked nothing has no draft to warn of.
+ *
+ * `o.only` names a file of one mock or diagram ('One mock'): `contentHtml` is
+ * that artifact alone, under the same head, with no table. */
 export function exportDocument(o) {
   var esc = function (s) {
     return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -79,27 +95,35 @@ export function exportDocument(o) {
     return '<tr><td class="export-q">' + esc(r.question) + '</td><td class="export-pick">' + esc(r.pick)
       + '</td><td class="export-note">' + esc(r.note) + '</td></tr>';
   }).join('');
+  var draft = !!o.unsent && !o.only && !!rows;
   var decisions = rows
-    ? '<table class="export-decisions"><thead><tr><th>Question</th><th>Pick</th><th>Note</th></tr></thead><tbody>' + rows + '</tbody></table>'
+    ? '<table class="export-decisions"><thead><tr><th>Question</th><th>' + (draft ? 'Pick, unsent' : 'Pick') + '</th><th>Note</th></tr></thead><tbody>' + rows + '</tbody></table>'
     : '<p class="export-empty">This round asked no questions.</p>';
-  var sent = o.sentDate ? '<span>Sent <b>' + esc(o.sentDate) + '</b></span>' : '';
+  var sent = o.only ? '<span>' + esc(o.only) + '</span>'
+    : draft ? '<span><b>Not sent</b></span>'
+    : o.sentDate ? '<span>Sent <b>' + esc(o.sentDate) + '</b></span>' : '';
+  var body = o.only ? ''
+    : '<h2 class="export-section">' + (draft ? 'Picks so far, not sent' : 'Decisions') + '</h2>\n' + decisions + '\n'
+      + '<h2 class="export-section">Round content</h2>\n';
   return '<!DOCTYPE html>\n<html lang="en" data-theme="light">\n<head>\n<meta charset="utf-8">\n'
     + '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'; img-src data:; font-src data:; media-src data:">\n'
     + '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
-    + '<title>' + esc(o.title) + ', ' + roundName + '</title>\n'
+    + '<title>' + esc(o.title) + ', ' + roundName + (o.only ? ', ' + esc(o.only).toLowerCase() : '') + '</title>\n'
     + '<style>\n' + String(o.css || '').replace(/</g, '\\3c ') + '\n</style>\n'
     + '<style>\n' + o.exportCss + '\n</style>\n</head>\n'
     + '<body class="round-export">\n<main class="export-doc">\n'
+    + (draft ? '<p class="export-unsent-note"><b>Not sent:</b> these picks are a draft, not a decision.</p>\n' : '')
     + '<header class="export-head"><div class="export-from">From claude-board</div><h1 class="export-title">' + esc(o.title) + '</h1>'
     + '<div class="export-meta"><span><b>' + roundName + '</b>' + subtitle + '</span>' + sent + '</div></header>\n'
-    + '<h2 class="export-section">Decisions</h2>\n' + decisions + '\n'
-    + '<h2 class="export-section">Round content</h2>\n'
-    + '<section class="round round-current export-round">\n' + o.contentHtml + '\n</section>\n'
+    + body
+    + '<section class="round round-current export-round' + (draft ? ' export-unsent' : '') + '">\n' + o.contentHtml + '\n</section>\n'
     + '</main>\n</body>\n</html>\n';
 }
 
 /** Layout A, decisions first, over the board's own stylesheet; light, since a
- * file is printed. The print half keeps a card, a question, a diagram, a stage and
+ * file is printed. An unsent round's picked option wears no settled tint: a dashed
+ * edge, and 'picked, unsent' after its label; its question's state chip says
+ * unsent too. The print half keeps a card, a question, a diagram, a stage and
  * a decisions row each on one page, and keeps the marks a reader needs (the picked
  * option's tint, the card edges) when the browser would drop backgrounds. A
  * diagram taller than a page is drawn smaller to fit one (PRINT_PAGE_H). A mock taller than a page (its holder is '.export-fit',
@@ -144,6 +168,14 @@ body.round-export::before { display: none; }
 .export-round .opt-check { display: none; }
 .export-round .card-choice.selected, .export-round .variant-card.selected { border-color: var(--good); background: var(--good-soft); box-shadow: inset 3px 0 0 var(--good); }
 .export-round .card-choice.selected .opt-label::before, .export-round .variant-card.selected .opt-label::before { content: "\\2713  "; color: var(--good); }
+.export-unsent-note { margin: 0 0 24px; padding: 10px 14px; font-size: 13.5px; color: var(--ink); background: var(--panel-2);
+  border: 1.5px solid var(--ink-2); border-radius: var(--r-md); }
+.export-unsent .card-choice.selected, .export-unsent .variant-card.selected { border: 1px dashed var(--ink-2); background: var(--panel-2); box-shadow: none; }
+.export-unsent .card-choice.selected .opt-label::before, .export-unsent .variant-card.selected .opt-label::before { color: var(--ink-2); }
+.export-unsent .card-choice.selected .opt-label::after, .export-unsent .variant-card.selected .opt-label::after { content: " \\00b7  picked, unsent"; white-space: pre;
+  font-weight: 500; color: var(--muted); }
+.export-unsent .answer-status[data-status] { background: var(--panel-2); color: var(--muted); }
+.export-unsent .answer-status[data-status]::after { content: ", unsent"; }
 .export-round .export-text { white-space: pre-wrap; font-size: 13px; color: var(--ink); background: var(--panel-2); border: 1px solid var(--hairline);
   border-radius: var(--r-md); padding: 12px 14px; }
 .export-round .export-note-box { font-size: 12.5px; color: var(--ink-2); background: var(--accent-soft); border: 1px solid var(--hairline);
@@ -155,6 +187,7 @@ body.round-export::before { display: none; }
 .export-round .comment-list-wrap { max-height: none; overflow: visible; }
 @media print {
   body.round-export { padding: 0; background: #fff; }
+  .export-unsent-note { break-after: avoid; }
   .export-round .block { box-shadow: none; }
   .export-round .block, .export-round .question-block, .export-round .card-choice, .export-round .variant-card,
   .export-round .stage-wrap, .export-round pre.mermaid, .export-round .comment-item, .export-decisions tr,
