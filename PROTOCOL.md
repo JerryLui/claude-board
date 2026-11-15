@@ -1223,8 +1223,9 @@ reporting two answers for the one question that was asked.
 The question is what makes a round amendable, because amending exists for one situation: the agent
 is still assembling a round the reviewer has not answered yet. A round that asks nothing is
 complete the moment it lands — nothing can ever answer it, so it stays `open` for good — and a
-later post is a new round beside it, not an edit of it. That is what makes "post the artifact,
-then ask about it" two rounds, and therefore two pages one flip apart.
+later post is a new round beside it, not an edit of it. An artifact posted alone and a question
+posted after it are therefore two rounds, two pages one flip apart: a mock and the questions about
+it go up as one round, the mock in its question's `context` or as its rendered options.
 
 A board can consequently hold **two open rounds at once**: an artifact round nobody will ever send,
 and the question round after it. Wherever this protocol says *the open round*, the round an amend
