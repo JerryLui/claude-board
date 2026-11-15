@@ -2064,7 +2064,7 @@ event: watcher        data: { id }
 event: round          data: { round, mode: 'new-round' | 'amend', blockIds, html, board }
 event: submitted      data: { round, board, html }
 event: awaitExpired   data: { round }
-event: deadline       data: { round, awaitDeadline }
+event: deadline       data: { round, awaitDeadline, reopened? }
 ```
 
 `watcher` is the first thing the stream sends, ahead of any of the others, on every open and
@@ -2112,10 +2112,12 @@ whichever of the two lands first; a tab that missed both takes the round on from
 (below), the same way.
 
 `deadline` is also what a hand-over sends for each round it reopens (ADR 151), on the board's
-stream and, with `board`, on the daemon-wide one, beside a `waiting` event there: the round's
-deadline moved to one wait from now. A tab already open takes the round up again with no reload,
-whether it held it as lapsed or as abandoned: it counts down again, and its widgets and Send are
-live.
+stream with `reopened: true` and, with `board` and no `reopened`, on the daemon-wide one, beside a
+`waiting` event there: the round's deadline moved to one wait from now, and its status back to
+`open`. A tab already open re-reads the board on `reopened` (its catch-up, below) and takes the
+round up again with no reload, whether it held it as lapsed or as abandoned: it counts down again,
+its widgets and Send are live, a full-page round's frozen panel included, and what the reviewer
+picked or typed there is kept.
 
 `awaitExpired` is the one event that carries no board: it fires from `GET /api/board/:id/wait`'s
 own timeout branch, at the moment that wall clock gives up, and is a wake-up nudge rather than a

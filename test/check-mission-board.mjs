@@ -458,6 +458,27 @@ async function main() {
     assert.equal((await leave('LAPSED', 'lapsed-taker', taker)).status, 200);
   });
 
+  await check('a join that reopens rounds tells a tab already open on the board of each one: a deadline event naming the round, its new deadline and that it reopened, which the tab re-reads the board on', async () => {
+    const gone = sessionProcess();
+    const next = sessionProcess();
+    const folder = folderWith('open-tab', 'x\n');
+    assert.equal((await join('OPENTAB', 'opentab-gone', gone)).status, 200);
+    const asked = await ask(gone, folder, [question('Closed at its clear?')]);
+    await ask(gone, folder, [question('Left to lapse?')], { fresh: true });
+    lapse(asked.boardId, 2);
+    await kill(gone);
+    const tab = await openSseClient(port, asked.boardId, { secret: SECRET, comments: false });
+    try {
+      assert.equal((await join('OPENTAB', 'opentab-next', next)).status, 200);
+      const told = () => tab.events.filter(e => e.event === 'deadline').map(e => e.data);
+      await waitFor(() => told().length === 2, { what: 'a deadline event for each reopened round on the open tab' });
+      assert.deepEqual(told(), readBoard(asked.boardId, home).rounds.map(r => ({ round: r.n, awaitDeadline: r.awaitDeadline, reopened: true })));
+    } finally {
+      tab.req.destroy();
+    }
+    assert.equal((await leave('OPENTAB', 'opentab-next', next)).status, 200);
+  });
+
   await check('the bound session joining again under a new id (after a /clear) has the round its earlier id left closed reopened, and not the round it asked since', async () => {
     const s = sessionProcess();
     const folder = folderWith('cleared', 'x\n');

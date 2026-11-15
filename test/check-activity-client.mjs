@@ -10,7 +10,8 @@
 // route and the event's sender are the daemon's half, test/check-http.mjs's.
 
 import assert from 'node:assert/strict';
-import { createBoard } from '../src/board.mjs';
+import { closeLapsedAwaitedRounds } from '../src/badge.mjs';
+import { abandonOpenRounds, createBoard, handOverRounds } from '../src/board.mjs';
 import { renderBoardPage } from '../src/render.mjs';
 import { parseHTML, StandInEvent } from './dom-stand-in.mjs';
 import { check, finish, flush, pageHarness } from './support.mjs';
@@ -247,5 +248,122 @@ await check('a tab whose stream dropped while the deadline moved takes the new d
     restore();
   }
 });
+
+// A hand-over reopens a round in place (ADR 151) and tells the board's tabs so on the
+// `deadline` event, `reopened: true`, which a tab re-reads the board on. Each tab below
+// comes to hold the round closed the way a real one does, and the reopen is
+// src/board.mjs's own.
+
+const GONE = { id: 'session-gone' };
+const NEXT = { id: 'session-next' };
+
+/** The tab's network for one row: its re-read of the board is served `net.page`, and each
+ * POST is answered empty, the Sends among them listed by `net.submits()`. `net.ahead(ms)`
+ * moves the clock the tab and the daemon share. Restore in a finally. */
+function tabNetwork() {
+  const stub = stubFetch(() => ({ ok: true, status: 200, text: async () => net.page, json: async () => ({}) }));
+  const originalParser = globalThis.DOMParser;
+  const realNow = Date.now;
+  globalThis.DOMParser = class { parseFromString(text) { return parseHTML(text); } };
+  const net = {
+    page: '',
+    submits: () => stub.calls.filter(c => /\/submit$/.test(c.url)).map(c => c.body),
+    ahead(ms) { Date.now = () => realNow() + ms; },
+    restore() { Date.now = realNow; globalThis.DOMParser = originalParser; stub.restore(); },
+  };
+  return net;
+}
+
+/** Sends the tab `event`, with `board` as the daemon then serves it to the tab's re-read. */
+async function tell(net, es, board, event, data) {
+  net.page = renderBoardPage(board);
+  es.dispatch(event, JSON.stringify(data));
+  await flush(1);
+}
+
+/** How a tab comes to hold round 1 closed. Each opens the board's page, lets `work(document)`
+ * run while the page takes it, and answers the tab. */
+const HELD = {
+  'that sat through the round\'s lapse': async (board, net, work) => {
+    const tab = loadBoardWithEventSource(renderBoardPage(board));
+    work(tab.document);
+    net.ahead(41 * MINUTE);
+    closeLapsedAwaitedRounds(board);
+    await tell(net, tab.es, board, 'awaitExpired', { round: 1 });
+    return tab;
+  },
+  'opened after the round lapsed': async (board, net, work) => {
+    net.ahead(41 * MINUTE);
+    closeLapsedAwaitedRounds(board);
+    const tab = loadBoardWithEventSource(renderBoardPage(board));
+    work(tab.document);
+    return tab;
+  },
+  'that saw the round abandoned': async (board, net, work) => {
+    const tab = loadBoardWithEventSource(renderBoardPage(board));
+    work(tab.document);
+    assert.deepEqual(abandonOpenRounds(board), [1], 'setup: the boundary closes the round');
+    await tell(net, tab.es, board, 'awaitExpired', { round: 1 });
+    return tab;
+  },
+};
+
+/** The hand-over's reopen of round 1, told to the tab as the daemon tells it. */
+async function reopen(net, es, board) {
+  assert.deepEqual(handOverRounds(board, GONE, NEXT).reopened, [1], 'setup: the hand-over reopens the round');
+  await tell(net, es, board, 'deadline', { round: 1, awaitDeadline: board.rounds[0].awaitDeadline, reopened: true });
+}
+
+for (const [held, open] of Object.entries(HELD)) {
+  await check(`a tab ${held} shows it waiting again once a hand-over reopens it, with no reload: the countdown back, and its Send carrying the pick and the note made in that tab`, async () => {
+    const board = createBoard({ title: 'Reopened', blocks: [BLOCKS[0]], session: GONE });
+    const net = tabNetwork();
+    try {
+      const { document, es } = await open(board, net, document => {
+        answerSingle(blockOf(document, 'single'), 'Yes');
+        typeInto(blockOf(document, 'single').querySelector('textarea[data-note-for]'), 'Only after the review');
+      });
+      assert.deepEqual([countdown(document), meta(document)], ['', 'read-only'], 'setup: the tab holds the round closed');
+      await reopen(net, es, board);
+      assert.deepEqual([countdown(document), meta(document)], ['40m left', '40m left']);
+      click(document.getElementById('send-btn'));
+      await flush(1);
+      assert.deepEqual(net.submits().map(b => [b.round, b.answers]), [[1, [{ id: board.blocks[0].id, status: 'answered', choice: 'Yes', note: 'Only after the review' }]]]);
+    } finally { net.restore(); }
+  });
+}
+
+const pagePanel = document => document.querySelector('.page-comments');
+const pageSend = document => pagePanel(document).querySelector('.page-send-btn');
+const pageDraft = document => pagePanel(document).querySelector('.comment-form input[type=text]');
+
+for (const [held, open] of Object.entries(HELD)) {
+  await check(`a tab ${held} takes a reopened full-page round's answers again, with no reload: its panel live, the countdown back, the comment being typed in that tab kept, and its Send carrying it`, async () => {
+    const board = createBoard({ title: 'Reopened page', blocks: [{ kind: 'html', html: '<p>The mock under review</p>' }], wait: true, session: GONE });
+    const net = tabNetwork();
+    try {
+      // A page drawn after the lapse has no composer to type into.
+      const { document, es } = await open(board, net, document => { if (pageDraft(document)) pageDraft(document).value = 'Half a thought'; });
+      const typed = pageDraft(document) ? 'Half a thought' : '';
+      assert.equal(!!pageSend(document) && !pageSend(document).disabled, false, 'setup: the tab holds the page with no live Send');
+      assert.equal(meta(document), 'read-only', 'setup: and no countdown');
+
+      await reopen(net, es, board);
+      assert.equal(pagePanel(document).classList.contains('expired'), false);
+      assert.equal(meta(document), '40m left');
+      // `|| ''`: the stand-in reads a title never set as undefined, a browser as ''.
+      assert.deepEqual([pageSend(document).disabled, pageSend(document).textContent, pageSend(document).title || ''], [false, 'Nothing to add', '']);
+      assert.equal(pagePanel(document).querySelector('.page-discuss-btn').disabled, false);
+      assert.deepEqual([pageDraft(document).disabled, pageDraft(document).value], [false, typed]);
+
+      pageDraft(document).value = typed || 'Said after the reopen';
+      pagePanel(document).querySelector('.comment-form').dispatchEvent(new StandInEvent('submit'));
+      assert.equal(pageSend(document).textContent, 'Send 1 comment');
+      click(pageSend(document));
+      await flush(1);
+      assert.deepEqual(net.submits().map(b => [b.action, b.round, b.comments.map(c => c.text)]), [['send', 1, [typed || 'Said after the reopen']]]);
+    } finally { net.restore(); }
+  });
+}
 
 await finish('activity-client');
