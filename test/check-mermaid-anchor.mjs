@@ -428,7 +428,7 @@ function anchorOnForm(document, blockId) {
   };
 }
 
-await check('the Pull-out on a mermaid block opens a lens holding a CLONE of the diagram -- with fit and 1:1 controls', async () => {
+await check('the Pull-out on a mermaid block opens a lens holding a CLONE of the diagram -- with fit, 1:1 and download controls', async () => {
   const document = loadBoard(pageHtml, { mermaid: mockMermaid() });
   await flush(1);
   assert.equal(document.querySelectorAll('.diagram-lens').length, 0, 'the lens must not exist before it is asked for -- it is built lazily on the first open');
@@ -449,7 +449,7 @@ await check('the Pull-out on a mermaid block opens a lens holding a CLONE of the
   assert.ok(inlineSvg.querySelector(`[id="${idA}"]`), 'the inline diagram must still hold its own nodes -- the lens must not have stolen them');
 
   const actions = document.querySelectorAll('.diagram-lens .lens-btn').map(b => b.getAttribute('data-lens'));
-  assert.deepEqual(actions, ['fit', 'one', 'close'], `expected fit and 1:1 controls; got ${JSON.stringify(actions)}`);
+  assert.deepEqual(actions, ['fit', 'one', 'download', 'close'], `expected fit, 1:1 and download controls, then close; got ${JSON.stringify(actions)}`);
   // The percentage readout comes from the applied view, so it doubles as proof
   // that a view was actually applied to the canvas on open.
   assert.equal(document.querySelector('.diagram-lens .lens-pct').textContent, '100%');
