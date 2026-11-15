@@ -2718,14 +2718,21 @@ function publishDeadlineMove(req, board, round, home, sse, stranded, stream, wai
   const html = renderBoardPage(board);
   writeBoard(board, home);
   writePage(board.id, html, home);
-  const moveEvent = { round: round.n, awaitDeadline: round.awaitDeadline };
-  sse.broadcast(board.id, 'deadline', moveEvent);
-  // The index streams list every board, so theirs names which one moved.
-  stream.broadcast('deadline', { board: board.id, ...moveEvent });
+  broadcastDeadline(board, round, sse, stream);
   // No waiting count moved, so nothing is published for it; the cache takes the write
   // so its next read does not walk the store over a board this process just wrote.
   waiting.noteWrite(board);
   stranded.evaluate(board.id, strandedTarget(req, board.id));
+}
+
+/** The `deadline` event for `round`'s stored deadline: to every tab of `board`, and to
+ * every index stream, which list every board, so theirs names which one moved. `reopened`
+ * marks, for the board's tabs, a round a hand-over reopened (ADR 151): a tab re-reads the
+ * board on it, since the round's status moved too. */
+function broadcastDeadline(board, round, sse, stream, { reopened = false } = {}) {
+  const moveEvent = { round: round.n, awaitDeadline: round.awaitDeadline };
+  sse.broadcast(board.id, 'deadline', reopened ? { ...moveEvent, reopened: true } : moveEvent);
+  stream.broadcast('deadline', { board: board.id, ...moveEvent });
 }
 
 /** POST /api/board/:id/activity { round } -> `{ round, awaitDeadline, moved }` (ADR 145): the
@@ -3436,8 +3443,8 @@ function linkedMissionBoards(key, home) {
  * `taker`, the session a takeover, or a join after `giver` went, bound in its place, each
  * that asks for an answer reopened in place (`handOverRounds`, ADR 151): needs you reads
  * every linked board, so an older one's round is handed too. A reopened round's new
- * deadline goes to the board's tabs and the index streams as a moved one does, the waiting
- * count is published and the stranded rule asked again. A board that fails is warned and
+ * deadline goes to the board's tabs, marked `reopened`, and the index streams as a moved
+ * one does, the waiting count is published and the stranded rule asked again. A board that fails is warned and
  * the rest go on: the leave or join has happened. */
 function handOverMissionRounds(key, giver, taker, home, { req, sse, stranded, stream, waiting }) {
   for (const board of linkedMissionBoards(key, home)) {
@@ -3448,11 +3455,7 @@ function handOverMissionRounds(key, giver, taker, home, { req, sse, stranded, st
       writeBoard(board, home);
       writePage(board.id, html, home);
       if (reopened.length === 0) continue;
-      for (const r of board.rounds.filter(x => reopened.includes(x.n))) {
-        const moveEvent = { round: r.n, awaitDeadline: r.awaitDeadline };
-        sse.broadcast(board.id, 'deadline', moveEvent);
-        stream.broadcast('deadline', { board: board.id, ...moveEvent });
-      }
+      for (const r of board.rounds.filter(x => reopened.includes(x.n))) broadcastDeadline(board, r, sse, stream, { reopened: true });
       broadcastWaiting(stream, waiting, board);
       stranded.evaluate(board.id, strandedTarget(req, board.id));
     } catch (err) {
