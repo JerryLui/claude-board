@@ -22,7 +22,7 @@
   off your disk. It carries none of the comments made on the mock. When a mock cannot be saved
   (the board is not running to hand over the diagram library, or the mock has not loaded), the
   button says so under itself and nothing is saved.
-- **A mission's next session picks up the questions the last one left (ADR 151)**: when a session
+- **A mission's next session picks up the questions the last one left (ADR 151, 153)**: when a session
   joins a mission in place of the one before it, or takes the mission over, each round that
   session left unanswered goes back to waiting in place, whether it was closed at a `/clear` or
   the session's end, had timed out, or was still waiting at the takeover. It keeps its round
