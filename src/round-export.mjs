@@ -1,9 +1,13 @@
 // A round saved as one HTML file, sent or not: the Download round control on a
 // question round's chip line and, for a round drawn full page, in the top strip;
 // one mock or diagram saved alone from its Pull-out; and the pure half of the
-// file each saves. The file is made in the
-// browser from the drawn round (src/ui.mjs's downloadRound), so a diagram is
-// already SVG and no engine rides in the file; this module holds what needs no
+// file each saves. Two kinds of file (ADR.md entry 154). A question round's, and
+// one diagram's, is made in the browser from the drawn round (src/ui.mjs's
+// downloadRound), so a diagram is already SVG, a mock inside it is a still copy
+// and the file holds no script at all. A mock saved alone, from its Pull-out or
+// as the one mock of a round drawn full page, is the mock's own page: its source
+// as posted, scripts and all, under the diagram library's text where the mock
+// draws a diagram (stageOwnSource, mockDocument). This module holds what needs no
 // DOM, so test/check-round-download.mjs reads it in node and src/ui.mjs embeds
 // each function's literal source by '.toString()' (the src/badge.mjs discipline:
 // src/ui.mjs cannot import src/render.mjs).
@@ -62,6 +66,51 @@ export function exportFileName(title, n, part) {
   var slug = String(title || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60).replace(/-+$/, '');
   var tail = String(part || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
   return (slug || 'board') + '-round-' + n + (tail ? '-' + tail : '') + '.html';
+}
+
+/** A mock's own source, read back out of its stage's `srcdoc`: what
+ * src/render.mjs's buildStageSrcdoc wrote around it is taken off again, since a
+ * page holds each mock there and nowhere else (ADR.md entry 122). Answers
+ * `{ html, engine }`, `engine` true where the board gave the stage the diagram
+ * library (its tag names `engineAsset`, the library's file beside the page, and
+ * the board's stand-in follows it), and null for text that is not a stage's. The
+ * board's own script is the last thing in every stage and opens the same way
+ * nowhere else in itself, so the last such opening is its own, whatever the mock
+ * holds. */
+export function stageOwnSource(srcdoc, engineAsset) {
+  var text = String(srcdoc == null ? '' : srcdoc);
+  var close = '</' + 'script>';
+  var reset = '<style>html,body{margin:0;padding:0}</style>';
+  if (text.slice(0, reset.length) !== reset) return null;
+  var from = reset.length;
+  var lent = '<script src="' + engineAsset + '">' + close + "<script>(function () {\n  var CB = 'cb-stage', pending";
+  var engine = text.slice(from, from + lent.length) === lent;
+  if (engine) {
+    var end = text.indexOf(close, from + lent.length);
+    if (end < 0) return null;
+    from = end + close.length;
+  }
+  var to = text.lastIndexOf("<script>(function () {\n  var CB = 'cb-stage';\n");
+  if (to < from) return null;
+  return { html: text.slice(from, to), engine: engine };
+}
+
+/** A mock saved as its own page: `html`, the mock's source as posted, under the
+ * head a stage gives it on the board (a standards-mode document with no page
+ * margin), read as UTF-8 whatever opens it. `engineSource` is the diagram
+ * library's text for a mock that draws a diagram, written in as a script ahead
+ * of the mock's own, so the mock finds the library on `window` and reaches for
+ * no address; null for a mock with none. Nothing of the board's rides: no stage
+ * script, no stylesheet, no address of the daemon. The mock's scripts run
+ * wherever the file is opened.
+ *
+ * The library is written as it is, so its text may hold no script tag, opening
+ * or closing: one would end the script early or swallow the page after it. */
+export function mockDocument(html, engineSource) {
+  if (engineSource && /<\/?script/i.test(engineSource)) throw new Error('the diagram library holds a script tag and cannot be written into a file');
+  return '<!DOCTYPE html>\n<meta charset="utf-8">\n<style>html,body{margin:0;padding:0}</style>\n'
+    + (engineSource ? '<script>' + engineSource + '</' + 'script>\n' : '')
+    + String(html == null ? '' : html);
 }
 
 /** The height, in px, of the one printed page a taller diagram or mock is fitted to:
