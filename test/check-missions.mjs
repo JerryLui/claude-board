@@ -100,15 +100,15 @@ function seed(dir, key, fields) {
   }, dir);
 }
 
-/** Writes a board of `rounds` to `dir`'s store, round 1 asking one question, and answers the
- * link a mission's `boards` holds for it. */
+/** Writes a board of `rounds` to `dir`'s store, round 1 asking one Fire question, and answers
+ * the link a mission's `boards` holds for it. */
 function seedBoard(dir, boardId, now, rounds) {
   const at = new Date(now).toISOString();
   mkdirSync(path.join(dir, 'boards'), { recursive: true });
   writeFileSync(path.join(dir, 'boards', `${boardId}.json`), JSON.stringify({
     id: boardId, thread: 't', title: 'q', cwd: null, createdAt: at, updatedAt: at, state: 'open',
     rounds: rounds.map((r, i) => ({ n: i + 1, postedAt: at, status: 'open', sentAt: null, title: 'q', ...r })),
-    blocks: [{ id: 'q1', kind: 'question', round: 1, prompt: 'Fire?', widget: 'single', options: [{ label: 'Yes' }] }],
+    blocks: [{ id: 'q1', kind: 'question', round: 1, prompt: 'Fire?', widget: 'single', action: 'fire', options: [{ label: 'Yes' }] }],
     answers: {}, comments: [],
   }));
   return { id: boardId, url: 'http://x/b/' + boardId, at };
@@ -862,21 +862,27 @@ async function main() {
       'seven working and two waiting on the PM leave a working slot');
   });
 
-  await check('a session working on behind a round a hand-over reopened holds its working slot, though its mission reads needs you: a launch queues at the cap (ADR 155)', () => {
-    const dir = scratchHome('behind-reopened');
+  await check('a session working on while a round a hand-over reopened is owed holds its working slot, though its mission reads needs you, the round behind a later one of its own or still its newest and drawing the card\'s Fire: a launch queues at the cap (ADR 155)', () => {
     const now = Date.now();
     const alive = () => true;
-    for (let i = 0; i < MAX_WORKING - 1; i++) {
-      seed(dir, `W${i}`, { session: { pid: 1000 + i, startedAt: iso(now), seenAt: iso(now) } });
+    const reopened = { reopenedAt: iso(now), awaited: true, awaitDeadline: iso(now + minutes(40)) };
+    for (const [label, rounds, fires] of [
+      ['behind-a-later-round', [reopened, {}], []],
+      ['no-later-round', [reopened], [1]],
+    ]) {
+      const dir = scratchHome(`reopened-${label}`);
+      for (let i = 0; i < MAX_WORKING - 1; i++) {
+        seed(dir, `W${i}`, { session: { pid: 1000 + i, startedAt: iso(now), seenAt: iso(now) } });
+      }
+      const link = seedBoard(dir, `b_reopened${rounds.length}`, now, rounds);
+      seed(dir, 'WORKS_ON', { boards: [link], session: { pid: 3000, startedAt: iso(now), seenAt: iso(now) } });
+      const overview = missionsOverview({ home: dir, now, isAlive: alive });
+      const worksOn = overview.missions.find(m => m.key === 'WORKS_ON');
+      assert.deepEqual([worksOn.view, worksOn.actions.map(a => [a.kind, a.round])], ['needs-you', fires.map(n => ['fire', n])], label);
+      assert.equal(worksOn.asking, false, label);
+      assert.deepEqual([overview.live, overview.slotFree], [{ working: MAX_WORKING, alive: MAX_WORKING }, false], label);
+      assert.deepEqual(launchMission('NEXT', { phase: 'direct' }, { home: dir, now, isAlive: alive }), { queued: true }, label);
     }
-    // Round 1 was handed to this session and still asks; its own round 2 asks nothing.
-    const link = seedBoard(dir, 'b_behindreopened', now, [{ reopenedAt: iso(now), awaited: true, awaitDeadline: iso(now + minutes(40)) }, {}]);
-    seed(dir, 'WORKS_ON', { boards: [link], session: { pid: 3000, startedAt: iso(now), seenAt: iso(now) } });
-    const overview = missionsOverview({ home: dir, now, isAlive: alive });
-    const worksOn = overview.missions.find(m => m.key === 'WORKS_ON');
-    assert.deepEqual([worksOn.view, worksOn.asking], ['needs-you', false]);
-    assert.deepEqual([overview.live, overview.slotFree], [{ working: MAX_WORKING, alive: MAX_WORKING }, false]);
-    assert.deepEqual(launchMission('NEXT', { phase: 'direct' }, { home: dir, now, isAlive: alive }), { queued: true });
   });
 
   await check('the card\'s Fire comes only from the newest round of each session on a board, and needs you from that round or a reopened one (held in check-mission-board.mjs): an older page left asking, never reopened, holds neither, and one session is one poster by its id or its process start to the second', () => {
