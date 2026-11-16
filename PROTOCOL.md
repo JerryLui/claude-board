@@ -1833,7 +1833,8 @@ The one check that keeps a mission to one live session. The 409 names the live `
 carries `silent: true` when that session reads stalled by silence while its process lives, which
 is how a launcher tells a hang from a busy session. A launch ends the session it replaces,
 finished, gone or silent, and that session's `pid`, `procStart` and `id` move to the new session's `ended`; a
-queued launch keeps no session, only that `ended`, until it launches.
+queued launch keeps no session, only that `ended`, or the `left` of a session that left the mission
+before it (`leave` below), until it launches.
 
 ```
 POST /api/mission/:key/join         { id, pid?, procStart?, phase?, takeover? }
@@ -1878,8 +1879,10 @@ A leave by the bound session, with no takeover pending, stores `session: { ended
 moves a `working` mission to `waiting`; the session is a tab card again ("The session routes").
 The record that takes its place, a session bound or a launch's reservation or queue, carries
 it as `left`, `{ pid?, procStart?, id? }`, and as nothing else: it is not `ended`, so it may
-join again. The first 200 join after hands the rounds it left unanswered to the session that
-joined ("Hand-over" below) and drops `left`.
+join again. A 200 join hands the rounds it left unanswered to the session that joined
+("Hand-over" below, ADR 153) and drops `left` once every board the mission links was read and
+handed over. A board that failed keeps `left` on the record, and the next 200 join hands over
+again. The join's answer never carries `left`.
 Any other session's leave is a 409. The binding is read off the stored records alone, nothing
 derived and no board read, for a hook that asks every minute: the mission the session is bound to
 (a released mission, a bare reservation and a session that left bind no one), its pending
@@ -3057,7 +3060,7 @@ closes only rounds no session posted. A session naming no `round` leaves open a 
 **Owed answers and comments** ride only packets of a round the same session posted (by its id,
 or its pid and start): a shared board's late answer reaches the session that asked.
 
-**Hand-over** (ADR 150, 151). When a leave binds the session that asked to take over (`POST
+**Hand-over** (ADR 150, 151, 153). When a leave binds the session that asked to take over (`POST
 /api/mission/:key/leave` with a takeover pending), the rounds the giver left unsent on every board the
 mission links become the taker's: `session` is rewritten to the taker and `handedFrom` names the giver. A join that binds in place of a
 session that went or that a launch replaced (the joined record's `session.ended`) hands that
@@ -3065,11 +3068,16 @@ session's rounds over the same way, and so does the bound process joining under 
 `/clear`, for the rounds recorded under the id it had. Only rounds whose own `session` names the giver are
 handed: one recording none stays where it is, and so do an earlier session's. A session that left
 with no takeover pending gives too, at the next join (the record's `left`), whether its process
-still runs or not, a join through a launch's reservation or queue included: once, to a session
-of another id. That session joining again under the id it left with is handed nothing, its
-rounds being its own still; under a new id, after a `/clear`, it is handed them as any other.
+still runs or not, a join through a launch's reservation or queue included: to a session of
+another id, and at no later join once every linked board was read and handed over. A board that
+fails keeps `left` on the record, and the next join hands over again. That session joining again
+under the id it left with is handed nothing, its rounds being its own still; under a new id,
+after a `/clear`, it is handed them as any other, save where a round on the mission's boards is
+recorded under the id it joins with: it asked that round after a `/clear` while bound and left
+under the new id, so it is handed only the rounds recorded under the id the mission bound it
+with, and the round it asked since stays as it was.
 A session bound by a heartbeat alone (`POST /api/mission/:key/session`) is handed them at its
-join, and when it goes or leaves before one, they stay the leaver's.
+join, and when it goes, leaves or is taken over before one, they stay the leaver's.
 
 Each handed round that asks for an answer (it was minted with an `awaitDeadline`) is **reopened in
 place**, whether the giver's boundary abandoned it, its wait lapsed or it still waited: `open`,

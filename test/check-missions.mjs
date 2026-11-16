@@ -198,6 +198,27 @@ async function main() {
     assert.deepEqual(missionsOverview({ home: dir, now: past, isAlive: alive }).live, { working: 1, alive: 1 });
   });
 
+  for (const [i, how] of ['a second launch replaces it, and the join binds that one', 'a join binds in its place'].entries()) {
+    await check(`a launch's reservation no process bound hands on the session that left before it once it lapses: ${how}, answered the leaver`, () => {
+      const key = `LEFT_FAILED_START_${i}`;
+      const dir = scratchHome(`left-unbound-${i}`);
+      const t0 = Date.parse('2026-10-28T12:00:00Z');
+      const isAlive = () => true;
+      const leaver = { pid: 4343, id: 'sess-left' };
+      joinMission(key, leaver, { home: dir, now: t0, isAlive });
+      leaveMission(key, { id: 'sess-left' }, { home: dir, now: t0 + 1000 });
+      assert.deepEqual(launchMission(key, { phase: 'direct' }, { home: dir, now: t0 + 2000, isAlive }), { launch: true });
+
+      const past = t0 + 2000 + UNBOUND_GRACE_MS + 1000;
+      if (i === 0) {
+        assert.deepEqual(launchMission(key, { phase: 'direct' }, { home: dir, now: past, isAlive }), { launch: true });
+        assert.deepEqual(readMission(key, dir).session, { startedAt: iso(past), seenAt: iso(past), left: leaver });
+      }
+      const joined = joinMission(key, { id: 'sess-next', pid: 4444 }, { home: dir, now: past + 1000, isAlive });
+      assert.deepEqual([joined.status, joined.session.id, joined.left], [200, 'sess-next', leaver]);
+    });
+  }
+
   await check('a session bound by id alone stays live past the unbound grace', () => {
     const t0 = Date.parse('2026-10-28T12:00:00Z');
     const dir = scratchHome('bound-by-id');
