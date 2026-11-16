@@ -4,23 +4,24 @@
 
 - **Download round**: a round's page has a Download round button at the right end of the
   round's chip line, or in the top strip when the round is one mock drawn full page, where it stays
-  in view as the mock scrolls. It saves that one round as a single HTML file that opens offline: the
-  board's title, the round's number and date, a table of each question with its pick and note, then
-  the round in full, with every option and the pick marked, diagrams as pictures, mocks at full
-  height with their scripts left out, comments under what they point at and images inside the file.
-  The browser's Print makes a PDF of it. A round not yet sent saves too: its file opens on a Not
-  sent line and marks each pick so far as unsent. Pull-out, the full-window view of one mock or
-  diagram, has a download of its own that saves that one alone. A board opened from Finder offers
-  none of these.
+  in view as the mock scrolls. On a question round it saves that one round as a single HTML file
+  that opens offline: the board's title, the round's number and date, a table of each question with
+  its pick and note, then the round in full, with every option and the pick marked, diagrams as
+  pictures, each mock a still copy at full height with its scripts left out, comments under what
+  they point at and images inside the file. The browser's Print makes a PDF of it. A round not yet
+  sent saves too: its file opens on a Not sent line and marks each pick so far as unsent. Pull-out,
+  the full-window view of one mock or diagram, has a Download of its own that saves that one alone.
+  A board opened from Finder offers none of these.
 - **A saved mock is the page itself (ADR 154)**: Download on a mock's Pull-out, and Download round
-  on a round that is one mock drawn full page, now save the mock as its own working page instead of
-  a still copy: its scripts run, its diagrams draw, its contents list fills and its controls work,
-  opened from disk with no connection. A mock that draws diagrams gets the board's diagram library
-  written into the file, about 3.5 MB, so it asks the web for nothing; a library a mock names by any
-  other web address stays a web address. The file runs the mock's scripts wherever it is opened, so
-  treat one as you would the session that made it. A full-page round's file no longer lists the
-  comments made on the mock. A question round's file is unchanged: no script anywhere in it, each
-  mock inside it a still copy.
+  on a round that is one mock drawn full page, save the mock as its own working page: its scripts
+  run, its diagrams draw, its contents list fills and its controls work, opened from disk with no
+  connection. A mock that draws diagrams gets the board's diagram library written into the file,
+  about 3.5 MB, so it asks the web for nothing; a library a mock names by an `https:` address
+  stays a web address. The file runs the mock's scripts wherever it is opened, so treat one as you
+  would the session that made it; its own policy keeps those scripts from loading any other file
+  off your disk. It carries none of the comments made on the mock. When a mock cannot be saved
+  (the board is not running to hand over the diagram library, or the mock has not loaded), the
+  button says so under itself and nothing is saved.
 - **A mission's next session picks up the questions the last one left (ADR 151, 153)**: when a session
   joins a mission in place of the one before it, or takes the mission over, each round that
   session left unanswered goes back to waiting in place, whether it was closed at a `/clear` or

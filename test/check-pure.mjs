@@ -4037,7 +4037,9 @@ check('mode detection is synchronous, from the document\'s own protocol -- never
   // tab that does not hold it, (ADR 145) sendActivity's POST to /activity,
   // the reviewer's work on a round moving its deadline, and (ADR 154)
   // downloadMock's read of the board's own diagram library beside the page,
-  // written into a saved mock that draws a diagram. Any eighth is a
+  // under the name the mock's stage carries (src/round-export.mjs's
+  // stageOwnSource takes no name of any other shape), written into a saved
+  // mock that draws a diagram. Any eighth is a
   // network call nobody has justified -- in particular, mode detection must
   // never become a probe to the daemon.
   const fetchCalls = [...ui.matchAll(/fetch\(([^)]*)/g)].map(m => m[1]);
@@ -4047,7 +4049,7 @@ check('mode detection is synchronous, from the document\'s own protocol -- never
   assert.equal(fetchCalls.filter(c => c.includes("'/b/'")).length, 2, 'two fetches must read the board page: the resync and the held-stage fill');
   assert.ok(fetchCalls.some(c => c.includes('/attended')), 'one fetch must be the attended report');
   assert.ok(fetchCalls.some(c => c.includes('/activity')), 'one fetch must be the activity report');
-  assert.ok(fetchCalls.some(c => c === 'MERMAID_ASSET'), 'one fetch must read the diagram library, by the name the page already loads it under');
+  assert.ok(fetchCalls.some(c => c === 'own.engine'), 'one fetch must read the diagram library, by the name the mock\'s stage carries');
   // All seven live behind a readonly guard: the standalone file:// archive is
   // network-free, period.
   assert.match(namedFunctionBody(ui, 'resync'), /if \(readonly\) return;/);

@@ -330,9 +330,10 @@ credential a cross-origin GET could ride in on. Every other route in that list a
 (`/auth/<token>` is the route that *hands out* the credential, so it cannot require one; it is
 protected by the token being unguessable, single-use and seconds-lived. `/signin/<token>` hands out
 nothing at all: see [The sign-in link](#the-sign-in-link). The last open route is the vendored mermaid
-engine, and only that one name shape: the caller is a board page's own `html` stage, which is
-sandboxed with no `allow-same-origin` and so holds no credential by construction, and what the
-route hands back is a third-party library's public bytes under a name that is a digest of
+engine, and only that one name shape: the caller it is open for is a board page's own `html` stage,
+which is sandboxed with no `allow-same-origin` and so holds no credential by construction (the
+board page reads the same file too, with its cookie, to write it into a saved mock, `ADR.md`
+entry 154), and what the route hands back is a third-party library's public bytes under a name that is a digest of
 them — no board, no path, no store contents. `ui-<hash>.js` and `styles-<hash>.css` are this
 board's own behaviour and stay gated.) There are exactly two
 credentials: the secret file above, and a cookie the daemon derives from it and hands to
@@ -505,7 +506,8 @@ the "any process running as you" boundary — see [Not defended, by
 design](#not-defended-by-design). `'self'` is deliberately not widened to a bare `file:` scheme
 source, which would also make an archive work but would let an archived board's untrusted
 `html` stage — it inherits the page's policy through its `srcdoc` — pull any script off the
-reader's disk.
+reader's disk. A mock saved as its own file is held to the same line by a policy of its own: see
+[A mock saved as its own file](#a-mock-saved-as-its-own-file).
 
 `script-src` and `style-src` both also carry `'unsafe-inline'`, and in `script-src` it is
 load-bearing, not laziness: the theme boot script (`src/theme.mjs`'s `themeBootScript`) is an
@@ -554,6 +556,39 @@ Chrome's own hover bubble already names a link's target, and the artifacts this 
 the ones its own agent authored. A strip showing the full address with Open and Dismiss was
 built and reverted for that reason; what it cost was one extra click per link. `PROTOCOL.md`,
 "Links inside a stage", carries the shapes and the validation rules.
+
+#### A mock saved as its own file
+
+Download on a mock's Pull-out, and Download round on a round that is one mock drawn full page,
+save the mock's own source as a page, scripts included (`ADR.md` entry 154). This is the one
+place agent-authored script leaves the sandboxed stage: the saved file runs it wherever the
+reader opens it, with no sandbox and none of the board's policy. It is a reader's deliberate
+act, and the file is as trusted as the session that wrote the mock.
+
+What the board still holds for that file:
+
+- **No reach into the disk it is opened from.** A page opened from disk is a `file:` document,
+  and Chrome and Safari let one load any other `file:` address as a classic script or an image
+  (they refuse it `fetch`). Unchecked, a saved mock's script could run any script-shaped file on
+  the reader's disk and probe which paths exist. Every saved mock therefore opens on a meta
+  policy, right after its charset line and ahead of every script in the file, the diagram engine
+  included: `default-src 'unsafe-inline' https: data: blob:`. It names no `file:`
+  source and no `'self'`, which at a `file:` origin would match the disk, so a `file:` script,
+  image, stylesheet or frame is refused, as an archived stage is refused the same reach above.
+  It admits no `eval`, as the board's own page policy admits none in a stage. A mock can add a
+  policy of its own but cannot loosen this one: policies only narrow each other.
+- **Never drawn at the daemon's origin.** The tab hands the file to the browser as a blob at the
+  daemon's own origin. A mock's blob is typed `application/octet-stream` and dropped after a few
+  seconds, so a browser sent to its address saves it and does not render it there, where its
+  script would hold the reader's cookie. A round's file, which holds no script, stays `text/html`.
+- **Nothing of the board in it.** No address of the daemon, no stage script, no credential: opened
+  anywhere, the file cannot name the board, and a request it makes to the daemon arrives with
+  `Origin: null` and no cookie.
+
+What it does not stop: a script in a saved mock sending what that page itself holds to an
+`https:` host. The policy admits `https:` so that a library a mock names by web address still
+loads; `http:` addresses are refused, a server on the reader's own machine included. A question
+round's file, the one that carries picks and comments, admits no script at all.
 
 #### Your review content at rest
 
@@ -659,7 +694,9 @@ The same escape has a larger consequence for one kind: for `markdown`, `code` an
 `mermaid`, "quote it" means the hard-linked file's bytes appear as escaped text or a fenced
 diagram. For `html`, quoting it means its markup is what runs inside the sandboxed stage —
 still opaque-origin, still under the page CSP, so not a new hole, but a bigger one to fall
-into by the same route.
+into by the same route. That holds on the board. A reviewer who then saves that mock with
+Download has its markup in a file that runs unsandboxed wherever it is opened, under the saved
+file's own policy and nothing else: [A mock saved as its own file](#a-mock-saved-as-its-own-file).
 
 **A browser extension with host permissions on the profile holding the credential.** It can
 read boards and submit as you. `HttpOnly` stops page script, not extensions.

@@ -2653,16 +2653,22 @@ fonts and media: no script runs in it and it fetches nothing.
 it sits in a round), and what Download round saves for a round drawn full page, which is one
 mock. It is the mock's page, not a copy of the board's:
 
-1. `<!DOCTYPE html>`, `<meta charset="utf-8">` and the stage's margin reset
+1. `<!DOCTYPE html>`, `<meta charset="utf-8">`, the file's policy and the stage's margin reset
    (`html,body{margin:0;padding:0}`), so the page opens in standards mode with no page margin, as
-   it is drawn in a stage.
+   it is drawn in a stage. The policy is
+   `<meta http-equiv="Content-Security-Policy" content="default-src 'unsafe-inline' https: data: blob:">`,
+   ahead of every script in the file: what is written in the file runs, `data:`, `blob:` and
+   `https:` addresses load, and no `file:` address does, so a saved mock opened from disk loads
+   nothing else off that disk (`SECURITY.md`, "A mock saved as its own file"). An `http:` address
+   does not load either, and `eval` is refused, as it is in a stage on the board.
 2. Where the board lent the stage its diagram engine (the block's source carries the `mermaid`
    class marker, "the board draws a stage's diagrams" above), the vendored engine's text in one
    inline `<script>`. It runs before any script of the mock, so a mock that checks
    `window.mermaid` before loading or importing an engine finds it and asks no address for one.
-3. The block's `html`, byte for byte as posted, scripts included.
+3. The block's `html` as the stage holds it, scripts included: the text that was posted, with a
+   line ending of CR or CRLF read as LF, as a browser reads any attribute.
 
-Nothing of the board's rides in it: no stage script, no stylesheet, no policy, no address of the
+Nothing else of the board's rides in it: no stage script, no stylesheet, no address of the
 daemon, and no comment or answer of the round. The mock's scripts run wherever the file is
 opened, with whatever that origin allows, where the board ran them in a sandboxed frame at an
 opaque origin. An address the mock itself names (a second library by web address, an image off
@@ -2670,8 +2676,20 @@ another host) stays as written and needs a connection; the board fetches nothing
 
 The tab reads the mock's source back out of its stage's `srcdoc`, the one place a page holds it
 (ADR 122), by taking off what `buildStageSrcdoc` wrote around it, and reads the engine's text
-from the board's own `mermaid-<hash>.js` beside the page. A stage the tab does not hold saves
-nothing.
+from the board's own `mermaid-<hash>.js` beside the page, under the name that stage's own tag
+carries: a tab left open across an upgrade holds stages that name the build before, and the
+daemon still serves that file. One limit of the read: a mock that draws no diagram and itself
+opens on the board's engine tag followed by the first line of the board's stand-in is taken for
+a stage lent the engine, and is saved without its text up to its first closing script tag.
+
+There is no second-best file. A full-page round whose stage a push sent held is read first; a
+mock the tab still does not hold, or an engine the board does not hand over (the daemon stopped
+or restarting), saves nothing, and the control that was pressed says so in a note under itself
+and in its own label, live again for another press. The note goes at the next press.
+
+The tab hands a mock's file to the browser as `application/octet-stream` under its `.html` name,
+at an address dropped after a few seconds, so that address saves the file and never draws it at
+the board's origin. A round's file is `text/html`.
 
 ## MCP surface
 
