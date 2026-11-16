@@ -4600,6 +4600,7 @@ export const ui = `
   }
 
   var MOCK_UNLOADED_NOTE = 'This mock did not load, so nothing was saved. Press again to retry, or reload the page.';
+  var MOCK_UNREAD_NOTE = 'This page is older than the board that sent this mock, so nothing was saved. Reload the page, then press again.';
   var LIBRARY_UNREAD_NOTE = 'The board could not hand over the diagram library, so nothing was saved. Press again to retry.';
   var SAVE_FAILED_NOTE = 'Nothing was saved. Press again to retry, or reload the page.';
 
@@ -4617,12 +4618,17 @@ export const ui = `
   // the board's own copy beside the page, under the name the stage itself
   // carries, and written into the file, so the saved page draws its diagrams
   // with no connection. There is no second-best file: a stage this tab does not
-  // hold, or a library the board does not hand over, saves nothing and says so
-  // (saveBehind). Neither does a file: archive, which reads nothing.
+  // hold, a stage it holds and cannot read, or a library the board does not
+  // hand over, saves nothing and says so (saveBehind). A stage that cannot be
+  // read is one a newer build of the board wrote for a tab left open across
+  // its upgrade (stageOwnSource), which a reload mends. Neither does a file:
+  // archive save, which reads nothing.
   async function downloadMock(frame, name) {
     if (readonly) return;
-    var own = frame ? stageOwnSource(frame.getAttribute('srcdoc'), STAGE_MARGIN_RESET) : null;
-    if (!own) throw saveFailure(MOCK_UNLOADED_NOTE, 'this mock is not loaded on the page');
+    var srcdoc = frame ? frame.getAttribute('srcdoc') : null;
+    if (!srcdoc) throw saveFailure(MOCK_UNLOADED_NOTE, 'this mock is not loaded on the page');
+    var own = stageOwnSource(srcdoc, STAGE_MARGIN_RESET);
+    if (!own) throw saveFailure(MOCK_UNREAD_NOTE, 'this page cannot tell this mock from what the board wrote around it');
     var engine = null;
     if (own.engine) {
       try {

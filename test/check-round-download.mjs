@@ -131,10 +131,11 @@ check('one mock or diagram saved alone is named for it; a diagram\'s file says w
 // What the board's own script opens with: a mock may quote it.
 const AGENT_OPENING = "<script>(function () {\n  var CB = 'cb-stage';\n";
 const DIAGRAM = '<pre class="mermaid">flowchart LR\n  a --> b</pre>';
+const DRAWS = `<h1>Flow</h1>${DIAGRAM}<script>window.mermaid.run();</script>`;
 
 const stageOf = html => buildStageSrcdoc({ kind: 'html', html });
 
-check('a mock\'s own source comes back out of its stage as the stage holds it, with the name of the library file the board lent it, or none: a fragment, a page, one with its own scripts, one that quotes the board\'s', () => {
+check('a mock\'s own source comes back out of its stage as the stage holds it, with the name of the library file the board lent it, or none: a fragment, a page, one with its own scripts, one that opens on a script of its own, one that quotes the board\'s', () => {
   const rows = [
     ['a fragment', '<div>Mock</div>', null],
     ['an empty mock', '', null],
@@ -144,7 +145,10 @@ check('a mock\'s own source comes back out of its stage as the stage holds it, w
     ['a diagram and nothing after it', DIAGRAM, MERMAID_ASSET],
     ['a page that quotes the board\'s own script', `<pre>${AGENT_OPENING}</pre><p>after</p>`, null],
     ['a diagram page that quotes it too', `${DIAGRAM}${AGENT_OPENING}})();</script><p>after</p>`, MERMAID_ASSET],
-    ['a page that opens on a script of the library\'s name and draws no diagram', `<script src="${MERMAID_ASSET}"></script><script>var own = 1;</script><p>after</p>`, null],
+    ['a page that opens on a script of its own', '<script>var own = 1;</script><p>after</p>', null],
+    ['a page that opens on a library it names by web address', '<script src="https://cdn.example/mermaid.min.js"></script><script>var own = 1;</script><p>after</p>', null],
+    ['a page that opens on a library file of another name beside it', '<script src="mermaid.min.js"></script><script>var own = 1;</script><p>after</p>', null],
+    ['a diagram page that opens on a library it names by web address', `<script src="https://cdn.example/mermaid.min.js"></script>${DIAGRAM}`, MERMAID_ASSET],
   ];
   for (const [what, html, engine] of rows) {
     assert.deepEqual(stageOwnSource(stageOf(html), STAGE_MARGIN_RESET), { html, engine }, what);
@@ -168,6 +172,30 @@ check('text that is no stage the board wrote gives no source: no margin reset, n
   const cut = prelude.slice(0, prelude.lastIndexOf('</script>'));
   assert.ok(cut.startsWith(`<script src="${MERMAID_ASSET}"></script><script>`) && cut.length > 1000, 'setup: the lent library\'s tag and its stand-in, less the closing tag');
   assert.equal(stageOwnSource(STAGE_MARGIN_RESET + cut, STAGE_MARGIN_RESET), null, 'the lent library cut before its closing tag');
+  assert.equal(stageOwnSource(STAGE_MARGIN_RESET + cut + '<p>x</p>' + AGENT_OPENING, STAGE_MARGIN_RESET), null, 'the lent library cut before its closing tag, then a mock and the opening of the board\'s own script, nothing closed');
+});
+
+// The first line of the board's stand-in for the library, as this build writes it, and as a
+// build that named its channel otherwise would.
+const STAND_IN_OPENING = "<script>(function () {\n  var CB = 'cb-stage', pending";
+const REWORDED_OPENING = "<script>(function () {\n  var CHANNEL = 'cb-stage', pending";
+const rewordedStage = html => stageOf(html).replace(STAND_IN_OPENING, REWORDED_OPENING);
+
+check('a stage that opens on a library file of the board\'s naming with anything after it but the stand-in this build knows gives no source: a stand-in another build reworded, under this build\'s name or another\'s, a tag written otherwise, a mock that draws no diagram and opens on such a tag itself', () => {
+  const OTHER = 'mermaid-0123456789abcdef.js';
+  const reworded = rewordedStage(DRAWS);
+  assert.ok(reworded.startsWith(`${STAGE_MARGIN_RESET}<script src="${MERMAID_ASSET}"></script>${REWORDED_OPENING}`), 'setup: the board\'s tag, then a stand-in that opens otherwise');
+  const rows = [
+    ['a stand-in another build reworded', reworded],
+    ['the same under another build\'s file name', reworded.replace(MERMAID_ASSET, OTHER)],
+    ['the tag written with one more attribute', stageOf(DRAWS).replace(`${MERMAID_ASSET}">`, `${MERMAID_ASSET}" defer>`)],
+    ['a mock that draws no diagram and opens on a script of the library\'s name', stageOf(`<script src="${MERMAID_ASSET}"></script><script>var own = 1;</script><p>after</p>`)],
+    ['the same naming another build\'s file', stageOf(`<script src="${OTHER}"></script><p>after</p>`)],
+  ];
+  for (const [what, stage] of rows) {
+    assert.notEqual(stage, stageOf(DRAWS), `setup: ${what}`);
+    assert.equal(stageOwnSource(stage, STAGE_MARGIN_RESET), null, what);
+  }
 });
 
 // The file's policy: inline, data:, blob: and https: sources, and none that matches a file on
@@ -220,7 +248,6 @@ function loadSaving(html, stubs, opts = {}) {
 }
 
 const press = el => { assert.ok(el, 'setup: the control is on the page'); el.dispatchEvent(new StandInEvent('click')); };
-const DRAWS = `<h1>Flow</h1>${DIAGRAM}<script>window.mermaid.run();</script>`;
 const LIBRARY = 'window.mermaid = { run: function () {} };';
 
 await check('Pull-out\'s Download on a mock saves the mock\'s own page: its source under the head, the diagram library the stage names read from the board and written in, as plain bytes under an .html name, dropped after a few seconds', async () => {
@@ -258,6 +285,28 @@ await check('Download round on a round drawn full page saves its one mock\'s own
     assert.equal(await stubs.saved[0].blob.text(), HEAD + html);
     assert.equal(stubs.saved[0].name, 'saved-page-round-1.html');
     assert.equal(stubs.saved[0].blob.type, 'application/octet-stream');
+  } finally {
+    stubs.restore();
+  }
+});
+
+const UNREAD_NOTE = 'This page is older than the board that sent this mock, so nothing was saved. Reload the page, then press again.';
+
+await check('a mock whose stage a newer build of the board wrote, its stand-in for the library opening as this page does not know, saves no file and reads no library: Download round says the page is older than the board, in its label and in a note under itself, live again', async () => {
+  const board = createBoard({ title: 'Newer board', blocks: [{ kind: 'html', html: DRAWS }] });
+  const stubs = savingStubs(LIBRARY);
+  try {
+    const document = loadSaving(renderBoardPage(board), stubs);
+    const frame = document.querySelector('.round-current iframe.html-stage');
+    assert.equal(frame.getAttribute('srcdoc'), stageOf(DRAWS), 'setup: the page holds the stage as this build writes it');
+    frame.setAttribute('srcdoc', rewordedStage(DRAWS));
+    const btn = document.querySelector('header.board-head .head-download');
+    press(btn);
+    await waitFor(() => btn.querySelector('.download-note'), { what: 'the note under the control' });
+    assert.deepEqual({ saved: stubs.saved.length, asked: stubs.asked }, { saved: 0, asked: [] });
+    assert.equal(btn.querySelector('.download-note').textContent, UNREAD_NOTE);
+    assert.deepEqual({ label: btn.getAttribute('aria-label'), title: btn.getAttribute('title') }, { label: UNREAD_NOTE, title: UNREAD_NOTE });
+    assert.equal(btn.disabled, false, 'live again');
   } finally {
     stubs.restore();
   }
