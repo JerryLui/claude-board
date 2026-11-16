@@ -75,7 +75,7 @@ link where it is worth reading.
 | 86 | [The status item learns by push and survives by poll](.agents/adr/0086-the-status-item-learns-by-push-and-survives-by-poll.md) | 2026-08-10 | replaces 79; relates to 77; relates to 72 |
 | 87 | [The index page holds the stream, not only the poll](.agents/adr/0087-the-index-page-holds-the-stream-not-only-the-poll.md) | 2026-08-10 | amends 77; relates to 86 |
 | 88 | [The popover's timer line mirrors the index page](.agents/adr/0088-the-popover-timer-line-mirrors-the-index-page.md) | 2026-08-11 | narrows 83; relates to 81; completed by 90 |
-| 89 | [The pill names a Submitted round](.agents/adr/0089-the-pill-names-a-submitted-round.md) | 2026-08-11 | narrows 40; relates to 50 |
+| 89 | [The pill names a Submitted round](.agents/adr/0089-the-pill-names-a-submitted-round.md) | 2026-08-11 | narrows 40; relates to 50; narrowed by 156 |
 | 90 | [An absent Timer names the state and nothing else](.agents/adr/0090-an-absent-timer-names-the-state-and-nothing-else.md) | 2026-08-11 | completes 88; relates to 83 |
 | 91 | [A fresh board defers to an open tab](.agents/adr/0091-a-fresh-board-defers-to-an-open-tab.md) | 2026-08-11 | narrows 55; widened by 92 |
 | 92 | [The Banner covers a Suppressed content-only board](.agents/adr/0092-the-banner-covers-a-suppressed-content-only-board.md) | 2026-08-11 | widens 55; widens 91; narrowed by 106 |
@@ -140,3 +140,4 @@ link where it is worth reading.
 | 153 | [A session that left its mission hands its unanswered rounds to the next join](.agents/adr/0153-a-session-that-left-its-mission-hands-its-unanswered-rounds-to-the-next-join.md) | 2026-11-16 | amends 151; relates to 150 |
 | 154 | [A saved mock is the page's own file and runs its scripts; a round's file stays script-free](.agents/adr/0154-a-saved-mock-is-the-pages-own-file-and-runs-its-scripts.md) | 2026-11-16 | relates to 22, 32, 78, 95, 108, 120, 122, 152 |
 | 155 | [A reopened round holds its mission's card at needs you behind a later round](.agents/adr/0155-a-reopened-round-holds-its-missions-card-at-needs-you-behind-a-later-round.md) | 2026-11-16 | amends 134, 151; relates to 150 |
+| 156 | [The pill reads `open` on an unsent round whose Send works](.agents/adr/0156-the-pill-reads-open-on-an-unsent-round-whose-send-works.md) | 2026-11-16 | narrows 89; relates to 44, 114 |

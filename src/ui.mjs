@@ -5887,7 +5887,7 @@ export const ui = `
       // that function's own comment (src/badge.mjs): a page board's status
       // never leaves 'open' even once its wait dies, so the round object alone
       // cannot make this call.
-      var m = pageBoardPillMeta(roundEntry(currentRound), now, fullpage);
+      var m = pageBoardPillMeta(roundEntry(currentRound), now, fullpage, !readonly && currentPageSendable());
       meta.textContent = m.text;
       meta.title = m.title;
     }

@@ -323,7 +323,7 @@ for (const [held, open] of Object.entries(HELD)) {
         answerSingle(blockOf(document, 'single'), 'Yes');
         typeInto(blockOf(document, 'single').querySelector('textarea[data-note-for]'), 'Only after the review');
       });
-      assert.deepEqual([countdown(document), meta(document)], ['', 'read-only'], 'setup: the tab holds the round closed');
+      assert.deepEqual([countdown(document), meta(document)], ['', 'open'], 'setup: the tab holds the round with no wait on it');
       await reopen(net, es, board);
       assert.deepEqual([countdown(document), meta(document)], ['40m left', '40m left']);
       click(document.getElementById('send-btn'));
