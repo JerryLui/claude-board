@@ -679,11 +679,12 @@ await checkAsync('an ordinary board whose round was abandoned stops counting dow
   assert.equal(document.querySelector('.card-choice').disabled, false,
     'and the widgets stay answerable, or a live Send has nothing to carry');
 
-  // The one place a reviewer is told what "read-only" now means: the wait is what
-  // ended, not the answer. The pill must not fall back to the page board's
-  // "commenting is off", which is what it said here before.
+  // The one place a reviewer is told what the end of the wait means: the wait is
+  // what ended, not the answer. The pill reads "open" beside the live Send (ADR
+  // 155) and must not fall back to the page board's "commenting is off", which is
+  // what it said here before.
   const meta = document.querySelector('span#round-meta');
-  assert.equal(meta.textContent, 'read-only', 'the word itself is unchanged -- only what it promises on hover');
+  assert.equal(meta.textContent, 'open', 'Send still works on the abandoned round, and its tab says so');
   assert.equal(meta.title, ROUND_OPEN_UNAWAITED_TITLE);
   assert.match(meta.title, /reads the board/, 'the promise names the read path, the only way an abandoned board pays out');
 });

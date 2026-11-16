@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **A round you can still answer says so (ADR 155)**: the state label in a board's top strip reads
+  `open` on a round not yet sent whose Send works: the newest round, and an older one that still
+  asks a question. Before, it read `read-only` there, above a Send that worked. It still reads
+  `read-only` on an older round that asks nothing, on a mock drawn full page that nobody is
+  waiting on, and on every round of a board opened from Finder. A round you sent reads
+  `submitted` and one an agent is waiting on shows the time left, as before, and the text on
+  hover is unchanged.
 - **Download round**: a round's page has a Download round button at the right end of the
   round's chip line, or in the top strip when the round is one mock drawn full page, where it stays
   in view as the mock scrolls. On a question round it saves that one round as a single HTML file

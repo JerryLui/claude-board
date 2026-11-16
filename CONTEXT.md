@@ -47,8 +47,8 @@ listener.
 
 **Submitted**: of a round, that the reviewer sent their answers, which is the reader-facing
 name for the round state the store calls `sent`. One of the two closed states a reader is told
-about by name, Abandoned being the other; Lapsed and never-Awaited rounds are both read-only and
-say only that. _Avoid_: sent (internal only), answered, completed, done.
+about by name, Abandoned being the other; Lapsed and never-Awaited rounds read alike, `open`
+where Send works on the round and `read-only` elsewhere (ADR 155). _Avoid_: sent (internal only), answered, completed, done.
 
 **Abandoned**: of a round, that it was closed with nobody having answered it, because the
 conversation that posted it declared itself over — the `fresh` flag on a later `ask`, or a direct

@@ -1298,8 +1298,8 @@ the agent's wait ended. A Lapsed round (still `status: 'open'`, ADR 50) always d
 answers are then owed to the thread's next packet, or collected by `read` above, which is the only
 path an abandoned board has, since no wait ever returns to it. The page says as much rather than
 hiding it: the round keeps its widgets and its Send bar live (`historical` in `renderRoundSection`
-is `sent` alone, server-side too, so a reload takes nothing back), and the pill still reads
-`read-only`, with a hover text promising that comments and answers sent here are saved and reach
+is `sent` alone, server-side too, so a reload takes nothing back), and the pill reads `open`
+(ADR 155), with a hover text promising that comments and answers sent here are saved and reach
 the next agent that reads the board. A page board's comment panel is the one exception: it renders
 only while a wait is open on its round (`renderPageCommentPanel`), so an abandoned page round
 shows its comments and no compose form, exactly as a lapsed one does.

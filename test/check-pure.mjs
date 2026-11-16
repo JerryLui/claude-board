@@ -900,7 +900,7 @@ check('pageBoardPillMeta: the countdown text/title while awaited, and "read-only
   }
 });
 
-check('pageBoardPillMeta: on an ORDINARY board (fullpage=false), an open-but-unawaited round\'s title stops claiming commenting is off, and a Submitted round reads "submitted"', () => {
+check('pageBoardPillMeta: on an ORDINARY board (fullpage=false), an unsent round reads "open" where Send works and "read-only" where it does not, under one title that never claims commenting is off, and a Submitted round reads "submitted"', () => {
   // The exact shape a plain `ask` with no `wait: true` leaves behind
   // (src/board.mjs:526's default): open, not awaited. On a page board this
   // is genuinely dark (PILL_READONLY_TITLE, unchanged above); on an ordinary
@@ -923,6 +923,23 @@ check('pageBoardPillMeta: on an ORDINARY board (fullpage=false), an open-but-una
   assert.deepEqual(pageBoardPillMeta(openUnawaited, now, true), { text: 'read-only', title: PILL_READONLY_TITLE },
     'the identical round object, asked about as a page board, must keep the page-board title');
 
+  // ADR 155: the fourth argument is the caller's "Send works on this round,
+  // here". It moves the word of an ordinary board's unsent round, lapsed or
+  // abandoned alike, and nothing else: never the title, a page board's word,
+  // a Submitted round's or a countdown.
+  const abandoned = { status: 'abandoned', awaited: false, awaitDeadline: '2026-08-07T12:38:00.000Z' };
+  for (const unsent of [openUnawaited, abandoned]) {
+    assert.deepEqual(pageBoardPillMeta(unsent, now, false, true), { text: 'open', title: ROUND_OPEN_UNAWAITED_TITLE },
+      'fullpage=false, unsent, Send works: the pill must read "open" under the unchanged title');
+    assert.deepEqual(pageBoardPillMeta(unsent, now, false, false), { text: 'read-only', title: ROUND_OPEN_UNAWAITED_TITLE },
+      'fullpage=false, unsent, Send off: the pill must keep "read-only" under the same title');
+    assert.deepEqual(pageBoardPillMeta(unsent, now, true, true), { text: 'read-only', title: PILL_READONLY_TITLE },
+      'a page board keeps "read-only" whatever the caller says of Send');
+  }
+  const awaited = { status: 'open', awaited: true, awaitDeadline: '2026-08-07T12:38:00.000Z' };
+  assert.deepEqual(pageBoardPillMeta(awaited, now, false, true), { text: '38m left', title: ROUND_COUNTDOWN_TITLE },
+    'an awaited round keeps its countdown');
+
   // ADR 89: a Submitted round on an ORDINARY board reads "submitted" -- but
   // the SAME round object, asked about as a page board, must stay
   // "read-only": criterion 12 holds a page board off 'submitted' at the pill
@@ -931,6 +948,8 @@ check('pageBoardPillMeta: on an ORDINARY board (fullpage=false), an open-but-una
   const sent = { status: 'sent', awaited: true, awaitDeadline: '2026-08-07T12:38:00.000Z' };
   assert.deepEqual(pageBoardPillMeta(sent, now, false), { text: 'submitted', title: PILL_SUBMITTED_TITLE },
     'fullpage=false, status "sent": the pill must read "submitted"');
+  assert.deepEqual(pageBoardPillMeta(sent, now, false, true), { text: 'submitted', title: PILL_SUBMITTED_TITLE },
+    'and stays "submitted" whatever the caller says of Send');
   assert.deepEqual(pageBoardPillMeta(sent, now, true), { text: 'read-only', title: PILL_READONLY_TITLE },
     'the identical round object, asked about as a page board, must stay "read-only", never "submitted"');
 });

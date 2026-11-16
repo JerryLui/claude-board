@@ -293,19 +293,19 @@ export function roundCountdownText(round, nowMs) {
 export const ROUND_COUNTDOWN_TITLE = "Time left before this round's wait ends";
 
 // The page board pill's own fallback title (ADR.md entries 46, 40) -- read by
-// src/render.mjs for the deterministic (never-awaited) case and by this file's
-// own pageBoardPillMeta for every other closed case, so the two routes to the
-// same word never explain it two different ways. True on a page board
+// this file's own pageBoardPillMeta alone, which src/render.mjs's first paint
+// and src/ui.mjs's repaint both call, so the two routes to the same word never
+// explain it two different ways. True on a page board
 // specifically: entries 45/46 turn its WHOLE compose/send surface off the
 // moment it stops being awaited, so "commenting is off" is not an
 // exaggeration there -- src/styles.mjs hides that board type's ordinary
 // '.send-bar' outright, leaving nothing else to send with.
 export const PILL_READONLY_TITLE = 'No agent is listening on this page -- commenting is off.';
 
-// The SAME 'read-only' word's title on an ORDINARY board (a PM follow-up,
-// once ADR.md entry 40 put the state label on every board, not just a page
-// board's, src/styles.mjs:464): PILL_READONLY_TITLE's "commenting is off" is simply
-// false on that surface. `roundIsAwaited` (CONTEXT.md "Awaited") is about
+// The title of an unsent round on an ORDINARY board, under `open` and
+// `read-only` alike (a PM follow-up, once ADR.md entry 40 put the state label
+// on every board, not just a page board's, src/styles.mjs:464):
+// PILL_READONLY_TITLE's "commenting is off" is simply false on that surface. `roundIsAwaited` (CONTEXT.md "Awaited") is about
 // whether an `ask` call is still blocked waiting on this exact round -- a
 // plain `ask` with no `wait: true` is never awaited, but its round is `open`
 // the whole time, its ordinary send bar stays enabled throughout
@@ -366,14 +366,22 @@ export const PAGE_SEND_EXPIRED_TITLE =
 // The header's own pill/meta slot (ADR.md entry 40, "the pill may hold a
 // label alone", on every board's condensed header, not only a page board's):
 // the countdown while someone is actually waiting, the word `submitted` the
-// moment an ORDINARY board's round in view actually was (ADR 89), or the bare
-// word `read-only` for every other closed round -- never awaited at all
-// (AC 8), its wait lapsed, or (on a page board specifically) sent, all three
-// deliberately indistinguishable from each other. Client-only (see this
-// section's header comment); src/render.mjs's own first-paint fallback
-// mirrors this same three-way split by hand, computed straight from
-// `round.status`/`roundIsAwaitedOpen`/`fullpage` with no clock at all -- the
-// live figure is filled in at hydrate, before the reader can act on it.
+// moment an ORDINARY board's round in view actually was (ADR 89), the word
+// `open` on an ordinary board's unsent round whose Send works (ADR 155), or
+// the bare word `read-only` for every other closed round: an ordinary board's
+// unsent round whose Send is off, and every closed page-board round -- never
+// awaited at all (AC 8), its wait lapsed, or sent, all three deliberately
+// indistinguishable from each other. src/ui.mjs repaints the slot from this
+// with the reader's clock; src/render.mjs's first paint calls it too, for a
+// round that is not awaited alone, where no clock is read -- the live figure
+// is filled in at hydrate, before the reader can act on it.
+//
+// `sendable` (default `false`: a caller that cannot say keeps `read-only`) is
+// the caller's own answer to "does Send work on this round, here": src/ui.mjs
+// passes what its send bar goes by (currentPageSendable) and never in an
+// archive, src/render.mjs what its first-paint send bar goes by
+// (hasOpenRound). It moves the word alone, never the title, and only where
+// this function already knows the round is an ordinary board's and unsent.
 //
 // `fullpage` (default `true`, matching every caller before this parameter
 // existed -- src/render.mjs's own page-board-era callers, and this file's own
@@ -389,7 +397,7 @@ export const PAGE_SEND_EXPIRED_TITLE =
 // a page round, so without this gate a caller that reached `sent` some other
 // way would see the pill claim an outcome the page-board surface as a whole
 // says never happens.
-export function pageBoardPillMeta(round, nowMs, fullpage = true) {
+export function pageBoardPillMeta(round, nowMs, fullpage = true, sendable = false) {
   const countdown = roundCountdownText(round, nowMs);
   if (countdown) return { text: countdown, title: ROUND_COUNTDOWN_TITLE };
   if (!fullpage && round && round.status === 'sent') return { text: 'submitted', title: PILL_SUBMITTED_TITLE };
@@ -397,8 +405,11 @@ export function pageBoardPillMeta(round, nowMs, fullpage = true) {
   // abandoned round keeps its live widgets and a working Send exactly like a
   // lapsed one, so telling the reviewer "commenting is off" above a live Send
   // button is the same false statement on both.
-  const title = (!fullpage && round && round.status !== 'sent') ? ROUND_OPEN_UNAWAITED_TITLE : PILL_READONLY_TITLE;
-  return { text: 'read-only', title };
+  const unsent = !fullpage && !!round && round.status !== 'sent';
+  return {
+    text: unsent && sendable ? 'open' : 'read-only',
+    title: unsent ? ROUND_OPEN_UNAWAITED_TITLE : PILL_READONLY_TITLE,
+  };
 }
 
 /** What a question's answer chip reads, by answer status: the chip at the right

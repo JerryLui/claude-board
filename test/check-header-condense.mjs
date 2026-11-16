@@ -139,7 +139,7 @@ check('a board page\'s strip takes no click on its own box, expanded or condense
   assert.equal(computed(head, 'pointer-events'), 'none');
 });
 
-check('AC 7: the state label shows on an ordinary board too -- the countdown while awaited, read-only otherwise', () => {
+check('AC 7: the state label shows on an ordinary board too -- the countdown while awaited, "open" on an unsent round whose Send works, and "read-only" on the same page opened from disk', () => {
   const awaited = createBoard({
     title: 'awaited',
     blocks: [{ kind: 'markdown', text: 'a' }, { kind: 'question', text: 'q?', widget: 'text' }],
@@ -150,14 +150,14 @@ check('AC 7: the state label shows on an ordinary board too -- the countdown whi
   assert.ok(meta, 'setup: every board renders the slot (src/render.mjs)');
   assert.equal(computed(meta, 'display'), 'inline', 'AC 7: visible on an ordinary board, not just a page board');
 
-  const notAwaited = loadBoard(renderBoardPage(ordinaryBoard()));
+  const pageHtml = renderBoardPage(ordinaryBoard());
+  const notAwaited = loadBoard(pageHtml);
   const meta2 = notAwaited.querySelector('span#round-meta');
   assert.equal(computed(meta2, 'display'), 'inline');
-  // ordinaryBoard()'s round was never Awaited at all -- one of the two closed
-  // shapes ADR 89 keeps collapsed onto 'read-only' (the other being a lapsed
-  // wait); only a Submitted round gets a word of its own, so this one is
-  // unaffected by that split.
-  assert.equal(meta2.textContent, 'read-only', 'src/render.mjs\'s own deterministic fallback for a never-Awaited round');
+  // ordinaryBoard()'s round was never Awaited at all, and it is the board's
+  // newest unsent round: its Send works, so its tab says so (ADR 155).
+  assert.equal(notAwaited.getElementById('send-btn').disabled, false, 'setup: Send works on this round');
+  assert.equal(meta2.textContent, 'open', 'a never-Awaited round whose Send works reads "open"');
   // The hover title underneath it must not repeat PILL_READONLY_TITLE's
   // "commenting is off": ordinaryBoard() is a plain, un-awaited board whose
   // one open round has an ENABLED send bar the whole time (src/ui.mjs's
@@ -168,6 +168,18 @@ check('AC 7: the state label shows on an ordinary board too -- the countdown whi
   // here is exactly what this assertion exists to catch.
   assert.equal(meta2.title, ROUND_OPEN_UNAWAITED_TITLE,
     'an ordinary board\'s open, unawaited round must not claim commenting is off directly above a live Send button');
+
+  // Read from the served bytes, before `ui` runs: the first paint already
+  // says what hydrate will.
+  const firstPaint = parseHTML(pageHtml).querySelector('span#round-meta');
+  assert.deepEqual([firstPaint.textContent, firstPaint.getAttribute('title')], ['open', ROUND_OPEN_UNAWAITED_TITLE],
+    'server first paint and client hydrate must show the same word and title');
+
+  // The same bytes are the archive a reader opens from disk, where nothing
+  // can be sent: the first paint cannot know, so the page puts the word back.
+  const archived = loadBoard(pageHtml, { protocol: 'file:' }).querySelector('span#round-meta');
+  assert.deepEqual([archived.textContent, archived.title], ['read-only', ROUND_OPEN_UNAWAITED_TITLE],
+    'opened from disk, the tab reads "read-only" under the unchanged hover text');
 });
 
 check('AC 7 / ADR 89: an ordinary board whose round was Submitted shows "submitted" in the state label, not "read-only"', () => {
@@ -182,9 +194,9 @@ check('AC 7 / ADR 89: an ordinary board whose round was Submitted shows "submitt
   assert.notEqual(meta.title, ROUND_OPEN_UNAWAITED_TITLE, 'a Submitted round and an open unawaited one never share a title');
   assert.notEqual(meta.title, PILL_READONLY_TITLE, 'a Submitted round must not claim commenting is off');
 
-  // Hydrate must not flicker: src/render.mjs keeps its first-paint word and
-  // title in step with src/ui.mjs's pageBoardPillMeta by hand, and hydrate
-  // overwrites the slot with the latter -- so the first paint is read from the
+  // Hydrate must not flicker: src/render.mjs draws its first-paint word and
+  // title from the pageBoardPillMeta src/ui.mjs repaints the slot with, each
+  // handing it its own answers -- so the first paint is read from the
   // served bytes before `ui` runs, not from the hydrated document above.
   const firstPaint = parseHTML(pageHtml).querySelector('span#round-meta');
   assert.equal(firstPaint.textContent, meta.textContent, 'server first paint and client hydrate must show the same word');

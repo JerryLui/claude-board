@@ -4543,7 +4543,7 @@ async function main() {
     // page contains every comment's text twice").
     const meta = page.match(/<span class="round-meta" id="round-meta" title="([^"]*)">([^<]*)</);
     assert.ok(meta, 'setup: the header pill is on every board');
-    assert.equal(meta[2], 'read-only', 'the word itself is unchanged -- ADR 114 kept it deliberately');
+    assert.equal(meta[2], 'open', 'the word beside the live Send says it works (ADR 155)');
     assert.equal(meta[1], ROUND_OPEN_UNAWAITED_TITLE,
       'the hover text is the one place the promise lives: answers sent here are saved and reach the next agent that reads the board');
     assert.notEqual(meta[1], PILL_READONLY_TITLE, 'never "commenting is off" above a live Send button');
