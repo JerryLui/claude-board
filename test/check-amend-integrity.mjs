@@ -681,8 +681,7 @@ await checkAsync('an ordinary board whose round was abandoned stops counting dow
 
   // The one place a reviewer is told what the end of the wait means: the wait is
   // what ended, not the answer. The pill reads "open" beside the live Send (ADR
-  // 156) and must not fall back to the page board's "commenting is off", which is
-  // what it said here before.
+  // 156) and must not fall back to the page board's "commenting is off".
   const meta = document.querySelector('span#round-meta');
   assert.equal(meta.textContent, 'open', 'Send still works on the abandoned round, and its tab says so');
   assert.equal(meta.title, ROUND_OPEN_UNAWAITED_TITLE);

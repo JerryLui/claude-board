@@ -721,7 +721,7 @@ await checkAsync('a comment on a page that asks nothing rides the newest unsent 
   assert.equal(queued(), 0, 'and both leave the queue once it lands');
 });
 
-check('Send and Discuss are off on an older page that asks nothing, and on for the newest page whatever it asks and an older one still asking, the tab reading "open" on an unsent page exactly where they are on', () => {
+check('Send and Discuss are off on an older page that asks nothing, and on for the newest page whatever it asks and an older one still asking, the tab of an unsent page with no wait on it reading "open" exactly where they are on', () => {
   const display = () => [{ kind: 'markdown', text: 'read this' }, { kind: 'code', text: 'const a = 1;', lang: 'js' }];
   const board = createBoard({ title: 'Display then ask', blocks: display() });
   addRound(board, { blocks: [singleSpec()], wait: true });

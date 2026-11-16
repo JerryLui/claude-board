@@ -3626,14 +3626,9 @@ export function renderBoardPage(board, { stageHtml = false } = {}) {
   // the actual "38m left" figure is a wall-clock fact only src/ui.mjs may
   // compute, filled in at hydrate before the reader can act. The
   // deterministic cases -- Submitted, or closed some other way (never-awaited
-  // or its wait lapsed) -- need no such deferral: no word or title of theirs
-  // is a function of the clock, so pageBoardPillMeta (src/badge.mjs), the
-  // function src/ui.mjs repaints the slot from, draws them here too. It is
-  // handed no clock (NaN, which no deadline is ahead of) and the first-paint
-  // send bar's own rule, `hasOpenRound`: the round on screen is the newest,
-  // so its tab reads `open` exactly when Send below is painted live. These
-  // bytes are also the archive a reader opens from disk, where nothing can be
-  // sent: the client script puts `read-only` back there once it loads.
+  // or its wait lapsed) -- need no such deferral: no clock decides them. The
+  // same bytes are the archive opened from disk, where nothing can be sent:
+  // the client script puts `read-only` back there once it loads.
   const initialRound = board.rounds.find(r => r.n === initialRoundInView);
   const initialRoundOpenAwaited = roundIsAwaitedOpen(initialRound);
   const roundMeta = initialRoundOpenAwaited ? { text: '', title: '' }
@@ -3646,7 +3641,6 @@ export function renderBoardPage(board, { stageHtml = false } = {}) {
   // show the send bar and the comment control for one frame and then take
   // them away.
   const initialRoundSent = !!initialRound && initialRound.status === 'sent';
-  const latestRoundOpenAwaited = roundIsAwaitedOpen(board.rounds[board.rounds.length - 1]);
   // ADR.md entry 46: a page nobody is listening to is uncommentable whatever kind
   // its one block is (CONTEXT.md "Commentable"). The entry names three things such
   // a page must not have, and the comment-mode toggle was the one still shipping:
@@ -3717,7 +3711,7 @@ ${faviconLink}
 ${roundPagerMarkup(board, initialRoundInView)}
   <div class="send-bar">
     <button type="button" class="questions-left-pill${pillCount > 0 ? ' visible' : ''}" id="questions-left-pill"${hasOpenRound(board) ? '' : ' disabled'}>${escHtml(pillLabel)}</button>
-    <span class="round-countdown${latestRoundOpenAwaited ? ' visible' : ''}" id="round-countdown" title=""></span>
+    <span class="round-countdown${initialRoundOpenAwaited ? ' visible' : ''}" id="round-countdown" title=""></span>
     <span class="send-status" id="send-status">${hasOpenRound(board) ? '' : 'This round has been sent. Waiting for the next one.'}</span>
     <button type="button" class="btn-discuss" id="discuss-btn"${hasOpenRound(board) ? '' : ' disabled'}>Discuss in chat</button>
     <button type="button" class="btn-send" id="send-btn"${hasOpenRound(board) ? '' : ' disabled'}>Send</button>

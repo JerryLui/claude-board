@@ -1299,7 +1299,7 @@ answers are then owed to the thread's next packet, or collected by `read` above,
 path an abandoned board has, since no wait ever returns to it. The page says as much rather than
 hiding it: the round keeps its widgets and its Send bar live (`historical` in `renderRoundSection`
 is `sent` alone, server-side too, so a reload takes nothing back), and the pill reads `open`
-(ADR 156), with a hover text promising that comments and answers sent here are saved and reach
+where Send works (ADR 156), with a hover text promising that comments and answers sent here are saved and reach
 the next agent that reads the board. A page board's comment panel is the one exception: it renders
 only while a wait is open on its round (`renderPageCommentPanel`), so an abandoned page round
 shows its comments and no compose form, exactly as a lapsed one does.

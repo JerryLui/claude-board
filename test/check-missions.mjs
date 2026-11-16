@@ -853,7 +853,7 @@ async function main() {
       'seven working and two waiting on the PM leave a working slot');
   });
 
-  await check('needs you and the card\'s Fire come only from the newest round of each session on a board: an older page left asking holds neither, and one session is one poster by its id or its process start to the second', () => {
+  await check('the card\'s Fire comes only from the newest round of each session on a board, and needs you from that round or a reopened one (held in check-mission-board.mjs): an older page left asking, never reopened, holds neither, and one session is one poster by its id or its process start to the second', () => {
     const dir = scratchHome('newest-page');
     const now = Date.now();
     const fireQ = (id, round) => ({ id, kind: 'question', round, prompt: 'Fire?', widget: 'single', action: 'fire', options: [{ label: 'Fire /direct' }, { label: 'Not yet' }] });

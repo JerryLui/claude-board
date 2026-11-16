@@ -368,7 +368,7 @@ export const PAGE_SEND_EXPIRED_TITLE =
 // the countdown while someone is actually waiting, the word `submitted` the
 // moment an ORDINARY board's round in view actually was (ADR 89), the word
 // `open` on an ordinary board's unsent round whose Send works (ADR 156), or
-// the bare word `read-only` for every other closed round: an ordinary board's
+// the bare word `read-only` for every other round nobody waits on: an ordinary board's
 // unsent round whose Send is off, and every closed page-board round -- never
 // awaited at all (AC 8), its wait lapsed, or sent, all three deliberately
 // indistinguishable from each other. src/ui.mjs repaints the slot from this
