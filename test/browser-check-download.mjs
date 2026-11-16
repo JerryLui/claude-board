@@ -10,11 +10,14 @@
 // file that opens on a Not sent line and marks each pick so far as unsent. Pull-out's
 // Download saves the one mock or diagram it shows, alone, as a file that opens offline: a
 // diagram as the picture the page drew, a mock as its own page (ADR.md entry 154), its
-// scripts run, with the diagram library written in where it draws a diagram. A round
+// scripts run, with the diagram library written in where it draws a diagram, under a
+// policy that lets its script load no file off the disk it is opened from. A round
 // drawn full page saves its one mock the same way. Two boards hold a mock that draws a
 // diagram by its own script, each finding the library the way one of the two render
 // templates does: saved, then opened from disk with the network off, each shows its
-// diagram drawn and its own script's work, having reached for no address.
+// diagram drawn and its own script's work, having reached for no address. A Download
+// that cannot save (the board not handing over the diagram library, a full-page mock the
+// tab does not hold) saves no file and says so under the control, which is live again.
 // A second board holds what is
 // taller than a printed page: a sent artifact round (drawn full page, its Download round
 // in the top strip), a long text,
@@ -44,6 +47,7 @@ import { existsSync, readdirSync, readFileSync, writeFileSync, copyFileSync } fr
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { sessionToken } from '../src/secret.mjs';
+import { STAGE_MARGIN_RESET } from '../src/round-export.mjs';
 import { MERMAID_SOURCE } from '../src/vendor/mermaid/index.mjs';
 import { runMain, skipFile, withTimeout } from './support.mjs';
 import { CHROME, copyArchive, evalIn, guardRun, measureTab, openTab, postJson, row, scratchDir, startScratchDaemon, withChrome } from './browser-support.mjs';
@@ -89,7 +93,8 @@ const TALL_MOCK_PX = 2400;
 const TALL_ROUND_1 = [
   { id: 'h2', kind: 'html', html: `<div style="height:${TALL_MOCK_PX}px;box-sizing:border-box;border:4px solid #3251c9;background:linear-gradient(#eef,#fee)">Tall mock</div>` },
 ];
-// More than the board's comment rail shows at once: it scrolls past three.
+// Comments on the full-page mock, more than the board's rail shows at once: the round's
+// saved file is the mock's own page and carries none of them.
 const TALL_PAGE_COMMENTS = Array.from({ length: 5 }, (_, i) => ({ blockId: 'h2', anchor: { kind: 'block' }, text: `Mock comment ${i}` }));
 // Its text items run several printed lines each and differ in length, so a page's edge
 // falls inside one of every kind and only that kind's own print rule keeps it whole (the
@@ -171,8 +176,35 @@ document.querySelectorAll("h2").forEach(function (h) {
 document.getElementById("reveal").addEventListener("click", function () { document.getElementById("answer").hidden = false; });
 renderMermaidAll();
 </script></body></html>`;
+// A mock that is a diagram's source and no script: on the board the board's stand-in draws
+// it on load, saved the written-in library's own start does.
+const BARE_MOCK = '<h2>Bare</h2><pre class="mermaid">flowchart LR\n  a[A] --> b[B]\n  b --> c[C]</pre>';
+// A mock whose script, beside its own work, asks for a script and an image by file:
+// address (reachMock below, once the two files exist): each load or refusal is noted in
+// 'reach', with every refusal the page's policy reports.
+const reachMock = (script, image) => `<p id="late"></p>
+<pre class="mermaid">flowchart LR
+  a[A] --> b[B]
+  b --> c[C]</pre>
+<script>
+document.getElementById("late").textContent = "ran";
+var reach = { script: "pending", image: "pending", refused: [] };
+document.addEventListener("securitypolicyviolation", function (e) { reach.refused.push(e.effectiveDirective + " " + e.blockedURI); });
+var s = document.createElement("script");
+s.onload = function () { reach.script = window.__fromDisk ? "loaded" : "loaded, empty"; };
+s.onerror = function () { reach.script = "refused"; };
+s.src = ${JSON.stringify(script)};
+document.head.appendChild(s);
+var img = new Image();
+img.onload = function () { reach.image = "loaded"; };
+img.onerror = function () { reach.image = "refused"; };
+img.src = ${JSON.stringify(image)};
+window.mermaid.initialize({ startOnLoad: false });
+window.mermaid.run({ nodes: document.querySelectorAll("pre.mermaid") });
+</script>`;
 const DRAWN_ROUND_1 = [
   { id: 'h6', kind: 'html', title: 'Loader page', html: LOADER_MOCK },
+  { id: 'h8', kind: 'html', title: 'Bare diagram', html: BARE_MOCK },
   { id: 'q11', kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] },
 ];
 // The second, drawn full page, mints its diagram's node from a source it carries and
@@ -227,8 +259,11 @@ renderMermaid(document);
 </script></body></html>`;
 const DRAWN_PAGE_ROUND_1 = [{ id: 'h7', kind: 'html', html: IMPORTER_MOCK }];
 // What a saved mock opens with, ahead of its own source: a standards-mode, UTF-8 page
-// with no page margin, as a stage is on the board.
-const SAVED_HEAD = '<!DOCTYPE html>\n<meta charset="utf-8">\n<style>html,body{margin:0;padding:0}</style>\n';
+// under a policy that admits what the file holds and https: addresses and no file on the
+// disk, with no page margin, as a stage is on the board.
+const SAVED_HEAD = '<!DOCTYPE html>\n<meta charset="utf-8">\n'
+  + '<meta http-equiv="Content-Security-Policy" content="default-src \'unsafe-inline\' \'unsafe-eval\' https: data: blob:">\n'
+  + STAGE_MARGIN_RESET + '\n';
 const SAVED_LIBRARY = '<script>' + MERMAID_SOURCE + '</script>\n';
 // The first board's open round: one question picked on the page and one left alone.
 const OPEN_ROUND = [
@@ -307,16 +342,20 @@ const EXPORT_EXPR = `(function () {
   };
 })()`;
 
-// A saved mock as opened, once each diagram in it is drawn or five seconds have passed:
+// A saved mock as opened, once each diagram in it is drawn and each file: address it asked
+// for has loaded or been refused, or five seconds have passed:
 // each diagram as its node count, or its source's first line where it is not drawn; the
 // contents list its script built; whether its Reveal control, pressed here, showed its
 // answer; each address the page asked for a diagram library at, and each the browser
-// fetched; what an earlier script of its own wrote; and the page's own box.
+// fetched; what an earlier script of its own wrote; what came of the file: addresses it
+// asked for; and the page's own box.
 const SAVED_PAGE_EXPR = `new Promise(function (resolve) {
   var tries = 0;
   (function poll() {
     var pres = [].slice.call(document.querySelectorAll('pre.mermaid'));
-    if (pres.some(function (p) { return !p.querySelector('svg'); }) && ++tries < 100) return setTimeout(poll, 50);
+    var waiting = pres.some(function (p) { return !p.querySelector('svg'); })
+      || (window.reach && (window.reach.script === 'pending' || window.reach.image === 'pending'));
+    if (waiting && ++tries < 100) return setTimeout(poll, 50);
     var reveal = document.getElementById('reveal'), answer = document.getElementById('answer'), late = document.getElementById('late');
     if (reveal) reveal.click();
     var cs = getComputedStyle(document.body);
@@ -330,6 +369,7 @@ const SAVED_PAGE_EXPR = `new Promise(function (resolve) {
       reached: window.reached || null,
       fetched: performance.getEntriesByType('resource').map(function (e) { return e.name; }).filter(function (n) { return !/^data:/.test(n); }),
       late: late ? late.textContent : null,
+      reach: window.reach || null,
       text: document.body.textContent.trim().slice(0, 40),
       frames: document.querySelectorAll('iframe').length,
       height: document.documentElement.scrollHeight,
@@ -368,12 +408,10 @@ const UNSENT_EXPR = `(function () {
 // the round or the board came along.
 const ONE_EXPR = `(function () {
   function texts(sel) { return [].slice.call(document.querySelectorAll(sel)).map(function (e) { return e.textContent.replace(/\\s+/g, ' ').trim(); }); }
-  var frame = document.querySelector('iframe');
   var svg = document.querySelector('pre.mermaid svg');
   return {
-    title: document.querySelector('h1').textContent, meta: texts('.export-meta > span'),
+    meta: texts('.export-meta > span'),
     frames: document.querySelectorAll('iframe').length,
-    frame: frame ? { sandbox: frame.getAttribute('sandbox'), height: frame.getBoundingClientRect().height, srcdoc: frame.getAttribute('srcdoc') } : null,
     svgs: document.querySelectorAll('svg').length,
     svg: svg ? { width: svg.getBoundingClientRect().width, height: svg.getBoundingClientRect().height, nodes: svg.querySelectorAll('.node').length } : null,
     rest: document.querySelectorAll('table, h2, .export-empty, .export-unsent-note, .question-block, .comment-item, .md-content, .card-head').length,
@@ -490,7 +528,11 @@ async function downloadFrom(send, onEvent, tab, click) {
   await send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: dir, eventsEnabled: true });
   const done = waitForDownload(onEvent, dir);
   await tab.evalPage(click);
-  const files = await done;
+  // A press that saved nothing says why on the page: carried into the failure.
+  const files = await done.catch(async err => {
+    const said = await tab.evalPage(`[].slice.call(document.querySelectorAll('.download-note')).map(function (n) { return n.textContent; }).join(' | ')`).catch(() => '');
+    throw new Error(`${err.message}${said ? `; the page said: ${said}` : ''} (${click})`);
+  });
   const file = path.join(dir, files[0]);
   if (process.env.CLAUDE_BOARD_DOWNLOAD_KEEP) copyFileSync(file, path.join(process.env.CLAUDE_BOARD_DOWNLOAD_KEEP, files[0]));
   return { files, file };
@@ -555,6 +597,33 @@ async function openSaved(send, onEvent, file, cookie, prepare) {
   }
 }
 
+/** A Download that saves nothing: presses `control` (a selector) on the open board tab,
+ * waits for the note under it and answers what the control then shows, with every file the
+ * press saved. */
+async function failedDownload(send, tab, control) {
+  const dir = scratchDir('cb-download-files-');
+  await send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: dir, eventsEnabled: true });
+  await tab.evalPage(`document.querySelector(${JSON.stringify(control)}).click()`);
+  await tab.until(`document.querySelector(${JSON.stringify(control + ' .download-note')})`, 'the note under the Download that saved nothing');
+  const shown = await tab.evalPage(`(function () {
+    var btn = document.querySelector(${JSON.stringify(control)}), note = btn.querySelector('.download-note');
+    var r = note.getBoundingClientRect(), b = btn.getBoundingClientRect(), cs = getComputedStyle(note);
+    return { note: note.textContent, label: btn.getAttribute('aria-label'), live: !btn.disabled,
+      drawn: r.width > 0 && r.height > 0 && cs.visibility === 'visible' && r.left >= 0 && r.right <= window.innerWidth && r.bottom <= window.innerHeight,
+      under: r.top >= b.bottom && Math.abs(r.right - b.right) <= 1 };
+  })()`);
+  return { ...shown, files: readdirSync(dir) };
+}
+
+/** Whether the note of a Download that saved nothing is still under `control`. */
+const noteGone = (tab, control) => tab.evalPage(`!document.querySelector(${JSON.stringify(control + ' .download-note')})`);
+
+/** Blocks, on `tab`, every request whose address matches one of `urls`; none with []. */
+const blockRequests = (tab, urls) => tab.sp('Network.setBlockedURLs', { urls });
+
+const LENS_DOWNLOAD = 'dialog.stage-lens [data-lens="download"]';
+const STRIP_DOWNLOAD = 'header.board-head .board-head-actions .head-download';
+
 async function waitForDownload(onEvent, dir) {
   return withTimeout(new Promise((resolve, reject) => {
     const off = onEvent(msg => {
@@ -595,7 +664,13 @@ async function main() {
     const tallUrl = `${origin}${new URL(tall.url).pathname}`;
     const shown = await postJson(`${origin}/api/board`, { title: SHOWN_TITLE, blocks: SHOWN_ROUND_1 }, daemon.secret);
     const shownUrl = `${origin}${new URL(shown.url).pathname}`;
-    const drawn = await postJson(`${origin}/api/board`, { title: DRAWN_TITLE, blocks: DRAWN_ROUND_1 }, daemon.secret);
+    // Two files on the disk the saved mock is opened from, for its script to ask for.
+    const disk = scratchDir('cb-download-disk-');
+    writeFileSync(path.join(disk, 'other.js'), 'window.__fromDisk = true;');
+    writeFileSync(path.join(disk, 'other.png'), Buffer.from(PNG.split(',')[1], 'base64'));
+    const REACH_MOCK = reachMock(pathToFileURL(path.join(disk, 'other.js')).href, pathToFileURL(path.join(disk, 'other.png')).href);
+    const drawn = await postJson(`${origin}/api/board`, { title: DRAWN_TITLE,
+      blocks: [...DRAWN_ROUND_1.slice(0, 2), { id: 'h9', kind: 'html', title: 'Reaching page', html: REACH_MOCK }, ...DRAWN_ROUND_1.slice(2)] }, daemon.secret);
     const drawnUrl = `${origin}${new URL(drawn.url).pathname}`;
     const drawnPage = await postJson(`${origin}/api/board`, { title: DRAWN_PAGE_TITLE, blocks: DRAWN_PAGE_ROUND_1 }, daemon.secret);
     const drawnPageUrl = `${origin}${new URL(drawnPage.url).pathname}`;
@@ -606,6 +681,12 @@ async function main() {
         expr: `document.querySelector('.round-current').getAttribute('data-round')` });
 
       const offline = async sp => { await sp('Network.emulateNetworkConditions', { offline: true, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }); };
+      // The type of each blob the page hands the browser to save, in order.
+      await board.evalPage(`(function () {
+        var real = URL.createObjectURL;
+        window.__savedTypes = [];
+        URL.createObjectURL = function (blob) { window.__savedTypes.push(blob.type); return real.call(URL, blob); };
+      })()`);
 
       await board.evalPage(`document.querySelector('[data-block-id="q6"] .card-choice').click()`);
       await board.until(`document.querySelector('[data-block-id="q6"] .card-choice.selected')`, 'the pick on the open round');
@@ -707,7 +788,15 @@ async function main() {
       const done = waitForDownload(onEvent, downloads);
       await board.evalPage(`document.querySelector('.round[data-round="1"] .round-download').click()`);
       const files = await done;
+      const savedTypes = await board.evalPage('window.__savedTypes');
       await board.close();
+      await row('a mock\'s own file is handed to the browser as plain bytes, so its address saves and draws no page at the board\'s origin, and it still saves under its .html name and opens as a page; a round\'s file and a diagram\'s stay text/html', note => {
+        note(savedTypes.join(' | '));
+        assert.deepEqual(savedTypes, ['text/html;charset=utf-8', 'application/octet-stream', 'text/html;charset=utf-8', 'text/html;charset=utf-8'],
+          'the unsent round, the mock, the diagram, the sent round');
+        assert.deepEqual(mockDownload.files, ['download-fixture-round-1-mock-h1.html']);
+        assert.deepEqual({ late: oneMock.late, mode: oneMock.mode }, { late: 'ran', mode: 'CSS1Compat' }, 'opened from disk it is a page, its script run');
+      });
 
       await row('Download round saves one HTML file named for the board and the round', note => {
         note(files.join(', '));
@@ -848,6 +937,7 @@ async function main() {
           frameTop: box(document.querySelector('.round-current iframe')).top };
       })()`);
       const stripAtRest = await tallTab.evalPage(STRIP_EXPR);
+      const railComments = await tallTab.evalPage(`[].slice.call(document.querySelectorAll('.round-current .page-comments .comment-item')).length`);
       const tallFrame = await artifactSession(send, 'Tall mock');
       const padTop = await evalIn(send, tallFrame, 'parseFloat(getComputedStyle(document.body).paddingTop)');
       await row('a sent artifact round, drawn full page, shows Download round in the top strip, among its controls', note => {
@@ -874,7 +964,7 @@ async function main() {
       await evalIn(send, tallFrame, 'window.scrollTo(0, 0)');
       await tallTab.until(`!document.body.classList.contains('stage-scrolled')`, 'the artifact back at its top');
       await tallTab.quiet();
-      await row('once the artifact has scrolled under the header, the strip\'s Download round is still drawn and its click still saves the round', note => {
+      await row('once the artifact has scrolled under the header, the strip\'s Download round is still drawn and its click still saves the mock as its own page', note => {
         note(scrolledDownload.files.join(', '));
         assert.deepEqual(stripScrolled, { hit: true, drawn: true, inWindow: true, scrolled: true });
         assert.deepEqual(scrolledDownload.files, ['tall-fixture-round-1.html']);
@@ -883,12 +973,13 @@ async function main() {
       const mockBand = await evalIn(send, tallFrame, BAND_EXPR);
       const pageDownload = await downloadFrom(send, onEvent, tallTab, STRIP_CLICK);
       const pageFile = await openSaved(send, onEvent, pageDownload.file, cookie, offline);
-      await row('a sent full-page mock round\'s Download saves the mock as its own page, as tall as the mock, with none of the room the board pads it by', note => {
+      await row('a sent full-page mock round\'s Download saves the mock as its own page, as tall as the mock, with none of the room the board pads it by and none of the comments made on it', note => {
         const bytes = readFileSync(pageDownload.file, 'utf8');
-        note(`${pageDownload.files.join(', ')}, ${bytes.length} bytes; the artifact is ${TALL_MOCK_PX}px tall, padded ${mockBand}px on the board; the file's page is ${pageFile.height}px tall, padded ${pageFile.pad}px`);
+        note(`${pageDownload.files.join(', ')}, ${bytes.length} bytes; the artifact is ${TALL_MOCK_PX}px tall, padded ${mockBand}px on the board under ${railComments} comments; the file's page is ${pageFile.height}px tall, padded ${pageFile.pad}px`);
         assert.deepEqual(pageDownload.files, ['tall-fixture-round-1.html']);
         assert.ok(mockBand > 0, 'setup: the board pads the artifact for its own chrome');
-        assert.ok(bytes === SAVED_HEAD + TALL_ROUND_1[0].html, 'the mock\'s source as posted, and nothing of the board\'s');
+        assert.equal(railComments, TALL_PAGE_COMMENTS.length, 'setup: the board lists the comments made on the mock');
+        assert.ok(bytes === SAVED_HEAD + TALL_ROUND_1[0].html, 'the mock\'s source as posted, and nothing of the board\'s: no comment, no stage script');
         assert.deepEqual({ height: pageFile.height, pad: pageFile.pad, frames: pageFile.frames }, { height: TALL_MOCK_PX, pad: 0, frames: 0 });
       });
 
@@ -948,9 +1039,25 @@ async function main() {
       await shownTab.quiet();
       const shownScrolled = await shownTab.evalPage(STRIP_EXPR);
       const shownDownload = await downloadFrom(send, onEvent, shownTab, STRIP_CLICK);
+      // The mock held, as a push leaves a stage this tab does not hold: no source in the
+      // frame until the page is read for it. First with that read refused, then allowed.
+      await shownTab.evalPage(`(function () {
+        var frame = document.querySelector('.round-current iframe.html-stage');
+        frame.setAttribute('data-held', '');
+        frame.removeAttribute('srcdoc');
+      })()`);
+      await blockRequests(shownTab, ['*stages=*']);
+      const heldRefused = await failedDownload(send, shownTab, STRIP_DOWNLOAD);
+      await blockRequests(shownTab, []);
+      const heldDownload = await downloadFrom(send, onEvent, shownTab, STRIP_CLICK);
+      const heldAfter = await shownTab.evalPage(`(function () {
+        var frame = document.querySelector('.round-current iframe.html-stage');
+        return { held: frame.hasAttribute('data-held'), noteGone: !document.querySelector('.head-download .download-note'),
+          label: document.querySelector('.head-download').getAttribute('aria-label'), text: document.querySelector('.head-download').textContent.trim() };
+      })()`);
       await shownTab.close();
       const shownFile = await openSaved(send, onEvent, shownDownload.file, cookie, offline);
-      await row('an artifact round never sent shows the same Download round in the top strip, at rest and scrolled, and it saves the round', note => {
+      await row('an artifact round never sent shows the same Download round in the top strip, at rest and scrolled, and it saves the mock as its own page', note => {
         note(shownDownload.files.join(', '));
         assert.equal(shownTab.measured, 'open', 'setup: drawn full page, and not sent');
         assert.deepEqual(shownAtRest, { hit: true, drawn: true, inWindow: true, scrolled: false });
@@ -959,13 +1066,72 @@ async function main() {
         assert.deepEqual({ text: shownFile.text, frames: shownFile.frames }, { text: 'Shown mock', frames: 0 }, 'the mock as its own page');
       });
 
+      await row('a full-page mock the tab does not hold, its read refused, saves no file: Download round says so under itself and is live again', note => {
+        note(`${heldRefused.note} | files: ${heldRefused.files.join(', ') || 'none'}`);
+        assert.deepEqual(heldRefused.files, []);
+        assert.match(heldRefused.note, /did not load, so nothing was saved/);
+        assert.equal(heldRefused.label, heldRefused.note, 'the control\'s own label says the same');
+        assert.deepEqual({ live: heldRefused.live, drawn: heldRefused.drawn, under: heldRefused.under }, { live: true, drawn: true, under: true });
+      });
+      await row('pressed again with the read allowed, Download round reads the held mock in, saves it as its own page and says nothing more', note => {
+        note(heldDownload.files.join(', '));
+        assert.deepEqual(heldDownload.files, ['shown-fixture-round-1.html']);
+        assert.ok(readFileSync(heldDownload.file, 'utf8') === SAVED_HEAD + SHOWN_ROUND_1[0].html, 'the mock\'s source as posted');
+        assert.deepEqual(heldAfter, { held: false, noteGone: true, label: null, text: 'Download round' });
+      });
+
       // A mock that draws a diagram by its own script, saved from its Pull-out in a question round.
       const drawnTab = await openTab(send, onEvent, drawnUrl, cookie, { width: 1280, height: 900, theme: 'dark',
         expr: `document.querySelector('.round-current').getAttribute('data-round')` });
       await drawnTab.evalPage(`document.querySelector('[data-block-id="h6"] .pull-out').click()`);
       await drawnTab.until(`document.querySelector('dialog.stage-lens[open] iframe')`, 'the diagram-drawing mock pulled out');
-      const loaderDownload = await downloadFrom(send, onEvent, drawnTab, `document.querySelector('dialog.stage-lens [data-lens="download"]').click()`);
+      // First with the board not handing over its diagram library, then with it.
+      await blockRequests(drawnTab, ['*/mermaid-*.js']);
+      const libraryRefused = await failedDownload(send, drawnTab, LENS_DOWNLOAD);
+      await blockRequests(drawnTab, []);
+      const loaderDownload = await downloadFrom(send, onEvent, drawnTab, `document.querySelector('${LENS_DOWNLOAD}').click()`);
+      const libraryNoteGone = await noteGone(drawnTab, LENS_DOWNLOAD);
+      const pullOutAndSave = async (id, what) => {
+        // Until the dialog's own 'close' has been heard: it lands a task after the press, and
+        // the page tears the lens down on it, a lens opened again meanwhile included.
+        await drawnTab.sp('Runtime.evaluate', { awaitPromise: true, expression: `new Promise(function (resolve) {
+          document.querySelector('dialog.stage-lens').addEventListener('close', function () { setTimeout(resolve, 0); }, { once: true });
+          document.querySelector('dialog.stage-lens [data-lens="close"]').click();
+        })` });
+        await drawnTab.evalPage(`document.querySelector('[data-block-id="${id}"] .pull-out').click()`);
+        await drawnTab.until(`document.querySelector('dialog.stage-lens[open] iframe')`, `${what} pulled out`);
+        return downloadFrom(send, onEvent, drawnTab, `document.querySelector('${LENS_DOWNLOAD}').click()`);
+      };
+      const bareDownload = await pullOutAndSave('h8', 'the bare diagram');
+      const reachDownload = await pullOutAndSave('h9', 'the reaching mock');
       await drawnTab.close();
+      const bareFile = await openSaved(send, onEvent, bareDownload.file, cookie, offline);
+      const reachFile = await openSaved(send, onEvent, reachDownload.file, cookie, offline);
+      await row('with the board not handing over its diagram library, Download on a diagram-drawing mock\'s Pull-out saves no file, says so under itself and is live again; pressed again once the library is back, it saves and the note is gone', note => {
+        note(`${libraryRefused.note} | files: ${libraryRefused.files.join(', ') || 'none'}`);
+        assert.deepEqual(libraryRefused.files, []);
+        assert.match(libraryRefused.note, /diagram library, so nothing was saved/);
+        assert.equal(libraryRefused.label, libraryRefused.note, 'the control\'s own label says the same');
+        assert.deepEqual({ live: libraryRefused.live, drawn: libraryRefused.drawn, under: libraryRefused.under }, { live: true, drawn: true, under: true });
+        assert.deepEqual(loaderDownload.files, ['drawn-fixture-round-1-mock-h6.html']);
+        assert.equal(libraryNoteGone, true);
+      });
+      await row('a saved mock\'s script that asks for a script and an image by file: address loads neither, while its own inline script ran and its diagram is drawn, nothing else asked for', note => {
+        const r = reachFile.reach || {};
+        note(`script ${r.script}, image ${r.image}; refused: ${(r.refused || []).join(', ') || 'nothing'}; diagrams: ${reachFile.diagrams.join(', ')}; fetched: ${reachFile.fetched.join(', ') || 'nothing'}`);
+        assert.ok(readFileSync(reachDownload.file, 'utf8') === SAVED_HEAD + SAVED_LIBRARY + REACH_MOCK, 'the policy ahead of the library, then the mock as posted');
+        assert.deepEqual({ script: r.script, image: r.image }, { script: 'refused', image: 'refused' }, 'neither file on the disk loads');
+        assert.deepEqual((r.refused || []).map(line => line.split(' ')[0]).sort(), ['img-src', 'script-src-elem'], 'each refused by the file\'s own policy');
+        // The browser lists a refused address among the page's requests too.
+        assert.deepEqual({ late: reachFile.late, diagrams: reachFile.diagrams, fetched: reachFile.fetched.filter(url => !url.startsWith(pathToFileURL(disk).href)) },
+          { late: 'ran', diagrams: ['3 nodes'], fetched: [] }, 'its own script ran and its diagram is drawn from the library written in');
+      });
+      await row('a mock that is a diagram\'s source and no script, saved from its Pull-out and opened offline, is drawn by the written-in library\'s own start, nothing fetched', note => {
+        note(`${bareDownload.files.join(', ')}; diagrams: ${bareFile.diagrams.join(', ') || 'none'}`);
+        assert.deepEqual(bareDownload.files, ['drawn-fixture-round-1-mock-h8.html']);
+        assert.ok(readFileSync(bareDownload.file, 'utf8') === SAVED_HEAD + SAVED_LIBRARY + BARE_MOCK, 'the head, the library, the diagram\'s source: no script of the board\'s');
+        assert.deepEqual({ diagrams: bareFile.diagrams, fetched: bareFile.fetched, frames: bareFile.frames }, { diagrams: ['3 nodes'], fetched: [], frames: 0 });
+      });
       const loaderFile = await openSaved(send, onEvent, loaderDownload.file, cookie, offline);
       const savedLine = (download, file) => `${download.files.join(', ')}, ${readFileSync(download.file, 'utf8').length} bytes; diagrams: ${file.diagrams.join(', ') || 'none'}; contents: ${file.contents.join(', ') || 'none'}; reached for: ${(file.reached || []).join(', ') || 'nothing'}`;
       await row('a mock that draws a diagram, saved from its Pull-out and opened offline, shows the diagram drawn, its contents list filled and its control live, having asked no address for the library', note => {

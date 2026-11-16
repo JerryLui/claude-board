@@ -6,20 +6,22 @@
 // file opens on, the file of one diagram, and the file's head escaped so no title or
 // stylesheet text can open a script, and how far a printed page's height shrinks a mock. A
 // mock saved alone is its own page (ADR.md entry 154): its source read back out of its stage
-// byte for byte, under a head of its own, with the diagram library written in where it draws
-// a diagram. The saved file itself, its layout and its print are
+// as the stage holds it, under a head of its own whose policy admits no file on the reader's
+// disk, with the diagram library written in where it draws a diagram; the page's own script
+// saves that text from a mock's Pull-out and from a round drawn full page, and saves nothing
+// in an archive. The saved file itself, opened, its layout and its print are
 // test/browser-check-download.mjs's, run by hand.
 
 import assert from 'node:assert/strict';
 import { createBoard, addRound, applySubmit, abandonOpenRounds } from '../src/board.mjs';
-import { renderBoardPage, buildStageSrcdoc } from '../src/render.mjs';
+import { renderBoardPage, buildStageSrcdoc, stageMermaidPrelude } from '../src/render.mjs';
 import { buildRoundPushPayload } from '../src/server.mjs';
-import { decisionRows, exportDocument, exportFileName, printScale, stageOwnSource, mockDocument } from '../src/round-export.mjs';
+import { decisionRows, exportDocument, exportFileName, printScale, stageOwnSource, mockDocument, STAGE_MARGIN_RESET } from '../src/round-export.mjs';
 import { MERMAID_ASSET, MERMAID_SOURCE } from '../src/vendor/mermaid/index.mjs';
-import { parseHTML } from './dom-stand-in.mjs';
-import { check, finish, pageHarness } from './support.mjs';
+import { parseHTML, StandInEvent } from './dom-stand-in.mjs';
+import { check, finish, flush, pageHarness, waitFor } from './support.mjs';
 
-const { loadBoardWithEventSource } = await pageHarness();
+const { loadBoard, loadBoardWithEventSource } = await pageHarness();
 
 const Q1 = { kind: 'question', prompt: 'Q1: pick one', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] };
 const Q2 = { kind: 'question', prompt: 'Q2: pick another', widget: 'single', options: [{ label: 'A' }, { label: 'B' }] };
@@ -130,39 +132,152 @@ check('one mock or diagram saved alone is named for it; a diagram\'s file says w
 const AGENT_OPENING = "<script>(function () {\n  var CB = 'cb-stage';\n";
 const DIAGRAM = '<pre class="mermaid">flowchart LR\n  a --> b</pre>';
 
-check('a mock\'s own source comes back out of its stage byte for byte, whatever it holds, with whether the board lent it the diagram library', () => {
+const stageOf = html => buildStageSrcdoc({ kind: 'html', html });
+
+check('a mock\'s own source comes back out of its stage as the stage holds it, with the name of the library file the board lent it, or none: a fragment, a page, one with its own scripts, one that quotes the board\'s', () => {
   const rows = [
-    ['a fragment', '<div>Mock</div>', false],
-    ['an empty mock', '', false],
-    ['a whole page', '<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8"><title>T</title></head><body><p>Page</p></body></html>\n', false],
-    ['a page that ends in its own script', '<p id="p"></p><script>document.getElementById("p").textContent = "ran";</script>', false],
-    ['a page that draws a diagram', `<!DOCTYPE html><html><body>${DIAGRAM}<script>window.mermaid.run();</script></body></html>`, true],
-    ['a diagram and nothing after it', DIAGRAM, true],
-    ['a page that quotes the board\'s own script', `<pre>${AGENT_OPENING}</pre><p>after</p>`, false],
-    ['a diagram page that quotes it too', `${DIAGRAM}${AGENT_OPENING}})();</script><p>after</p>`, true],
-    ['a page that opens on a script of the library\'s name and draws no diagram', `<script src="${MERMAID_ASSET}"></script><script>var own = 1;</script><p>after</p>`, false],
+    ['a fragment', '<div>Mock</div>', null],
+    ['an empty mock', '', null],
+    ['a whole page', '<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8"><title>T</title></head><body><p>Page</p></body></html>\n', null],
+    ['a page that ends in its own script', '<p id="p"></p><script>document.getElementById("p").textContent = "ran";</script>', null],
+    ['a page that draws a diagram', `<!DOCTYPE html><html><body>${DIAGRAM}<script>window.mermaid.run();</script></body></html>`, MERMAID_ASSET],
+    ['a diagram and nothing after it', DIAGRAM, MERMAID_ASSET],
+    ['a page that quotes the board\'s own script', `<pre>${AGENT_OPENING}</pre><p>after</p>`, null],
+    ['a diagram page that quotes it too', `${DIAGRAM}${AGENT_OPENING}})();</script><p>after</p>`, MERMAID_ASSET],
+    ['a page that opens on a script of the library\'s name and draws no diagram', `<script src="${MERMAID_ASSET}"></script><script>var own = 1;</script><p>after</p>`, null],
   ];
   for (const [what, html, engine] of rows) {
-    assert.deepEqual(stageOwnSource(buildStageSrcdoc({ kind: 'html', html }), MERMAID_ASSET), { html, engine }, what);
+    assert.deepEqual(stageOwnSource(stageOf(html), STAGE_MARGIN_RESET), { html, engine }, what);
   }
-  assert.equal(stageOwnSource('<div>Mock</div>', MERMAID_ASSET), null, 'text that is no stage\'s');
-  assert.equal(stageOwnSource(null, MERMAID_ASSET), null, 'a stage the tab does not hold');
 });
 
-const HEAD = '<!DOCTYPE html>\n<meta charset="utf-8">\n<style>html,body{margin:0;padding:0}</style>\n';
+check('a stage written by another build of the board, its lent library under another name, gives its mock back with that name, the board\'s tag and stand-in taken off', () => {
+  const OTHER = 'mermaid-0123456789abcdef.js';
+  assert.notEqual(OTHER, MERMAID_ASSET, 'setup: not this build\'s name');
+  const html = `<h1>Flow</h1>${DIAGRAM}<script>window.mermaid.run();</script>`;
+  const stage = stageOf(html).replace(MERMAID_ASSET, OTHER);
+  assert.ok(stage.startsWith(`${STAGE_MARGIN_RESET}<script src="${OTHER}"></script>`), 'setup: the stage names the other build\'s file');
+  assert.deepEqual(stageOwnSource(stage, STAGE_MARGIN_RESET), { html, engine: OTHER });
+});
 
-check('a saved mock is its own source under a UTF-8, standards-mode, margin-free head, the diagram library written in ahead of it only where it is given', () => {
+check('text that is no stage the board wrote gives no source: no margin reset, no stage script at its end, a lent library that never closes, a stage the tab does not hold', () => {
+  assert.equal(stageOwnSource('<div>Mock</div>', STAGE_MARGIN_RESET), null, 'no margin reset');
+  assert.equal(stageOwnSource(null, STAGE_MARGIN_RESET), null, 'a stage the tab does not hold');
+  assert.equal(stageOwnSource(STAGE_MARGIN_RESET + '<p>x</p>', STAGE_MARGIN_RESET), null, 'the reset and a mock, with no stage script after it');
+  const prelude = stageMermaidPrelude();
+  const cut = prelude.slice(0, prelude.lastIndexOf('</script>'));
+  assert.ok(cut.startsWith(`<script src="${MERMAID_ASSET}"></script><script>`) && cut.length > 1000, 'setup: the lent library\'s tag and its stand-in, less the closing tag');
+  assert.equal(stageOwnSource(STAGE_MARGIN_RESET + cut, STAGE_MARGIN_RESET), null, 'the lent library cut before its closing tag');
+});
+
+// The file's policy: inline, data:, blob: and https: sources, and none that matches a file on
+// the disk the page is opened from (no file:, no 'self', no *). What it stops in a browser is
+// test/browser-check-download.mjs's.
+const POLICY = '<meta http-equiv="Content-Security-Policy" content="default-src \'unsafe-inline\' \'unsafe-eval\' https: data: blob:">';
+const HEAD = `<!DOCTYPE html>\n<meta charset="utf-8">\n${POLICY}\n${STAGE_MARGIN_RESET}\n`;
+
+check('a saved mock is its own source under a UTF-8, standards-mode, margin-free head whose policy admits no file: source and sits ahead of every script in the file, the diagram library written in after it only where it is given', () => {
   const page = '<!DOCTYPE html><html><body><p>Page</p><script>go();</script></body></html>';
-  assert.equal(mockDocument(page, null), HEAD + page);
-  assert.equal(mockDocument(page, 'window.mermaid = {};'), HEAD + '<script>window.mermaid = {};</script>\n' + page);
-  assert.equal(mockDocument('', null), HEAD);
+  assert.equal(mockDocument(page, null, STAGE_MARGIN_RESET), HEAD + page);
+  assert.equal(mockDocument(page, 'window.mermaid = {};', STAGE_MARGIN_RESET), HEAD + '<script>window.mermaid = {};</script>\n' + page);
+  assert.equal(mockDocument('', null, STAGE_MARGIN_RESET), HEAD);
 });
 
 check('the vendored diagram library can be written into a file as it is: a text holding a script tag, which would end the script early or swallow the page, is refused', () => {
-  assert.ok(mockDocument('<p>after</p>', MERMAID_SOURCE) === HEAD + '<script>' + MERMAID_SOURCE + '</script>\n<p>after</p>',
+  assert.ok(mockDocument('<p>after</p>', MERMAID_SOURCE, STAGE_MARGIN_RESET) === HEAD + '<script>' + MERMAID_SOURCE + '</script>\n<p>after</p>',
     'the head, the library whole inside one script, then the mock');
   for (const text of ['var a = "</script>";', 'var a = "</SCRIPT >";', 'var a = "<!--<script>";']) {
-    assert.throws(() => mockDocument('<p>after</p>', text), /script tag/, text);
+    assert.throws(() => mockDocument('<p>after</p>', text, STAGE_MARGIN_RESET), /script tag/, text);
+  }
+});
+
+// The page's own script saving a mock, in node: what the tab hands the browser. `fetch` gives
+// the diagram library's text for the name asked, `URL.createObjectURL` keeps each blob, the
+// link the script clicks keeps the file's name, and the timer that drops a blob keeps its
+// delay and never runs. Answers `{ saved, asked, restore }`.
+function savingStubs(library) {
+  const real = { fetch: globalThis.fetch, create: URL.createObjectURL, timeout: globalThis.setTimeout };
+  const saved = [], asked = [];
+  globalThis.fetch = async url => { asked.push(String(url)); return new Response(library, { status: 200 }); };
+  URL.createObjectURL = blob => { saved.push({ blob }); return `blob:stub/${saved.length}`; };
+  globalThis.setTimeout = (fn, ms, ...rest) => {
+    if (ms >= 1000 && saved.length && saved[saved.length - 1].life === undefined) { saved[saved.length - 1].life = ms; return 0; }
+    return real.timeout(fn, ms, ...rest);
+  };
+  return { saved, asked, restore() { globalThis.fetch = real.fetch; URL.createObjectURL = real.create; globalThis.setTimeout = real.timeout; } };
+}
+
+/** `loadBoard`, with each link the page's script makes given a click that keeps its name. */
+function loadSaving(html, stubs, opts = {}) {
+  const document = loadBoard(html, opts);
+  const create = document.createElement.bind(document);
+  document.createElement = tag => {
+    const el = create(tag);
+    if (String(tag).toLowerCase() === 'a') el.click = () => { stubs.saved[stubs.saved.length - 1].name = el.download; };
+    return el;
+  };
+  return document;
+}
+
+const press = el => { assert.ok(el, 'setup: the control is on the page'); el.dispatchEvent(new StandInEvent('click')); };
+const DRAWS = `<h1>Flow</h1>${DIAGRAM}<script>window.mermaid.run();</script>`;
+const LIBRARY = 'window.mermaid = { run: function () {} };';
+
+await check('Pull-out\'s Download on a mock saves the mock\'s own page: its source under the head, the diagram library the stage names read from the board and written in, as plain bytes under an .html name, dropped after a few seconds', async () => {
+  const board = createBoard({ title: 'Saved mock', blocks: [{ kind: 'html', title: 'Flow', html: DRAWS }, Q1] });
+  const stubs = savingStubs(LIBRARY);
+  try {
+    const document = loadSaving(renderBoardPage(board), stubs);
+    const id = document.querySelector('.html-block').getAttribute('data-block-id');
+    press(document.querySelector('.html-block .pull-out'));
+    assert.ok(document.querySelector('.stage-lens').hasAttribute('open'), 'setup: the mock is pulled out');
+    press(document.querySelector('.stage-lens [data-lens="download"]'));
+    await waitFor(() => stubs.saved.length && stubs.saved[0].name, { what: 'the mock\'s file' });
+    assert.equal(stubs.saved.length, 1);
+    assert.deepEqual(stubs.asked, [MERMAID_ASSET], 'one read: the library, by the name the stage carries');
+    assert.equal(await stubs.saved[0].blob.text(), HEAD + '<script>' + LIBRARY + '</script>\n' + DRAWS);
+    assert.equal(stubs.saved[0].name, `saved-mock-round-1-mock-${id}.html`);
+    assert.equal(stubs.saved[0].blob.type, 'application/octet-stream', 'plain bytes: its address saves, and draws no page at the board\'s origin');
+    assert.ok(stubs.saved[0].life >= 1000 && stubs.saved[0].life <= 5000, `dropped after a few seconds, not ${stubs.saved[0].life}ms`);
+    assert.equal(document.querySelector('.stage-lens [data-lens="download"]').disabled, false, 'the control is live again');
+  } finally {
+    stubs.restore();
+  }
+});
+
+await check('Download round on a round drawn full page saves its one mock\'s own page, named for the round, with nothing read where the mock draws no diagram', async () => {
+  const html = '<main><h1>Page</h1><script>document.title = "ran";</script></main>';
+  const board = createBoard({ title: 'Saved page', blocks: [{ kind: 'html', html }] });
+  const stubs = savingStubs(LIBRARY);
+  try {
+    const document = loadSaving(renderBoardPage(board), stubs);
+    press(document.querySelector('header.board-head .head-download'));
+    await waitFor(() => stubs.saved.length && stubs.saved[0].name, { what: 'the page\'s file' });
+    assert.equal(stubs.saved.length, 1);
+    assert.deepEqual(stubs.asked, []);
+    assert.equal(await stubs.saved[0].blob.text(), HEAD + html);
+    assert.equal(stubs.saved[0].name, 'saved-page-round-1.html');
+    assert.equal(stubs.saved[0].blob.type, 'application/octet-stream');
+  } finally {
+    stubs.restore();
+  }
+});
+
+await check('a read-only archive saves nothing and reads nothing, from the top strip\'s Download round or from a mock\'s Pull-out', async () => {
+  const page = createBoard({ title: 'Archived page', blocks: [{ kind: 'html', html: DRAWS }] });
+  const mixed = createBoard({ title: 'Archived mock', blocks: [{ kind: 'html', title: 'Flow', html: DRAWS }, Q1] });
+  const stubs = savingStubs(LIBRARY);
+  try {
+    const paged = loadSaving(renderBoardPage(page), stubs, { protocol: 'file:' });
+    press(paged.querySelector('header.board-head .head-download'));
+    const document = loadSaving(renderBoardPage(mixed), stubs, { protocol: 'file:' });
+    press(document.querySelector('.html-block .pull-out'));
+    assert.ok(document.querySelector('.stage-lens').hasAttribute('open'), 'setup: an archive still pulls a mock out');
+    press(document.querySelector('.stage-lens [data-lens="download"]'));
+    await flush();
+    assert.deepEqual({ saved: stubs.saved.length, asked: stubs.asked }, { saved: 0, asked: [] });
+  } finally {
+    stubs.restore();
   }
 });
 
