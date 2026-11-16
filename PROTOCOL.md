@@ -2375,7 +2375,7 @@ the parent cannot observe it short of being told.
 | `band` | `{ top, bottom }` | the board's own chrome band, right now (ADR 59) |
 | `scroll` | `{ top }` | "put yourself at this offset" |
 | `scrollBy` | `{ delta }` | "move yourself this many pixels" — one forwarded wheel notch |
-| `height` | — | "report your height now". Sent by Download round to each stage of the round that has reported none: a frame the window does not show is given no animation frame, so its first report has not left |
+| `height` | — | "report your height now". Sent by a question round's Download round to each stage of the round that has reported none: a frame the window does not show is given no animation frame, so its first report has not left |
 | `diagrams` | `{ requestId, svgs }` | response to `mermaid`: one entry per requested source, in the same order — the rendered SVG as a string, or `null` for one the board could not draw |
 
 `scroll` and `height` are the two bidirectional types on this channel: inbound, `height` asks for
@@ -2623,6 +2623,43 @@ stage: a hint is composed via the same `buildHint`/`composeHint` every other cli
 Checked by `test/check-stage-isolation.mjs` and `test/check-click.mjs`'s malformed and
 hostile-message cases. `test/dom-stand-in.mjs`'s `StandInWindow` models a stage's `window.parent`
 as an object exposing only `postMessage`, never `.document`, for the same reason.
+
+## Saved files (ADR 154)
+
+A served board page saves two kinds of file, both made in the tab (`src/ui.mjs`, the pure half
+in `src/round-export.mjs`). A `file://` archive saves neither: its controls are hidden and off.
+
+**A round's file** is what Download round saves on a question round, sent or not, and what
+Pull-out's Download saves for one board diagram. It is a copy of the round as drawn: the
+decisions table, every option with the pick marked, each diagram as the SVG the page drew, each
+image as a `data:` URL, and each mock inside the round as a still copy, its `srcdoc` with every
+script, inline handler and `javascript:` address removed, in a frame sandboxed with nothing
+allowed. The file's own policy is `default-src 'none'` with inline styles and `data:` images,
+fonts and media: no script runs in it and it fetches nothing.
+
+**A mock's own file** is what Pull-out's Download saves for one mock (an `html` block, wherever
+it sits in a round), and what Download round saves for a round drawn full page, which is one
+mock. It is the mock's page, not a copy of the board's:
+
+1. `<!DOCTYPE html>`, `<meta charset="utf-8">` and the stage's margin reset
+   (`html,body{margin:0;padding:0}`), so the page opens in standards mode with no page margin, as
+   it is drawn in a stage.
+2. Where the board lent the stage its diagram engine (the block's source carries the `mermaid`
+   class marker, "the board draws a stage's diagrams" above), the vendored engine's text in one
+   inline `<script>`. It runs before any script of the mock, so a mock that checks
+   `window.mermaid` before loading or importing an engine finds it and asks no address for one.
+3. The block's `html`, byte for byte as posted, scripts included.
+
+Nothing of the board's rides in it: no stage script, no stylesheet, no policy, no address of the
+daemon, and no comment or answer of the round. The mock's scripts run wherever the file is
+opened, with whatever that origin allows, where the board ran them in a sandboxed frame at an
+opaque origin. An address the mock itself names (a second library by web address, an image off
+another host) stays as written and needs a connection; the board fetches nothing to write in.
+
+The tab reads the mock's source back out of its stage's `srcdoc`, the one place a page holds it
+(ADR 122), by taking off what `buildStageSrcdoc` wrote around it, and reads the engine's text
+from the board's own `mermaid-<hash>.js` beside the page. A stage the tab does not hold saves
+nothing.
 
 ## MCP surface
 

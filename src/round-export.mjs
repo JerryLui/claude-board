@@ -76,21 +76,24 @@ export function exportFileName(title, n, part) {
  * the board's stand-in follows it), and null for text that is not a stage's. The
  * board's own script is the last thing in every stage and opens the same way
  * nowhere else in itself, so the last such opening is its own, whatever the mock
- * holds. */
+ * holds.
+ *
+ * No script tag is spelled whole here or in mockDocument: this text rides in
+ * the page's client script, which a check reads for the files a page names. */
 export function stageOwnSource(srcdoc, engineAsset) {
   var text = String(srcdoc == null ? '' : srcdoc);
-  var close = '</' + 'script>';
+  var open = '<' + 'script', close = '</' + 'script>';
   var reset = '<style>html,body{margin:0;padding:0}</style>';
   if (text.slice(0, reset.length) !== reset) return null;
   var from = reset.length;
-  var lent = '<script src="' + engineAsset + '">' + close + "<script>(function () {\n  var CB = 'cb-stage', pending";
+  var lent = open + ' src="' + engineAsset + '">' + close + open + ">(function () {\n  var CB = 'cb-stage', pending";
   var engine = text.slice(from, from + lent.length) === lent;
   if (engine) {
     var end = text.indexOf(close, from + lent.length);
     if (end < 0) return null;
     from = end + close.length;
   }
-  var to = text.lastIndexOf("<script>(function () {\n  var CB = 'cb-stage';\n");
+  var to = text.lastIndexOf(open + ">(function () {\n  var CB = 'cb-stage';\n");
   if (to < from) return null;
   return { html: text.slice(from, to), engine: engine };
 }
@@ -109,7 +112,7 @@ export function stageOwnSource(srcdoc, engineAsset) {
 export function mockDocument(html, engineSource) {
   if (engineSource && /<\/?script/i.test(engineSource)) throw new Error('the diagram library holds a script tag and cannot be written into a file');
   return '<!DOCTYPE html>\n<meta charset="utf-8">\n<style>html,body{margin:0;padding:0}</style>\n'
-    + (engineSource ? '<script>' + engineSource + '</' + 'script>\n' : '')
+    + (engineSource ? '<' + 'script>' + engineSource + '</' + 'script>\n' : '')
     + String(html == null ? '' : html);
 }
 
@@ -127,7 +130,7 @@ export function printScale(height) {
   return height > PRINT_PAGE_H ? PRINT_PAGE_H / height : 1;
 }
 
-/** The file itself. `css` is the board's stylesheet as text, so the drawn blocks
+/** A round's file. `css` is the board's stylesheet as text, so the drawn blocks
  * in `contentHtml` read as they did on the board; EXPORT_CSS lays out the rest
  * and prints it. The policy admits styles, fonts and images inline and nothing
  * else, so even a script that slipped past the strip could not run, and nothing
@@ -138,8 +141,9 @@ export function printScale(height) {
  * marks the round's content, where EXPORT_CSS writes 'picked, unsent' after each
  * picked option. A round that asked nothing has no draft to warn of.
  *
- * `o.only` names a file of one mock or diagram ('One mock'): `contentHtml` is
- * that artifact alone, under the same head, with no table. */
+ * `o.only` names a file of one diagram ('One diagram'): `contentHtml` is that
+ * diagram alone, under the same head, with no table. (One mock saved alone is
+ * mockDocument's, above.) */
 export function exportDocument(o) {
   var esc = function (s) {
     return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');

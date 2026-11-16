@@ -4600,8 +4600,9 @@ export const ui = `
   // board lent that stage the diagram library, the library's text is read from
   // the board's own copy beside the page and written into the file, so the
   // saved page draws its diagrams with no connection. A stage this tab does not
-  // hold saves nothing.
+  // hold saves nothing, and neither does a file: archive, which reads nothing.
   async function downloadMock(frame, name) {
+    if (readonly) return;
     var own = frame ? stageOwnSource(frame.getAttribute('srcdoc'), MERMAID_ASSET) : null;
     if (!own) throw new Error('this mock is not loaded on the page');
     var engine = null;

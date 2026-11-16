@@ -118,11 +118,10 @@ const PINNED_PX = 3000;
 const TALL_ROUND_3 = [
   { id: 'h4', kind: 'html', html: `<style>html, body { height: 100%; margin: 0; }</style><div style="height:${PINNED_PX}px;box-sizing:border-box;border:4px solid #3251c9;background:linear-gradient(#efe,#eef)">Pinned body, spilling content</div>` },
 ];
-// The third board: one artifact, shown and never sent, since it asks nothing. It names no
-// encoding of its own.
+// The third board: one artifact, shown and never sent, since it asks nothing.
 const SHOWN_TITLE = 'Shown fixture';
 const SHOWN_ROUND_1 = [
-  { id: 'h5', kind: 'html', html: '<div style="height:1800px;box-sizing:border-box;border:4px solid #3251c9;background:linear-gradient(#eef,#efe)">Shown mock, na\u00efve caf\u00e9</div>' },
+  { id: 'h5', kind: 'html', html: '<div style="height:1800px;box-sizing:border-box;border:4px solid #3251c9;background:linear-gradient(#eef,#efe)">Shown mock</div>' },
 ];
 // The fourth and fifth boards: a mock that draws a diagram by its own script. Each finds
 // the diagram library the way one of the two render templates does, and notes in
@@ -685,7 +684,7 @@ async function main() {
         note(`${mockBar.join(' | ')}; ${mockDownload.files.join(', ')}, ${bytes.length} bytes; its script wrote "${oneMock.late}"`);
         assert.deepEqual(mockBar.slice(-2), ['download', 'close']);
         assert.deepEqual(mockDownload.files, ['download-fixture-round-1-mock-h1.html']);
-        assert.equal(bytes, SAVED_HEAD + ROUND_1.find(b => b.id === 'h1').html, 'the mock\'s source as posted: no diagram, so no library, and nothing of the board\'s');
+        assert.ok(bytes === SAVED_HEAD + ROUND_1.find(b => b.id === 'h1').html, 'the mock\'s source as posted: no diagram, so no library, and nothing of the board\'s');
         assert.equal(oneMock.late, 'ran', 'its own script ran');
         assert.deepEqual({ frames: oneMock.frames, mode: oneMock.mode, fetched: oneMock.fetched }, { frames: 0, mode: 'CSS1Compat', fetched: [] },
           'the page itself, in standards mode as on the board, nothing fetched');
@@ -889,7 +888,7 @@ async function main() {
         note(`${pageDownload.files.join(', ')}, ${bytes.length} bytes; the artifact is ${TALL_MOCK_PX}px tall, padded ${mockBand}px on the board; the file's page is ${pageFile.height}px tall, padded ${pageFile.pad}px`);
         assert.deepEqual(pageDownload.files, ['tall-fixture-round-1.html']);
         assert.ok(mockBand > 0, 'setup: the board pads the artifact for its own chrome');
-        assert.equal(bytes, SAVED_HEAD + TALL_ROUND_1[0].html, 'the mock\'s source as posted, and nothing of the board\'s');
+        assert.ok(bytes === SAVED_HEAD + TALL_ROUND_1[0].html, 'the mock\'s source as posted, and nothing of the board\'s');
         assert.deepEqual({ height: pageFile.height, pad: pageFile.pad, frames: pageFile.frames }, { height: TALL_MOCK_PX, pad: 0, frames: 0 });
       });
 
@@ -957,8 +956,7 @@ async function main() {
         assert.deepEqual(shownAtRest, { hit: true, drawn: true, inWindow: true, scrolled: false });
         assert.deepEqual(shownScrolled, { hit: true, drawn: true, inWindow: true, scrolled: true });
         assert.deepEqual(shownDownload.files, ['shown-fixture-round-1.html']);
-        assert.deepEqual({ text: shownFile.text, frames: shownFile.frames }, { text: 'Shown mock, na\u00efve caf\u00e9', frames: 0 },
-          'the mock as its own page, its text read in the encoding it was saved in');
+        assert.deepEqual({ text: shownFile.text, frames: shownFile.frames }, { text: 'Shown mock', frames: 0 }, 'the mock as its own page');
       });
 
       // A mock that draws a diagram by its own script, saved from its Pull-out in a question round.

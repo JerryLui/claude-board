@@ -137,3 +137,4 @@ link where it is worth reading.
 | 150 | [One board per mission, each round its session's](.agents/adr/0150-one-board-per-mission-each-round-its-sessions.md) | 2026-11-11 | amends 69, 131, 134, 141; amended by 151 |
 | 151 | [A hand-over reopens the last session's unanswered rounds in place](.agents/adr/0151-a-hand-over-reopens-the-last-sessions-unanswered-rounds-in-place.md) | 2026-11-15 | amends 150; relates to 69, 114, 145, 146 |
 | 152 | [The top strip takes clicks on its controls only, holds Download round on a full-page round, and leaves for a mock's full-size view](.agents/adr/0152-the-top-strip-takes-clicks-on-its-controls-only-and-leaves-for-a-mocks-full-size-view.md) | 2026-11-15 | amends 40; relates to 33, 59, 120 |
+| 154 | [A saved mock is the page's own file and runs its scripts; a round's file stays script-free](.agents/adr/0154-a-saved-mock-is-the-pages-own-file-and-runs-its-scripts.md) | 2026-11-16 | relates to 22, 32, 78, 95, 108, 120, 122, 152 |
