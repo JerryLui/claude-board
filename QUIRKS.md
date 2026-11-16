@@ -2604,4 +2604,28 @@ Traps that have bitten once. A second bite moves the entry up into the section i
   (2026-11-12). Putting the offset back is no cure: a `scrollTop` assignment follows the
   artifact's own `scroll-behavior`, so a smooth-scrolling one animates back, and an artifact
   scrolling in an inner pane is not reached at all. So the stage reports its height with the
-  band's padding in place (`reportHeight`), and a saved full-page mock ends in that much blank.
+  band's padding in place (`reportHeight`).
+- **A whole script tag in a string of the client script reads as a file the page names.**
+  `test/check-assets.mjs` ("a page already on disk still opens correctly from Finder") lists every
+  file a page names, the text of `src/ui.mjs`'s `ui` included, and so of every function it embeds
+  by `.toString()` (`src/round-export.mjs`, `src/badge.mjs`). A string literal that spells a script
+  tag with a `src` whole fails it with "the stand-in still references something" (2026-11-16, the
+  saved mock). Spell the tag in parts: `'<' + 'script'`, `'</' + 'script>'`.
+- **Every `fetch(` in the client script is counted and named.** `test/check-pure.mjs` ("mode
+  detection is synchronous") counts the `fetch(` calls in `ui`, embedded functions included,
+  matches each by its argument's text, and wants each one's function to open on
+  `if (readonly) return;` (2026-11-16, the saved mock's read of the diagram library). A new read,
+  or a renamed argument, fails it until the count, the comment and the guard row there say what
+  it is.
+- **A lens closed and opened again in one breath is torn down by its own late `close`.** A
+  dialog's `close` event lands a task after `close()`, and the stage lens tears down on it
+  (`wireStageLensChrome`), whatever is open by then. A check that presses close and at once pulls
+  another mock out found the new lens emptied, its Download saving nothing, one run in three
+  (2026-11-16, `test/browser-check-download.mjs`). Wait for the dialog's `close` event, not for
+  the `open` attribute to go.
+- **Chrome lists an address a policy refused among the page's requests, and not a `file:` one it
+  loaded.** `performance.getEntriesByType('resource')` on a page opened from disk held the two
+  `file:` addresses its policy refused, and neither once the policy was gone and both loaded
+  (2026-11-16). So "nothing fetched" proves nothing about a `file:` address: read the element's
+  own `load` or `error`, and the page's `securitypolicyviolation` events, whose `blockedURI` for
+  a `file:` address is the bare word `file`.

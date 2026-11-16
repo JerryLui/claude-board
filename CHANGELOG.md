@@ -4,23 +4,36 @@
 
 - **Download round**: a round's page has a Download round button at the right end of the
   round's chip line, or in the top strip when the round is one mock drawn full page, where it stays
-  in view as the mock scrolls. It saves that one round as a single HTML file that opens offline: the
-  board's title, the round's number and date, a table of each question with its pick and note, then
-  the round in full, with every option and the pick marked, diagrams as pictures, mocks at full
-  height with their scripts left out, comments under what they point at and images inside the file.
-  The browser's Print makes a PDF of it. A round not yet sent saves too: its file opens on a Not
-  sent line and marks each pick so far as unsent. Pull-out, the full-window view of one mock or
-  diagram, has a download of its own that saves that one alone. A board opened from Finder offers
-  none of these.
-- **A mission's next session picks up the questions the last one left (ADR 151)**: when a session
+  in view as the mock scrolls. On a question round it saves that one round as a single HTML file
+  that opens offline: the board's title, the round's number and date, a table of each question with
+  its pick and note, then the round in full, with every option and the pick marked, diagrams as
+  pictures, each mock a still copy at full height with its scripts left out, comments under what
+  they point at and images inside the file. The browser's Print makes a PDF of it. A round not yet
+  sent saves too: its file opens on a Not sent line and marks each pick so far as unsent. Pull-out,
+  the full-window view of one mock or diagram, has a Download of its own that saves that one alone.
+  A board opened from Finder offers none of these.
+- **A saved mock is the page itself (ADR 154)**: Download on a mock's Pull-out, and Download round
+  on a round that is one mock drawn full page, save the mock as its own working page: its scripts
+  run, its diagrams draw, its contents list fills and its controls work, opened from disk with no
+  connection. A mock that draws diagrams gets the board's diagram library written into the file,
+  about 3.5 MB, so it asks the web for nothing; a library a mock names by an `https:` address
+  stays a web address. The file runs the mock's scripts wherever it is opened, so treat one as you
+  would the session that made it; its own policy keeps those scripts from loading any other file
+  off your disk. It carries none of the comments made on the mock. When a mock cannot be saved
+  (the board is not running to hand over the diagram library, the mock has not loaded, or the
+  page has been open since before the board was updated), the button says so under itself and
+  nothing is saved.
+- **A mission's next session picks up the questions the last one left (ADR 151, 153)**: when a session
   joins a mission in place of the one before it, or takes the mission over, each round that
   session left unanswered goes back to waiting in place, whether it was closed at a `/clear` or
   the session's end, had timed out, or was still waiting at the takeover. It keeps its round
   number and everything the board holds for it, gets a fresh 40-minute clock, and shows under
   Waiting on you again; a tab you still have open on it takes answers again with no reload. Your
   Send reaches the new session, which is told of each reopened round when it joins. A round you
-  already sent stays read-only, rounds of earlier sessions stay closed, and so do those of a
-  session that left the mission with nobody taking over. A round nobody answers reopens again for
+  already sent stays read-only, and rounds of earlier sessions stay closed. A session that left
+  the mission on purpose (`/mission off`) with nobody taking over hands its unanswered rounds on
+  the same way, to the next session that joins, also when a session in between started on the
+  mission and ended or left before it joined. A round nobody answers reopens again for
   the session after, until you send it or a session declines it: `mission close` closes one
   reopened round whose question no longer stands, for good. Before, such a round stayed
   read-only and a late Send reached a session only when it thought to read the board.

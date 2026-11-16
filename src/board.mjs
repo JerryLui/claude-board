@@ -1165,8 +1165,9 @@ export function abandonOpenRounds(board, { session = null, except = null, only =
  * or it still waited: `open` and awaited again, its deadline `awaitTimeoutMs` from `now`,
  * `reopenedAt` stamped and `abandonedAt` dropped. Nothing else of the round moves. A sent
  * round, one its session closed by number (`declined`) and a closed one that asked nothing
- * stay as they are. Returns `{ handed, reopened }`, the round numbers of each; mutates
- * `board`, caller persists it. */
+ * stay as they are, and so does a round recorded under the taker's own id, the taker's
+ * already though its process names the giver too. Returns `{ handed, reopened }`, the round
+ * numbers of each; mutates `board`, caller persists it. */
 export function handOverRounds(board, giver, taker, { now = Date.now(), awaitTimeoutMs = DEFAULT_AWAIT_TIMEOUT_MS } = {}) {
   const handed = [];
   const reopened = [];
@@ -1176,6 +1177,9 @@ export function handOverRounds(board, giver, taker, { now = Date.now(), awaitTim
     // one's to hand, even once a later poster has given the board a session. A round from
     // before rounds recorded their poster stays where it is, as no takeover moved one then.
     if (r.status === 'sent' || r.declined || !sessionMatches(r.session, giver)) continue;
+    // A giver back in its own process under a new id (a /clear) is named by that process:
+    // the round it asked, or was handed, under the id it takes with is not handed to itself.
+    if (taker.id != null && r.session.id === taker.id) continue;
     const asks = r.awaitDeadline != null;
     if (r.status !== 'open' && !asks) continue;
     const from = (r.session && r.session.id) || giver.id || null;

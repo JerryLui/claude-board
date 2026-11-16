@@ -1,9 +1,14 @@
 // A round saved as one HTML file, sent or not: the Download round control on a
 // question round's chip line and, for a round drawn full page, in the top strip;
 // one mock or diagram saved alone from its Pull-out; and the pure half of the
-// file each saves. The file is made in the
-// browser from the drawn round (src/ui.mjs's downloadRound), so a diagram is
-// already SVG and no engine rides in the file; this module holds what needs no
+// file each saves. Two kinds of file (ADR.md entry 154). A question round's, and
+// one diagram's, is made in the browser from the drawn round (src/ui.mjs's
+// downloadRound), so a diagram is already SVG, a mock inside it is a still copy
+// and the file holds no script at all. A mock saved alone, from its Pull-out or
+// as the one mock of a round drawn full page, is the mock's own page: its source
+// as its stage holds it, scripts and all, under a policy that admits no file on
+// the reader's disk and the diagram library's text where the mock draws a
+// diagram (stageOwnSource, mockDocument). This module holds what needs no
 // DOM, so test/check-round-download.mjs reads it in node and src/ui.mjs embeds
 // each function's literal source by '.toString()' (the src/badge.mjs discipline:
 // src/ui.mjs cannot import src/render.mjs).
@@ -11,6 +16,7 @@
 // Every function below that src/ui.mjs embeds is self-contained: no import, no
 // module-scope name, since its text runs in the tab on its own. The one
 // exception is PRINT_PAGE_H, which src/ui.mjs embeds beside printScale.
+// STAGE_MARGIN_RESET is handed to the two that need it.
 
 const DOWNLOAD_ICON = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="M7 11l5 5 5-5"/><path d="M5 21h14"/></svg>';
 
@@ -64,6 +70,100 @@ export function exportFileName(title, n, part) {
   return (slug || 'board') + '-round-' + n + (tail ? '-' + tail : '') + '.html';
 }
 
+/** What every stage's `srcdoc` opens with (src/render.mjs's buildStageSrcdoc)
+ * and every saved mock's head carries (mockDocument): no page margin, so a mock
+ * lays out saved as it does in a stage. Spelled here once; stageOwnSource and
+ * mockDocument take it as a parameter, since each runs in the tab on its own. */
+export const STAGE_MARGIN_RESET = '<style>html,body{margin:0;padding:0}</style>';
+
+/** A mock's own source, read back out of its stage's `srcdoc`: what
+ * src/render.mjs's buildStageSrcdoc wrote around it is taken off again, since a
+ * page holds each mock there and nowhere else (ADR.md entry 122). `marginReset`
+ * is STAGE_MARGIN_RESET. Answers `{ html, engine }`, and null for text that is
+ * not a stage's. `html` is the source as the stage holds it: the text the block
+ * was posted with, a line ending of CR or CRLF read as LF, as the browser reads
+ * every attribute. `engine` names the diagram library's file where the board
+ * gave the stage the library (its tag, then the board's stand-in), and is null
+ * for a stage given none. The file is told by its shape, `mermaid-<16 hex>.js`,
+ * not by this build's own name: a tab left open across an upgrade holds stages
+ * that name the build before, whose file the daemon still serves. A stage whose
+ * lent library does not end is no stage this can read, so it answers null too.
+ *
+ * So does a stage that opens on a script naming a file of that shape with
+ * anything after the name but the tag's end and the stand-in's first line as
+ * this build writes it:
+ * a build that words its stand-in otherwise wrote that stage, this one cannot
+ * tell where the stand-in ends, and the board's tag and stand-in saved as the
+ * mock's own would be a page that draws nothing.
+ *
+ * The board's own script is the last thing in every stage and opens the same way
+ * nowhere else in itself, so the last such opening is its own, whatever the mock
+ * holds. The front has no such mark, so a mock that draws no diagram and itself
+ * opens on a script naming a file of that shape is misread, either way: followed
+ * by the stand-in's first line it is read as lent the library, and loses its
+ * text up to its first closing script tag; followed by anything else it answers
+ * null. A mock that opens on any other script, its own or a library under
+ * another name or address, is read whole.
+ *
+ * No script tag is spelled whole here or in mockDocument: this text rides in
+ * the page's client script, which a check reads for the files a page names. */
+export function stageOwnSource(srcdoc, marginReset) {
+  var text = String(srcdoc == null ? '' : srcdoc);
+  var open = '<' + 'script', close = '</' + 'script>';
+  if (text.slice(0, marginReset.length) !== marginReset) return null;
+  var from = marginReset.length, at = from, engine = null;
+  function takes(s) {
+    if (text.slice(at, at + s.length) !== s) return false;
+    at += s.length;
+    return true;
+  }
+  if (takes(open + ' src="')) {
+    var name = (/^mermaid-[0-9a-f]{16}\.js/.exec(text.slice(at, at + 27)) || [''])[0];
+    at += name.length;
+    if (name && takes('">' + close + open + ">(function () {\n  var CB = 'cb-stage', pending")) {
+      var end = text.indexOf(close, at);
+      if (end < 0) return null;
+      engine = name;
+      from = end + close.length;
+    } else if (name) {
+      return null;
+    }
+  }
+  var to = text.lastIndexOf(open + ">(function () {\n  var CB = 'cb-stage';\n");
+  if (to < from) return null;
+  return { html: text.slice(from, to), engine: engine };
+}
+
+/** A mock saved as its own page: `html`, the mock's source as its stage holds
+ * it, under a head of four lines, read as UTF-8 whatever opens it: a
+ * standards-mode document, the file's policy, and `marginReset`
+ * (STAGE_MARGIN_RESET), the head a stage gives it on the board. `engineSource`
+ * is the diagram library's text for a mock that draws a diagram, written in as
+ * a script ahead of the mock's own, so the mock finds the library on `window`
+ * and reaches for no address; null for a mock with none. Nothing else of the
+ * board's rides: no stage script, no stylesheet, no address of the daemon.
+ *
+ * The mock's scripts run wherever the file is opened, and opened from disk
+ * that is a `file:` page, which a browser lets load any other file on the disk
+ * as a script or an image. The policy is what stops that (ADR.md entry 154): it
+ * admits what is written in the file, `data:` and `blob:`, and `https:`
+ * addresses, so a library the mock names by web address still loads, and no
+ * `file:` address, nor the page's own folder, nor code built from text, which
+ * the board's own policy gives a stage none of either. It sits ahead of the
+ * library, so it governs every script in the file. It does not stop a script sending what
+ * it holds to an `https:` host.
+ *
+ * The library is written as it is, so its text may hold no script tag, opening
+ * or closing: one would end the script early or swallow the page after it. */
+export function mockDocument(html, engineSource, marginReset) {
+  if (engineSource && /<\/?script/i.test(engineSource)) throw new Error('the diagram library holds a script tag and cannot be written into a file');
+  return '<!DOCTYPE html>\n<meta charset="utf-8">\n'
+    + '<meta http-equiv="Content-Security-Policy" content="default-src \'unsafe-inline\' https: data: blob:">\n'
+    + marginReset + '\n'
+    + (engineSource ? '<' + 'script>' + engineSource + '</' + 'script>\n' : '')
+    + String(html == null ? '' : html);
+}
+
 /** The height, in px, of the one printed page a taller diagram or mock is fitted to:
  * Letter's, the shorter paper, under Chrome's default 0.4in margins, less a little
  * for rounding. */
@@ -78,7 +178,7 @@ export function printScale(height) {
   return height > PRINT_PAGE_H ? PRINT_PAGE_H / height : 1;
 }
 
-/** The file itself. `css` is the board's stylesheet as text, so the drawn blocks
+/** A round's file. `css` is the board's stylesheet as text, so the drawn blocks
  * in `contentHtml` read as they did on the board; EXPORT_CSS lays out the rest
  * and prints it. The policy admits styles, fonts and images inline and nothing
  * else, so even a script that slipped past the strip could not run, and nothing
@@ -89,8 +189,9 @@ export function printScale(height) {
  * marks the round's content, where EXPORT_CSS writes 'picked, unsent' after each
  * picked option. A round that asked nothing has no draft to warn of.
  *
- * `o.only` names a file of one mock or diagram ('One mock'): `contentHtml` is
- * that artifact alone, under the same head, with no table. */
+ * `o.only` names a file of one diagram ('One diagram'): `contentHtml` is that
+ * diagram alone, under the same head, with no table. (One mock saved alone is
+ * mockDocument's, above.) */
 export function exportDocument(o) {
   var esc = function (s) {
     return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -190,7 +291,6 @@ body.round-export::before { display: none; }
 .export-round .html-stage { max-height: none; }
 .export-round .export-missing { color: var(--muted); font-style: italic; font-size: 12.5px; }
 .export-round .comment-list { display: block; }
-.export-round .comment-list-wrap { max-height: none; overflow: visible; }
 @media print {
   body.round-export { padding: 0; background: #fff; }
   .export-unsent-note { break-after: avoid; }

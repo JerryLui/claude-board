@@ -14,7 +14,7 @@ import { readBoard, readMission, writeBoard, writeMission, pruneStore, MISSION_R
 import { createBoard } from '../src/board.mjs';
 import { createSessionList } from '../src/sessions.mjs';
 import {
-  missionsOverview, missionView, getMissionView, launchMission, bindSession, joinMission, leaveMission, upsertMission, bindingFor, deriveState, pidAlive, MAX_WORKING, MAX_ALIVE, STALL_SILENCE_MS, UNBOUND_GRACE_MS, RELEASED_VISIBLE_MS,
+  missionsOverview, missionView, getMissionView, launchMission, bindSession, joinMission, leaveMission, leaverHandedOver, upsertMission, bindingFor, deriveState, pidAlive, MAX_WORKING, MAX_ALIVE, STALL_SILENCE_MS, UNBOUND_GRACE_MS, RELEASED_VISIBLE_MS,
 } from '../src/missions.mjs';
 import { createMissionsCache, MISSIONS_CACHE_MS } from '../src/missions-cache.mjs';
 import { processStartUtc } from '../src/proc-start.mjs';
@@ -197,6 +197,27 @@ async function main() {
     assert.deepEqual(readMission('FAILED_START', dir).session, { startedAt: iso(past), seenAt: iso(past) }, 'the new launch re-reserves');
     assert.deepEqual(missionsOverview({ home: dir, now: past, isAlive: alive }).live, { working: 1, alive: 1 });
   });
+
+  for (const [i, how] of ['a second launch replaces it, and the join binds that one', 'a join binds in its place'].entries()) {
+    await check(`a launch's reservation no process bound hands on the session that left before it once it lapses: ${how}, answered the leaver`, () => {
+      const key = `LEFT_FAILED_START_${i}`;
+      const dir = scratchHome(`left-unbound-${i}`);
+      const t0 = Date.parse('2026-10-28T12:00:00Z');
+      const isAlive = () => true;
+      const leaver = { pid: 4343, id: 'sess-left' };
+      joinMission(key, leaver, { home: dir, now: t0, isAlive });
+      leaveMission(key, { id: 'sess-left' }, { home: dir, now: t0 + 1000 });
+      assert.deepEqual(launchMission(key, { phase: 'direct' }, { home: dir, now: t0 + 2000, isAlive }), { launch: true });
+
+      const past = t0 + 2000 + UNBOUND_GRACE_MS + 1000;
+      if (i === 0) {
+        assert.deepEqual(launchMission(key, { phase: 'direct' }, { home: dir, now: past, isAlive }), { launch: true });
+        assert.deepEqual(readMission(key, dir).session, { startedAt: iso(past), seenAt: iso(past), left: [leaver] });
+      }
+      const joined = joinMission(key, { id: 'sess-next', pid: 4444 }, { home: dir, now: past + 1000, isAlive });
+      assert.deepEqual([joined.status, joined.session.id, joined.leavers], [200, 'sess-next', [leaver]]);
+    });
+  }
 
   await check('a session bound by id alone stays live past the unbound grace', () => {
     const t0 = Date.parse('2026-10-28T12:00:00Z');
@@ -688,6 +709,35 @@ async function main() {
     const bound = bindSession('LEFT_THEN_BOUND', { id: 'sess-b', pid: 7777 }, { home: dir, now: t0 + 2000, isAlive });
     assert.deepEqual([bound.session.id, bound.session.ended], ['sess-b', undefined]);
   });
+
+  for (const [i, went] of ['left it too', 'went, its process gone'].entries()) {
+    const answered = i === 0 ? 'both as leavers, the earlier first' : 'the leaver, and the session that went as ended';
+    await check(`the record names each session that left until a join was handed its rounds: a session bound by its heartbeat that never joined carries the leaver before it, and once it ${went}, the join after is answered ${answered}; that join's hand-over made, the record names none, and the session that joined gives alone once it has left`, () => {
+      const key = `LEFT_CARRIED_${i}`;
+      const dir = scratchHome(`left-carried-${i}`);
+      const t0 = Date.parse('2026-11-16T09:00:00Z');
+      const alive = new Set([8181, 8282, 8383, 8484]);
+      const isAlive = pid => alive.has(pid);
+      const [a, b, c] = [{ pid: 8181, id: 'sess-a' }, { pid: 8282, id: 'sess-b' }, { pid: 8383, id: 'sess-c' }];
+      joinMission(key, a, { home: dir, now: t0, isAlive });
+      leaveMission(key, { id: 'sess-a' }, { home: dir, now: t0 + 1000 });
+      assert.deepEqual(bindSession(key, b, { home: dir, now: t0 + 2000, isAlive }).session.left, [a]);
+      if (i === 0) {
+        leaveMission(key, { id: 'sess-b' }, { home: dir, now: t0 + 3000 });
+        assert.deepEqual(readMission(key, dir).session, { ended: b, leftAt: iso(t0 + 3000), left: [a] });
+      } else alive.delete(8282);
+
+      const joined = joinMission(key, c, { home: dir, now: t0 + 4000, isAlive });
+      const leavers = i === 0 ? [a, b] : [a];
+      assert.deepEqual([joined.status, joined.leavers, joined.session.ended, joined.session.left], [200, leavers, i === 0 ? undefined : b, undefined]);
+      assert.deepEqual(readMission(key, dir).session.left, leavers, 'named until the hand-over was made');
+      leaverHandedOver(key, { home: dir });
+      assert.equal(readMission(key, dir).session.left, undefined);
+      leaveMission(key, { id: 'sess-c' }, { home: dir, now: t0 + 5000 });
+      const last = joinMission(key, { pid: 8484, id: 'sess-d' }, { home: dir, now: t0 + 6000, isAlive });
+      assert.deepEqual([last.status, last.leavers], [200, [c]]);
+    });
+  }
 
   await check('a join by the session a launch replaced is a 409 ended, under its id or its process after a /clear, and the successor binds', () => {
     const dir = scratchHome('ended-join');

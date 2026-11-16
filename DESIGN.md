@@ -891,6 +891,59 @@ review. Copied by hand, it costs nothing until someone wants it. Also rejected: 
 leaving the description to carry the whole load — the description says *that* a caller should reach
 the board, and nothing shows what a caller that defers its mechanism actually looks like.
 
+### Entry 153: a leaver's rounds reopen at the next join
+
+**Rejected: they stay closed, as first built.** Entry 151 kept the board's standing rule that a
+session that left its mission is no longer the mission's, so it gave nothing: the rounds it left
+unanswered stayed closed, and only the leaver joining again could get an answer to them. That
+left a question the PM still owed an answer to read-only and off Waiting on you while the next
+session worked the mission, the very state entry 151 ended for a session that went or was
+replaced, and it made a leave the one way out of a mission that lost its open questions. A
+takeover already moves a live session's rounds to the taker, so a leave with nobody waiting to
+take over follows the same rule one join later.
+
+**Rejected: they stay the leaver's when the session after it never joined, as first built.**
+The first build let only the session before the one that joins give. A session bound by its
+heartbeat that went or left before its join so took the leaver's rounds out of reach: the record
+dropped the leaver with it, and the join after was handed that session's rounds alone. That
+session was handed nothing and never held the mission's questions, and a launched session dying
+between its first heartbeat and its join is an ordinary failure, so the PM was left owing
+answers no session could receive. A session whose join was handed the rounds still ends the
+line, which keeps a long mission's old closed rounds from all coming back.
+
+**Rejected: a joined stamp on the record, to tell a session that joined from one that did not.**
+The record says it already: `left` stays until a join was handed every board, so a record
+holding it is one whose rounds are still owed. A stamp would call a session joined whose
+hand-over failed on a board, and its going would strand the leaver's rounds there; carrying
+`left` covers that with no second field.
+
+### Entry 154: a saved mock is the page's own file
+
+**Why not a drawn still copy.** The stage could hand its drawn markup over the message channel and
+the board save that. It saves a picture of the page: the diagrams are there and every control is
+dead, so a `/explain` page's lenses and a `/visualize` page's folds do nothing. The file is meant
+to be handed to someone, and they would get less than the reviewer saw.
+
+**Why the board fetches no library a mock names.** Fetching whatever a mock names would make the
+file need no connection at all. The board's pages reach no outside address (entry 95), so the tab
+cannot do it, and a daemon that fetches any address a mock names is a new outbound path, steered
+by agent-authored markup. The diagram engine is the one library both render templates use and the
+board already ships it, so that one is written in and any other stays an address.
+
+**Why the file carries a policy, and this one.** As first built the file had none, on the reading
+that a saved mock is as trusted as the session that wrote it. That missed where the file is
+opened: from disk it is a `file:` page, and Chrome and Safari let such a page load any other
+`file:` address as a classic script or an image, so a mock's script could run any script-shaped
+file on the reader's disk and learn which paths exist. `SECURITY.md` refuses an archive exactly
+that reach. A meta policy of `default-src 'unsafe-inline' https: data: blob:` closes
+it and keeps the rest: what is written in the file runs, the engine draws, and a library named by
+`https:` address still loads. No `'self'`: at a `file:` origin it would match the disk. No
+`'unsafe-eval'` either: the engine draws without it, and the board's own page policy gives a
+stage none, so a mock that works on the board asks for none saved. Also rejected: saving a script-free copy for a mock
+whose source was a path. Every mock is agent-authored either way, and it would bring back the
+dead copy for the pages the change exists for. Not closed, by choice: sending data to an `https:`
+host, which the same policy must admit for a mock's own web addresses.
+
 ## Out of Scope
 
 - Live revision of the artifact after feedback. Lavish edits the page in place; we re-render from

@@ -1730,8 +1730,9 @@ Mission = {
   prFacts?: [ { repo, number, state, head, checkedAt } ],   // the watcher's, from GitHub (ADR 140)
   boards: [ { id, url, at } ],                     // linked by a post; the last is the latest
   session: { id?, pid?, procStart?, name?, login?, startedAt, seenAt, typedAt?, ended?,
+             left?,          // the sessions that left before it, until a join was handed their rounds
              reopened?: [ { board, round, awaitDeadline } ] }   // the rounds reopened under it (ADR 151)
-         | { ended, leftAt }  // the session left (`leave`)
+         | { ended, leftAt, left? }  // the session left (`leave`)
          | null,
   takeover?: { by, pid?, procStart?, at },         // a join asking for the mission (`join`)
   handoff?,                  // a Handoff block, at most 4 KB
@@ -1832,7 +1833,8 @@ The one check that keeps a mission to one live session. The 409 names the live `
 carries `silent: true` when that session reads stalled by silence while its process lives, which
 is how a launcher tells a hang from a busy session. A launch ends the session it replaces,
 finished, gone or silent, and that session's `pid`, `procStart` and `id` move to the new session's `ended`; a
-queued launch keeps no session, only that `ended`, until it launches.
+queued launch keeps no session, only that `ended`, or the `left` of the sessions that left the mission
+before it (`leave` below), until it launches.
 
 ```
 POST /api/mission/:key/join         { id, pid?, procStart?, phase?, takeover? }
@@ -1875,6 +1877,16 @@ mission.
 
 A leave by the bound session, with no takeover pending, stores `session: { ended, leftAt }` and
 moves a `working` mission to `waiting`; the session is a tab card again ("The session routes").
+The record that takes its place, a session bound or a launch's reservation or queue, carries
+it in `left`, a list of `{ pid?, procStart?, id? }`, oldest first, and as nothing else: it is
+not `ended`, so it may join again. A 200 join hands the rounds each session in `left` left
+unanswered to the session that joined ("Hand-over" below, ADR 153) and drops `left` once every
+board the mission links was read and handed over. A board that failed keeps `left` on the
+record, and the next 200 join hands over again. Until then `left` moves with the record: to the
+one that takes the place of a session that was bound and never joined, or whose join failed on a
+board, and into `{ ended, leftAt, left }` when that session leaves, the session named `ended`
+there joining the list after it. A leave that lands a takeover hands the rounds over to the
+session it binds, as a join does. No join's or leave's answer carries `left`.
 Any other session's leave is a 409. The binding is read off the stored records alone, nothing
 derived and no board read, for a hook that asks every minute: the mission the session is bound to
 (a released mission, a bare reservation and a session that left bind no one), its pending
@@ -2375,7 +2387,7 @@ the parent cannot observe it short of being told.
 | `band` | `{ top, bottom }` | the board's own chrome band, right now (ADR 59) |
 | `scroll` | `{ top }` | "put yourself at this offset" |
 | `scrollBy` | `{ delta }` | "move yourself this many pixels" — one forwarded wheel notch |
-| `height` | — | "report your height now". Sent by Download round to each stage of the round that has reported none: a frame the window does not show is given no animation frame, so its first report has not left |
+| `height` | — | "report your height now". Sent by a question round's Download round to each stage of the round that has reported none: a frame the window does not show is given no animation frame, so its first report has not left |
 | `diagrams` | `{ requestId, svgs }` | response to `mermaid`: one entry per requested source, in the same order — the rendered SVG as a string, or `null` for one the board could not draw |
 
 `scroll` and `height` are the two bidirectional types on this channel: inbound, `height` asks for
@@ -2623,6 +2635,72 @@ stage: a hint is composed via the same `buildHint`/`composeHint` every other cli
 Checked by `test/check-stage-isolation.mjs` and `test/check-click.mjs`'s malformed and
 hostile-message cases. `test/dom-stand-in.mjs`'s `StandInWindow` models a stage's `window.parent`
 as an object exposing only `postMessage`, never `.document`, for the same reason.
+
+## Saved files (ADR 154)
+
+A served board page saves two kinds of file, both made in the tab (`src/ui.mjs`, the pure half
+in `src/round-export.mjs`). A `file://` archive saves neither: its controls are hidden and off.
+
+**A round's file** is what Download round saves on a question round, sent or not, and what
+Pull-out's Download saves for one board diagram. It is a copy of the round as drawn: the
+decisions table, every option with the pick marked, each diagram as the SVG the page drew, each
+image as a `data:` URL, and each mock inside the round as a still copy, its `srcdoc` with every
+script, inline handler and `javascript:` address removed, in a frame sandboxed with nothing
+allowed. The file's own policy is `default-src 'none'` with inline styles and `data:` images,
+fonts and media: no script runs in it and it fetches nothing.
+
+**A mock's own file** is what Pull-out's Download saves for one mock (an `html` block, wherever
+it sits in a round), and what Download round saves for a round drawn full page, which is one
+mock. It is the mock's page, not a copy of the board's:
+
+1. `<!DOCTYPE html>`, `<meta charset="utf-8">`, the file's policy and the stage's margin reset
+   (`html,body{margin:0;padding:0}`), so the page opens in standards mode with no page margin, as
+   it is drawn in a stage. The policy is
+   `<meta http-equiv="Content-Security-Policy" content="default-src 'unsafe-inline' https: data: blob:">`,
+   ahead of every script in the file: what is written in the file runs, `data:`, `blob:` and
+   `https:` addresses load, and no `file:` address does, so a saved mock opened from disk loads
+   nothing else off that disk (`SECURITY.md`, "A mock saved as its own file"). An `http:` address
+   does not load either, and `eval` is refused, as it is in a stage on the board.
+2. Where the board lent the stage its diagram engine (the block's source carries the `mermaid`
+   class marker, "the board draws a stage's diagrams" above), the vendored engine's text in one
+   inline `<script>`. It runs before any script of the mock, so a mock that checks
+   `window.mermaid` before loading or importing an engine finds it and asks no address for one.
+3. The block's `html` as the stage holds it, scripts included: the text that was posted, with a
+   line ending of CR or CRLF read as LF, as a browser reads any attribute.
+
+Nothing else of the board's rides in it: no stage script, no stylesheet, no address of the
+daemon, and no comment or answer of the round. The mock's scripts run wherever the file is
+opened, with whatever that origin allows, where the board ran them in a sandboxed frame at an
+opaque origin. An address the mock itself names (a second library by web address, an image off
+another host) stays as written and needs a connection; the board fetches nothing to write in.
+
+The tab reads the mock's source back out of its stage's `srcdoc`, the one place a page holds it
+(ADR 122), by taking off what `buildStageSrcdoc` wrote around it, and reads the engine's text
+from the board's own `mermaid-<hash>.js` beside the page, under the name that stage's own tag
+carries: a tab left open across an upgrade holds stages that name the build before, and the
+daemon still serves that file. The tab knows the board's stand-in by its first line, as its own
+build writes it. A stage that opens on a script naming a file of that shape
+(`mermaid-<16 hex>.js`) with anything else after the name is one a newer build wrote, its
+stand-in worded otherwise: the tab cannot tell where that stand-in ends, so it reads no source
+out of the stage and saves nothing.
+
+One limit of the read, since nothing marks where the mock begins: a mock that draws no diagram
+and itself opens on a script naming a file of that shape is misread. Followed by the first line
+of the board's stand-in it is taken for a stage lent the engine, and is saved without its text
+up to its first closing script tag; followed by anything else it is taken for a newer build's
+stage and is not saved, and the reload its note asks for changes nothing. A mock that opens on
+any other script, its own or an engine under another name or address, is read whole.
+
+There is no second-best file. A full-page round whose stage a push sent held is read first; a
+mock the tab still does not hold, or an engine the board does not hand over (the daemon stopped
+or restarting), saves nothing, and neither does a stage the tab holds and cannot read, which
+says the page is older than the board and asks for a reload. The control that was pressed says
+which in a note under itself and in its own label, live again for another press. The note goes
+at the next press.
+
+The tab hands a mock's file to the browser as `application/octet-stream` under its `.html` name,
+at an address dropped after a few seconds, so that address saves the file and never draws it at
+the board's origin. A round's file is `text/html`.
 
 ## MCP surface
 
@@ -3015,14 +3093,29 @@ closes only rounds no session posted. A session naming no `round` leaves open a 
 **Owed answers and comments** ride only packets of a round the same session posted (by its id,
 or its pid and start): a shared board's late answer reaches the session that asked.
 
-**Hand-over** (ADR 150, 151). When a leave binds the session that asked to take over (`POST
+**Hand-over** (ADR 150, 151, 153). When a leave binds the session that asked to take over (`POST
 /api/mission/:key/leave` with a takeover pending), the rounds the giver left unsent on every board the
 mission links become the taker's: `session` is rewritten to the taker and `handedFrom` names the giver. A join that binds in place of a
 session that went or that a launch replaced (the joined record's `session.ended`) hands that
 session's rounds over the same way, and so does the bound process joining under a new id after a
 `/clear`, for the rounds recorded under the id it had. Only rounds whose own `session` names the giver are
 handed: one recording none stays where it is, and so do an earlier session's. A session that left
-with no takeover pending is no giver: the rounds it left unanswered stay closed.
+with no takeover pending gives too, at the next join (the record's `left`), whether its process
+still runs or not, a join through a launch's reservation or queue included: to a session of
+another id, and at no later join once every linked board was read and handed over. A board that
+fails keeps `left` on the record, and the next join hands over again. That session joining again
+under the id it left with is handed nothing, its rounds being its own still; under a new id,
+after a `/clear`, it is handed them as any other, by its process, save a round recorded under
+the id it joins with. No hand-over gives a session a round recorded under its own id, so the
+round it asked after a `/clear` while bound, and one an earlier join already handed it, stay as
+they were.
+A session bound by a heartbeat alone (`POST /api/mission/:key/session`) is handed them at its
+join. When it goes or leaves before one, they pass to the next session that joins, beside that
+session's own: `left` names every session that left since the last join that was handed
+every board, and each gives. A session whose join failed on a board passes on the same way the
+rounds that board holds. When the session is taken over before its join, the leave that binds
+the taker hands them over with the giver's. A session whose join was handed them ends the line:
+the join after it is handed that session's rounds alone.
 
 Each handed round that asks for an answer (it was minted with an `awaitDeadline`) is **reopened in
 place**, whether the giver's boundary abandoned it, its wait lapsed or it still waited: `open`,

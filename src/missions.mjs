@@ -273,7 +273,8 @@ function touch(m, now) {
 // --- the view -------------------------------------------------------------------------
 
 /** The session bound or reserved on `m`, or null. A launch that queued leaves a record
- * holding only `ended`, the session it replaced: that is no session. */
+ * holding only `ended`, the session it replaced, or `left`, the sessions that left: that is
+ * no session. */
 function currentSession(m) {
   const s = m.session;
   return s && (s.pid != null || s.id != null || s.startedAt) ? s : null;
@@ -664,8 +665,8 @@ export function launchMission(key, body, { home = boardHome(), now = Date.now(),
     throw Object.assign(refuse('live', 409), { session: m.session, ...(silent ? { silent } : {}) });
   }
   // The session this launch replaces is over, finished or gone or silent, yet its process
-  // may still run: its pid and id never bind the next one (`endedOf`).
-  const ended = endedOf(m.session);
+  // may still run: its pid and id never bind the next one (`carriedFrom`).
+  const carried = carriedFrom(m.session);
   const others = listMissions(home).filter(o => o.key !== key).map(o => missionView(o, { home, now, isAlive, listed }));
   const live = liveCounts(others, listed);
   const at = iso(now);
@@ -673,11 +674,11 @@ export function launchMission(key, body, { home = boardHome(), now = Date.now(),
   if (!slotFree(live)) {
     m.queue = { phase, prompt: prompt ?? '', ...(login !== undefined ? { login } : {}), at };
     // A queued mission has no session: one kept here would read live and never dequeue.
-    m.session = ended ? { ended } : null;
+    m.session = Object.keys(carried).length ? carried : null;
     moveTo(m, { phase, state: 'queued' }, now);
     answer = { queued: true };
   } else {
-    m.session = { startedAt: at, seenAt: at, ...(login !== undefined ? { login } : {}), ...(ended ? { ended } : {}) };
+    m.session = { startedAt: at, seenAt: at, ...(login !== undefined ? { login } : {}), ...carried };
     delete m.queue;
     moveTo(m, { phase, state: 'working' }, now);
     answer = { launch: true };
@@ -701,7 +702,7 @@ function endedSession(s) {
 /** The `ended` a session taking `previous`'s place carries: `previous` itself when a process
  * or id was bound there, else the `ended` it carried. A session that left (`leaveMission`)
  * went back to being a tab: its `ended` is not carried, so it never reads as this
- * mission's again. */
+ * mission's again (`leftOf` carries it as `left`, for its rounds alone). */
 function endedOf(previous) {
   if (!previous) return null;
   return endedSession(previous) ?? (previous.leftAt ? null : previous.ended) ?? null;
@@ -710,6 +711,39 @@ function endedOf(previous) {
 /** The session `previous` names as ended, while it has not left: a session a launch replaced,
  * whose process may linger and must not take its successor's place. */
 const endedOn = previous => (previous && !previous.leftAt && previous.ended) || null;
+
+/** The `left` a record taking `previous`'s place carries: each session that left the
+ * mission (`leaveMission`) whose unanswered rounds no join was handed yet, oldest first,
+ * givers of those rounds to the next join and nothing more (ADR 153). `previous` passes on
+ * the ones it carries, whatever it is: a record names them until a join's hand-over ran
+ * clean (`leaverHandedOver`), so a session that joined carries none, and one that was bound
+ * and never joined, a launch's reservation or its queue was handed nothing. The session
+ * that left `previous` itself goes last, named once. */
+function leftOf(previous) {
+  if (!previous) return [];
+  const earlier = previous.left ?? [];
+  if (!previous.leftAt || !previous.ended) return earlier;
+  return [...earlier.filter(s => !sessionMatches(s, previous.ended)), previous.ended];
+}
+
+/** What a record taking `previous`'s place carries of it: `ended` (`endedOf`) and `left`
+ * (`leftOf`), each when there is one. */
+function carriedFrom(previous) {
+  const ended = endedOf(previous);
+  const left = leftOf(previous);
+  return { ...(ended ? { ended } : {}), ...(left.length ? { left } : {}) };
+}
+
+/** The bound session of `m` parted from the `left` it carries, for the hand-over that binds
+ * `ref` there: `session` without it, as an answer shows it, and `leavers`, the sessions
+ * that give their rounds. `ref` back under the id it left with gives none, its rounds being
+ * its own still, and the record names it no longer; it goes on naming the rest. */
+function leaversFor(m, ref) {
+  const { left = [], ...session } = m.session;
+  const leavers = left.filter(s => s.id !== ref.id);
+  m.session = leavers.length ? { ...session, left: leavers } : session;
+  return { session, leavers };
+}
 
 /** `POST /api/mission/:key/session`: binds a session, or heartbeats the one bound
  * (`seenAt` now); the bound pid under a new id is a heartbeat that takes the id, and so is
@@ -720,7 +754,7 @@ const endedOn = previous => (previous && !previous.leftAt && previous.ended) || 
  * different pid, or a different id when the bound session has no pid, while the bound one
  * still holds the mission (`sessionHolds`) is a second live session and throws a 409
  * carrying the bound one; once the bound one is gone, or silent with no pid, it starts a
- * fresh session, carrying `endedOf` the record it replaces. The pid or id of the session
+ * fresh session, carrying what `carriedFrom` gives of the record it replaces. The pid or id of the session
  * that ended before this launch, or that left, is a 409 too: that process lingers, and must
  * not take its successor's place; that session resumed in a new process (`resumedFrom`)
  * binds, and `ended` is dropped. Answers the stored record. */
@@ -859,8 +893,7 @@ function dropResumed(session, ref, isAlive) {
 const isReservation = s => s.pid == null && s.id == null;
 
 function boundFrom(ref, at, previous) {
-  const ended = endedOf(previous);
-  return { ...ref, startedAt: at, seenAt: at, ...(ended ? { ended } : {}) };
+  return { ...ref, startedAt: at, seenAt: at, ...carriedFrom(previous) };
 }
 
 /** A join or leave refused: 409 with its own answer. */
@@ -883,7 +916,12 @@ function conflict(answer) {
  * that session resumed in a new process (`resumedFrom`), which binds and drops `ended`; and a session
  * bound to another mission (`bindingFor`'s rule), its own released mission's rejoin
  * included, a 409 `{ error: 'bound elsewhere', mission, session }` naming it, so one
- * session is never two missions'. */
+ * session is never two missions'. A 200 also answers `leavers`, the sessions that left the
+ * mission and whose rounds no join was handed yet (`leftOf`): the givers of the rounds they
+ * left unanswered (ADR 153). The record goes on naming them as `left`, and each 200 join
+ * answering them, until their rounds were handed over (`leaverHandedOver`); the answer's
+ * `session` never carries them. One back under the id it left with is not among them, and
+ * the record drops it here (`leaversFor`). */
 export function joinMission(key, body, { home = boardHome(), now = Date.now(), isAlive = pidAlive, listed = null } = {}) {
   assertMissionKey(key);
   assertObject(body, 'the body');
@@ -929,17 +967,36 @@ export function joinMission(key, body, { home = boardHome(), now = Date.now(), i
     moveTo(m, { phase: phase || m.phase, state: 'working' }, now);
     answer = { status: 200, bound: true, session: m.session };
   }
+  // The sessions that left before this one bound give their rounds at this join, and stay
+  // on the record until those were handed over, so a hand-over that failed is made again at
+  // the next join.
+  if (answer.status === 200) {
+    const { session, leavers } = leaversFor(m, ref);
+    answer.session = session;
+    if (leavers.length) answer.leavers = leavers;
+  }
   touch(m, now);
   writeMission(m, home);
   return answer;
 }
 
+/** Drops `session.left` from mission `key`'s record: the join and leave routes', once the
+ * rounds of each session that left were handed over on every board the mission links (ADR 153). */
+export function leaverHandedOver(key, { home = boardHome() } = {}) {
+  const m = readMission(key, home);
+  if (!m || !m.session || !m.session.left) return;
+  delete m.session.left;
+  writeMission(m, home);
+}
+
 /** `POST /api/mission/:key/leave`: the bound session lets the mission go. With a takeover
  * pending, the session that asked for it is bound in its place and `takeover` cleared,
- * answering `{ left: true, session }` with the new session; else the mission holds
- * `session: { ended, leftAt }` and, stored working, moves to waiting, answering
- * `{ left: true, session: null }`. A session that left is no longer the mission's: it reads
- * as a tab again (src/sessions.mjs `deriveTabs`). Any other session is a 409
+ * answering `{ left: true, session }` with the new session, and `leavers` as a join does
+ * when the record it leaves carried any (`leaversFor`); else the mission holds
+ * `session: { ended, leftAt }`, with the `left` it carried, and, stored working, moves to
+ * waiting, answering `{ left: true, session: null }`. A session that left is no longer the
+ * mission's: it reads as a tab again (src/sessions.mjs `deriveTabs`), and the next join is
+ * handed the rounds it left unanswered (`leftOf`, ADR 153). Any other session is a 409
  * `{ error: 'not bound', session }`. */
 export function leaveMission(key, body, { home = boardHome(), now = Date.now() } = {}) {
   assertMissionKey(key);
@@ -952,18 +1009,22 @@ export function leaveMission(key, body, { home = boardHome(), now = Date.now() }
   if (!boundTo(m, ref)) throw conflict({ error: 'not bound', session: m.session ?? null });
   const at = iso(now);
   const t = m.takeover;
+  let answer = { left: true, session: null };
   if (t) {
     const next = { id: t.by, ...(t.pid !== undefined ? { pid: t.pid } : {}), ...(t.procStart !== undefined ? { procStart: t.procStart } : {}) };
     m.session = boundFrom(next, at, bound);
     delete m.takeover;
     moveTo(m, { state: 'working' }, now);
+    const { session, leavers } = leaversFor(m, next);
+    answer = { left: true, session, ...(leavers.length ? { leavers } : {}) };
   } else {
-    m.session = { ended: endedSession(bound), leftAt: at };
+    const left = leftOf(bound);
+    m.session = { ended: endedSession(bound), leftAt: at, ...(left.length ? { left } : {}) };
     if (m.state === 'working') moveTo(m, { state: 'waiting' }, now);
   }
   touch(m, now);
   writeMission(m, home);
-  return { left: true, session: t ? m.session : null };
+  return answer;
 }
 
 /** The pm orders on `m` its session has not marked seen, oldest first. */
