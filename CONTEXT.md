@@ -36,7 +36,8 @@ counts. Deliberately not Stranded: a board with a tab open in front of it is sti
 Stranded is the narrower thing a Banner fires on. _Avoid_: unanswered, pending, open, blocked.
 
 **Lapsed**: of a round, that its wait deadline passed before an answer arrived, rather than the
-round being answered. A lapsed round is no longer Awaited and is never resumed by a repeat post.
+round being answered. A lapsed round is no longer Awaited and is never resumed by a repeat post;
+on a Mission's board a Hand-over makes it Reopened.
 _Avoid_: expired, stale, dead.
 
 **Answer watch**: a Claude Code session's background call on one Lapsed round, named by that
@@ -51,11 +52,12 @@ say only that. _Avoid_: sent (internal only), answered, completed, done.
 
 **Abandoned**: of a round, that it was closed with nobody having answered it, because the
 conversation that posted it declared itself over — the `fresh` flag on a later `ask`, or a direct
-abandon. The second closed state told by name, and terminal in a way Lapsed is not: a lapsed round
-sits on a board that can still be posted to, while an abandoned one belongs to a conversation that
-has moved to another board. A blocked `ask` on it is released at once and told `abandoned` rather
-than left to the wall clock. A Send that arrives after is stored like a Lapsed round's and the round
-becomes Submitted; it reaches an agent through `read`, since no thread waits on that board again. _Avoid_: cancelled, dropped, discarded, closed, expired
+abandon. The second closed state told by name, and terminal for its conversation in a way Lapsed
+is not: a lapsed round sits on a board that can still be posted to, while an abandoned one belongs
+to a conversation that has moved on. A blocked `ask` on it is released at once and told `abandoned`
+rather than left to the wall clock. A Send that arrives after is stored like a Lapsed round's and
+the round becomes Submitted; it reaches an agent through `read`. On a Mission's board the state is
+not final: a Hand-over makes the round Reopened, unless it was Declined. _Avoid_: cancelled, dropped, discarded, closed, expired
 (that is Lapsed).
 
 **Watcher**: an open board tab with a live stream to one board: its own, or its browser's shared
@@ -159,12 +161,18 @@ preview, mock, iframe.
 stage at viewport size under the board header instead of in the content column. _Avoid_:
 fullpage board, artifact board, embed.
 
-**Band**: the space a board's floating chrome occupies over a Stage — the header at the top, a
-sent full-page round's chip line under it, the pager dock and comment rail at the bottom. _Avoid_: clearance, safe area, gutter, offset, the
+**Band**: the space a board's floating chrome occupies over a Stage — the header at the top,
+the pager dock and comment rail at the bottom. _Avoid_: clearance, safe area, gutter, offset, the
 96px.
 
+**Top strip**: the header as a reader meets it, the strip across the top of every board page
+holding the title and the controls; scrolled, it condenses to the Pill. It takes clicks on its
+title and controls alone, a click on its empty part reaching the page under it, and it leaves
+while a mock drawn full page shows its own full-size view. _Avoid_: toolbar, nav, top bar.
+
 **Pill**: the header once it condenses while scrolling — the mark, the comment toggle, the
-theme control and the state label, in that order, on a floating centred band. Also names the
+theme control, Download round on a Page board and the state label, in that order, on a floating
+centred band. Also names the
 pager dock and the unanswered-count chip elsewhere in this codebase, a collision left
 unresolved. _Avoid_: capsule, chip, bar, collapse, minimize, shrink.
 
@@ -257,6 +265,21 @@ favicon it echoes, never a portrait rect. _Avoid_: off icon, placeholder icon, a
 keyed by a short name such as a spec's descriptor (`FRONT_AGENT`). Its record holds work names,
 phases, links and closing summaries, never case content, and is written by whichever agent works
 on it. _Avoid_: task, job, ticket, project, session (a Mission outlives several).
+
+**Hand-over**: the moment a Mission's next session is bound in place of its last: a takeover
+landing, a join after the bound session went or was replaced, or the bound session joining again
+after a `/clear`. The rounds the last session left unsent become the new session's. A session
+that left with no takeover hands nothing over. _Avoid_: handoff (that is the record's note for
+the next session), transfer, takeover (one of its three causes).
+
+**Reopened**: of a round, that a Hand-over put it back to waiting in place: the same number,
+blocks and comments, Awaited again on a fresh 40-minute wait, its answer the new session's. It
+stays the new session's, so it is Reopened again at each later Hand-over until Submitted or
+Declined. _Avoid_: resumed, re-asked, revived.
+
+**Declined**: of a Reopened round, that its new session closed it by number (`mission close`)
+because the question no longer stands. It reads as Abandoned, and no Hand-over reopens it.
+_Avoid_: rejected, dismissed, closed.
 
 **Ledger**: every Mission the board holds, beside its boards and read live by the Missions view
 and the Master Chief. The board's status half, as boards are its decision half. _Avoid_:

@@ -138,7 +138,7 @@ board = {
   cwd,                              // project directory of the session that owns the thread
   createdAt, updatedAt,             // ISO 8601
   state,                            // 'open' | 'submitted' | 'discuss' | 'timeout'
-  rounds: [ { n, postedAt, status, sentAt, title, action?, awaited, awaitDeadline, movingDeadline?, abandonedAt? } ],
+  rounds: [ { n, postedAt, status, sentAt, title, action?, awaited, awaitDeadline, movingDeadline?, abandonedAt?, reopenedAt?, declined? } ],
                                      // status: 'open' | 'sent' | 'abandoned'
   blocks: [ Block ],                // every block of every round, in display order
   answers: { [questionBlockId]: Answer },
@@ -169,6 +169,12 @@ as minted, and `abandonedAt` is the ISO stamp of when it happened. Every reader 
 a round is open asks `status === 'open'`, so an abandoned round drops out of the send bar, the
 index badge, the "rounds left" count and the stranded rule with no rule of its own. **A round
 written before this state existed carries only `open` or `sent`,** and reads identically.
+
+**Neither an abandon nor a lapse is final on a mission's board** (ADR 151). When a session binds
+in place of the one that asked, the round is reopened in place: `status: 'open'`, `awaited: true`,
+`awaitDeadline` one wait from then, `reopenedAt` stamped and `abandonedAt` dropped, its number,
+blocks and comments as they were ("One board per mission" below). `declined: true` marks a round
+its session closed by number, which no hand-over reopens.
 
 **Round `title`.** Every round carries the `title` of the post that created it — `ask` requires
 a non-empty one on every call. `createBoard` seeds round 1's from the board title, `addRound`
@@ -679,7 +685,9 @@ round — an empty `answers` and no comments of its own — plus whatever the tw
 owe the thread, which are owed to a timed-out round exactly as they are to any other. `abandoned`
 is the round being closed under a blocked call — the
 conversation that owned the board declared itself over (`fresh`, ADR.md entry 69) or the board was
-abandoned directly — and it is terminal in a way `timeout` is not: the round will never reopen, so
+abandoned directly — and it is terminal for the caller in a way `timeout` is not: the round never
+reopens for the conversation that left it (on a mission's board a hand-over may reopen it under
+the mission's next session, ADR 151), so
 the caller posts to the current board rather than to this one. It carries whatever the store held
 plus the same owed comments and answers, and the shim names it as its own outcome, never as a
 submit.
@@ -789,7 +797,7 @@ GET  /api/board/:id/read            one board's rounds, answers and comments, in
                                     delivered and nothing is written, so the same call twice
                                     answers the same twice. Secret only, like /wait: a tool
                                     calls it, never a page
-POST /api/board/:id/collect         { round } -> the round's packet plus `delivered`, once it
+POST /api/board/:id/collect         { round, session?, startedAt? } -> the round's packet plus `delivered`, once it
                                     is sent, spending it; `status: 'open'` or `'abandoned'`
                                     before then (ADR 146). The answer watch's poll. Secret only
 GET  /api/board/:id/events          SSE: round pushes, state changes; `?stages=held`
@@ -1217,8 +1225,9 @@ reporting two answers for the one question that was asked.
 The question is what makes a round amendable, because amending exists for one situation: the agent
 is still assembling a round the reviewer has not answered yet. A round that asks nothing is
 complete the moment it lands — nothing can ever answer it, so it stays `open` for good — and a
-later post is a new round beside it, not an edit of it. That is what makes "post the artifact,
-then ask about it" two rounds, and therefore two pages one flip apart.
+later post is a new round beside it, not an edit of it. An artifact posted alone and a question
+posted after it are therefore two rounds, two pages one flip apart: a mock and the questions about
+it go up as one round, the mock in its question's `context` or as its rendered options.
 
 A board can consequently hold **two open rounds at once**: an artifact round nobody will ever send,
 and the question round after it. Wherever this protocol says *the open round*, the round an amend
@@ -1342,7 +1351,8 @@ the secret could post a relay, as it could already post a submit.
 ## `POST /api/board/:id/abandon`
 
 ```js
-(no body)  -> { ok: true, board, closed: [1, 2…] }
+(no body) | { session?: { pid, procStart }, round?: n }  -> { ok: true, board, closed: [1, 2…] }
+  -> 400 { error }   a `round` that is not a positive integer, or one with no `session`
 ```
 
 The shim declaring that the conversation which owned this board is over (ADR 69; `fresh` on `ask`,
@@ -1352,7 +1362,8 @@ is empty when there was nothing left open. Idempotent by construction: a second 
 round and closes none. A board id that names nothing is a **404**.
 
 The board document and its `pages/<id>.html` are both rewritten, unlike the `/wait` timeout branch
-which writes only the document: this is the last write an abandoned board will ever get, and since
+which writes only the document: this is the last write the board gets unless a late Send arrives
+or, on a mission's board, a hand-over reopens the round (ADR 151), and since
 ADR 114 what it has to carry is the opposite of what it once did. The round keeps its widgets and
 its Send bar live in the stored page, because a reviewer who reloads after the abandon can still
 answer and that answer is stored (`POST /api/board/:id/submit` above); freezing the page would
@@ -1538,13 +1549,18 @@ bound port crosses to the launcher as its own argument so the two can be checked
 other.
 
 The banner is recorded on the board document as `strandedBanner`,
-`{ at, until, round, returned, pid } | null`: when it went up, when the process serving it will exit
+`{ at, until, round, about, rounds, returned, pid } | null`: when it went up, when the process serving it will exit
 and withdraw it (the round's deadline as stored when the banner went up, a moved one included, or
 the launcher's hard ceiling, whichever is sooner — a
 Suppressed board's content-only first round has no deadline at all, and that ceiling alone bounds
 it), the highest round announced — the **mark**, permanent for the life of that round unless an
-amend to it moves it back one (ADR.md entry 97) — whether the reviewer has returned since, and the
-pid of the process serving the click. It is stripped from everything a
+amend to it moves it back one (ADR.md entry 97) — the round the banner is for (`about`: the mark,
+except for a round a hand-over reopened below it, whose banner leaves the mark where it stood; a
+daemon holding no handle on the banner's process withdraws it when that round is sent, and a record
+from before the field reads its mark as that round) — every round a banner has named (`rounds`, in
+round order: a round a hand-over reopened at or below the mark earns a banner only when it is not
+among them, ADR 151; a record from before the list has none, and its mark alone decides), whether
+the reviewer has returned since, and the pid of the process serving the click. It is stripped from everything a
 client sees, so the served page stays byte-identical to `pages/<id>.html`. A daemon restart reads it
 back and does not re-announce; a record written before `returned` existed reads as a shut gate.
 A banner already up when a report moves the deadline keeps the lifetime it went up with, since its
@@ -1605,11 +1621,27 @@ which already sends the secret on every request, reads included.
 ## `POST /api/board/:id/collect`
 
 ```js
-{ round: 1, 2, 3… }
+{ round: 1, 2, 3…, session?: { pid, procStart } | [ { pid, procStart }, … ], startedAt?: ISO time }
   -> 200 { board, thread, title, round, status, answers, comments, url, relayed?, delivered }
   -> 404 { error }   an unknown board, or a round not on it
-  -> 400 { error }   a round that is not a positive integer
+  -> 400 { error }   a round that is not a positive integer, a `session` of another shape, or a
+                     `startedAt` that is not an ISO time string
 ```
+
+`session` names the caller: its session's process, or the processes it runs under, nearest first,
+its session among them (the watch names these, its shell and the session that started it). It
+decides one thing. A round a hand-over gave another session (it carries `handedFrom` or
+`reopenedAt`, ADR 150, 151) answers only a caller naming that session, by its process or the id the
+watcher's list holds for it: any other, and one naming no `session` (a watch from before it named
+one), gets `status: 'abandoned'` with empty `answers` and `comments` and `delivered: false`, as on
+an abandoned round, and nothing is spent. On every other round `session` changes nothing.
+
+`startedAt` is when the caller's watch started (the watch sends it on every poll). A `/clear` keeps
+the process, so after one the conversation that left a round and the one whose join reopened it
+are the same `session`, and only time tells their watches apart: a round whose `reopenedAt` is
+later than `startedAt` answers `status: 'abandoned'` in the same shape, nothing spent, so the
+answer stays owed to the conversation the round was reopened under. A caller that sends no
+`startedAt` (a watch from before it sent one) is answered by `session` alone.
 
 The answer watch's poll (ADR 146; `bin/watch.mjs`, see "The answer watch" under "MCP surface"), on
 a round whose wait ended unanswered. While the round is `open`, `status` is `'open'`, and once it
@@ -1697,7 +1729,8 @@ Mission = {
   prs: [ { repo, number, url, order? } ],          // the session names its PRs (a `state` is dropped)
   prFacts?: [ { repo, number, state, head, checkedAt } ],   // the watcher's, from GitHub (ADR 140)
   boards: [ { id, url, at } ],                     // linked by a post; the last is the latest
-  session: { id?, pid?, procStart?, name?, login?, startedAt, seenAt, typedAt?, ended? }
+  session: { id?, pid?, procStart?, name?, login?, startedAt, seenAt, typedAt?, ended?,
+             reopened?: [ { board, round, awaitDeadline } ] }   // the rounds reopened under it (ADR 151)
          | { ended, leftAt }  // the session left (`leave`)
          | null,
   takeover?: { by, pid?, procStart?, at },         // a join asking for the mission (`join`)
@@ -1803,7 +1836,7 @@ queued launch keeps no session, only that `ended`, until it launches.
 
 ```
 POST /api/mission/:key/join         { id, pid?, procStart?, phase?, takeover? }
-       -> { bound: true, session }                 bound; the mission is created when new
+       -> { bound: true, session, reopened?: [Named] }   bound; the mission is created when new
        -> 202 { takeover: 'pending', session }     with takeover: true, another live session bound
        -> 409 { error: 'live', session }           another live session bound
        -> 409 { error: 'ended', session }          this is the session a launch replaced, not resumed
@@ -1812,7 +1845,10 @@ POST /api/mission/:key/leave        { id, pid?, procStart? } -> { left: true, se
        -> 409 { error: 'not bound', session }
 GET  /api/binding?id=<session id>[&pid=&procStart=]
        -> { key | null, takeover: { by, at } | null, orders: [Order], handoff | null,
-            rejoin: { reason, since, id } | null, spinDown: { on, at? } }
+            rejoin: { reason, since, id } | null, reopened: [Reopened], spinDown: { on, at? } }
+
+Reopened = { board, round, awaitDeadline }          // as the mission record holds it
+Named    = { board, round, title, url, awaitDeadline }   // read off the boards at the join
 ```
 
 **A session is bound to a mission by its own session id** (ADR 141), which the agent reads fresh
@@ -1842,10 +1878,21 @@ moves a `working` mission to `waiting`; the session is a tab card again ("The se
 Any other session's leave is a 409. The binding is read off the stored records alone, nothing
 derived and no board read, for a hook that asks every minute: the mission the session is bound to
 (a released mission, a bare reservation and a session that left bind no one), its pending
-`takeover`, the `pm` orders it has not marked seen, its `handoff`, and its `rejoin` as the view
-reads it off the snapshot in memory. Either `id` or `pid` is
+`takeover`, the `pm` orders it has not marked seen, its `handoff`, its `rejoin` as the view
+reads it off the snapshot in memory, and `reopened` (below), `[]` when none. Either `id` or `pid` is
 needed, else a 400; a `pid` names the session only with its `procStart`. Secret only, the binding
 included: it carries the PM's words.
+
+**`reopened`** (ADR 151) names each round reopened under the session and still waiting on the
+PM, in board then round order: `board` the board id, `round` its number, `awaitDeadline` when its
+wait ends. A 200 join carries it on every join while such a round waits, the rounds that join
+reopened included, and omits it when none does; there each entry also carries `title`, the
+round's, and `url`, the board's page on the origin the join came in on. The binding carries the
+list as the session's latest join, or the takeover that bound it, recorded it on the mission
+(`session.reopened`), which holds neither a round's text nor a url, so a round sent, closed or
+lapsed since is still listed there until the next join:
+a takeover's taker, whose own join answered 202, reads its rounds here. Each is the session's
+round from then on ("One board per mission" below).
 
 ```
 POST /api/mission/:key/session      { pid?, procStart?, id?, name?, login?, typed?, beat? } -> { session }
@@ -2043,7 +2090,7 @@ event: watcher        data: { id }
 event: round          data: { round, mode: 'new-round' | 'amend', blockIds, html, board }
 event: submitted      data: { round, board, html }
 event: awaitExpired   data: { round }
-event: deadline       data: { round, awaitDeadline }
+event: deadline       data: { round, awaitDeadline, reopened? }
 ```
 
 `watcher` is the first thing the stream sends, ahead of any of the others, on every open and
@@ -2089,6 +2136,14 @@ receives no `html` must fall back to disabling the round in place. The page that
 same payload in its Send's answer too (`POST /api/board/:id/submit`'s `submitted`), and applies
 whichever of the two lands first; a tab that missed both takes the round on from its catch-up
 (below), the same way.
+
+`deadline` is also what a hand-over sends for each round it reopens (ADR 151), on the board's
+stream with `reopened: true` and, with `board` and no `reopened`, on the daemon-wide one, beside a
+`waiting` event there: the round's deadline moved to one wait from now, and its status back to
+`open`. A tab already open re-reads the board on `reopened` (its catch-up, below) and takes the
+round up again with no reload, whether it held it as lapsed or as abandoned: it counts down again,
+its widgets and Send are live, a full-page round's frozen panel included, and what the reviewer
+picked or typed there is kept.
 
 `awaitExpired` is the one event that carries no board: it fires from `GET /api/board/:id/wait`'s
 own timeout branch, at the moment that wall clock gives up, and is a wake-up nudge rather than a
@@ -2233,6 +2288,7 @@ from anything else that might postMessage this window (an extension, devtools, a
 | `positions` | `{ requestId, positions }` | response to `locate`: per requested ref, `{left, top}` in the frame's viewport coordinates (the element's own client rect), or `null` if the ref no longer resolves. Numbers and null only |
 | `height` | `{ height }` | the height this whole document needs to show with no vertical scrollbar (see below) |
 | `scroll` | `{ top }` | "I am at this offset". Deduplicated on the last reported value |
+| `modal` | `{ open }` | "a modal dialog of mine reaches into your top band" (`true`) or "none does any more" (`false`): a full-size view the mock opens over itself, whose own bar sits where a page board's top strip floats. Sent on each change, and only ever on a page board, since no other stage is told a band. The board marks the stage's block, and takes its top strip away while the mock on screen is marked. Known limit (ADR 152): the report is the stage's word, so a mock's script can post `open: true` with no dialog open and keep the strip hidden while its round is on screen. That costs the strip's own controls only: Send and the pager sit outside it, so the mock decides nothing by it |
 | `mermaid` | `{ requestId, sources, config }` | "draw these diagrams for me". Sent only by the engine facade a diagram-bearing stage is given, and **repeated under the same `requestId` until answered** (see below) |
 
 `ref` is a `buildSteps`/`stepsToPath` index chain from `document.body`.
@@ -2378,7 +2434,7 @@ again on every theme change while the Lens is open, the board posts it one `mode
 comment mode. So the copy carries the same `data-theme` as the stage in its block, a template
 draws the same side of its palette in both, and the Lens stays view-only.
 
-`band` exists because the parent's header, a sent full-page round's chip line under it, the dock
+`band` exists because the parent's header, the dock
 and the comment rail float **over** the frame rather
 than pushing it down, so an artifact that pads nothing loses its own opening under them. No fixed
 number is baked in on either side — the header's real height moves with the title's wrap and the
@@ -2708,7 +2764,9 @@ node bin/watch.mjs --board <id> --round <n> [--hours <h>]
 
 `--hours` defaults to 24 and is clamped to 24. One `POST /api/board/:id/collect` per poll, every
 30 s (`CLAUDE_BOARD_WATCH_INTERVAL_MS` overrides, for checks), the last landing on the bound, so a
-Send reaches the session within a poll and its wake. Port and credential as the shim's:
+Send reaches the session within a poll and its wake. Each poll names the processes the watch runs
+under (`session`) and the time it started (`startedAt`), so a round handed to another session, or
+reopened since the watch started, ends it `abandoned`. Port and credential as the shim's:
 `CLAUDE_BOARD_PORT`, else the port record beside the secret, else 7391, and the local secret
 (`CLAUDE_BOARD_SECRET_FILE` relocates it). A Send after the bound is stored like any late Send and
 read back through `read`.
@@ -2740,7 +2798,18 @@ resent  { key, order }                        POST /api/mission/:key/order/:id/r
 relay   { board, round, answers?, words }     POST /api/board/:id/relay; board is a board URL
                                               or a bare id, as `read` takes it
 ack     { key, order }                        POST /api/mission/:key/order/:id/ack
+close   { board, round }                      POST /api/board/:id/abandon, with this shim's
+                                              session and round as the body
 ```
+
+The `reopened` entries of a join and of a binding (ADR 151), the second being where a takeover's
+taker reads them, each carry `url`, the board's page as the shim builds it from its own port,
+never the one in the daemon's answer, and from a Claude Code shim `watch`, the answer watch's
+command for that board and round, as a `timeout` packet names one (ADR 146). `close` closes one
+reopened round of the calling session's for good, answering `{ ok, board, closed }`: the way out
+of a reopened round it does not want. `closed: []` says the round was not this session's, not a
+reopened one, or not open. A shim that cannot name its session (its parent process's start did
+not read) refuses `close` and sends nothing.
 
 `session` is the caller's own current session id (Claude Code's `CLAUDE_CODE_SESSION_ID`, read at
 the call, since a `/clear` changes it), passed by the agent; the shim never supplies one, since
@@ -2919,7 +2988,9 @@ mission explicitly keeps the board it names.
 ```
   session: { pid, procStart, id },   // the posting session; id from the session list, else null
   cwd?: '<absolute folder>',         // the folder its file references read from, when not the board's
-  handedFrom?: '<session id>',       // set by a takeover: the session that posted it
+  handedFrom?: '<session id>',       // set by a hand-over: the session that posted it
+  reopenedAt?: '<ISO 8601>',         // set by a hand-over that reopened it (ADR 151)
+  declined?: true,                   // its session closed it by number: never reopened
 ```
 
 A round with no `session` (posted before this) is the board's first poster's (`board.session`).
@@ -2929,27 +3000,40 @@ accepted on every round, not only the first. Elsewhere a `cwd` other than the bo
 
 **Amend, `fresh`.** A post amends the latest open question round only when the posting session
 posted it (by its id, or its pid and start) and, on a mission's board, from the folder that round
-reads from; another session's first question, or one from another folder, opens a round of its own. `fresh: true` on a post
+reads from; another session's first question, or one from another folder, opens a round of its own, and so does a question after a round a hand-over reopened. `fresh: true` on a post
 says it starts a new conversation: it never amends, and on a board that already holds rounds it
 closes the posting session's other open rounds there in the same write (each with an
-`awaitExpired` event). `bin/mcp.mjs` sends it on a `fresh` ask and on the first ask after a
+`awaitExpired` event), sparing a reopened one (ADR 151). `bin/mcp.mjs` sends it on a `fresh` ask and on the first ask after a
 mission join or leave, and sends `cwd` on every post while its folder exists: once it is gone (a
 worktree removed after its merge) it sends none, and the round reads from the board's folder.
 
 **Scoped abandon.** `POST /api/board/:id/abandon` takes an optional body `{ session: { pid,
 procStart } }`: with it, only the open rounds that session posted close (by its id, or its pid
 and start); without a body, every open round, as before, except on a mission's board, where it
-closes only rounds no session posted. The stranded announcement is withdrawn only once no round is left open.
+closes only rounds no session posted. A session naming no `round` leaves open a round a hand-over reopened under it. With `round: n` only that round closes, when it is that session's and a hand-over reopened it, and it is stamped `declined` (ADR 151); any other round answers `closed: []`. A 400 unless a positive integer, and with no `session`. The stranded announcement is withdrawn only once no round is left open.
 
 **Owed answers and comments** ride only packets of a round the same session posted (by its id,
 or its pid and start): a shared board's late answer reaches the session that asked.
 
-**Takeover.** When a leave binds the session that asked to take over (`POST
-/api/mission/:key/leave` with a takeover pending), the giver's open rounds on every board the
-mission links become the taker's: `session` is rewritten to the taker and `handedFrom` names the giver. The
-answer the PM sends on such a round rides the taker's next packet. A join that binds in place of a
+**Hand-over** (ADR 150, 151). When a leave binds the session that asked to take over (`POST
+/api/mission/:key/leave` with a takeover pending), the rounds the giver left unsent on every board the
+mission links become the taker's: `session` is rewritten to the taker and `handedFrom` names the giver. A join that binds in place of a
 session that went or that a launch replaced (the joined record's `session.ended`) hands that
-session's open rounds over the same way. Only rounds whose own `session` names the giver are
-handed: one recording none stays where it is.
+session's rounds over the same way, and so does the bound process joining under a new id after a
+`/clear`, for the rounds recorded under the id it had. Only rounds whose own `session` names the giver are
+handed: one recording none stays where it is, and so do an earlier session's. A session that left
+with no takeover pending is no giver: the rounds it left unanswered stay closed.
 
-**Needs you** reads, on each board, the newest round of every session that posted there, one session being one by its id, or its pid and start to the second.
+Each handed round that asks for an answer (it was minted with an `awaitDeadline`) is **reopened in
+place**, whether the giver's boundary abandoned it, its wait lapsed or it still waited: `open`,
+`awaited`, its deadline one wait (40 minutes) from the hand-over, `reopenedAt` stamped,
+`abandonedAt` dropped. Its number, blocks and comments stand, so the PM's page keeps what it
+holds. It counts in `GET /api/waiting` and the Boards page's Waiting on you again, and the join or
+the binding names it (`reopened`, "The missions routes" above). The answer the PM sends on it
+reaches the new session as a round of its own does: its next packet, `read`, or
+`POST /api/board/:id/collect`. A sent round, a `declined` one and an abandoned round that asked
+nothing are left as they are; an open round that asked nothing is handed without a wait. A
+reopened round is the taker's from then on, so one it leaves unanswered reopens again at each
+later hand-over, until it is sent or declined.
+
+**Needs you** reads, on each board, the newest round of every session that posted there, one session being one by its id, or its pid and start to the second. A reopened round is its new session's, so one with a later round of that session after it does not hold the mission's card at needs you: it shows under Waiting on you on the Boards page alone.

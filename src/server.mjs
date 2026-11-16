@@ -74,7 +74,7 @@ import { createMissionWatch } from './mission-watch.mjs';
 import { createMissionsCache } from './missions-cache.mjs';
 import { MAX_POST_BYTES, MAX_DRAINED_BYTES, MAX_SUBMIT_BYTES, postTooLargeMessage } from './post-limit.mjs';
 import { activityMinMs } from './activity.mjs';
-import { getMissionView, missionView, upsertMission, launchMission, bindSession, joinMission, leaveMission, addOrder, ackOrder, seenOrder, resentOrder, linkBoard, missionBoardId, recordFire, recordPrFacts, assertMissionKey } from './missions.mjs';
+import { getMissionView, missionView, upsertMission, launchMission, bindSession, joinMission, leaveMission, recordReopened, sessionMatches, sameStart, addOrder, ackOrder, seenOrder, resentOrder, linkBoard, missionBoardId, recordFire, recordPrFacts, assertMissionKey } from './missions.mjs';
 import { createBindingIndex } from './bindings.mjs';
 import { readSpinDown, setSpinDown, spinDownBrief } from './spin-down.mjs';
 import { createSessionList, validateSessionRef, bindBoardSession } from './sessions.mjs';
@@ -902,13 +902,15 @@ function sleep(ms) {
  * machine.
  *
  * `abandoned` is the fourth way out, and it is not a nicety: `abandonOpenRounds`
- * (src/board.mjs) invented a THIRD terminal state, and a loop that only recognises
+ * (src/board.mjs) invented a THIRD round state, and a loop that only recognises
  * `sent` cannot see it. A backgrounded first `ask` -- the ordinary `fresh: true` path
  * after a context compaction -- therefore polled a round the daemon had already closed
  * for the full forty-minute cap and then reported a `timeout` whose text says the board
- * is "still open ... reopen it", which is false in both halves. A round that is
- * abandoned is exactly as final as one that is sent; the only difference is what the
- * caller is told, which is the caller's branch to make, not this loop's. */
+ * is "still open ... reopen it", which is false in both halves. For this wait an abandoned
+ * round is as final as a sent one: it still takes a Send (ADR 114) and a hand-over can
+ * reopen it (ADR 151), but neither reaches this caller, whose session closed the round.
+ * The only difference is what the caller is told, which is the caller's branch to make,
+ * not this loop's. */
 async function waitForRound(boardId, round, home, { intervalMs = 120, isAborted = () => false, deadlineAt = Infinity, followDeadline = false } = {}) {
   activeWaits++;
   try {
@@ -1235,10 +1237,11 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, s
       // session's first question opens a round of its own. And a `fresh` post is a new
       // conversation, which never joins the round its last one left open. Nor does a post from
       // another folder than the round reads from (a round a takeover handed over, asked in the
-      // giver's worktree): a round's folder never moves, so it opens a round of its own.
+      // giver's worktree): a round's folder never moves, so it opens a round of its own. A
+      // round a hand-over reopened (ADR 151) is another session's question, and stays as asked.
       if (latestRound && latestRound.status === 'open' && latestAsksSomething
         && !roundWaitLapsed(latestRound) && !drifted
-        && body.fresh !== true && roundOwnedBy(board, latestRound, roundSession)
+        && body.fresh !== true && !latestRound.reopenedAt && roundOwnedBy(board, latestRound, roundSession)
         && (!ownFolder || roundFolder(board, cwd, true) === folderOfRound(board, latestRound))) {
         // The open round hasn't been sent yet: amend it in place rather than
         // minting round N+1.
@@ -1396,19 +1399,21 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, s
   if (sessionRef) bindBoardSession(board, sessionRef, sessionId);
   // A `fresh` post that lands on a board already holding rounds (a mission's, ADR 150) is
   // the boundary itself: the rounds this session's last conversation left open there close
-  // in this same write, and only those. The shim closes nothing on this board after it.
+  // in this same write, and only those: a round a hand-over reopened under this session
+  // (ADR 151) is not its last conversation's. The shim closes nothing on this board after it.
   const freshClosed = body.fresh === true && pushMode === 'new-round' && roundSession
-    ? abandonOpenRounds(board, { session: roundSession, except: round })
+    ? abandonOpenRounds(board, { session: roundSession, except: round, keepReopened: true })
     : [];
   const html = renderBoardPage(board);
   writeBoard(board, home);
   writePage(board.id, html, home);
   for (const n of freshClosed) sse.broadcast(board.id, 'awaitExpired', { round: n });
-  // The board this session moved away from keeps every other session's rounds open. A
+  // The board this session moved away from keeps every other session's rounds open, and a
+  // round a hand-over reopened under this one (ADR 151), which is the mission's question. A
   // failure is warned and the post goes on, as the link below: this board is written.
   if (leftBoardId && roundSession) {
     try {
-      closeRounds(leftBoardId, { session: roundSession }, home, sse, stranded, stream, waiting);
+      closeRounds(leftBoardId, { session: roundSession, keepReopened: true }, home, sse, stranded, stream, waiting);
     } catch (err) {
       console.error(`claude-board: the rounds left open on board ${leftBoardId} were not closed: ${(err && err.message) || err}`);
     }
@@ -2153,8 +2158,20 @@ function handleReadBoard(req, res, id, home) {
  * watch that dies before the response lands leaves the round owed to the next packet
  * rather than lost; the round is held from the read until then, so no packet carries it
  * meanwhile. Secret-only:
- * `collect` is on no cookie list, so gate 3 refuses a browser. */
-async function handleCollect(req, res, id, home) {
+ * `collect` is on no cookie list, so gate 3 refuses a browser.
+ *
+ * `session` names the caller: `{ pid, procStart }`, or a list of them, the processes a watch
+ * runs under, its session among them. A round a hand-over gave another session (ADR 150,
+ * 151) is that session's alone: a caller that is not it, or that names none (a watch from
+ * before it named one), is answered `status: 'abandoned'` as on a round abandoned, and
+ * nothing is spent. On any other round `session` decides nothing.
+ *
+ * `startedAt` is when the caller's watch started, an ISO time. A /clear keeps the process, so
+ * after one the giver and the taker of a round are one `session`, and only time tells the
+ * cleared conversation's watch from the new one's: a round reopened after `startedAt` is
+ * answered `status: 'abandoned'` the same way, nothing spent. A caller that sends none (a
+ * watch from before it sent one) is answered by `session` alone. */
+async function handleCollect(req, res, id, home, sessions) {
   let body;
   try {
     body = await readJsonBody(req);
@@ -2165,13 +2182,34 @@ async function handleCollect(req, res, id, home) {
   if (!Number.isInteger(round) || round < 1) {
     return sendJson(res, 400, { error: 'collect requires an integer "round" naming the round to collect' });
   }
+  let callers = [];
+  if (body.session != null) {
+    try {
+      // Each with the id the watcher's list holds for it, so a session resumed in a new
+      // process still collects the rounds it holds.
+      callers = [].concat(body.session).map(validateSessionRef)
+        .map(s => ({ ...s, id: sessions ? sessions.matchId(s.pid, s.procStart) : null }));
+    } catch (err) {
+      return sendJson(res, 400, { error: err.message });
+    }
+  }
+  let startedAt = null;
+  if (body.startedAt != null) {
+    startedAt = typeof body.startedAt === 'string' ? Date.parse(body.startedAt) : NaN;
+    if (!Number.isFinite(startedAt)) {
+      return sendJson(res, 400, { error: 'collect "startedAt" must be the time the caller\'s watch started, as an ISO string' });
+    }
+  }
   const board = readBoard(id, home);
   if (!board) return sendJson(res, 404, { error: 'board not found' });
   const r = board.rounds.find(x => x.n === round);
   if (!r) return sendJson(res, 404, { error: 'round not found' });
   const url = boardUrl(req, id);
-  if (r.status !== 'sent') {
-    const status = r.status === 'abandoned' ? 'abandoned' : 'open';
+  const handed = r.handedFrom != null || r.reopenedAt != null;
+  const outlived = startedAt !== null && r.reopenedAt != null && Date.parse(r.reopenedAt) > startedAt;
+  const departed = outlived || (handed && !callers.some(s => sessionMatches(r.session, s)));
+  if (r.status !== 'sent' || departed) {
+    const status = departed || r.status === 'abandoned' ? 'abandoned' : 'open';
     return sendJson(res, 200, { board: board.id, thread: board.thread, title: board.title, round, status, answers: [], comments: [], delivered: false, url });
   }
   const packet = packetWithImagePaths(buildPacket(board, round, url), home);
@@ -2244,8 +2282,10 @@ async function handleWait(req, res, id, url, home, sse, stream, waiting) {
     // exactly as the timeout branch does, and rides the same undelivered-comment path:
     // a comment left before the session walked away is owed to this packet as much as
     // to any other. `status: 'abandoned'` is additive -- PROTOCOL.md's packet statuses
-    // gain a third terminal one beside `submitted`/`discuss`/`timeout`, matching the
-    // third terminal ROUND state `abandonOpenRounds` (src/board.mjs) already invented.
+    // gain one beside `submitted`/`discuss`/`timeout`, matching the third ROUND state
+    // `abandonOpenRounds` (src/board.mjs) already invented. It ends this wait, not the
+    // round: an abandoned round still takes a Send (ADR 114), and a hand-over can reopen
+    // it (ADR 151).
     const built = buildPacketWithUndelivered(result.board, round, boardUrl(req, id), home);
     spendWhenSent(res, built);
     return sendJson(res, 200, { ...built.packet, status: 'abandoned' });
@@ -2322,9 +2362,10 @@ async function handleWait(req, res, id, url, home, sse, stream, waiting) {
  * project directory out of each other's way: nothing here reads `cwd`, `thread`, or any
  * other board.
  *
- * Takes no body. The round-closing rule is `abandonOpenRounds` (src/board.mjs) and the
- * request has nothing to add to it; `req.resume()` drains whatever a caller sent anyway
- * rather than leaving the socket half-read.
+ * Its body is optional: `{ session?, round? }`, read below, which scope the close to one
+ * session's rounds or to one reopened round. The round-closing rule is `abandonOpenRounds`
+ * (src/board.mjs); a request with no body closes by it unscoped, and `req.resume()` then
+ * drains the socket rather than leaving it half-read.
  *
  * Rendered before either persist, and the page written as well as the document — the same
  * ordering and the same pair `handleSubmit` below uses, for the same reason. What that
@@ -2337,8 +2378,9 @@ async function handleWait(req, res, id, url, home, sse, stream, waiting) {
  * `stranded.abandoned` last, after the write has landed. That single call is the whole of
  * criterion "its Banner does not fire afterwards", and it has two halves: it cancels a
  * grace still counting down, and it withdraws the banner already on screen by SIGTERMing
- * the process serving its click. Nothing re-arms it, because only a round landing on this
- * board could, and no round ever will.
+ * the process serving its click. Nothing re-arms it until a round waits on this board
+ * again: a later post, or a hand-over reopening one closed here (ADR 151), each of which
+ * asks the stranded rule itself.
  *
  * `abandoned`, not `evaluate`, and the difference is load-bearing since ADR 74 made the
  * announcement mark permanent. `evaluate` alone now cancels the pending grace and stops:
@@ -2354,8 +2396,13 @@ async function handleWait(req, res, id, url, home, sse, stream, waiting) {
 async function handleAbandon(req, res, id, home, sse, stranded, stream, waiting, sessions) {
   // A body naming `session` closes only that session's rounds (ADR 150): a mission's board
   // is shared. No body closes every open round, as a shim from before it asks, but on a
-  // mission's board only the rounds no session posted (`abandonOpenRounds`).
+  // mission's board only the rounds no session posted (`abandonOpenRounds`). A session
+  // naming no `round` closes the rounds it asked, and spares one a hand-over reopened under
+  // it (ADR 151). Naming `round` closes that one round, for good, when a hand-over reopened
+  // it under this session: the way a session closes such a round it does not want. A `round`
+  // with no session is a 400.
   let session = null;
+  let only = null;
   if (Number(req.headers['content-length']) > 0 || req.headers['transfer-encoding']) {
     let body;
     try {
@@ -2373,10 +2420,15 @@ async function handleAbandon(req, res, id, home, sse, stranded, stream, waiting,
       // rounds it posted before its resume.
       session = { ...session, id: sessions ? sessions.matchId(session.pid, session.procStart) : null };
     }
+    if (body && typeof body === 'object' && body.round != null) {
+      if (!Number.isInteger(body.round) || body.round < 1) return sendJson(res, 400, { error: 'round must be a positive integer' });
+      only = body.round;
+    }
   } else {
     req.resume();
   }
-  const closed = closeRounds(id, { session }, home, sse, stranded, stream, waiting);
+  if (only !== null && !session) return sendJson(res, 400, { error: 'round needs the session that closes it' });
+  const closed = closeRounds(id, { session, only, keepReopened: session !== null && only === null }, home, sse, stranded, stream, waiting);
   if (closed === null) return sendJson(res, 404, { error: 'board not found' });
   return sendJson(res, 200, { ok: true, board: id, closed });
 }
@@ -2440,8 +2492,9 @@ async function handleSubmit(req, res, id, home, sse, stranded, stream, waiting, 
   // they had typed and no draft saving to fall back on (nine answers lost, 2026-09-09).
   // Nothing else about the transition changes: `applySubmit` marks the round `sent` from
   // whichever state it was in, and its answers are owed to the thread's next packet
-  // (`drainUndeliveredAnswers` above) or collected by `read` (ADR 115) -- which is the
-  // only way an abandoned board's answers reach anyone, since no thread waits on it again.
+  // (`drainUndeliveredAnswers` above) or collected by `read` (ADR 115) -- which is how an
+  // abandoned board's answers reach anyone while no thread waits on it. A round a
+  // hand-over reopens (ADR 151) is waited on again, by the session it was handed to.
   //
   // The check is PER-ROUND -- does `claimed` name a round that has not been sent -- and
   // not "is it the single most-recent unsent round", because a board can hold more
@@ -2709,14 +2762,21 @@ function publishDeadlineMove(req, board, round, home, sse, stranded, stream, wai
   const html = renderBoardPage(board);
   writeBoard(board, home);
   writePage(board.id, html, home);
-  const moveEvent = { round: round.n, awaitDeadline: round.awaitDeadline };
-  sse.broadcast(board.id, 'deadline', moveEvent);
-  // The index streams list every board, so theirs names which one moved.
-  stream.broadcast('deadline', { board: board.id, ...moveEvent });
+  broadcastDeadline(board, round, sse, stream);
   // No waiting count moved, so nothing is published for it; the cache takes the write
   // so its next read does not walk the store over a board this process just wrote.
   waiting.noteWrite(board);
   stranded.evaluate(board.id, strandedTarget(req, board.id));
+}
+
+/** The `deadline` event for `round`'s stored deadline: to every tab of `board`, and to
+ * every index stream, which list every board, so theirs names which one moved. `reopened`
+ * marks, for the board's tabs, a round a hand-over reopened (ADR 151): a tab re-reads the
+ * board on it, since the round's status moved too. */
+function broadcastDeadline(board, round, sse, stream, { reopened = false } = {}) {
+  const moveEvent = { round: round.n, awaitDeadline: round.awaitDeadline };
+  sse.broadcast(board.id, 'deadline', reopened ? { ...moveEvent, reopened: true } : moveEvent);
+  stream.broadcast('deadline', { board: board.id, ...moveEvent });
 }
 
 /** POST /api/board/:id/activity { round } -> `{ round, awaitDeadline, moved }` (ADR 145): the
@@ -2730,7 +2790,8 @@ function publishDeadlineMove(req, board, round, home, sse, stranded, stream, wai
  * minted for a poster that follows its stored deadline and not yet lapsed, and the report
  * moves it by `deadlineMoveMinMs()` or more. A round from a shim that waits on a clock of
  * its own cannot be moved, since that shim would give up at its own cap whatever the board
- * said; a lapsed round cannot come back. A report that gains less, the commonest one while
+ * said; a report never brings a lapsed round back (a hand-over alone does, ADR 151). A
+ * report that gains less, the commonest one while
  * the reviewer types, answers `moved: false` and writes nothing.
  *
  * One accepted report per round every `activityMinMs()` (src/activity.mjs, the value the
@@ -3301,7 +3362,7 @@ async function handlePrune(req, res, home, waiting) {
  *   GET  /api/mission/:key                  the view, or 404
  *   POST /api/mission/:key                  upsert the whitelisted fields, answers the view
  *   POST /api/mission/:key/launch           { launch: true } | { queued: true } | 409 live
- *   POST /api/mission/:key/join             { bound: true, session } | 202 { takeover: 'pending', session } | 409 live
+ *   POST /api/mission/:key/join             { bound: true, session, reopened? } | 202 { takeover: 'pending', session } | 409 live
  *   POST /api/mission/:key/leave            { left: true, session } | 409 not bound
  *   POST /api/mission/:key/session          bind or heartbeat, answers { session } | 409 live
  *   POST /api/mission/:key/order            { order }; a `pm` order wants the secret
@@ -3315,9 +3376,10 @@ async function handlePrune(req, res, home, waiting) {
  * `silent: true` on a launch refused by a session that reads stalled by silence while its
  * process lives. `heldSecret` is whether the request carried the secret, not the cookie.
  * `listed` is the session watcher's latest snapshot (src/sessions.mjs `listed()`), which a
- * bound session's liveness reads beside its heartbeats (ADR 36). Every write publishes
+ * bound session's liveness reads beside its heartbeats (ADR 36). `live` is what a hand-over
+ * publishes a reopened round through (`handOverMissionRounds`). Every write publishes
  * `missions` on the daemon-wide stream. */
-async function handleMission(req, res, parts, home, stream, cache, heldSecret, listed) {
+async function handleMission(req, res, parts, home, stream, cache, heldSecret, listed, live) {
   const key = parts[2];
   const tail = parts.slice(3);
   try {
@@ -3350,16 +3412,34 @@ async function handleMission(req, res, parts, home, stream, cache, heldSecret, l
     if (route === 'upsert') answer = missionView(upsertMission(key, body, { home }), { home, listed });
     else if (route === 'launch') answer = launchMission(key, body, { home, listed });
     else if (route === 'join') {
+      const before = boundBefore(key, home);
       ({ status, ...answer } = joinMission(key, body, { home, listed }));
-      // A session bound in place of one that went or that a launch replaced: that session's
-      // open rounds are asked again of this one, as a takeover's are (ADR 150).
-      if (status === 200 && answer.session && answer.session.ended) handOverMissionRounds(key, answer.session.ended, answer.session, home);
+      if (status === 200 && answer.session) {
+        // A session bound in place of one that went or that a launch replaced: the rounds
+        // that session left unanswered are reopened under this one, as a takeover's are
+        // (ADR 150, 151). So are the rounds the bound process asked under an id it had before
+        // a /clear, told from the ones it asked since by that id alone. The ids are read off
+        // the rounds: the mission may hold the new one already, from a heartbeat before
+        // this join.
+        const cleared = before && sessionMatches(before, answer.session) ? clearedIds(key, answer.session, home) : [];
+        const givers = [answer.session.ended, ...cleared.map(id => ({ id }))].filter(Boolean);
+        for (const giver of givers) handOverMissionRounds(key, giver, answer.session, home, live);
+        // Named on every join while they wait, so a session that joins again (after a
+        // /clear, or after a takeover bound it, which answered it nothing) is told what
+        // its earlier join was.
+        const reopened = reopenedUnder(key, answer.session, home, req);
+        if (reopened.length) answer.reopened = reopened;
+      }
     }
     else if (route === 'leave') {
       answer = leaveMission(key, body, { home });
-      // A takeover: the giver's open rounds on the mission's board are asked again of the
-      // session that now holds the mission (ADR 150), so the PM's answer reaches it.
-      if (answer.session) handOverMissionRounds(key, body, answer.session, home);
+      // A takeover: the rounds the giver left unanswered on the mission's boards are reopened
+      // under the session that now holds the mission (ADR 150, 151), so the PM's answer
+      // reaches it. Its binding names them: the taker made no call that this one answers.
+      if (answer.session) {
+        handOverMissionRounds(key, body, answer.session, home, live);
+        reopenedUnder(key, answer.session, home, req);
+      }
     }
     else if (route === 'session') answer = { session: bindSession(key, body, { home, listed }).session };
     else if (route === 'order') answer = { order: addOrder(key, body, { home }) };
@@ -3376,35 +3456,100 @@ async function handleMission(req, res, parts, home, stream, cache, heldSecret, l
   }
 }
 
-/** Hand the rounds session `giver` left open on every board mission `key` links to `taker`,
- * the session a takeover, or a join after `giver` went, bound in its place: needs you reads
- * every linked board, so an older one's open round is handed too. A board that fails is
- * warned and the rest go on: the leave or join has happened. */
-function handOverMissionRounds(key, giver, taker, home) {
+/** The session bound to mission `key` as stored, before a join rewrites it; null when none
+ * is, or the record does not read (the join then says why). */
+function boundBefore(key, home) {
+  try {
+    const s = (readMission(key, home) || {}).session;
+    return s && (s.pid != null || s.id != null) ? s : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The ids `session`'s process asked rounds under on mission `key`'s boards before the id it
+ * has now: the same pid and start, another id. A /clear changes the id and keeps the process. */
+function clearedIds(key, session, home) {
+  const ids = new Set();
+  for (const board of linkedMissionBoards(key, home)) {
+    for (const { session: s } of board.rounds || []) {
+      if (!s || s.id == null || s.id === session.id) continue;
+      if (s.pid != null && s.pid === session.pid && sameStart(s.procStart, session.procStart)) ids.add(s.id);
+    }
+  }
+  return [...ids];
+}
+
+/** The boards mission `key` links, each read once; one that fails is warned and skipped. */
+function linkedMissionBoards(key, home) {
+  const boards = [];
   let links = [];
   try {
     links = (readMission(key, home) || {}).boards || [];
   } catch (err) {
-    console.error(`claude-board: mission ${key}'s open rounds were not handed over: ${(err && err.message) || err}`);
+    console.error(`claude-board: mission ${key}'s boards were not read: ${(err && err.message) || err}`);
   }
   for (const { id } of links) {
     try {
       const board = readBoard(id, home);
-      if (!board || handOverRounds(board, giver, taker).length === 0) continue;
+      if (board) boards.push(board);
+    } catch (err) {
+      console.error(`claude-board: mission ${key}'s board ${id} was not read: ${(err && err.message) || err}`);
+    }
+  }
+  return boards;
+}
+
+/** Hand the rounds session `giver` left unanswered on every board mission `key` links to
+ * `taker`, the session a takeover, or a join after `giver` went, bound in its place, each
+ * that asks for an answer reopened in place (`handOverRounds`, ADR 151): needs you reads
+ * every linked board, so an older one's round is handed too. A reopened round's new
+ * deadline goes to the board's tabs, marked `reopened`, and the index streams as a moved
+ * one does, the waiting count is published and the stranded rule asked again. A board
+ * that fails is warned and the rest go on: the leave or join has happened. */
+function handOverMissionRounds(key, giver, taker, home, { req, sse, stranded, stream, waiting }) {
+  for (const board of linkedMissionBoards(key, home)) {
+    try {
+      const { handed, reopened } = handOverRounds(board, giver, taker, { awaitTimeoutMs: waitTimeoutMs() });
+      if (handed.length === 0) continue;
       const html = renderBoardPage(board);
       writeBoard(board, home);
       writePage(board.id, html, home);
+      if (reopened.length === 0) continue;
+      for (const r of board.rounds.filter(x => reopened.includes(x.n))) broadcastDeadline(board, r, sse, stream, { reopened: true });
+      broadcastWaiting(stream, waiting, board);
+      stranded.evaluate(board.id, strandedTarget(req, board.id));
     } catch (err) {
-      console.error(`claude-board: mission ${key}'s open rounds on board ${id} were not handed over: ${(err && err.message) || err}`);
+      console.error(`claude-board: mission ${key}'s open rounds on board ${board.id} were not handed over: ${(err && err.message) || err}`);
     }
   }
 }
 
+/** The rounds reopened under `session` on mission `key`'s boards that still wait (ADR 151),
+ * as a join names them: `[{ board, round, title, url, awaitDeadline }]`, in board then round
+ * order, `url` on the origin `req` came in on. One sent, closed or lapsed since is not among
+ * them. Recorded on the mission for the session's binding by board, round and deadline alone
+ * (`recordReopened`, src/missions.mjs); a record that fails is warned: the leave or join has
+ * happened. */
+function reopenedUnder(key, session, home, req) {
+  const reopened = linkedMissionBoards(key, home).flatMap(board => waitingRounds(board)
+    .filter(r => r.reopenedAt && sessionMatches(r.session, session))
+    .map(r => ({ board: board.id, round: r.n, title: r.title ?? null, url: boardUrl(req, board.id), awaitDeadline: r.awaitDeadline })));
+  try {
+    recordReopened(key, reopened, { home });
+  } catch (err) {
+    console.error(`claude-board: mission ${key}'s reopened rounds were not recorded: ${(err && err.message) || err}`);
+  }
+  return reopened;
+}
+
 /** `GET /api/binding?id=<session id>[&pid=&procStart=]`: the mission that session is bound
- * to (src/missions.mjs `bindingFor`), as `{ key, takeover, orders, handoff, rejoin, spinDown }`,
- * `rejoin` read off `listed`, the session watcher's latest snapshot, and `spinDown` the
- * flag as `spinDownBrief` reads it, carried whether the session is bound or not. A session names itself
- * by `id`, its process by `pid` and `procStart`, or both; neither is a 400. */
+ * to (src/missions.mjs `bindingFor`), as
+ * `{ key, takeover, orders, handoff, rejoin, reopened, spinDown }`, `rejoin` read off `listed`,
+ * the session watcher's latest snapshot, `reopened` the rounds a hand-over reopened under it
+ * as the mission records them, and `spinDown` the flag as `spinDownBrief` reads it, carried
+ * whether the session is bound or not. A session names itself by `id`, its process by `pid`
+ * and `procStart`, or both; neither is a 400. */
 function handleBinding(res, url, bindings, listed, home) {
   const q = url.searchParams;
   const ref = {};
@@ -3856,7 +4001,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
           return handleReadBoard(req, res, boardId, home);
         }
         if (req.method === 'POST' && action === 'collect') {
-          return await handleCollect(req, res, boardId, home);
+          return await handleCollect(req, res, boardId, home, sessions);
         }
         if (req.method === 'GET' && action === 'events') {
           return handleEvents(req, res, boardId, home, sse, stranded, url);
@@ -3938,7 +4083,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
           res.end();
           return;
         }
-        return await handleMission(req, res, parts, home, streamHub, missionsCache, secretMatches(req.headers[SECRET_HEADER], secret), sessions.listed());
+        return await handleMission(req, res, parts, home, streamHub, missionsCache, secretMatches(req.headers[SECRET_HEADER], secret), sessions.listed(), { req, sse, stranded, stream: streamHub, waiting: waitingCache });
       }
 
       return sendText(res, 404, 'not found');

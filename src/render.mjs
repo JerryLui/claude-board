@@ -40,7 +40,7 @@
 import { palettes, faviconLink, markSvg } from './styles.mjs';
 import { SCRIPT_ASSET, STYLE_ASSET } from './assets.mjs';
 import { STATUS_TONES } from './card-status.mjs';
-import { ROUND_DOWNLOAD_BUTTON } from './round-export.mjs';
+import { ROUND_DOWNLOAD_BUTTON, HEAD_DOWNLOAD_BUTTON } from './round-export.mjs';
 import { MAX_IMAGE_BYTES, megabytes } from './post-limit.mjs';
 import { themeBootScript, themeToggle } from './theme.mjs';
 import { resolveComments, stripDaemonOnly } from './board.mjs';
@@ -2601,6 +2601,7 @@ export function stageAgentScript() {
       if (typeof data.top !== 'number' || !isFinite(data.top) || data.top < 0) return;
       if (typeof data.bottom !== 'number' || !isFinite(data.bottom) || data.bottom < 0) return;
       applyBand(data.top, data.bottom);
+      reportModal();
       return;
     }
     if (data.type === 'height') {
@@ -2668,6 +2669,31 @@ export function stageAgentScript() {
   // not bubble, so a plain 'window' listener is blind to exactly the artifact
   // shape that broke this (see onScroll's own comment above).
   document.addEventListener('scroll', onScroll, true);
+  // A full-size view the mock opens over itself: a modal dialog that runs to
+  // this frame's top edge, where it keeps its own bar, and where on a page
+  // board the board's top strip floats ('bandTop', which stays 0 anywhere
+  // else). The parent cannot see into this document, so the stage says when
+  // such a dialog reaches into that band and when the last one has left it,
+  // and the board takes its strip away meanwhile (src/ui.mjs). A dialog that
+  // stays clear of the band, a small one centred in the mock, reports nothing
+  // and keeps the strip. showModal() and close() both move the dialog's
+  // 'open' attribute, so one observer on it sees every dialog, one added
+  // later too; the band and the window changing size re-ask.
+  var modalOpen = false;
+  function reportModal() {
+    var open = false;
+    try {
+      var views = document.querySelectorAll('dialog:modal');
+      for (var i = 0; i < views.length && !open; i++) open = views[i].getBoundingClientRect().top < bandTop;
+    } catch (e) { /* no ':modal' here: nothing to report */ }
+    if (open === modalOpen) return;
+    modalOpen = open;
+    post({ type: 'modal', open: open });
+  }
+  if (typeof MutationObserver === 'function') {
+    new MutationObserver(reportModal).observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ['open'] });
+  }
+  window.addEventListener('resize', reportModal);
   post({ type: 'ready' });
 })();</script>`;
 }
@@ -3356,22 +3382,20 @@ export function renderRoundSection(board, roundN, commentsByBlock) {
   <div class="round-end"><span class="line"></span><span class="tag">${escHtml(endTag)}</span><span class="line"></span></div>`;
   // An artifact round keeps its section (data-round is how a push, an amend and
   // the pager all find a round, and the section IS the page). It never draws
-  // the closing rail, and draws its chip line only once sent: the "Round N"
+  // the closing rail or its chip line, sent or not: the "Round N"
   // chip and the rail are chrome ABOUT a round, printed over a full-viewport
   // artifact, and the pager at the bottom of the page already names the round
   // for anyone who needs it -- exactly the "no card, no kicker" noise this
   // layout exists to remove. The rail carries a second meaning too (it is what
   // docks the send bar), which a page with nothing to send has no use for
-  // either. Sent, the chip line is there for Download round alone: it sits in
-  // the board's own top band, under the header, and the stage pads the band, so
-  // it never covers the artifact.
+  // either. Its Download round is the one in the top strip (renderBoardPage),
+  // which stays drawn and live once the artifact scrolls under the header.
   //
   // The label sits in the round's chip line, whose right end holds Download round
-  // once the round is sent (src/round-export.mjs): a round still open has nothing
-  // settled to save. src/ui.mjs's markRoundHistory adds the same control to a
-  // round that goes sent under an open tab.
-  const roundLabel = fullpage && !historical ? '' : `
-  <div class="round-chips"><div class="round-label">${escHtml(label)}</div>${historical ? ROUND_DOWNLOAD_BUTTON : ''}</div>`;
+  // (src/round-export.mjs), sent or not: a round not yet sent saves a file that
+  // says so at its top.
+  const roundLabel = fullpage ? '' : `
+  <div class="round-chips"><div class="round-label">${escHtml(label)}</div>${ROUND_DOWNLOAD_BUTTON}</div>`;
   return `
 <section class="round ${historical ? 'round-history' : 'round-open'}${current ? ' round-current' : ''}" data-round="${roundN}" data-round-status="${historical ? 'sent' : 'open'}">${roundLabel}
   ${blocksHtml}
@@ -3694,6 +3718,7 @@ ${faviconLink}
     <div class="board-head-actions">
       ${commentModeToggle()}
       ${themeToggle()}
+      ${HEAD_DOWNLOAD_BUTTON}
       <span class="round-meta" id="round-meta" title="${escAttr(roundMetaTitle)}">${escHtml(roundMetaText)}</span>
     </div>
   </header>

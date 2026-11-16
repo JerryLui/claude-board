@@ -101,7 +101,7 @@ check('AC 7: the condense is a ramp with no threshold, exactly like the page boa
   assert.equal(progress(document), '1.000', 'a long document cannot push the progress past 1');
 });
 
-check('AC 7: the pill holds mark, comment toggle, theme, then the state label -- the expanded header\'s own order', () => {
+check('AC 7: the pill holds mark, comment toggle, theme, Download round (hidden unless the round is drawn full page), then the state label -- the expanded header\'s own order', () => {
   const document = loadBoard(renderBoardPage(ordinaryBoard()));
   const head = document.querySelector('.board-head');
   const titleGroup = document.querySelector('.board-head-title');
@@ -110,14 +110,33 @@ check('AC 7: the pill holds mark, comment toggle, theme, then the state label --
   assert.equal(head.children[0], titleGroup, 'setup: the mark/identity group leads the header');
   assert.equal(head.children[1], actions, 'setup: the actions group follows it');
   assert.ok(titleGroup.children[0].classList.contains('back-to-index'), 'the mark is the first thing in that group');
-  assert.deepEqual(actions.children.map((c) => c.id), ['comment-mode-toggle', 'theme-toggle', 'round-meta'],
-    'comment toggle, theme, state label -- ADR.md entry 42\'s order, with no round badge back between theme and the label');
+  assert.deepEqual(actions.children.map((c) => c.id || c.className), ['comment-mode-toggle', 'theme-toggle', 'round-download head-download', 'round-meta'],
+    'comment toggle, theme, state label -- ADR.md entry 42\'s order, with no round badge back between theme and the label; Download round, which only a full-page round shows, sits ahead of the label');
+  assert.equal(computed(actions.children[2], 'display'), 'none',
+    'this board\'s rounds each have a chip line with their own Download round, so the strip\'s is hidden');
 
   scrollDocumentTo(document, 800);
   assert.equal(condensed(document), true, 'setup: condensed');
   assert.equal(computed(document.querySelector('button#comment-mode-toggle'), 'display'), 'inline-flex',
     'condensing hides the header\'s identity text, never its controls');
   assert.equal(computed(document.querySelector('button#theme-toggle'), 'display'), 'inline-flex');
+  assert.equal(computed(actions.children[2], 'display'), 'none', 'the strip\'s Download round stays hidden in the pill');
+});
+
+// The strip's box spans the column around a wash or a pill drawn far smaller
+// (ADR.md entry 152). Its own box is all this row can resolve: the rule handing
+// clicks back to the two control groups is a child selector, which the stand-in's
+// cascade does not read, and so is the ':has()' rule that hides the strip under
+// a mock's full-size view. A real click through the strip, on its controls, and
+// the strip gone under that view are test/browser-check-topbar.mjs's and
+// test/browser-check-mock-lens.mjs's, run by hand.
+check('a board page\'s strip takes no click on its own box, expanded or condensed', () => {
+  const document = loadBoard(renderBoardPage(ordinaryBoard()));
+  const head = document.querySelector('.board-head');
+  assert.equal(computed(head, 'pointer-events'), 'none');
+  scrollDocumentTo(document, 800);
+  assert.equal(condensed(document), true, 'setup: condensed');
+  assert.equal(computed(head, 'pointer-events'), 'none');
 });
 
 check('AC 7: the state label shows on an ordinary board too -- the countdown while awaited, read-only otherwise', () => {

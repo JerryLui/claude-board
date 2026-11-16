@@ -44,7 +44,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createBoard, applySubmit } from '../src/board.mjs';
 import { renderBoardPage } from '../src/render.mjs';
-import { StandInEvent, Element } from './dom-stand-in.mjs';
+import { styles } from '../src/styles.mjs';
+import { StandInEvent, Element, resolveComputedProperty } from './dom-stand-in.mjs';
 import { check, finish, flush, pageHarness } from './support.mjs';
 
 // Every load in this file is followed by `await flush(1)`: renderMermaidBlocks' own
@@ -428,7 +429,7 @@ function anchorOnForm(document, blockId) {
   };
 }
 
-await check('the Pull-out on a mermaid block opens a lens holding a CLONE of the diagram -- with fit and 1:1 controls', async () => {
+await check('the Pull-out on a mermaid block opens a lens holding a CLONE of the diagram -- with fit, 1:1 and download controls', async () => {
   const document = loadBoard(pageHtml, { mermaid: mockMermaid() });
   await flush(1);
   assert.equal(document.querySelectorAll('.diagram-lens').length, 0, 'the lens must not exist before it is asked for -- it is built lazily on the first open');
@@ -449,7 +450,7 @@ await check('the Pull-out on a mermaid block opens a lens holding a CLONE of the
   assert.ok(inlineSvg.querySelector(`[id="${idA}"]`), 'the inline diagram must still hold its own nodes -- the lens must not have stolen them');
 
   const actions = document.querySelectorAll('.diagram-lens .lens-btn').map(b => b.getAttribute('data-lens'));
-  assert.deepEqual(actions, ['fit', 'one', 'close'], `expected fit and 1:1 controls; got ${JSON.stringify(actions)}`);
+  assert.deepEqual(actions, ['fit', 'one', 'download', 'close'], `expected fit, 1:1 and download controls, then close; got ${JSON.stringify(actions)}`);
   // The percentage readout comes from the applied view, so it doubles as proof
   // that a view was actually applied to the canvas on open.
   assert.equal(document.querySelector('.diagram-lens .lens-pct').textContent, '100%');
@@ -903,7 +904,14 @@ async function loadReadonlyBoard(html, mermaidMock) {
 
 // That the Pull-out survives the readonly pass at all, for a diagram and a stage
 // alike, is test/check-stage-lens.mjs's archive row; this is the lens it opens.
-await check('readonly: the Pull-out opens the diagram lens in a standalone archive, with its fit and 1:1 view controls', async () => {
+/** One control of the open diagram lens's bar, by its `data-lens` action. */
+function lensControl(document, action) {
+  const control = document.querySelector(`.diagram-lens .lens-btn[data-lens="${action}"]`);
+  assert.ok(control, `setup failure: the open lens's bar has no ${action} control`);
+  return control;
+}
+
+await check('readonly: the Pull-out opens the diagram lens in a standalone archive -- fit and 1:1 stay live, its download is there but hidden and disarmed', async () => {
   const document = await loadReadonlyBoard(pageHtml, mockMermaid());
   const btn = findPullOut(document);
   assert.ok(btn, 'the Pull-out must still be rendered in a standalone archive');
@@ -914,9 +922,48 @@ await check('readonly: the Pull-out opens the diagram lens in a standalone archi
   assert.ok(document.querySelector('.diagram-lens .lens-canvas svg'), 'and show the diagram');
   assert.deepEqual(
     document.querySelectorAll('.diagram-lens .lens-btn').map(b => b.getAttribute('data-lens')),
-    ['fit', 'one', 'close'],
-    'fit and 1:1 are view controls, so they stay available in readonly',
+    ['fit', 'one', 'download', 'close'],
+    'fit and 1:1 are view controls, so they stay live in readonly; download is built into the bar there too, hidden and disarmed',
   );
+
+  // Live: neither is turned off, and each still moves the view. The stand-in
+  // opens every lens at 100% and fits to 100% (no layout), so the wheel zooms
+  // in first and each control has somewhere to come back from.
+  const pct = () => document.querySelector('.diagram-lens .lens-pct').textContent;
+  const stage = document.querySelector('.diagram-lens .lens-stage');
+  for (const action of ['one', 'fit']) {
+    const control = lensControl(document, action);
+    assert.equal(control.disabled, false, `${action} must not be turned off in an archive`);
+    stage.dispatchEvent(new StandInEvent('wheel', { deltaY: -100, clientX: 200, clientY: 200 }));
+    assert.notEqual(pct(), '100%', `setup: the wheel zoomed in before ${action}`);
+    control.dispatchEvent(new StandInEvent('click'));
+    assert.equal(pct(), '100%', `a click on ${action} must change the view in an archive`);
+  }
+
+  // Hidden: the archive's stylesheet takes the download out of the bar, read
+  // as a real cascade over it, and leaves a view control showing.
+  const download = lensControl(document, 'download');
+  assert.equal(resolveComputedProperty(styles, download, false, 'display'), 'none',
+    'an archive\'s stylesheet must hide the lens\'s download (body.readonly [data-lens="download"])');
+  assert.notEqual(resolveComputedProperty(styles, lensControl(document, 'fit'), false, 'display'), 'none',
+    'and must leave fit showing');
+
+  // Disarmed: a save turns its button off while the file is made, which is as
+  // far as this stand-in follows one -- no save here reaches a file, so the
+  // file itself is test/browser-check-download.mjs's. A live board is the
+  // control: there the same control shows and the same click starts a save.
+  const live = loadBoard(pageHtml, { mermaid: mockMermaid() });
+  await flush(1);
+  openLens(live);
+  const liveDownload = lensControl(live, 'download');
+  assert.notEqual(resolveComputedProperty(styles, liveDownload, false, 'display'), 'none',
+    'control: a live board shows the lens\'s download');
+  liveDownload.dispatchEvent(new StandInEvent('click'));
+  assert.equal(liveDownload.disabled, true,
+    'control: on a live board a click on download starts a save, its button off while the file is made');
+
+  download.dispatchEvent(new StandInEvent('click'));
+  assert.equal(download.disabled, false, 'a click on download in an archive must start no save, so it saves no file');
 });
 
 await check('readonly: clicking a node inside the lens comments on nothing, and the block\'s form is never moved in there at all', async () => {

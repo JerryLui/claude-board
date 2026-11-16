@@ -779,18 +779,20 @@ const READ_TOOL = {
  * the agent reads fresh (Claude Code's `CLAUDE_CODE_SESSION_ID`) while this process keeps
  * the one it was spawned under, so the shim never supplies an id of its own. It adds its
  * parent process (`sessionField`), which a `/clear` keeps, so the daemon rebinds the new id. */
-const MISSION_ACTIONS = ['list', 'read', 'write', 'join', 'leave', 'binding', 'seen', 'order', 'resent', 'relay', 'ack'];
+const MISSION_ACTIONS = ['list', 'read', 'write', 'join', 'leave', 'binding', 'seen', 'order', 'resent', 'relay', 'ack', 'close'];
 const MISSION_TOOL = {
   name: 'mission',
   description:
     'The claude-board missions ledger: one record per piece of work. Any agent (Claude, Codex, ' +
     'OpenCode) writes its work\'s status here: phase, state, summary, PRs, handoff. Never case ' +
     'content. Actions: list, read, write (fields; with session, also that session\'s heartbeat, refused unless it is the bound one), ' +
-    'join (bind this session to the mission, leaving any other first; takeover to take it from a live one; the next ask starts a new board), leave, ' +
-    'binding (the mission this session is bound to, its pending takeover, unseen PM orders and ' +
-    'handoff), seen (this session acknowledges an order), order (the Master Chief posts the ' +
+    'join (bind this session to the mission, leaving any other first; takeover to take it from a live one; the next ask starts a new board; ' +
+    '"reopened" names each round the mission\'s last session left unanswered, waiting again for this one: its answer rides your next ask packet, read, or its "watch" command), leave, ' +
+    'binding (the mission this session is bound to, its pending takeover, unseen PM orders, ' +
+    'handoff and reopened rounds), seen (this session acknowledges an order), order (the Master Chief posts the ' +
     'PM\'s words as a pm order), resent (the Master Chief sent an order again), relay (answer a ' +
-    'session\'s open board round on the PM\'s own words), ack (an order relayed). "session" is ' +
+    'session\'s open board round on the PM\'s own words), ack (an order relayed), close (close one ' +
+    'round of this session\'s for good, a reopened one it does not want). "session" is ' +
     'always the caller\'s own current session id (CLAUDE_CODE_SESSION_ID), read fresh.',
   inputSchema: {
     type: 'object',
@@ -806,8 +808,8 @@ const MISSION_TOOL = {
         type: 'object',
         description: 'write: the fields to set, from title cwd phase state summary waitingOn next prs handoff fire queue retiredAt.',
       },
-      board: { type: 'string', description: 'relay: the board URL or bare board id.' },
-      round: { type: 'integer', description: 'relay: the round being answered.' },
+      board: { type: 'string', description: 'relay, close: the board URL or bare board id.' },
+      round: { type: 'integer', description: 'relay: the round being answered. close: the round to close.' },
       answers: { type: 'array', items: { type: 'object' }, description: 'relay: [{ id, status, choice, note }], as a submit carries them.' },
       words: { type: 'string', description: 'relay: the PM\'s words, verbatim, at most 1 KB.' },
       order: { type: 'string', description: 'seen, resent, ack: the order id.' },
@@ -1716,6 +1718,17 @@ async function missionTool(args) {
     method = 'POST';
     route = `/api/mission/${needKey()}/order/${needOrder()}/ack`;
     body = {};
+  } else if (action === 'close') {
+    const boardId = boardIdFrom(args.board);
+    if (!boardId) throw new ToolError(`mission close requires "board": a board URL or bare board id, not ${JSON.stringify(args.board ?? null)}`);
+    if (!Number.isInteger(args.round) || args.round < 1) throw new ToolError(`mission close requires "round": the round to close, not ${JSON.stringify(args.round ?? null)}`);
+    method = 'POST';
+    route = `/api/board/${boardId}/abandon`;
+    // This shim's own session, so the round closes only when it is this session's. With no
+    // session to name there is no round of its own to close.
+    const own = sessionField();
+    if (!own.session) throw new ToolError('mission close cannot name this session: its process\'s start did not read. Nothing was closed.');
+    body = { ...own, round: args.round };
   } else {
     throw new ToolError(`mission requires "action": one of ${MISSION_ACTIONS.join(', ')}, not ${JSON.stringify(action ?? null)}`);
   }
@@ -1738,6 +1751,17 @@ async function missionTool(args) {
   // the board has no session to beat, and the write creates it.
   if (heartbeat) await call('POST', `/api/mission/${key}/session`, heartbeat, { absentOk: true });
   const answer = await call(method, route, body);
+  // Each round reopened under this session (ADR 151), as its join names it or, after a
+  // takeover, its binding: with the answer watch that wakes the session on its Send, as a
+  // `timeout` packet names one (ADR 146), and the board's url built here, never the response
+  // body's (see safeBoardUrl): on every entry, null where its board is no board id. The
+  // watch is named only where the entry names a board and a round.
+  if ((action === 'join' || action === 'binding') && Array.isArray(answer?.reopened)) {
+    answer.reopened = answer.reopened.map(r => {
+      const url = safeBoardUrl(r?.board);
+      return { ...r, url, ...(url && Number.isInteger(r.round) ? answerWatch(r.board, r.round) : {}) };
+    });
+  }
   // A join or leave changes the mission this conversation's boards link to, and the board
   // this shim reuses keeps the mission it linked first (src/server.mjs): the next ask
   // starts a board of its own, as `fresh` does. Joining again the mission this shim joined

@@ -1,22 +1,29 @@
 // One board per mission (ADR 150): a daemon on a temp store, sessions named by real live
 // processes, posting the way the shim does. Every session bound to a mission posts on the
 // mission's one board, each round its own: its own folder, its own boundaries, and on a
-// takeover the giver's open round handed to the taker. The last check drives the real shim.
+// takeover the giver's open round handed to the taker. A hand-over reopens in place the
+// rounds the last session left unanswered (ADR 151). The last check drives the real shim.
 
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
 import { startServer } from '../src/server.mjs';
+import { SECRET_HEADER } from '../src/secret.mjs';
+import { WAIT_CEILING_MS } from '../src/handoff.mjs';
 import { readBoard, readMission, writeBoard } from '../src/store.mjs';
 import { linkBoard } from '../src/missions.mjs';
-import { addRound, createBoard } from '../src/board.mjs';
+import { abandonOpenRounds, addRound, createBoard } from '../src/board.mjs';
 import { processStartUtc } from '../src/proc-start.mjs';
-import { McpClient, check, mcpBin, openSseClient, rawRequest, runMain, secretFetch, secretHome, waitFor, writeHeaders } from './support.mjs';
+import { McpClient, check, mcpBin, openSseClient, rawRequest, repoRoot, runMain, secretFetch, secretHome, waitFor, writeHeaders } from './support.mjs';
 
 const { home, secret: SECRET } = secretHome('claude-board-mission-board-');
 const fetch = secretFetch(SECRET);
 process.env.CLAUDE_BOARD_STRANDED_GRACE_MS ??= String(24 * 60 * 60 * 1000);
+// One wait, pinned: a reopened round's deadline is asserted against it.
+const WAIT_MS = 2_400_000;
+process.env.CLAUDE_BOARD_TIMEOUT_MS = String(WAIT_MS);
 const START = '2026-11-11T08:00:00Z';
 
 let server, port, base;
@@ -43,6 +50,8 @@ async function ask(session, folder, blocks, extra = {}) {
 
 const join = (key, id, session, extra = {}) => post(`/api/mission/${key}/join`, { id, ...session.ref, ...extra });
 const leave = (key, id, session) => post(`/api/mission/${key}/leave`, { id, ...session.ref });
+/** What `GET /api/binding` answers session `id`. */
+const binding = async (id, session) => (await fetch(`${base}/api/binding?${new URLSearchParams({ id, pid: String(session.ref.pid), procStart: session.ref.procStart })}`)).json();
 const question = prompt => ({ kind: 'question', prompt, widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] });
 const note = text => ({ kind: 'markdown', text });
 
@@ -55,11 +64,12 @@ function folderWith(name, text) {
 }
 
 /** The real shim, run in `folder` under its own shell, so its parent process, the session it
- * names, is not this one. `call` answers a tool call's result, refused on an error. */
-async function sessionShim(folder) {
+ * names, is not this one. `call` answers a tool call's result, refused on an error; `env`
+ * adds to the shim's environment. */
+async function sessionShim(folder, env = {}) {
   const child = spawn('/bin/sh', ['-c', `"${process.execPath}" "${mcpBin}"; exit $?`], {
     cwd: folder,
-    env: { ...process.env, CLAUDE_BOARD_HOME: home, CLAUDE_BOARD_PORT: String(port), CLAUDE_BOARD_NO_OPEN: '1', CLAUDE_CODE_ENTRYPOINT: 'cli' },
+    env: { ...process.env, CLAUDE_BOARD_HOME: home, CLAUDE_BOARD_PORT: String(port), CLAUDE_BOARD_NO_OPEN: '1', CLAUDE_CODE_ENTRYPOINT: 'cli', ...env },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   children.add(child);
@@ -73,6 +83,48 @@ async function sessionShim(folder) {
     return r.result;
   };
   return { child, shim, call };
+}
+
+/** The daemon-wide stream the Boards page holds, once the daemon has it: `events` is every
+ * event since, as `{ event, data }`, and `named(event)` the data of each one so named. */
+function openIndexStream() {
+  return new Promise((resolve, reject) => {
+    const events = [];
+    let pending = '';
+    const req = http.request({ host: '127.0.0.1', port, method: 'GET', path: '/api/events', headers: { host: `127.0.0.1:${port}`, [SECRET_HEADER]: SECRET } }, res => {
+      res.setEncoding('utf8');
+      res.on('data', chunk => {
+        pending += chunk;
+        const frames = pending.split('\n\n');
+        pending = frames.pop();
+        for (const frame of frames) {
+          const event = /^event: (.+)$/m.exec(frame);
+          const data = /^data: (.*)$/m.exec(frame);
+          if (event && data) events.push({ event: event[1], data: JSON.parse(data[1]) });
+        }
+      });
+      resolve({ events, named: name => events.filter(e => e.event === name).map(e => e.data), close: () => req.destroy() });
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+/** A daemon that is not the board's: whatever holds its port answers `POST route` with
+ * `answer`, and anything else 404. */
+function startPeer(route, answer) {
+  const srv = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      const hit = req.method === 'POST' && req.url === route;
+      const body = JSON.stringify(hit ? answer : { error: 'not found' });
+      res.writeHead(hit ? 200 : 404, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body) });
+      res.end(body);
+    });
+  });
+  return new Promise(resolve => {
+    srv.listen(0, '127.0.0.1', () => resolve({ port: srv.address().port, close: () => { srv.close(); srv.closeAllConnections?.(); } }));
+  });
 }
 
 async function main() {
@@ -211,19 +263,26 @@ async function main() {
     rmSync(path.join(home, 'boards', `${own.boardId}.json`));
   });
 
-  await check('a takeover hands the giver\'s open round to the taker, so the answer the PM sends on it rides the taker\'s next packet', async () => {
+  await check('a takeover hands the giver\'s open rounds to the taker: its live question reopened with a fresh clock and named in the taker\'s binding, its open round that asks nothing handed with no wait, its closed one that asks nothing left the giver\'s; the answer the PM sends on the question rides the taker\'s next packet', async () => {
     const giver = sessionProcess();
     const taker = sessionProcess();
     const folder = folderWith('takeover', 'x\n');
     assert.equal((await join('TAKEN', 'giver', giver)).status, 200);
-    const asked = await ask(giver, folder, [question('Which way?')]);
+    const asked = await ask(giver, folder, [note('closed at the next conversation')]);
+    await ask(giver, folder, [note('left open')], { fresh: true });
+    assert.equal((await ask(giver, folder, [question('Which way?')])).round, 3);
     assert.equal((await join('TAKEN', 'taker', taker, { takeover: true })).status, 202);
     assert.equal((await leave('TAKEN', 'giver', giver)).status, 200);
-    const round = readBoard(asked.boardId, home).rounds[0];
-    assert.deepEqual([round.session.id, round.session.pid, round.handedFrom], ['taker', taker.ref.pid, 'giver']);
+    const [closed, open, live] = readBoard(asked.boardId, home).rounds;
+    const told = r => [r.status, r.awaited, r.awaitDeadline == null, r.reopenedAt == null, r.session.id, r.session.pid, r.handedFrom];
+    assert.deepEqual(told(closed), ['abandoned', false, true, true, null, giver.ref.pid, undefined]);
+    assert.deepEqual(told(open), ['open', false, true, true, 'taker', taker.ref.pid, 'giver']);
+    assert.deepEqual(told(live), ['open', true, false, false, 'taker', taker.ref.pid, 'giver']);
+    assert.equal(Date.parse(live.awaitDeadline) - Date.parse(live.reopenedAt), WAIT_MS);
+    assert.deepEqual((await binding('taker', taker)).reopened, [{ board: asked.boardId, round: 3, awaitDeadline: live.awaitDeadline }]);
 
     const qid = readBoard(asked.boardId, home).blocks.find(x => x.kind === 'question').id;
-    const sent = await post(`/api/board/${asked.boardId}/submit`, { round: 1, action: 'send', answers: [{ id: qid, status: 'answered', choice: 'Yes', note: '' }], comments: [] });
+    const sent = await post(`/api/board/${asked.boardId}/submit`, { round: 3, action: 'send', answers: [{ id: qid, status: 'answered', choice: 'Yes', note: '' }], comments: [] });
     assert.equal(sent.status, 200, JSON.stringify(sent.body));
     const next = await ask(taker, folder, [note('picking up')]);
     assert.equal(next.boardId, asked.boardId);
@@ -321,6 +380,445 @@ async function main() {
     const after = await ask(next, folder, [note('picking up')]);
     assert.deepEqual(after.answers.map(x => [x.id, x.choice]), [[qid, 'No']]);
     assert.equal((await leave('CRASHED', 'crashed-next', next)).status, 200);
+  });
+
+  // Reopening in place (ADR 151). `send` is the PM's Send on round `n`, `lapse` a wait that
+  // ran out, `wait` the wait a reopened round was given, by its own stamps.
+  const questionId = (boardId, n) => readBoard(boardId, home).blocks.find(x => x.round === n && x.kind === 'question').id;
+  const send = (boardId, n, choice) => post(`/api/board/${boardId}/submit`, { round: n, action: 'send', answers: [{ id: questionId(boardId, n), status: 'answered', choice, note: '' }], comments: [] });
+  const lapse = (boardId, n) => {
+    const board = readBoard(boardId, home);
+    Object.assign(board.rounds[n - 1], { awaited: true, awaitDeadline: new Date(Date.now() - 60_000).toISOString() });
+    writeBoard(board, home);
+  };
+  const wait = round => Date.parse(round.awaitDeadline) - Date.parse(round.reopenedAt);
+  const kill = async session => {
+    session.child.kill('SIGKILL');
+    await new Promise(resolve => session.child.once('exit', resolve));
+  };
+  const state = (boardId, n) => {
+    const r = readBoard(boardId, home).rounds[n - 1];
+    return [r.status, r.awaited, r.session.pid];
+  };
+
+  await check('a join after the mission\'s session went reopens in place each round it left unanswered, one closed by its clear and one lapsed: the same number, nothing on the board moved but the round\'s state, a fresh 40-minute clock, the new session\'s; the join names each, the PM\'s Send on one answers the answer watch\'s collect and read, and on the other rides the new session\'s next packet', async () => {
+    const gone = sessionProcess();
+    const next = sessionProcess();
+    const folder = folderWith('reopen', 'x\n');
+    assert.equal((await join('REOPEN', 'reopen-gone', gone)).status, 200);
+    const asked = await ask(gone, folder, [question('Left at its clear?')]);
+    await ask(gone, folder, [question('Left to lapse?')], { fresh: true, title: 'Second' });
+    lapse(asked.boardId, 2);
+    const before = readBoard(asked.boardId, home);
+    assert.deepEqual(before.rounds.map(r => [r.n, r.status, r.awaited]), [[1, 'abandoned', false], [2, 'open', false]]);
+    await kill(gone);
+
+    const joined = await join('REOPEN', 'reopen-next', next);
+    assert.equal(joined.status, 200, JSON.stringify(joined.body));
+    const after = readBoard(asked.boardId, home);
+    assert.deepEqual(after.rounds.map(r => [r.n, r.status, r.awaited, r.session.pid, r.handedFrom, r.abandonedAt]), [
+      [1, 'open', true, next.ref.pid, 'reopen-gone', undefined],
+      [2, 'open', true, next.ref.pid, 'reopen-gone', undefined],
+    ]);
+    assert.deepEqual(after.rounds.map(wait), [WAIT_MS, WAIT_MS]);
+    assert.deepEqual({ ...after, rounds: null, updatedAt: null }, { ...before, rounds: null, updatedAt: null }, 'in place: the blocks, the comments and all else stand as they were');
+    assert.deepEqual(joined.body.reopened, after.rounds.map(r => ({ board: asked.boardId, round: r.n, title: r.title, url: `${base}/b/${asked.boardId}`, awaitDeadline: r.awaitDeadline })));
+    assert.deepEqual(joined.body.reopened.map(r => r.title), ['Round', 'Second']);
+
+    assert.equal((await send(asked.boardId, 1, 'Yes')).status, 200);
+    const read = await (await fetch(`${base}/api/board/${asked.boardId}/read`)).json();
+    assert.deepEqual(read.answers.filter(x => x.round === 1).map(x => [x.id, x.choice]), [[questionId(asked.boardId, 1), 'Yes']]);
+    const collected = await post(`/api/board/${asked.boardId}/collect`, { round: 1, session: next.ref });
+    assert.deepEqual([collected.body.status, collected.body.delivered, collected.body.answers.map(x => x.choice)], ['submitted', false, ['Yes']]);
+    assert.equal((await send(asked.boardId, 2, 'No')).status, 200);
+    const packet = await ask(next, folder, [note('picking up')]);
+    assert.deepEqual(packet.answers.map(x => [x.id, x.choice]), [[questionId(asked.boardId, 2), 'No']]);
+    assert.equal((await leave('REOPEN', 'reopen-next', next)).status, 200);
+  });
+
+  await check('a reopened round shows under Waiting on you on the Boards page and takes the PM\'s Send; a round the PM already sent stays sent and refuses another, and a round an earlier session left unanswered stays closed and unnamed', async () => {
+    const earlier = sessionProcess();
+    const gone = sessionProcess();
+    const next = sessionProcess();
+    const folder = folderWith('waiting', 'x\n');
+    // Round 1 an earlier session left closed, before the mission's last one bound.
+    const board = createBoard({ title: 'Earlier', blocks: [question('Asked by an earlier session')], cwd: folder, mission: 'WAITING', session: earlier.ref });
+    assert.deepEqual(abandonOpenRounds(board, { session: earlier.ref }), [1]);
+    writeBoard(board, home);
+    linkBoard('WAITING', { id: board.id, url: `${base}/b/${board.id}` }, { home });
+    assert.equal((await join('WAITING', 'waiting-gone', gone)).status, 200);
+    assert.equal((await ask(gone, folder, [question('Answered in time?')])).round, 2);
+    assert.equal((await send(board.id, 2, 'Yes')).status, 200);
+    assert.equal((await ask(gone, folder, [question('Left unanswered?')])).round, 3);
+    lapse(board.id, 3);
+    await kill(gone);
+    const waitingRows = async () => (await (await fetch(`${base}/api/waiting`)).json()).waiting.filter(r => r.boardId === board.id).map(r => r.round);
+    const row = async () => (await (await fetch(`${base}/api/index/rows`)).json()).html.split('<a ').find(a => a.includes(`data-thread-id="${board.thread}"`));
+    assert.deepEqual(await waitingRows(), []);
+    assert.match(await row(), /data-live="false"/);
+
+    const joined = await join('WAITING', 'waiting-next', next);
+    assert.equal(joined.status, 200, JSON.stringify(joined.body));
+    assert.deepEqual(joined.body.reopened.map(r => r.round), [3]);
+    assert.deepEqual(readBoard(board.id, home).rounds.map(r => [r.status, r.session.pid]), [['abandoned', earlier.ref.pid], ['sent', gone.ref.pid], ['open', next.ref.pid]]);
+    assert.deepEqual(await waitingRows(), [3]);
+    assert.match(await row(), /data-rounds-left="1" data-live="true"/);
+
+    assert.equal((await send(board.id, 2, 'No')).status, 409, 'a sent round takes no second Send');
+    assert.equal((await send(board.id, 3, 'Yes')).status, 200);
+    assert.deepEqual(await waitingRows(), []);
+    assert.equal((await leave('WAITING', 'waiting-next', next)).status, 200);
+  });
+
+  await check('a fresh ask by the new session closes its own open round and leaves a reopened one waiting, its plain question opens a round of its own beside it, and it closes a reopened round it does not want by number: that round stays closed at the next join, where the rounds it left itself reopen', async () => {
+    const gone = sessionProcess();
+    const next = sessionProcess();
+    const third = sessionProcess();
+    const folder = folderWith('declined', 'x\n');
+    assert.equal((await join('DECLINED', 'declined-gone', gone)).status, 200);
+    const asked = await ask(gone, folder, [question('Still wanted?')]);
+    await kill(gone);
+    assert.deepEqual((await join('DECLINED', 'declined-next', next)).body.reopened.map(r => r.round), [1]);
+
+    assert.equal((await ask(next, folder, [question('The new session\'s own')])).round, 2, 'a reopened round is not amended');
+    assert.equal((await ask(next, folder, [question('After its /clear')], { fresh: true })).round, 3);
+    assert.deepEqual([1, 2, 3].map(n => state(asked.boardId, n)), [['open', true, next.ref.pid], ['abandoned', false, next.ref.pid], ['open', true, next.ref.pid]]);
+
+    const closed = await post(`/api/board/${asked.boardId}/abandon`, { session: next.ref, round: 1 });
+    assert.deepEqual([closed.status, closed.body.closed], [200, [1]]);
+    assert.deepEqual([1, 3].map(n => state(asked.boardId, n).slice(0, 2)), [['abandoned', false], ['open', true]]);
+    await kill(next);
+    assert.deepEqual((await join('DECLINED', 'declined-third', third)).body.reopened.map(r => r.round), [2, 3]);
+    assert.deepEqual([1, 2, 3].map(n => state(asked.boardId, n)), [['abandoned', false, next.ref.pid], ['open', true, third.ref.pid], ['open', true, third.ref.pid]]);
+    assert.equal((await leave('DECLINED', 'declined-third', third)).status, 200);
+  });
+
+  await check('a takeover reopens the giver\'s lapsed round under the taker, whose binding names it by board, round and deadline, as the mission record holds it, with no title or url; its next join names it with both while the round waits, and no longer once it is sent', async () => {
+    const giver = sessionProcess();
+    const taker = sessionProcess();
+    const folder = folderWith('taken-lapsed', 'x\n');
+    assert.equal((await join('LAPSED', 'lapsed-giver', giver)).status, 200);
+    const asked = await ask(giver, folder, [question('Lapsed before the takeover?')]);
+    lapse(asked.boardId, 1);
+    assert.equal((await join('LAPSED', 'lapsed-taker', taker, { takeover: true })).status, 202);
+    assert.equal((await leave('LAPSED', 'lapsed-giver', giver)).status, 200);
+    const round = readBoard(asked.boardId, home).rounds[0];
+    assert.deepEqual([round.status, round.awaited, round.session.id, round.handedFrom], ['open', true, 'lapsed-taker', 'lapsed-giver']);
+    assert.equal(wait(round), WAIT_MS);
+
+    // The mission record, and the binding read off it, hold the round by number alone: no
+    // title, which is the round's own text, and no url.
+    const stored = [{ board: asked.boardId, round: 1, awaitDeadline: round.awaitDeadline }];
+    assert.deepEqual(readMission('LAPSED', home).session.reopened, stored);
+    const bound = await binding('lapsed-taker', taker);
+    assert.deepEqual([bound.key, bound.reopened], ['LAPSED', stored]);
+    const named = [{ ...stored[0], title: 'Round', url: `${base}/b/${asked.boardId}` }];
+    assert.deepEqual((await join('LAPSED', 'lapsed-taker', taker)).body.reopened, named);
+    assert.deepEqual(readMission('LAPSED', home).session.reopened, stored);
+    assert.equal((await send(asked.boardId, 1, 'Yes')).status, 200);
+    assert.equal((await join('LAPSED', 'lapsed-taker', taker)).body.reopened, undefined);
+    assert.equal((await leave('LAPSED', 'lapsed-taker', taker)).status, 200);
+  });
+
+  await check('a join that reopens rounds tells a tab already open on the board of each one: a deadline event naming the round, its new deadline and that it reopened, which the tab re-reads the board on; and it tells the Boards page\'s stream of each one, a deadline event naming the board, the round and its new deadline, with one waiting count that holds them', async () => {
+    const gone = sessionProcess();
+    const next = sessionProcess();
+    const folder = folderWith('open-tab', 'x\n');
+    assert.equal((await join('OPENTAB', 'opentab-gone', gone)).status, 200);
+    const asked = await ask(gone, folder, [question('Closed at its clear?')]);
+    await ask(gone, folder, [question('Left to lapse?')], { fresh: true });
+    lapse(asked.boardId, 2);
+    await kill(gone);
+    const waitingBefore = (await (await fetch(`${base}/api/waiting`)).json()).waiting;
+    assert.deepEqual(waitingBefore.filter(r => r.boardId === asked.boardId), [], 'neither round waits before the join');
+    const tab = await openSseClient(port, asked.boardId, { secret: SECRET, comments: false });
+    const index = await openIndexStream();
+    try {
+      assert.equal((await join('OPENTAB', 'opentab-next', next)).status, 200);
+      const told = () => tab.events.filter(e => e.event === 'deadline').map(e => e.data);
+      await waitFor(() => told().length === 2, { what: 'a deadline event for each reopened round on the open tab' });
+      const rounds = readBoard(asked.boardId, home).rounds;
+      assert.deepEqual(told(), rounds.map(r => ({ round: r.n, awaitDeadline: r.awaitDeadline, reopened: true })));
+      await waitFor(() => index.named('waiting').length > 0, { what: 'the waiting count on the Boards page\'s stream' });
+      assert.deepEqual(index.named('deadline'), rounds.map(r => ({ board: asked.boardId, round: r.n, awaitDeadline: r.awaitDeadline })));
+      assert.deepEqual(index.named('waiting').map(w => w.total), [waitingBefore.length + 2]);
+    } finally {
+      tab.req.destroy();
+      index.close();
+    }
+    assert.equal((await leave('OPENTAB', 'opentab-next', next)).status, 200);
+  });
+
+  // A /clear gives the bound process a new id. Its shim's heartbeat (a `mission write` sends
+  // one) may reach the mission before its join does, and takes the new id there.
+  for (const [key, order, beatFirst] of [['CLEARED', 'its join comes first', false], ['CLEARED_BEAT', 'its heartbeat took the new id before its join', true]]) {
+    await check(`the bound session joining again under a new id (after a /clear) has the round its earlier id left closed reopened, and not the round it asked since: ${order}`, async () => {
+      const s = sessionProcess();
+      const folder = folderWith(key.toLowerCase(), 'x\n');
+      const listed = id => post('/api/sessions', { intervalMs: 30_000, sessions: [{ id, pid: s.ref.pid, procStart: s.ref.procStart, kind: 'interactive', jobId: null, cwd: folder, login: null, name: null, status: 'idle', reason: null }] });
+      try {
+        assert.equal((await listed('cleared-before')).status, 200);
+        assert.equal((await join(key, 'cleared-before', s)).status, 200);
+        const asked = await ask(s, folder, [question('Before the /clear?')]);
+        assert.equal((await listed('cleared-after')).status, 200);
+        assert.equal((await ask(s, folder, [question('After it?')], { fresh: true })).round, 2);
+        assert.deepEqual([1, 2].map(n => state(asked.boardId, n).slice(0, 2)), [['abandoned', false], ['open', true]]);
+        if (beatFirst) {
+          const beat = await post(`/api/mission/${key}/session`, { id: 'cleared-after', ...s.ref, beat: true });
+          assert.deepEqual([beat.status, beat.body.session.id], [200, 'cleared-after']);
+        }
+
+        const joined = await join(key, 'cleared-after', s);
+        assert.deepEqual([joined.status, (joined.body.reopened || []).map(r => r.round)], [200, [1]]);
+        const rounds = readBoard(asked.boardId, home).rounds;
+        assert.deepEqual(rounds.map(r => [r.status, r.awaited, r.session.id, r.handedFrom]), [['open', true, 'cleared-after', 'cleared-before'], ['open', true, 'cleared-after', undefined]]);
+        assert.equal((await leave(key, 'cleared-after', s)).status, 200);
+      } finally {
+        await post('/api/sessions', { intervalMs: 30_000, sessions: [] });
+      }
+    });
+  }
+
+  await check('a round a hand-over gave another session answers only that session\'s collect: the departed session\'s, naming itself or no session, is answered as on a round abandoned and spends nothing, so the answer still reaches the session that holds the round, undelivered', async () => {
+    const giver = sessionProcess();
+    const taker = sessionProcess();
+    const folder = folderWith('departed', 'x\n');
+    assert.equal((await join('DEPARTED', 'departed-giver', giver)).status, 200);
+    const asked = await ask(giver, folder, [question('Whose answer?')]);
+    assert.equal((await join('DEPARTED', 'departed-taker', taker, { takeover: true })).status, 202);
+    assert.equal((await leave('DEPARTED', 'departed-giver', giver)).status, 200);
+    assert.equal((await send(asked.boardId, 1, 'Yes')).status, 200);
+
+    const collect = body => post(`/api/board/${asked.boardId}/collect`, { round: 1, ...body });
+    const told = r => [r.status, r.body.status, r.body.delivered, r.body.answers.map(x => x.choice)];
+    assert.deepEqual(told(await collect({ session: giver.ref })), [200, 'abandoned', false, []]);
+    assert.deepEqual(told(await collect({})), [200, 'abandoned', false, []]);
+    assert.deepEqual(readBoard(asked.boardId, home).answersDelivered, [], 'a refused collect spends nothing');
+    assert.deepEqual(told(await collect({ session: taker.ref })), [200, 'submitted', false, ['Yes']]);
+    assert.equal((await leave('DEPARTED', 'departed-taker', taker)).status, 200);
+  });
+
+  // The answer watch as a session runs it, polling every 100 ms.
+  const watchBin = path.join(repoRoot, 'bin', 'watch.mjs');
+  const env = { ...process.env, CLAUDE_BOARD_HOME: home, CLAUDE_BOARD_PORT: String(port), CLAUDE_BOARD_WATCH_INTERVAL_MS: '100' };
+  /** A watch `child` to its exit: `{ code, out }`, its exit code and what it printed. */
+  const run = (child, limitMs = 10_000) => new Promise((resolve, reject) => {
+    let out = '';
+    child.stdout.on('data', c => { out += c; });
+    const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('the watch was still running')); }, limitMs);
+    child.on('close', code => { clearTimeout(timer); resolve({ code, out: out.trim() }); });
+  });
+
+  await check('the answer watch names the processes it runs under: started by the session a reopened round was handed to, it prints the round\'s answer, and started by any other, abandoned', async () => {
+    const gone = sessionProcess();
+    const folder = folderWith('watched', 'x\n');
+    // The session that takes the round: a shell that starts the watch on the board it reads
+    // from its stdin, as a session starts one in the background.
+    const shell = spawn('/bin/sh', ['-c', `read board; "${process.execPath}" "${watchBin}" --board "$board" --round 1; exit $?`], { env, stdio: ['pipe', 'pipe', 'ignore'] });
+    children.add(shell);
+    const taker = { ref: { pid: shell.pid, procStart: processStartUtc(shell.pid) } };
+    assert.ok(taker.ref.procStart, 'the shell\'s start reads');
+
+    assert.equal((await join('WATCHED', 'watched-gone', gone)).status, 200);
+    const asked = await ask(gone, folder, [question('Sent after the hand-over?')]);
+    await kill(gone);
+    assert.deepEqual((await join('WATCHED', 'watched-taker', taker)).body.reopened.map(r => r.round), [1]);
+    assert.equal((await send(asked.boardId, 1, 'No')).status, 200);
+
+    const stray = spawn(process.execPath, [watchBin, '--board', asked.boardId, '--round', '1'], { env, stdio: ['ignore', 'pipe', 'ignore'] });
+    children.add(stray);
+    assert.deepEqual(await run(stray), { code: 2, out: 'abandoned' });
+    const watched = run(shell);
+    shell.stdin.end(`${asked.boardId}\n`);
+    const { code, out } = await watched;
+    assert.equal(code, 0, out);
+    const packet = JSON.parse(out);
+    assert.deepEqual([packet.round, packet.status, packet.delivered, packet.answers.map(x => x.choice)], [1, 'submitted', false, ['No']]);
+    assert.equal((await leave('WATCHED', 'watched-taker', taker)).status, 200);
+  });
+
+  await check('an answer watch a session started before its /clear is refused the round its join after the /clear reopened: it prints abandoned and spends nothing, and the watch the session starts after that join prints the answer; a start that is no time is refused', async () => {
+    const folder = folderWith('cleared-watch', 'x\n');
+    // The session: a shell that starts a watch on the board it reads from its stdin, says how
+    // that one ended, and starts another once it is told to go on.
+    const watch = `"${process.execPath}" "${watchBin}" --board "$board" --round 1`;
+    const shell = spawn('/bin/sh', ['-c', `read board; ${watch}; echo "exit $?"; read go; ${watch}; exit $?`], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+    children.add(shell);
+    let err = '';
+    shell.stderr.on('data', c => { err += c; });
+    const ended = run(shell);
+    ended.catch(() => {}); // a failing assertion below is the report
+    let out = '';
+    shell.stdout.on('data', c => { out += c; });
+    const s = { ref: { pid: shell.pid, procStart: processStartUtc(shell.pid) } };
+    assert.ok(s.ref.procStart, 'the shell\'s start reads');
+    const listed = id => post('/api/sessions', { intervalMs: 30_000, sessions: id ? [{ id, pid: s.ref.pid, procStart: s.ref.procStart, kind: 'interactive', jobId: null, cwd: folder, login: null, name: null, status: 'idle', reason: null }] : [] });
+    try {
+      assert.equal((await listed('watch-before')).status, 200);
+      assert.equal((await join('CLEARED_WATCH', 'watch-before', s)).status, 200);
+      const asked = await ask(s, folder, [question('Sent after the /clear?')]);
+      shell.stdin.write(`${asked.boardId}\n`);
+      // The first watch says the bound it runs to, a day from its start; the join comes later.
+      await waitFor(() => /until \S+\n/.test(err), { what: 'the first watch to start' });
+      const started = Date.parse(/until (\S+)/.exec(err)[1]) - WAIT_CEILING_MS;
+      await waitFor(() => Date.now() > started, { intervalMs: 1, what: 'the clock to pass the watch\'s start' });
+
+      assert.equal((await listed('watch-after')).status, 200);
+      assert.deepEqual((await join('CLEARED_WATCH', 'watch-after', s)).body.reopened.map(r => r.round), [1]);
+      assert.deepEqual(state(asked.boardId, 1), ['open', true, s.ref.pid], 'the round was open through the /clear, and is the same process\'s');
+      assert.equal((await send(asked.boardId, 1, 'Yes')).status, 200);
+      await waitFor(() => /exit \d+\n/.test(out), { what: 'the first watch to end' });
+      assert.equal(out, 'abandoned\nexit 2\n');
+      assert.deepEqual(readBoard(asked.boardId, home).answersDelivered, [], 'a refused collect spends nothing');
+      const unread = await post(`/api/board/${asked.boardId}/collect`, { round: 1, session: s.ref, startedAt: 'before the /clear' });
+      assert.deepEqual([unread.status, unread.body], [400, { error: 'collect "startedAt" must be the time the caller\'s watch started, as an ISO string' }]);
+
+      shell.stdin.end('go\n');
+      const { code, out: all } = await ended;
+      assert.equal(code, 0, all);
+      const packet = JSON.parse(all.split('\n').pop());
+      assert.deepEqual([packet.round, packet.status, packet.delivered, packet.answers.map(x => x.choice)], [1, 'submitted', false, ['Yes']]);
+      assert.equal((await leave('CLEARED_WATCH', 'watch-after', s)).status, 200);
+    } finally {
+      await listed(null);
+    }
+  });
+
+  await check('close by number closes only a round a hand-over reopened under the session that names it: for a round that session asked itself, and for a round reopened under another session, it answers closed: [] and the round stays open; naming a round and no session is refused', async () => {
+    const gone = sessionProcess();
+    const next = sessionProcess();
+    const stranger = sessionProcess();
+    const folder = folderWith('close-by-number', 'x\n');
+    assert.equal((await join('BY_NUMBER', 'by-number-gone', gone)).status, 200);
+    const asked = await ask(gone, folder, [question('Reopened?')]);
+    await kill(gone);
+    assert.deepEqual((await join('BY_NUMBER', 'by-number-next', next)).body.reopened.map(r => r.round), [1]);
+    assert.equal((await ask(next, folder, [question('Its own, never reopened')])).round, 2);
+
+    const close = body => post(`/api/board/${asked.boardId}/abandon`, body);
+    const open = () => [1, 2].map(n => state(asked.boardId, n).slice(0, 2));
+    const own = await close({ session: next.ref, round: 2 });
+    assert.deepEqual([own.status, own.body.closed], [200, []]);
+    const others = await close({ session: stranger.ref, round: 1 });
+    assert.deepEqual([others.status, others.body.closed], [200, []]);
+    const unnamed = await close({ round: 1 });
+    assert.deepEqual([unnamed.status, unnamed.body], [400, { error: 'round needs the session that closes it' }]);
+    assert.deepEqual(open(), [['open', true], ['open', true]]);
+    assert.equal(readBoard(asked.boardId, home).rounds[1].declined, undefined);
+    assert.equal((await leave('BY_NUMBER', 'by-number-next', next)).status, 200);
+  });
+
+  await check('a session whose next ask lands on a newer board of its mission closes its own rounds on the board it posted on before, and leaves a round a hand-over reopened under it there waiting, as its scoped abandon of that board does', async () => {
+    const gone = sessionProcess();
+    const next = sessionProcess();
+    const folder = folderWith('newer-board', 'x\n');
+    assert.equal((await join('NEWER', 'newer-gone', gone)).status, 200);
+    const asked = await ask(gone, folder, [question('Reopened on the older board?')]);
+    await kill(gone);
+    assert.deepEqual((await join('NEWER', 'newer-next', next)).body.reopened.map(r => r.round), [1]);
+    assert.equal((await ask(next, folder, [question('Its own, on the older board')])).round, 2);
+    // A newer board the mission links since, as a post naming the mission makes one.
+    const newer = createBoard({ title: 'Newer', blocks: [note('the newer board')], cwd: folder, mission: 'NEWER' });
+    writeBoard(newer, home);
+    linkBoard('NEWER', { id: newer.id, url: `${base}/b/${newer.id}` }, { home });
+
+    const moved = await ask(next, folder, [question('On the newer board')], { boardId: asked.boardId });
+    assert.deepEqual([moved.boardId, moved.moved], [newer.id, true]);
+    const older = () => [1, 2].map(n => state(asked.boardId, n).slice(0, 2));
+    assert.deepEqual(older(), [['open', true], ['abandoned', false]]);
+    const closed = await post(`/api/board/${asked.boardId}/abandon`, { session: next.ref });
+    assert.deepEqual([closed.status, closed.body.closed], [200, []]);
+    assert.deepEqual(older(), [['open', true], ['abandoned', false]]);
+    assert.equal((await leave('NEWER', 'newer-next', next)).status, 200);
+  });
+
+  const watchOf = (boardId, n) => new RegExp(`^CLAUDE_BOARD_PORT=${port} node \\S*watch\\.mjs\\S* --board ${boardId} --round ${n}$`);
+
+  await check('the shim\'s join names each reopened round with its answer watch, and its close closes the one named of two, marked declined, and leaves the other waiting', async () => {
+    const gone = sessionProcess();
+    const folder = folderWith('shim-reopen', 'x\n');
+    assert.equal((await join('SHIM_REOPEN', 'shim-reopen-gone', gone)).status, 200);
+    const asked = await ask(gone, folder, [question('Left at its clear, for the shim\'s session?')]);
+    assert.equal((await ask(gone, folder, [question('Left when it went?')], { fresh: true })).round, 2);
+    await kill(gone);
+    const { shim, call } = await sessionShim(folder);
+    try {
+      const joined = (await call('mission', { action: 'join', key: 'SHIM_REOPEN', session: 'shim-reopen-next' })).structuredContent;
+      assert.deepEqual(joined.reopened.map(r => [r.board, r.round]), [[asked.boardId, 1], [asked.boardId, 2]]);
+      for (const r of joined.reopened) assert.match(r.watch, watchOf(asked.boardId, r.round));
+      const closed = (await call('mission', { action: 'close', board: asked.boardId, round: 2 })).structuredContent;
+      assert.deepEqual(closed.closed, [2]);
+      assert.deepEqual(readBoard(asked.boardId, home).rounds.map(r => [r.n, r.status, r.declined]), [[1, 'open', undefined], [2, 'abandoned', true]]);
+      await call('mission', { action: 'leave', key: 'SHIM_REOPEN', session: 'shim-reopen-next' });
+    } finally {
+      shim.close();
+    }
+  });
+
+  await check('a taker reads the round its takeover reopened from the shim\'s binding: with its answer watch, and the board\'s url, which the daemon\'s binding does not carry', async () => {
+    const giver = sessionProcess();
+    const folder = folderWith('shim-takeover', 'x\n');
+    assert.equal((await join('SHIM_TAKEN', 'shim-taken-giver', giver)).status, 200);
+    const asked = await ask(giver, folder, [question('Lapsed before the shim took over?')]);
+    lapse(asked.boardId, 1);
+    const { shim, call } = await sessionShim(folder);
+    try {
+      const pending = (await call('mission', { action: 'join', key: 'SHIM_TAKEN', session: 'shim-taken-taker', takeover: true })).structuredContent;
+      assert.equal(pending.takeover, 'pending');
+      assert.equal((await leave('SHIM_TAKEN', 'shim-taken-giver', giver)).status, 200);
+      const binding = (await call('mission', { action: 'binding', session: 'shim-taken-taker' })).structuredContent;
+      assert.deepEqual([binding.key, binding.reopened.map(r => [r.board, r.round])], ['SHIM_TAKEN', [[asked.boardId, 1]]]);
+      assert.match(binding.reopened[0].watch, watchOf(asked.boardId, 1));
+      assert.equal(binding.reopened[0].url, `${base}/b/${asked.boardId}`);
+      await call('mission', { action: 'leave', key: 'SHIM_TAKEN', session: 'shim-taken-taker' });
+    } finally {
+      shim.close();
+    }
+  });
+
+  await check('the shim builds each reopened round\'s url itself and relays none a join answered: this shim\'s own for the entry\'s board, null when that is no board id, and the answer watch only on an entry naming a board and a round', async () => {
+    const folder = folderWith('shim-peer', 'x\n');
+    const theirs = '/Applications/Evil.app';
+    const named = { board: 'b_peer_round', round: 1, title: 'Round', awaitDeadline: '2026-11-15T10:40:00.000Z' };
+    const peer = await startPeer('/api/mission/PEER/join', { bound: true, session: { id: 'peer-session' }, reopened: [
+      { ...named, url: theirs },
+      { board: `-a ${theirs}`, round: 2, url: theirs },
+      { board: 'b_peer_round', round: 'two', url: theirs },
+    ] });
+    const { shim, call } = await sessionShim(folder, { CLAUDE_BOARD_PORT: String(peer.port) });
+    try {
+      const joined = (await call('mission', { action: 'join', key: 'PEER', session: 'peer-session' })).structuredContent;
+      const own = `http://127.0.0.1:${peer.port}/b/b_peer_round`;
+      const { watch, ...first } = joined.reopened[0];
+      assert.match(watch, new RegExp(`^CLAUDE_BOARD_PORT=${peer.port} node \\S*watch\\.mjs\\S* --board b_peer_round --round 1$`));
+      assert.deepEqual([first, ...joined.reopened.slice(1)], [
+        { ...named, url: own },
+        { board: `-a ${theirs}`, round: 2, url: null },
+        { board: 'b_peer_round', round: 'two', url: own },
+      ]);
+    } finally {
+      shim.close();
+      peer.close();
+    }
+  });
+
+  await check('a shim that cannot read its parent process\'s start, so names no session, refuses mission close, and the round stays open', async () => {
+    const s = sessionProcess();
+    const folder = folderWith('shim-no-session', 'x\n');
+    const asked = await ask(s, folder, [question('Closed by a shim naming no session?')]);
+    // A `ps` that answers nothing, first on the shim's PATH.
+    const bin = path.join(home, 'no-ps');
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(path.join(bin, 'ps'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    const { shim } = await sessionShim(folder, { PATH: `${bin}:${process.env.PATH}` });
+    try {
+      const r = await shim.request('tools/call', { name: 'mission', arguments: { action: 'close', board: asked.boardId, round: 1 } });
+      assert.equal(r.result.isError, true, JSON.stringify(r));
+      assert.equal(r.result.content[0].text, 'mission close cannot name this session: its process\'s start did not read. Nothing was closed.');
+      assert.equal(readBoard(asked.boardId, home).rounds[0].status, 'open');
+    } finally {
+      shim.close();
+    }
   });
 
   await check('a session moving onto its mission\'s board is told whether to open a tab as things stand now: suppressed while any board has a watcher, not as the board was decided when it was made', async () => {

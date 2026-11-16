@@ -49,7 +49,7 @@ ask({ title, blocks, wait, fresh })
 ## Posting a rendered artifact
 
 - **Write a generated stage into the render directory and reference it** by absolute path, `{ kind: 'html', source: { path: '/Users/you/Documents/renders/<file>.html' } }`, rather than pasting its bytes. Keep `html` by value for small, readable stages only.
-- **A board whose blocks are one `html` block and nothing else is a page board**: the stage renders at viewport size instead of in the content column. Anything beside it silently costs it that layout, so post the artifact alone and ask about it in a later round.
+- **A board whose blocks are one `html` block and nothing else is a page board**: the stage renders at viewport size instead of in the content column, and anything beside it silently costs it that layout. **A page board is for an artifact nothing is asked about**; a mock with questions goes up in their round ("Question blocks" below).
 - **An artifact is one self-contained file: every script, style, font and image inline or a `data:` URI.** A stage renders in a sandboxed opaque-origin frame, where a relative reference resolves against the board page's URL and silently never loads. One exception: a stage carrying a mermaid class marker gets the board's engine as `window.mermaid` before its scripts run, so it bundles none. Fonts, images and styles stay inline.
 - **A video goes inline too**: `<video controls>` with a `data:` source, or a `blob:` URL the stage's own script builds from inlined bytes. An `http(s)` or relative source never loads. Write the `<video>` and its `aria-label` in the markup and have a script set only `src`, or every comment on the video is lost. A stage may carry up to the post's 25 MB, clips and images included; every other block keeps 512 KiB.
 - **A stage sizes itself from its own content, never from the viewport**, so no `100vh` anywhere. Outside a page board the frame's height is derived from what the stage reports: it fits the artifact from 120px up to 600px; past that it folds, scrolling inside at 600px under a Show full height bar. A rendered-variant option clips at 600px with no bar.
@@ -80,7 +80,7 @@ ask({ title, blocks, wait, fresh })
 
 Two to four options read best, and every answer carries a free-text note. **Every option commits to an answer**: never offer a "your call" or "you decide" option, which leaves every recommended pick ambiguous between agreement and delegation.
 
-`explainer` is one to three sentences of markdown under the prompt; `context` is what the reviewer looks up, one panel beside the options. **A question about a screen or control carries its mock in its own `context`, in the same round**, never a description or a pointer to an earlier round. Attach `code` only to a question about the code.
+`explainer` is one to three sentences of markdown under the prompt; `context` is what the reviewer looks up: one panel beside the options, or the full card width above them when it holds a mock. **A mock and the questions about it share one round**: the mock sits in its question's own `context`, or is the options themselves (`choose-between-rendered-variants`), never a description or a pointer to another round. Attach `code` only to a question about the code.
 
 ## What comes back
 
@@ -112,6 +112,8 @@ Two to four options read best, and every answer carries a free-text note. **Ever
 A comment anchored to a block (`blockId`, `anchor`) is feedback on that block, not an answer; address it as its own input. One packet is one round: no packet redelivers earlier rounds.
 
 **What no packet has carried is owed to the next packet the same thread returns, once**, tagged with its own `round`: comments on a page board posted without `wait` (or whose wait timed out), and answers sent after a round's wait ended. Any packet can carry them, `timeout` and `abandoned` included, so check `round` on every answer and comment before assuming it belongs to the round you just posted; the same check spots an entry `read` already showed you. A round the watch handed you is spent: no later packet carries it.
+
+**A `mission` join lists `reopened` rounds**, as `binding` does after a takeover: each is a round the mission's last session left unanswered, open again under your session, so its answer is yours, through your next `ask` packet, `read`, or its `watch` run as a timeout's. `mission({ action: 'close', board, round })` declines one whose question no longer stands, and it stays closed.
 
 ## Collecting a late answer
 

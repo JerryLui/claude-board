@@ -1092,7 +1092,8 @@ export function amendRound(board, { blocks, cwd, title, ownFolder = false }) {
  * to it declared a boundary and walked away (ADR 69). Returns the round numbers closed;
  * mutates `board` in place, caller persists it.
  *
- * `status: 'abandoned'` is a THIRD terminal state, and inventing one is the point. Until
+ * `status: 'abandoned'` is a THIRD closed state, final for the conversation that left it
+ * (a mission's hand-over may reopen the round, ADR 151), and inventing one is the point. Until
  * now exactly two things ended an awaited round, and neither is honest here:
  *
  *  - `applySubmit` above marks it `sent` with an `action` of `'submitted'`/`'discuss'`.
@@ -1129,8 +1130,14 @@ export function amendRound(board, { blocks, cwd, title, ownFolder = false }) {
  *
  * No `action` is recorded. `action` is the reviewer's own choice and `buildPacket` reads
  * it straight into the packet's `status`, so writing one here would invent a packet
- * status no caller knows. */
-export function abandonOpenRounds(board, { session = null, except = null } = {}) {
+ * status no caller knows.
+ *
+ * Two narrowings (ADR 151). `keepReopened` spares a round a hand-over reopened
+ * (`handOverRounds`): a `fresh` post closes what its session's last conversation asked, and
+ * such a round is the mission's question, asked again of the session. `only` closes that one
+ * round, when a hand-over reopened it, and stamps it `declined`: its session does not want it,
+ * and no hand-over reopens it. A round never reopened is not closed by number. */
+export function abandonOpenRounds(board, { session = null, except = null, only = null, keepReopened = false } = {}) {
   const now = new Date().toISOString();
   const closed = [];
   for (const r of (board && board.rounds) || []) {
@@ -1138,35 +1145,53 @@ export function abandonOpenRounds(board, { session = null, except = null } = {})
     // A mission's board is shared (ADR 150): a session's boundary closes only the rounds it
     // posted, and never the round its own post just opened. A close naming no session there
     // (a shim from before it named one) closes only rounds no session posted.
-    if (r.n === except) continue;
+    if (r.n === except || (only !== null && (r.n !== only || !r.reopenedAt))) continue;
+    if (keepReopened && r.reopenedAt) continue;
     if (session ? !roundOwnedBy(board, r, session) : board.mission && posterOf(board, r)) continue;
     r.status = 'abandoned';
     r.abandonedAt = now;
     r.awaited = false;
+    if (only !== null) r.declined = true;
     closed.push(r.n);
   }
   if (closed.length) board.updatedAt = now;
   return closed;
 }
 
-/** A takeover (ADR 150): the rounds session `giver` left open on `board` become session
- * `taker`'s, the one now holding the mission, so its packets carry their answers and its
- * boundaries close them. Each keeps `handedFrom`, the giver's id. Returns the round numbers
- * handed; mutates `board`, caller persists it. */
-export function handOverRounds(board, giver, taker) {
+/** A hand-over (ADR 150, 151): the rounds session `giver` left unanswered on `board` become
+ * session `taker`'s, the one now holding the mission, so its packets carry their answers.
+ * Each keeps `handedFrom`, the giver's id. One that asks for an answer (it was minted with a
+ * deadline) is reopened in place, whether the giver's boundary closed it, its wait lapsed
+ * or it still waited: `open` and awaited again, its deadline `awaitTimeoutMs` from `now`,
+ * `reopenedAt` stamped and `abandonedAt` dropped. Nothing else of the round moves. A sent
+ * round, one its session closed by number (`declined`) and a closed one that asked nothing
+ * stay as they are. Returns `{ handed, reopened }`, the round numbers of each; mutates
+ * `board`, caller persists it. */
+export function handOverRounds(board, giver, taker, { now = Date.now(), awaitTimeoutMs = DEFAULT_AWAIT_TIMEOUT_MS } = {}) {
   const handed = [];
+  const reopened = [];
+  const at = new Date(now).toISOString();
   for (const r of (board && board.rounds) || []) {
     // Only rounds recorded as the giver's own (`round.session`): one no session posted is no
     // one's to hand, even once a later poster has given the board a session. A round from
     // before rounds recorded their poster stays where it is, as no takeover moved one then.
-    if (r.status !== 'open' || !sessionMatches(r.session, giver)) continue;
+    if (r.status === 'sent' || r.declined || !sessionMatches(r.session, giver)) continue;
+    const asks = r.awaitDeadline != null;
+    if (r.status !== 'open' && !asks) continue;
     const from = (r.session && r.session.id) || giver.id || null;
     r.session = sessionStamp(taker);
     if (from) r.handedFrom = from;
     handed.push(r.n);
+    if (!asks) continue;
+    r.status = 'open';
+    delete r.abandonedAt;
+    r.awaited = true;
+    r.awaitDeadline = new Date(now + awaitTimeoutMs).toISOString();
+    r.reopenedAt = at;
+    reopened.push(r.n);
   }
-  if (handed.length) board.updatedAt = new Date().toISOString();
-  return handed;
+  if (handed.length) board.updatedAt = at;
+  return { handed, reopened };
 }
 
 /** Every block of round `n`, top-level and nested alike, in stored order. The same tree
@@ -1753,7 +1778,7 @@ export function buildPacket(board, round, url) {
 // that case. One field holding one record rather than three parallel ones that must be
 // written, cleared and stripped together:
 //
-//   board.strandedBanner = { at, until, round, returned, pid } | null
+//   board.strandedBanner = { at, until, round, rounds, returned, pid } | null
 //
 //   at        when the banner went up, an ISO stamp like `sentAt`/`postedAt` beside it.
 //             Also what bounds src/stranded.mjs's `pid`: a process that started before this
@@ -1765,7 +1790,11 @@ export function buildPacket(board, round, url) {
 //             screen still counts as this board's one announcement.
 //   round     the highest round the reviewer has been told about: THE MARK, permanent for
 //             the life of that round (ADR.md entry 74). A round at or below it is never
-//             announced again, whatever happens to it.
+//             announced again, whatever happens to it, but one a hand-over reopened that
+//             `rounds` does not list.
+//   rounds    every round a banner has named, in round order (ADR.md entry 151): what tells
+//             a reopened round that has had its banner from one that never did. Absent on a
+//             record written before this field existed, where the mark alone decides.
 //   returned  whether the reviewer has genuinely returned to this board since. False from
 //             the moment a banner is raised, and only a Watcher reporting its tab focused
 //             sets it true -- not a round ending, not the banner expiring, not a restart.

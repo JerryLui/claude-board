@@ -18,15 +18,23 @@
 // `POST /api/board/:id/collect` per poll, every 30 s (CLAUDE_BOARD_WATCH_INTERVAL_MS
 // overrides, for checks); the last poll lands on the bound itself. Both numbers are
 // src/handoff.mjs's, which the shim's text about the watch reads too. Port and credential as
-// the shim's: `daemonPort()` and the local secret (src/secret.mjs).
+// the shim's: `daemonPort()` and the local secret (src/secret.mjs). Each call names the
+// processes this watch runs under, the session that started it among them: a round handed to
+// another session answers that session's watch alone, and any other `abandoned`. Each also
+// names the time this watch started: a round reopened since is the conversation's that
+// joined after it (a /clear keeps the process), and answers this watch `abandoned` too.
 
+import { execFileSync } from 'node:child_process';
 import http from 'node:http';
 import { readSecret, daemonPort, SECRET_HEADER } from '../src/secret.mjs';
 import { SAFE_BOARD_ID, WAIT_CEILING_MS, WATCH_INTERVAL_MS } from '../src/handoff.mjs';
+import { processStartUtc } from '../src/proc-start.mjs';
 
 const MAX_HOURS = WAIT_CEILING_MS / 3_600_000;
 const INTERVAL_MS = Number(process.env.CLAUDE_BOARD_WATCH_INTERVAL_MS) || WATCH_INTERVAL_MS;
 const REQUEST_TIMEOUT_MS = 10_000;
+// How far up its process tree the watch names itself: a session sits a shell or two above it.
+const MAX_UNDER = 8;
 const USAGE = 'usage: node bin/watch.mjs --board <id> --round <n> [--hours <h>]';
 
 function parseArgs(argv) {
@@ -48,12 +56,32 @@ function parseArgs(argv) {
   return { board: opts.board, round, hours: Math.min(hours, MAX_HOURS) };
 }
 
-/** One collect call. Resolves `{ status, json }` for any HTTP answer; rejects when the
- * daemon cannot be reached or does not answer in time. */
-function collect(port, board, round) {
+/** The processes this watch runs under, nearest first, as `[{ pid, procStart }]`: its shell,
+ * then the session that started it, and on up. Read once; a process that cannot be read
+ * ends the list. */
+function runningUnder() {
+  const under = [];
+  let pid = process.ppid;
+  while (pid > 1 && under.length < MAX_UNDER) {
+    const procStart = processStartUtc(pid);
+    if (!procStart) break;
+    under.push({ pid, procStart });
+    try {
+      pid = Number(execFileSync('ps', ['-o', 'ppid=', '-p', String(pid)], { encoding: 'utf8', timeout: 2_000, stdio: ['ignore', 'pipe', 'ignore'] }).trim());
+    } catch {
+      break;
+    }
+  }
+  return under;
+}
+
+/** One collect call, naming `session`, the processes this watch runs under, and `startedAt`,
+ * when it started. Resolves `{ status, json }` for any HTTP answer; rejects when the daemon
+ * cannot be reached or does not answer in time. */
+function collect(port, board, round, session, startedAt) {
   return new Promise((resolve, reject) => {
     const secret = readSecret();
-    const body = JSON.stringify({ round });
+    const body = JSON.stringify({ round, session, startedAt });
     const req = http.request({
       host: '127.0.0.1',
       port,
@@ -87,14 +115,17 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 async function watch({ board, round, hours }) {
   const port = daemonPort();
-  const deadline = Date.now() + hours * 3_600_000;
+  const started = Date.now();
+  const startedAt = new Date(started).toISOString();
+  const deadline = started + hours * 3_600_000;
+  const session = runningUnder();
   process.stderr.write(`watch: board ${board} round ${round}, every ${INTERVAL_MS / 1000}s, until ${new Date(deadline).toISOString()}\n`);
   let downs = 0;
   for (;;) {
     let answer = null;
     let why;
     try {
-      answer = await collect(port, board, round);
+      answer = await collect(port, board, round, session, startedAt);
       if (answer.status === 200 && typeof answer.json?.status !== 'string') why = 'the daemon answered no round status';
       else if (answer.status !== 200 && answer.status !== 404) why = `the daemon answered ${answer.status}${answer.json?.error ? `: ${answer.json.error}` : ''}`;
     } catch (err) {

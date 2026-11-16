@@ -1,20 +1,24 @@
 // Real-browser check for Download round (src/round-export.mjs, src/ui.mjs's
-// downloadRound): a sent round offers it at the right end of its chip line and an open
-// round does not; the file it saves opens from disk with the network off and holds the
+// downloadRound): a sent question round offers it at the right end of its chip line (a
+// round not yet sent, test/check-round-download.mjs); the file a sent round saves opens from disk with the network off and holds the
 // board's title, the round's number and date, the decisions table first, every option
 // with the pick marked, the diagram as SVG at full height, the mock at its full height
 // with none of its scripts run, each comment under what it points at and every image as
 // a data: URL, with no script anywhere in it; and under print media every card, diagram,
 // stage and decisions row is kept whole and fits one page, a mock no taller than a page
-// at its own size and a taller one scaled into its holder. A second board holds what is
+// at its own size and a taller one scaled into its holder. A round not yet sent saves a
+// file that opens on a Not sent line and marks each pick so far as unsent. Pull-out's
+// Download saves the one mock or diagram it shows, alone, as a file that opens offline.
+// A second board holds what is
 // taller than a printed page: a sent artifact round (drawn full page, its Download round
-// on a chip line of its own, its file listing every comment under the mock), a long text,
+// in the top strip, its file listing every comment under the mock), a long text,
 // a diagram, a question with many options, a long free-text answer under a long note and
 // a long comment list; its files are
 // paginated under print media and nothing that must stay whole sits across a page's edge.
-// The artifact round's chip line is read twice more: in a window too narrow for the
-// header to condense, where it stays live over a scrolled artifact, and in the board's
-// archive opened from disk, which draws none. Layout, a real download and a file: page, none of which the DOM
+// The top strip's Download round is read over a scrolled artifact, where it stays drawn
+// and takes its click, in a window too narrow for the header to condense, on a third
+// board whose one artifact round was never sent, and in the board's
+// archive opened from disk, which shows none. Layout, a real download and a file: page, none of which the DOM
 // stand-in has (test/check-round-download.mjs holds the markup).
 //
 // The fixture's images: one pasted on a note and one on a comment, sent with the round
@@ -106,6 +110,16 @@ const TALL_COMMENTS = Array.from({ length: 14 }, (_, i) => ({ blockId: 'm2', anc
 const PINNED_PX = 3000;
 const TALL_ROUND_3 = [
   { id: 'h4', kind: 'html', html: `<style>html, body { height: 100%; margin: 0; }</style><div style="height:${PINNED_PX}px;box-sizing:border-box;border:4px solid #3251c9;background:linear-gradient(#efe,#eef)">Pinned body, spilling content</div>` },
+];
+// The third board: one artifact, shown and never sent, since it asks nothing.
+const SHOWN_TITLE = 'Shown fixture';
+const SHOWN_ROUND_1 = [
+  { id: 'h5', kind: 'html', html: '<div style="height:1800px;box-sizing:border-box;border:4px solid #3251c9;background:linear-gradient(#eef,#efe)">Shown mock</div>' },
+];
+// The first board's open round: one question picked on the page and one left alone.
+const OPEN_ROUND = [
+  { id: 'q6', kind: 'question', prompt: 'Next?', widget: 'single', options: [{ label: 'Go' }, { label: 'Wait' }] },
+  { id: 'q10', kind: 'question', prompt: 'And then?', widget: 'single', options: [{ label: 'Stop' }, { label: 'On' }] },
 ];
 // A free-text answer and a note, each most of a page: under the question's explainer the
 // answer does not fit the first page, nor the note the page the answer moves to.
@@ -203,6 +217,67 @@ const PAGE_FILE_EXPR = `(function () {
   };
 })()`;
 
+// An unsent round's file as opened: what it opens on, its head, its table and each option
+// of the open round with what follows its label.
+const UNSENT_EXPR = `(function () {
+  function texts(sel, root) { return [].slice.call((root || document).querySelectorAll(sel)).map(function (e) { return e.textContent.replace(/\\s+/g, ' ').trim(); }); }
+  var note = document.querySelector('main.export-doc').firstElementChild;
+  return {
+    first: note.className, note: note.textContent.trim(),
+    noteAboveHead: note.getBoundingClientRect().height > 0 && note.getBoundingClientRect().bottom <= document.querySelector('.export-head').getBoundingClientRect().top + 0.5,
+    meta: texts('.export-meta > span'), sections: texts('h2.export-section'), heads: texts('table.export-decisions th'),
+    rows: [].slice.call(document.querySelectorAll('table.export-decisions tbody tr')).map(function (tr) { return texts('td', tr); }),
+    options: [].slice.call(document.querySelectorAll('.card-choice')).map(function (o) {
+      var label = o.querySelector('.opt-label');
+      return { label: label.textContent.trim(), picked: o.classList.contains('selected'), after: getComputedStyle(label, '::after').content };
+    }),
+    // Each question's state chip as drawn: its word and what follows it; '' for a chip not drawn.
+    chips: [].slice.call(document.querySelectorAll('.answer-status')).map(function (c) {
+      return getComputedStyle(c).display === 'none' ? '' : c.textContent.trim() + getComputedStyle(c, '::after').content.replace(/"/g, '');
+    }),
+    hints: document.querySelectorAll('.paste-hint, .thumb-remove').length,
+    scripts: document.scripts.length,
+    controls: document.querySelectorAll('button, textarea, input, form, .pin-layer, .round-download').length,
+    fetched: performance.getEntriesByType('resource').map(function (e) { return e.name; }).filter(function (n) { return !/^data:/.test(n); }),
+  };
+})()`;
+
+// One artifact's file as opened: its head, the one mock or diagram it holds and whatever
+// else of the round or the board came along.
+const ONE_EXPR = `(function () {
+  function texts(sel) { return [].slice.call(document.querySelectorAll(sel)).map(function (e) { return e.textContent.replace(/\\s+/g, ' ').trim(); }); }
+  var frame = document.querySelector('iframe');
+  var svg = document.querySelector('pre.mermaid svg');
+  return {
+    title: document.querySelector('h1').textContent, meta: texts('.export-meta > span'),
+    frames: document.querySelectorAll('iframe').length,
+    frame: frame ? { sandbox: frame.getAttribute('sandbox'), height: frame.getBoundingClientRect().height, srcdoc: frame.getAttribute('srcdoc') } : null,
+    svgs: document.querySelectorAll('svg').length,
+    svg: svg ? { width: svg.getBoundingClientRect().width, height: svg.getBoundingClientRect().height, nodes: svg.querySelectorAll('.node').length } : null,
+    rest: document.querySelectorAll('table, h2, .export-empty, .export-unsent-note, .question-block, .comment-item, .md-content, .card-head').length,
+    scripts: document.scripts.length,
+    controls: document.querySelectorAll('button, textarea, input, form, .pin-layer, .round-download').length,
+    fetched: performance.getEntriesByType('resource').map(function (e) { return e.name; }).filter(function (n) { return !/^data:/.test(n); }),
+  };
+})()`;
+
+// The top strip's Download round on a full-page round: whether it is drawn, inside the
+// window, and what a click at its middle lands on, with whether the artifact has
+// scrolled under the header.
+const STRIP_EXPR = `(function () {
+  var btn = document.querySelector('header.board-head .board-head-actions .head-download');
+  if (!btn) return { present: false };
+  var r = btn.getBoundingClientRect();
+  var cs = getComputedStyle(btn);
+  var hit = document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+  return { hit: !!(hit && hit.closest('.head-download')),
+    drawn: r.width > 0 && r.height > 0 && cs.visibility === 'visible' && cs.opacity === '1',
+    inWindow: r.top >= 0 && r.left >= 0 && r.bottom <= window.innerHeight && r.right <= window.innerWidth,
+    scrolled: document.body.classList.contains('stage-scrolled') };
+})()`;
+const ROUND_CLICK = n => `document.querySelector('.round[data-round="${n}"] .round-download').click()`;
+const STRIP_CLICK = `document.querySelector('header.board-head .board-head-actions .head-download').click()`;
+
 // Under print media at a printed page's width: every piece that must not be cut, with
 // whether it asks to be kept whole and how tall it is.
 const PRINT_EXPR = `(function () {
@@ -286,13 +361,13 @@ function contestedKinds(pieces) {
   return [...kinds].sort();
 }
 
-/** Clicks round `n`'s Download round on the open board tab and answers the one file it
- * saved, into a directory of its own. */
-async function downloadFrom(send, onEvent, tab, n) {
+/** Runs `click`, a press of some Download on the open board tab, and answers the one file
+ * it saved, into a directory of its own. */
+async function downloadFrom(send, onEvent, tab, click) {
   const dir = scratchDir('cb-download-files-');
   await send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: dir, eventsEnabled: true });
   const done = waitForDownload(onEvent, dir);
-  await tab.evalPage(`document.querySelector('.round[data-round="${n}"] .round-download').click()`);
+  await tab.evalPage(click);
   const files = await done;
   const file = path.join(dir, files[0]);
   if (process.env.CLAUDE_BOARD_DOWNLOAD_KEEP) copyFileSync(file, path.join(process.env.CLAUDE_BOARD_DOWNLOAD_KEEP, files[0]));
@@ -337,7 +412,7 @@ async function artifactSession(send, marker) {
   throw new Error(`no artifact frame holds "${marker}"`);
 }
 
-/** The room the board pads an artifact by for its header, chip line, dock and comment
+/** The room the board pads an artifact by for its header, dock and comment
  * rail, top and bottom together, read in the artifact itself (neither fixture artifact
  * pads its own body). */
 const BAND_EXPR = `(function () {
@@ -373,8 +448,7 @@ async function main() {
     const doc = JSON.parse(readFileSync(stored, 'utf8'));
     doc.rounds[0].sentAt = SENT_AT;
     writeFileSync(stored, JSON.stringify(doc));
-    await postJson(`${origin}/api/board`, { boardId: created.boardId, title: TITLE,
-      blocks: [{ id: 'q6', kind: 'question', prompt: 'Next?', widget: 'single', options: [{ label: 'Go' }] }] }, daemon.secret);
+    await postJson(`${origin}/api/board`, { boardId: created.boardId, title: TITLE, blocks: OPEN_ROUND }, daemon.secret);
     const boardUrl = `${origin}${new URL(created.url).pathname}`;
     const downloads = scratchDir('cb-download-files-');
 
@@ -390,18 +464,39 @@ async function main() {
     await postJson(`${origin}/api/board`, { boardId: tall.boardId, title: TALL_TITLE,
       blocks: [{ id: 'q8', kind: 'question', prompt: 'Next?', widget: 'single', options: [{ label: 'Go' }] }] }, daemon.secret);
     const tallUrl = `${origin}${new URL(tall.url).pathname}`;
+    const shown = await postJson(`${origin}/api/board`, { title: SHOWN_TITLE, blocks: SHOWN_ROUND_1 }, daemon.secret);
+    const shownUrl = `${origin}${new URL(shown.url).pathname}`;
 
     await withChrome({ tag: 'cb-download', hideScrollbars: true }, async ({ send, onEvent }) => {
       const cookie = sessionToken(daemon.secret);
       const board = await openTab(send, onEvent, boardUrl, cookie, { width: 1280, height: 900, theme: 'dark',
         expr: `document.querySelector('.round-current').getAttribute('data-round')` });
 
-      const open = await board.evalPage(`({ chips: !!document.querySelector('.round[data-round="2"] .round-chips'),
-        download: document.querySelectorAll('.round[data-round="2"] .round-download').length })`);
-      await row('an open round\'s chip line carries no Download round', () => {
-        assert.equal(board.measured, '2', 'setup: the board opens on its open round');
-        assert.equal(open.chips, true, 'setup: the open round has its chip line');
-        assert.equal(open.download, 0);
+      const offline = async sp => { await sp('Network.emulateNetworkConditions', { offline: true, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }); };
+
+      await board.evalPage(`document.querySelector('[data-block-id="q6"] .card-choice').click()`);
+      await board.until(`document.querySelector('[data-block-id="q6"] .card-choice.selected')`, 'the pick on the open round');
+      const unsentDownload = await downloadFrom(send, onEvent, board, ROUND_CLICK(2));
+      const unsent = await measureTab(send, onEvent, pathToFileURL(unsentDownload.file).href, cookie,
+        { width: 1280, height: 900, theme: 'dark', expr: UNSENT_EXPR, prepare: offline });
+      await row('an unsent round\'s file opens offline on a Not sent line, above its head, and names the round unsent', note => {
+        note(`${unsentDownload.files.join(', ')}: ${unsent.note} | ${unsent.meta} | ${unsent.sections.join(' > ')}`);
+        assert.deepEqual(unsentDownload.files, ['download-fixture-round-2.html']);
+        assert.equal(unsent.first, 'export-unsent-note', 'the first thing in the file');
+        assert.equal(unsent.note, 'Not sent: these picks are a draft, not a decision.');
+        assert.equal(unsent.noteAboveHead, true, 'drawn, above the board\'s title');
+        assert.deepEqual(unsent.meta, ['Round 2', 'Not sent']);
+        assert.deepEqual(unsent.sections, ['Picks so far, not sent', 'Round content']);
+        assert.deepEqual({ scripts: unsent.scripts, controls: unsent.controls, fetched: unsent.fetched }, { scripts: 0, controls: 0, fetched: [] });
+      });
+      await row('the unsent file shows the pick made on the page so far, marked unsent, and the question left alone as unanswered', () => {
+        assert.deepEqual(unsent.heads, ['Question', 'Pick, unsent', 'Note']);
+        assert.deepEqual(unsent.rows, [['Next?', 'Go', ''], ['And then?', 'No answer', '']]);
+        assert.deepEqual(unsent.options.map(o => `${o.label}${o.picked ? ' (picked)' : ''}`), ['Go (picked)', 'Wait', 'Stop', 'On']);
+        assert.match(unsent.options[0].after, /picked, unsent/, 'the picked option says so after its label');
+        assert.deepEqual(unsent.options.slice(1).map(o => o.after), ['none', 'none', 'none'], 'no other option does');
+        assert.deepEqual(unsent.chips, ['Answered, unsent', ''], 'the picked question\'s state chip says unsent too');
+        assert.equal(unsent.hints, 0, 'the page\'s paste hint stays on the page');
       });
 
       await board.evalPage(`document.querySelector('.round-page[data-round="1"]').click()`);
@@ -433,6 +528,54 @@ async function main() {
         return { top: frame.getBoundingClientRect().top, windowBottom: window.innerHeight, reported: frame.__cbStageContentH || 0 };
       })()`);
 
+      // Pull-out, the full-window view of one mock or one diagram, and its own Download.
+      const barOf = lens => `[].slice.call(document.querySelectorAll('dialog.${lens} .lens-bar .lens-btn')).map(function (b) { return b.textContent.trim(); })`;
+      await board.evalPage(`document.querySelector('[data-block-id="h1"] .pull-out').click()`);
+      await board.until(`document.querySelector('dialog.stage-lens[open] iframe')`, 'the mock pulled out');
+      const mockBar = await board.evalPage(barOf('stage-lens'));
+      const mockDownload = await downloadFrom(send, onEvent, board, `document.querySelector('dialog.stage-lens [data-lens="download"]').click()`);
+      await board.evalPage(`document.querySelector('dialog.stage-lens [data-lens="close"]').click()`);
+      await board.until(`!document.querySelector('dialog.stage-lens[open]')`, 'the mock\'s Pull-out closed');
+      await board.until(`document.querySelector('[data-block-id="m1"] pre.mermaid svg')`, 'the diagram drawn');
+      await board.evalPage(`document.querySelector('[data-block-id="m1"] .pull-out').click()`);
+      await board.until(`document.querySelector('dialog.diagram-lens[open] svg')`, 'the diagram pulled out');
+      const diagramBar = await board.evalPage(barOf('diagram-lens'));
+      const diagramDownload = await downloadFrom(send, onEvent, board, `document.querySelector('dialog.diagram-lens [data-lens="download"]').click()`);
+      await board.evalPage(`document.querySelector('dialog.diagram-lens [data-lens="close"]').click()`);
+      await board.until(`!document.querySelector('dialog.diagram-lens[open]')`, 'the diagram\'s Pull-out closed');
+      const oneMock = await measureTab(send, onEvent, pathToFileURL(mockDownload.file).href, cookie,
+        { width: 1280, height: 900, theme: 'dark', expr: ONE_EXPR, prepare: offline });
+      const oneDiagram = await measureTab(send, onEvent, pathToFileURL(diagramDownload.file).href, cookie,
+        { width: 1280, height: 900, theme: 'dark', expr: ONE_EXPR, prepare: offline });
+      const quiet = m => ({ scripts: m.scripts, controls: m.controls, fetched: m.fetched, rest: m.rest });
+      await row('Pull-out on a mock has a Download beside close, which saves that mock alone as one file that opens offline, at its full height, script-free', note => {
+        const bytes = readFileSync(mockDownload.file, 'utf8');
+        note(`${mockBar.join(' | ')}; ${mockDownload.files.join(', ')}, ${bytes.length} bytes, the mock ${oneMock.frame && oneMock.frame.height}px tall`);
+        assert.deepEqual(mockBar.slice(-2), ['download', 'close']);
+        assert.deepEqual(mockDownload.files, ['download-fixture-round-1-mock-h1.html']);
+        assert.doesNotMatch(bytes, /<script/i);
+        assert.doesNotMatch(bytes, /allow-scripts/);
+        assert.equal(oneMock.title, TITLE);
+        assert.deepEqual(oneMock.meta, ['Round 1', 'One mock']);
+        assert.deepEqual({ frames: oneMock.frames, svgs: oneMock.svgs }, { frames: 1, svgs: 0 }, 'the mock and no diagram');
+        assert.equal(oneMock.frame.sandbox, '', 'sandboxed with nothing allowed');
+        assert.ok(oneMock.frame.height >= STAGE_PX, `as tall as the mock, not the ${oneMock.frame.height}px the board folds it to`);
+        assert.match(oneMock.frame.srcdoc, /Static mock/);
+        assert.deepEqual(quiet(oneMock), { scripts: 0, controls: 0, fetched: [], rest: 0 }, 'no script, no control, nothing fetched, nothing else of the round');
+      });
+      await row('Pull-out on a diagram has the same Download, which saves that diagram alone, drawn, as one file that opens offline', note => {
+        const bytes = readFileSync(diagramDownload.file, 'utf8');
+        note(`${diagramBar.join(' | ')}; ${diagramDownload.files.join(', ')}, ${bytes.length} bytes, the diagram ${oneDiagram.svg && Math.round(oneDiagram.svg.width)}x${oneDiagram.svg && Math.round(oneDiagram.svg.height)}`);
+        assert.deepEqual(diagramBar.slice(-4), ['fit', '1:1', 'download', 'close']);
+        assert.deepEqual(diagramDownload.files, ['download-fixture-round-1-diagram-m1.html']);
+        assert.doesNotMatch(bytes, /<script/i);
+        assert.deepEqual(oneDiagram.meta, ['Round 1', 'One diagram']);
+        assert.deepEqual({ frames: oneDiagram.frames, svgs: oneDiagram.svgs }, { frames: 0, svgs: 1 }, 'the diagram and no mock');
+        assert.ok(oneDiagram.svg.width > 50 && oneDiagram.svg.height > 100, 'drawn at a size to read');
+        assert.equal(oneDiagram.svg.nodes, 4, 'all four of its nodes');
+        assert.deepEqual(quiet(oneDiagram), { scripts: 0, controls: 0, fetched: [], rest: 0 }, 'no script, no control, nothing fetched, nothing else of the round');
+      });
+
       await send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: downloads, eventsEnabled: true });
       const done = waitForDownload(onEvent, downloads);
       await board.evalPage(`document.querySelector('.round[data-round="1"] .round-download').click()`);
@@ -454,7 +597,6 @@ async function main() {
         assert.doesNotMatch(bytes, /src="(?!data:)/, 'every src is a data: URL');
       });
 
-      const offline = async sp => { await sp('Network.emulateNetworkConditions', { offline: true, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }); };
       const saved = await openTab(send, onEvent, pathToFileURL(file).href, cookie, { width: 1280, height: 900, theme: 'dark', expr: EXPORT_EXPR, prepare: offline });
       const m = saved.measured;
 
@@ -572,50 +714,47 @@ async function main() {
       await tallTab.quiet();
       const page = await tallTab.evalPage(`(function () {
         function box(el) { var r = el.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, left: r.left, right: r.right }; }
-        var btn = document.querySelector('.round[data-round="1"] .round-download');
-        var hit = btn && document.elementFromPoint((box(btn).left + box(btn).right) / 2, (box(btn).top + box(btn).bottom) / 2);
-        return { btn: btn && box(btn), head: box(document.querySelector('.board-head')), hit: !!(hit && hit.closest('.round-download')),
-          chipsBottom: box(document.querySelector('.round-current .round-chips')).bottom,
+        var btn = document.querySelector('header.board-head .board-head-actions .head-download');
+        return { btn: btn && box(btn), text: btn && btn.textContent.trim(), head: box(document.querySelector('.board-head')),
+          status: document.querySelector('.round-current').getAttribute('data-round-status'),
+          chips: document.querySelectorAll('.round-current .round-chips, .round-current .round-download').length,
           frameTop: box(document.querySelector('.round-current iframe')).top };
       })()`);
+      const stripAtRest = await tallTab.evalPage(STRIP_EXPR);
       const tallFrame = await artifactSession(send, 'Tall mock');
       const padTop = await evalIn(send, tallFrame, 'parseFloat(getComputedStyle(document.body).paddingTop)');
-      await row('a sent artifact round, drawn full page, shows Download round under the header', note => {
-        note(`header ends at ${page.head.bottom}, button ${page.btn && page.btn.top}..${page.btn && page.btn.bottom}`);
+      await row('a sent artifact round, drawn full page, shows Download round in the top strip, among its controls', note => {
+        note(`header ${page.head.top}..${page.head.bottom}, button ${page.btn && page.btn.top}..${page.btn && page.btn.bottom}`);
         assert.equal(tallTab.measured, '4', 'setup: the board opens on its open round');
-        assert.ok(page.btn, 'the sent artifact round has the control');
-        assert.ok(page.btn.top >= page.head.bottom - 0.5, 'below the header, not under it');
-        assert.equal(page.hit, true, 'nothing covers it: a click lands on it');
+        assert.equal(page.status, 'sent', 'setup: the artifact round is sent');
+        assert.ok(page.btn, 'the top strip has the control');
+        assert.equal(page.text, 'Download round');
+        assert.ok(page.btn.top >= page.head.top && page.btn.bottom <= page.head.bottom, 'inside the strip');
+        assert.deepEqual(stripAtRest, { hit: true, drawn: true, inWindow: true, scrolled: false }, 'drawn, and a click lands on it');
+        assert.equal(page.chips, 0, 'and no chip line or second control over the artifact');
       });
 
-      await row('the artifact is padded down to the chip line\'s bottom, so the line covers none of it', note => {
-        note(`chip line ends at ${page.chipsBottom}, the artifact's own top padding is ${padTop}px in a frame at ${page.frameTop}`);
-        assert.ok(page.chipsBottom > page.head.bottom + 1, 'setup: the chip line runs on below the header');
-        assert.ok(Math.abs(page.frameTop + padTop - page.chipsBottom) <= 0.5, 'the artifact begins where the chip line ends');
+      await row('the artifact is padded down to the top strip\'s bottom and no further, so the strip covers none of it', note => {
+        note(`the strip ends at ${page.head.bottom}, the artifact's own top padding is ${padTop}px in a frame at ${page.frameTop}`);
+        assert.ok(Math.abs(page.frameTop + padTop - page.head.bottom) <= 0.5, 'the artifact begins where the strip ends');
       });
 
-      // Where a click on the control lands, how drawn the chip line is, and whether the
-      // artifact has scrolled under the header.
-      const buttonHit = `(function () {
-        var chips = document.querySelector('.round-current .round-chips');
-        var r = chips.querySelector('.round-download').getBoundingClientRect();
-        var hit = document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2);
-        return { hit: !!(hit && hit.closest('.round-download')), opacity: getComputedStyle(chips).opacity,
-          scrolled: document.body.classList.contains('stage-scrolled') };
-      })()`;
       await evalIn(send, tallFrame, 'window.scrollTo(0, 400)');
       await tallTab.until(`document.body.classList.contains('stage-scrolled')`, 'the artifact scrolling under the header');
       await tallTab.quiet();
-      const wideScrolled = await tallTab.evalPage(buttonHit);
+      const stripScrolled = await tallTab.evalPage(STRIP_EXPR);
+      const scrolledDownload = await downloadFrom(send, onEvent, tallTab, STRIP_CLICK);
       await evalIn(send, tallFrame, 'window.scrollTo(0, 0)');
       await tallTab.until(`!document.body.classList.contains('stage-scrolled')`, 'the artifact back at its top');
       await tallTab.quiet();
-      await row('in a wide window the chip line leaves as the artifact scrolls under the header, and a click at the control\'s place passes through', () => {
-        assert.deepEqual(wideScrolled, { hit: false, opacity: '0', scrolled: true });
+      await row('once the artifact has scrolled under the header, the strip\'s Download round is still drawn and its click still saves the round', note => {
+        note(scrolledDownload.files.join(', '));
+        assert.deepEqual(stripScrolled, { hit: true, drawn: true, inWindow: true, scrolled: true });
+        assert.deepEqual(scrolledDownload.files, ['tall-fixture-round-1.html']);
       });
 
       const mockBand = await evalIn(send, tallFrame, BAND_EXPR);
-      const pageDownload = await downloadFrom(send, onEvent, tallTab, 1);
+      const pageDownload = await downloadFrom(send, onEvent, tallTab, STRIP_CLICK);
       await row('its Download round saves the artifact round as one HTML file, the mock at its full height', note => {
         const saved = savedMockHeight(pageDownload.file);
         note(`${pageDownload.files.join(', ')}; the artifact is ${TALL_MOCK_PX}px tall, padded ${mockBand}px on the board; the file draws it ${saved}px tall, ${saved - TALL_MOCK_PX}px of that past its end`);
@@ -637,7 +776,7 @@ async function main() {
       await tallTab.evalPage(`document.querySelector('.round-page[data-round="2"]').click()`);
       await tallTab.until(`document.querySelector('.round[data-round="2"]').classList.contains('round-current')`, 'the flip to round 2');
       await tallTab.until(`document.querySelector('[data-block-id="m2"] pre.mermaid svg')`, 'the tall diagram drawn');
-      const tallDownload = await downloadFrom(send, onEvent, tallTab, 2);
+      const tallDownload = await downloadFrom(send, onEvent, tallTab, ROUND_CLICK(2));
 
       await tallTab.evalPage(`document.querySelector('.round-page[data-round="3"]').click()`);
       await tallTab.until(`document.body.classList.contains('page-board') && document.querySelector('.round[data-round="3"]').classList.contains('round-current')`, 'the flip to the pinned artifact round');
@@ -645,7 +784,7 @@ async function main() {
       await tallTab.quiet();
       const pinnedFrame = await artifactSession(send, 'Pinned body');
       const pinnedBand = await evalIn(send, pinnedFrame, BAND_EXPR);
-      const pinnedDownload = await downloadFrom(send, onEvent, tallTab, 3);
+      const pinnedDownload = await downloadFrom(send, onEvent, tallTab, STRIP_CLICK);
       await row('an artifact whose content spills out of a body pinned to the window is saved at the content\'s full height', note => {
         const saved = savedMockHeight(pinnedDownload.file);
         note(`the artifact is ${PINNED_PX}px tall, padded ${pinnedBand}px on the board; the file draws it ${saved}px tall, ${saved - PINNED_PX}px of that past its end`);
@@ -674,27 +813,46 @@ async function main() {
         assert.equal(afterAsk, atEnd);
       });
 
-      // Back on the artifact round, in a window too narrow for the header to condense:
-      // the chip line stays drawn as the artifact scrolls under it.
+      // Back on the artifact round, in a window too narrow for the header to condense.
       await tallTab.evalPage(`document.querySelector('.round-page[data-round="1"]').click()`);
       await tallTab.until(`document.body.classList.contains('page-board') && document.querySelector('.round[data-round="1"]').classList.contains('round-current')`, 'the flip back to the artifact round');
       await tallTab.sp('Emulation.setDeviceMetricsOverride', { width: 560, height: 800, deviceScaleFactor: 1, mobile: false });
       await tallTab.quiet();
-      const narrowAtRest = await tallTab.evalPage(buttonHit);
-      const narrowHead = await tallTab.evalPage(`({ head: document.querySelector('.board-head').getBoundingClientRect().height,
-        chipsPad: parseFloat(getComputedStyle(document.querySelector('.round-current .round-chips')).paddingTop) })`);
+      const narrowAtRest = await tallTab.evalPage(STRIP_EXPR);
       await evalIn(send, await artifactSession(send, 'Tall mock'), 'window.scrollTo(0, 200)');
       await tallTab.until(`document.body.classList.contains('stage-scrolled')`, 'the artifact scrolling');
-      const narrowScrolled = await tallTab.evalPage(buttonHit);
+      const narrowScrolled = await tallTab.evalPage(STRIP_EXPR);
       await tallTab.close();
-      await row('under a header taller than usual, as a narrow window makes it, the chip line still begins at the header\'s bottom', note => {
-        note(`header ${narrowHead.head}px tall, chip line padded ${narrowHead.chipsPad}px`);
-        assert.ok(narrowHead.head > 80, 'setup: the header is taller than the 76px the chip line falls back on');
-        assert.ok(Math.abs(narrowHead.chipsPad - narrowHead.head) <= 0.5);
+      await row('in a narrow window the strip\'s Download round is drawn inside the window and takes a click, at rest and over a scrolled artifact', () => {
+        assert.deepEqual(narrowAtRest, { hit: true, drawn: true, inWindow: true, scrolled: false });
+        assert.deepEqual(narrowScrolled, { hit: true, drawn: true, inWindow: true, scrolled: true });
       });
-      await row('in a narrow window, where the chip line stays drawn over a scrolled artifact, its Download round still takes a click', () => {
-        assert.deepEqual(narrowAtRest, { hit: true, opacity: '1', scrolled: false }, 'setup: at rest the control is drawn and live');
-        assert.deepEqual(narrowScrolled, { hit: true, opacity: '1', scrolled: true });
+
+      // An artifact that asks nothing is never sent: its round offers the same control.
+      const shownTab = await openTab(send, onEvent, shownUrl, cookie, { width: 1280, height: 800, theme: 'dark',
+        expr: `document.body.classList.contains('page-board') && document.querySelector('.round-current').getAttribute('data-round-status')` });
+      await reportedHeight(shownTab, 'h5');
+      await shownTab.quiet();
+      const shownAtRest = await shownTab.evalPage(STRIP_EXPR);
+      await evalIn(send, await artifactSession(send, 'Shown mock'), 'window.scrollTo(0, 400)');
+      await shownTab.until(`document.body.classList.contains('stage-scrolled')`, 'the unsent artifact scrolling under the header');
+      await shownTab.quiet();
+      const shownScrolled = await shownTab.evalPage(STRIP_EXPR);
+      const shownDownload = await downloadFrom(send, onEvent, shownTab, STRIP_CLICK);
+      await shownTab.close();
+      const shownFile = await measureTab(send, onEvent, pathToFileURL(shownDownload.file).href, cookie,
+        { width: 1280, height: 900, theme: 'dark', prepare: offline, expr: `({
+          meta: [].slice.call(document.querySelectorAll('.export-meta > span')).map(function (e) { return e.textContent.trim(); }),
+          unsentNotes: document.querySelectorAll('.export-unsent-note').length,
+          empty: (document.querySelector('.export-empty') || {}).textContent, frames: document.querySelectorAll('iframe').length })` });
+      await row('an artifact round never sent shows the same Download round in the top strip, at rest and scrolled, and it saves the round', note => {
+        note(shownDownload.files.join(', '));
+        assert.equal(shownTab.measured, 'open', 'setup: drawn full page, and not sent');
+        assert.deepEqual(shownAtRest, { hit: true, drawn: true, inWindow: true, scrolled: false });
+        assert.deepEqual(shownScrolled, { hit: true, drawn: true, inWindow: true, scrolled: true });
+        assert.deepEqual(shownDownload.files, ['shown-fixture-round-1.html']);
+        assert.deepEqual(shownFile, { meta: ['Round 1'], unsentNotes: 0, empty: 'This round asked no questions.', frames: 1 },
+          'the mock, and no Not sent line: nothing was asked, so nothing is a draft');
       });
 
       // The board as a reader has it with no daemon behind it: opened from disk, read-only.
@@ -705,17 +863,14 @@ async function main() {
       await archived.until(`document.body.classList.contains('page-board') && document.querySelector('.round[data-round="1"]').classList.contains('round-current')`, 'the archive\'s flip to the artifact round');
       await archived.quiet();
       const strip = await archived.evalPage(`(function () {
-        var chips = document.querySelector('.round-current .round-chips');
-        var mock = document.querySelector('.round-current iframe').getBoundingClientRect();
-        var hit = document.elementFromPoint(mock.left + mock.width / 2, document.querySelector('.board-head').getBoundingClientRect().bottom + 12);
-        return { chips: !!chips, height: chips ? chips.getBoundingClientRect().height : 0, overMock: !!(hit && hit.closest('.round-chips')) };
+        var btn = document.querySelector('header.board-head .head-download');
+        return { present: !!btn, display: btn && getComputedStyle(btn).display,
+          chips: document.querySelectorAll('.round-current .round-chips').length };
       })()`);
       await archived.close();
-      await row('a read-only archive, which offers no Download round, draws no chip line over a sent artifact round', note => {
-        note(`chip line ${strip.height}px tall`);
+      await row('a read-only archive, which cannot save a round, shows no Download round in its top strip and no chip line over the artifact', () => {
         assert.equal(archived.measured, true, 'setup: opened from disk, the board is read-only');
-        assert.equal(strip.chips, true, 'setup: the sent artifact round carries its chip line');
-        assert.deepEqual({ height: strip.height, overMock: strip.overMock }, { height: 0, overMock: false });
+        assert.deepEqual(strip, { present: true, display: 'none', chips: 0 });
       });
 
       const printedPage = await paginate(send, onEvent, pageDownload.file, cookie, A4_W);

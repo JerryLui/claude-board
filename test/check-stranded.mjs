@@ -29,8 +29,9 @@ import path from 'node:path';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { SECRET_HEADER } from '../src/secret.mjs';
-import { createBoard, addRound, amendRound } from '../src/board.mjs';
+import { createBoard, addRound, amendRound, abandonOpenRounds, handOverRounds } from '../src/board.mjs';
 import { readBoard, writeBoard } from '../src/store.mjs';
+import { linkBoard } from '../src/missions.mjs';
 import { STRANDED_BANNER, SUPPRESSED } from '../src/board.mjs';
 import { roundIsAwaitedOpen } from '../src/badge.mjs';
 import { CLICK_LIFETIME_MAX_MS } from '../src/notify.mjs';
@@ -636,6 +637,78 @@ async function layerOne() {
     watch.close();
   });
 
+  await check('ADR 151: a round a hand-over reopens behind the mark rings once when no banner ever named it, and a reopened round a banner did name stays silent', async () => {
+    const { looking, banners, watch } = stand();
+    const giver = { pid: 4101, procStart: '2026-11-11T08:00:00Z', id: 'giver' };
+    const taker = { pid: 4102, procStart: '2026-11-11T08:00:00Z', id: 'taker' };
+    // Round 1 closed by its session's boundary before any banner; round 2 is the one announced.
+    const board = createBoard({ title: 'Stranded', blocks: [QUESTION('Closed before any banner')], cwd: projectDir, awaitTimeoutMs: AWAIT_MS, session: giver });
+    assert.deepEqual(abandonOpenRounds(board, { session: giver }), [1]);
+    addRound(board, { blocks: [QUESTION('The one announced')], awaitTimeoutMs: AWAIT_MS, session: giver });
+    writeBoard(board, home);
+    watch.evaluate(board.id, target(board.id));
+    await sleep(40);
+    assert.equal(banners.length, 1);
+    assert.equal(bannerOn(board.id).round, 2);
+
+    looking.set(board.id, true); // the reviewer comes back, and the mission changes hands
+    watch.evaluate(board.id, target(board.id));
+    const handed = readBoard(board.id, home);
+    assert.deepEqual(handOverRounds(handed, giver, taker, { awaitTimeoutMs: AWAIT_MS }).reopened, [1, 2]);
+    writeBoard(handed, home);
+    looking.delete(board.id);
+    watch.evaluate(board.id, target(board.id));
+    await sleep(40);
+    assert.equal(banners.length, 2, 'round 1 waits again and no banner ever named it');
+    assert.deepEqual([bannerOn(board.id).round, bannerOn(board.id).rounds], [2, [1, 2]], 'the mark stays on round 2, and round 1 is now named beside it');
+
+    looking.set(board.id, true);
+    watch.evaluate(board.id, target(board.id));
+    looking.delete(board.id);
+    watch.evaluate(board.id, target(board.id));
+    await sleep(40);
+    assert.equal(banners.length, 2, 'round 2 was announced before it was reopened, and round 1 has had its one');
+    watch.close();
+  });
+
+  await check('ADR 151: a banner for a round reopened behind the mark leaves the mark on the higher round, so an amend of that round afterwards withdraws the banner standing and rings again', async () => {
+    const { looking, banners, watch } = stand();
+    // One process through a /clear: round 1 asked under its first id and closed at the /clear
+    // before any banner, round 2 asked under its second and announced.
+    const before = { pid: 4201, procStart: '2026-11-11T08:00:00Z', id: 'before' };
+    const after = { ...before, id: 'after' };
+    const board = createBoard({ title: 'Stranded', blocks: [QUESTION('Closed at the /clear')], cwd: projectDir, awaitTimeoutMs: AWAIT_MS, session: before });
+    assert.deepEqual(abandonOpenRounds(board, { session: before }), [1]);
+    addRound(board, { blocks: [QUESTION('Asked after it')], awaitTimeoutMs: AWAIT_MS, session: after });
+    writeBoard(board, home);
+    watch.evaluate(board.id, target(board.id));
+    await sleep(40);
+    assert.equal(banners.length, 1);
+    assert.equal(bannerOn(board.id).round, 2);
+
+    looking.set(board.id, true); // the reviewer comes back, and the session joins again under its new id
+    watch.evaluate(board.id, target(board.id));
+    const handed = readBoard(board.id, home);
+    assert.deepEqual(handOverRounds(handed, { id: 'before' }, after, { awaitTimeoutMs: AWAIT_MS }).reopened, [1]);
+    writeBoard(handed, home);
+    looking.delete(board.id);
+    watch.evaluate(board.id, target(board.id));
+    await sleep(40);
+    assert.equal(banners.length, 2, 'round 1 waits again and no banner ever named it');
+
+    // The session's next question amends round 2, still open and its own.
+    const fresh = readBoard(board.id, home);
+    assert.equal(amendRound(fresh, { blocks: [QUESTION('Asked again, reworded')], cwd: projectDir }).round, 2);
+    writeBoard(fresh, home);
+    watch.amended(board.id, 2);
+    watch.evaluate(board.id, target(board.id));
+    await sleep(40);
+    assert.deepEqual(banners[1].child.killed, ['SIGTERM'], 'the banner standing is withdrawn');
+    assert.equal(banners.length, 3, 'round 2 rings again for the question the reviewer never saw');
+    assert.deepEqual([bannerOn(board.id).round, bannerOn(board.id).rounds], [2, [1, 2]]);
+    watch.close();
+  });
+
   await check('regression: an amend must not regress the mark past round-1, or an OLDER already-answered-for round rings again while the amended one stays silent', async () => {
     // The severe defect a review caught: `nextToAnnounce` always names the OLDEST
     // still-waiting round past the mark, and a board can hold more than one awaited-open
@@ -1104,6 +1177,46 @@ async function layerOne() {
     assert.equal(successor.watch.answered(board.id, 1), true);
     assert.deepEqual(successor.withdrawn, [{ pid: 4242, startedAtMs: Date.parse(rec.at) }],
       'the recorded pid is what withdraws it, bounded by when the record was written');
+    successor.watch.close();
+    crashed.watch.close();
+  });
+
+  await check('ADR 151: after an unclean restart, sending a round reopened behind the mark withdraws its banner by the recorded pid, and sending the higher round the mark names does not; a record from before the banner\'s own round was kept reads its mark as that round', async () => {
+    const crashed = stand();
+    // One process through a /clear: round 1 closed at the /clear before any banner, round 2
+    // announced, then round 1 reopened by the join after it and announced behind the mark.
+    const before = { pid: 4301, procStart: '2026-11-11T08:00:00Z', id: 'before' };
+    const after = { ...before, id: 'after' };
+    const board = createBoard({ title: 'Stranded', blocks: [QUESTION('Closed at the /clear')], cwd: projectDir, awaitTimeoutMs: AWAIT_MS, session: before });
+    assert.deepEqual(abandonOpenRounds(board, { session: before }), [1]);
+    addRound(board, { blocks: [QUESTION('Asked after it')], awaitTimeoutMs: AWAIT_MS, session: after });
+    writeBoard(board, home);
+    crashed.watch.evaluate(board.id, target(board.id));
+    await sleep(40);
+    crashed.looking.set(board.id, true);
+    crashed.watch.evaluate(board.id, target(board.id));
+    const handed = readBoard(board.id, home);
+    assert.deepEqual(handOverRounds(handed, { id: 'before' }, after, { awaitTimeoutMs: AWAIT_MS }).reopened, [1]);
+    writeBoard(handed, home);
+    crashed.looking.delete(board.id);
+    crashed.watch.evaluate(board.id, target(board.id));
+    await sleep(40);
+    const rec = bannerOn(board.id);
+    assert.deepEqual([crashed.banners.length, rec.round, rec.rounds, rec.pid], [2, 2, [1, 2], 4242], 'setup: round 1\'s banner is up, the mark on round 2');
+
+    const successor = stand(); // no handle for that child anywhere in this process
+    assert.equal(successor.watch.answered(board.id, 2), false, 'round 2 is not what the banner is about');
+    assert.deepEqual(successor.withdrawn, [], 'so round 1, still waiting, keeps its banner');
+    assert.equal(successor.watch.answered(board.id, 1), true);
+    assert.deepEqual(successor.withdrawn, [{ pid: 4242, startedAtMs: Date.parse(rec.at) }]);
+
+    // The record as a daemon from before the field wrote it: the mark alone, the banner's round.
+    const older = readBoard(board.id, home);
+    delete older[STRANDED_BANNER].about;
+    writeBoard(older, home);
+    assert.equal(successor.watch.answered(board.id, 1), false);
+    assert.equal(successor.watch.answered(board.id, 2), true);
+    assert.equal(successor.withdrawn.length, 2);
     successor.watch.close();
     crashed.watch.close();
   });
@@ -2542,6 +2655,39 @@ async function layerTwo() {
       });
     } finally {
       process.env.STUB_OSASCRIPT_LINGER_MS = '0';
+    }
+  });
+
+  await check('ADR 151: a join that reopens a round on a board nobody is looking at raises that round\'s banner', async () => {
+    const idle = () => spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    const gone = idle();
+    const next = idle();
+    const ref = child => ({ pid: child.pid, procStart: '2026-11-11T08:00:00Z' });
+    const join = (id, child) => rawRequest(port, 'POST', '/api/mission/STRANDED_REOPEN/join', {
+      headers: { 'content-type': 'application/json', [SECRET_HEADER]: SECRET },
+      body: JSON.stringify({ id, ...ref(child) }),
+    });
+    try {
+      // Round 1 closed by its session's boundary with no banner raised, on the mission's board.
+      const board = createBoard({
+        title: 'Stranded: reopened', blocks: [QUESTION('Left at its clear?')], cwd: projectFor(workDir, 'reopened-unwatched'),
+        awaitTimeoutMs: AWAIT_MS, mission: 'STRANDED_REOPEN', session: ref(gone),
+      });
+      assert.deepEqual(abandonOpenRounds(board, { session: ref(gone) }), [1]);
+      writeBoard(board, home);
+      linkBoard('STRANDED_REOPEN', { id: board.id, url: `http://127.0.0.1:${port}/b/${board.id}` }, { home });
+      assert.equal((await join('reopen-gone', gone)).status, 200);
+      gone.kill('SIGKILL');
+      await new Promise(resolve => gone.once('exit', resolve));
+
+      const joined = await join('reopen-next', next);
+      assert.deepEqual([joined.status, JSON.parse(joined.body).reopened.map(r => r.round)], [200, [1]], joined.body);
+      const rows = await waitForCount(() => spawnsFor(LOG, 'reopened-unwatched'), 1, { timeoutMs: 2000, intervalMs: 10 });
+      assert.equal(rows.length, 1, 'the reopened round rings: no tab is on its board');
+      assert.equal(bannerOn(board.id).round, 1);
+    } finally {
+      gone.kill('SIGKILL');
+      next.kill('SIGKILL');
     }
   });
 

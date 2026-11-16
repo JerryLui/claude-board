@@ -404,7 +404,7 @@ async function main() {
     assert.deepEqual(res.result.tools.map(t => t.name).sort(), ['ask', 'mission', 'read']);
     const mission = res.result.tools.find(t => t.name === 'mission');
     assert.deepEqual(mission.inputSchema.required, ['action']);
-    assert.deepEqual(mission.inputSchema.properties.action.enum, ['list', 'read', 'write', 'join', 'leave', 'binding', 'seen', 'order', 'resent', 'relay', 'ack']);
+    assert.deepEqual(mission.inputSchema.properties.action.enum, ['list', 'read', 'write', 'join', 'leave', 'binding', 'seen', 'order', 'resent', 'relay', 'ack', 'close']);
     const tool = res.result.tools.find(t => t.name === 'ask');
     assert.equal(tool.inputSchema.type, 'object');
     assert.ok(tool.inputSchema.properties.title);

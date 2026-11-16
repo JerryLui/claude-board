@@ -3,7 +3,8 @@
 // lands on the same pixels on both views, at 1440 and 2560 wide, light and dark; the
 // bar's title and view tabs hold the places they have at 1280, where the round page's
 // wide column is not in force; the boards list and its filter run the bar's whole content
-// width; and an ordinary board page's own header sits on the same edges. Layout, which the DOM stand-in has none of
+// width; an ordinary board page's own header sits on the same edges; and that header takes
+// a click on its controls only, one on the rest of it landing on the page under it. Layout, which the DOM stand-in has none of
 // (QUIRKS.md "The DOM stand-in's ceilings"): test/check-topbar.mjs holds the markup.
 //
 // NOT wired into test/run.mjs's `checks` array, on purpose: that suite has to pass on a
@@ -24,8 +25,8 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { sessionToken } from '../src/secret.mjs';
-import { runMain, skipFile } from './support.mjs';
-import { CHROME, guardRun, measureTab, postJson, row, startScratchDaemon, withChrome } from './browser-support.mjs';
+import { runMain, skipFile, waitFor } from './support.mjs';
+import { CHROME, clickAt, guardRun, measureTab, openTab, postJson, row, startScratchDaemon, withChrome } from './browser-support.mjs';
 
 if (!existsSync(CHROME)) skipFile('browser-check-topbar', `browser-check-topbar: no Chrome at ${CHROME} (set CLAUDE_BOARD_CHROME_BIN to override)`);
 
@@ -93,6 +94,11 @@ async function main() {
     const longBoard = await post({ title: 'An ordinary board',
       blocks: Array.from({ length: 30 }, (_, i) => ({ kind: 'markdown', text: `Paragraph ${i + 1}.\n\nMore text, to scroll.` })) });
     const boardUrl = `${origin}${new URL(longBoard.url).pathname}`;
+    // An open question over enough text to scroll: its options pass under the header.
+    const askedBoard = await post({ title: 'A board with a question', wait: true, blocks: [
+      { kind: 'question', prompt: 'Which one?', widget: 'single', options: Array.from({ length: 4 }, (_, i) => ({ label: `Option ${i + 1}` })) },
+      ...Array.from({ length: 30 }, (_, i) => ({ kind: 'markdown', text: `Paragraph ${i + 1}.\n\nMore text, to scroll.` })) ] });
+    const askedUrl = `${origin}${new URL(askedBoard.url).pathname}`;
 
     for (const [mode, classicScrollbars] of [['classic scrollbars', true], ['default scrollbars', false]]) {
     await withChrome({ tag: 'cb-topbar', classicScrollbars }, async ({ send, onEvent }) => {
@@ -167,6 +173,51 @@ async function main() {
           assert.ok(Math.abs(head.left - bar.left) <= 0.5 && Math.abs(head.width - bar.width) <= 0.5);
         });
       }
+
+      await row(`${mode}: a click on the board header's empty part picks the option under it, and one on its theme control stays the header's`, async note => {
+        const tab = await openTab(send, onEvent, askedUrl, cookie, { width: 1440, height: HEIGHT, theme: 'light', expr: 'true' });
+        try {
+          // A different option per run: the pick is kept on the board.
+          const label = `Option ${classicScrollbars ? 2 : 3}`;
+          const option = `[].slice.call(document.querySelectorAll('button.choice-single')).find(function (b) { return b.getAttribute('data-choice') === ${JSON.stringify(label)}; })`;
+          await tab.evalPage(`(function () {
+            document.documentElement.style.scrollBehavior = 'auto';
+            var o = (${option}).getBoundingClientRect();
+            var h = document.querySelector('header.board-head').getBoundingClientRect();
+            window.scrollBy(0, (o.top + o.height / 2) - (h.top + h.height / 2));
+          })()`);
+          await tab.quiet();
+          // A point inside both the header's box and the option's, outside every box the header holds.
+          const at = await tab.evalPage(`(function () {
+            var head = document.querySelector('header.board-head');
+            var h = head.getBoundingClientRect();
+            var opt = ${option};
+            var o = opt.getBoundingClientRect();
+            var held = [].slice.call(head.children).map(function (c) { return c.getBoundingClientRect(); });
+            var y = o.top + o.height / 2;
+            var x = null;
+            for (var i = o.left + 8; i < o.right - 8 && x === null; i += 8) {
+              if (i > h.left && i < h.right && !held.some(function (r) { return i >= r.left - 4 && i <= r.right + 4; })) x = i;
+            }
+            var theme = document.querySelector('header.board-head button#theme-toggle').getBoundingClientRect();
+            return { x: x, y: y, inHeader: y > h.top && y < h.bottom, picked: opt.classList.contains('selected'), scrollY: window.scrollY,
+              header: h.top + ' to ' + h.bottom, theme: { x: theme.left + theme.width / 2, y: theme.top + theme.height / 2 },
+              scheme: document.documentElement.getAttribute('data-theme') };
+          })()`);
+          note(`board scrolled to ${at.scrollY}px: header ${at.header}px, ${label} under it at ${px(at.x)},${px(at.y)}`);
+          assert.ok(at.x !== null && at.inHeader, 'setup: the option lies under the header, clear of the boxes the header holds');
+          assert.equal(at.picked, false, 'setup: the option is not picked yet');
+          await clickAt(tab, at);
+          const picked = await waitFor(() => tab.evalPage(`(${option}).classList.contains('selected')`), { timeoutMs: 1500 });
+          assert.equal(picked, true, 'the click went through the header to the option');
+          await clickAt(tab, at.theme);
+          const scheme = await waitFor(() => tab.evalPage(`(function () { var t = document.documentElement.getAttribute('data-theme'); return t !== ${JSON.stringify(at.scheme)} && (t || 'none'); })()`), { timeoutMs: 1500 });
+          note(`theme control: data-theme ${at.scheme} then ${scheme}`);
+          assert.ok(scheme, 'the theme control still takes its click');
+        } finally {
+          await tab.close();
+        }
+      });
 
       await row(`${mode}: no view scrolls sideways`, note => {
         const wrong = [];
