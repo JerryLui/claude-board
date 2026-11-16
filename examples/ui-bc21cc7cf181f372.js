@@ -4435,10 +4435,11 @@
   // in the light palette, since a file is printed.
   //
   // A mock saved alone, from its Pull-out or as the one mock of a round drawn
-  // full page, is the mock's own page instead (downloadMock): its source as
-  // posted, its scripts kept, with the diagram library's text written in where
-  // the mock draws a diagram.
-  var EXPORT_CSS = "\nbody.round-export { min-height: 0; padding: 40px 24px; background: var(--bg); -webkit-print-color-adjust: exact; print-color-adjust: exact; }\nbody.round-export::before { display: none; }\n.export-doc { max-width: 1065px; margin: 0 auto; }\n.export-head { padding-bottom: 20px; border-bottom: 1px solid var(--hairline-2); margin-bottom: 28px; }\n.export-from { font-size: 11px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); margin-bottom: 10px; }\n.export-title { font-size: 22px; font-weight: 650; margin: 0 0 6px; letter-spacing: -0.01em; }\n.export-meta { font-size: 13px; color: var(--muted); display: flex; gap: 14px; flex-wrap: wrap; }\n.export-meta b { color: var(--ink-2); font-weight: 600; }\n.export-section { font-size: 15px; font-weight: 650; margin: 36px 0 14px; display: flex; align-items: center; gap: 10px; break-after: avoid; }\n.export-section::after { content: \"\"; flex: 1; height: 1px; background: var(--hairline-2); }\n.export-decisions { width: 100%; border-collapse: separate; border-spacing: 0; table-layout: fixed; font-size: 13px;\n  background: var(--panel); border: 1px solid var(--hairline); border-radius: var(--r-card); overflow: hidden; }\n.export-decisions th, .export-decisions td { text-align: left; vertical-align: top; padding: 12px 16px; border-bottom: 1px solid var(--hairline); overflow-wrap: anywhere; }\n.export-decisions tr:last-child td { border-bottom: none; }\n.export-decisions th { background: var(--panel-2); font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }\n.export-decisions th:first-child { width: 40%; }\n.export-q { color: var(--ink-2); }\n.export-pick { font-weight: 650; color: var(--ink); white-space: pre-wrap; }\n.export-note { color: var(--muted); font-style: italic; white-space: pre-wrap; }\n.export-empty { color: var(--muted); }\n.export-round { gap: 16px; }\n.export-round .round-history .block, .export-round .block { background: var(--panel); }\n.export-round .folded > .fold-body { max-height: none; overflow: visible; -webkit-mask-image: none; mask-image: none; }\n.export-round .card-choice { cursor: default; opacity: 1; }\n.export-round .opt-check { display: none; }\n.export-round .card-choice.selected, .export-round .variant-card.selected { border-color: var(--good); background: var(--good-soft); box-shadow: inset 3px 0 0 var(--good); }\n.export-round .card-choice.selected .opt-label::before, .export-round .variant-card.selected .opt-label::before { content: \"\\2713  \"; color: var(--good); }\n.export-unsent-note { margin: 0 0 24px; padding: 10px 14px; font-size: 13.5px; color: var(--ink); background: var(--panel-2);\n  border: 1.5px solid var(--ink-2); border-radius: var(--r-md); }\n.export-unsent .card-choice.selected, .export-unsent .variant-card.selected { border: 1px dashed var(--ink-2); background: var(--panel-2); box-shadow: none; }\n.export-unsent .card-choice.selected .opt-label::before, .export-unsent .variant-card.selected .opt-label::before { color: var(--ink-2); }\n.export-unsent .card-choice.selected .opt-label::after, .export-unsent .variant-card.selected .opt-label::after { content: \" \\00b7  picked, unsent\"; white-space: pre;\n  font-weight: 500; color: var(--muted); }\n.export-unsent .answer-status[data-status] { background: var(--panel-2); color: var(--muted); }\n.export-unsent .answer-status[data-status]::after { content: \", unsent\"; }\n.export-round .export-text { white-space: pre-wrap; font-size: 13px; color: var(--ink); background: var(--panel-2); border: 1px solid var(--hairline);\n  border-radius: var(--r-md); padding: 12px 14px; }\n.export-round .export-note-box { font-size: 12.5px; color: var(--ink-2); background: var(--accent-soft); border: 1px solid var(--hairline);\n  border-radius: var(--r-sm); padding: 8px 12px; white-space: pre-wrap; }\n.export-round .export-note-tag { display: block; font-weight: 650; font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); margin-bottom: 3px; }\n.export-round .html-stage { max-height: none; }\n.export-round .export-missing { color: var(--muted); font-style: italic; font-size: 12.5px; }\n.export-round .comment-list { display: block; }\n.export-round .comment-list-wrap { max-height: none; overflow: visible; }\n@media print {\n  body.round-export { padding: 0; background: #fff; }\n  .export-unsent-note { break-after: avoid; }\n  .export-round .block { box-shadow: none; }\n  .export-round .block, .export-round .question-block, .export-round .card-choice, .export-round .variant-card,\n  .export-round .stage-wrap, .export-round pre.mermaid, .export-round .comment-item, .export-decisions tr,\n  .export-round p, .export-round li, .export-round tr, .export-round .export-text, .export-round .export-note-box { break-inside: avoid; }\n  .export-round .card-head, .export-round .question-prompt { break-after: avoid; }\n  .export-round pre.mermaid svg { max-height: 960px; }\n  .export-round pre:not(.mermaid) { height: auto !important; max-height: none; overflow: visible; white-space: pre-wrap; overflow-wrap: anywhere; }\n  .export-round .stage-wrap { container-type: inline-size; }\n  .export-round .export-frame { break-inside: avoid; }\n  @supports (width: 1cqw) and (rotate: atan2(1px, 1px)) {\n    .export-round .export-fit { --export-fit: min(var(--export-scale), tan(atan2(100cqw, var(--export-w))));\n      height: calc(var(--export-h) * var(--export-fit)); overflow: hidden; }\n    .export-round .export-fit > iframe.html-stage { width: var(--export-w); max-width: none;\n      transform: scale(var(--export-fit)); transform-origin: 0 0; }\n  }\n}\n";
+  // full page, is the mock's own page instead (downloadMock): its source as its
+  // stage holds it, its scripts kept, under a policy that admits no file on the
+  // reader's disk, with the diagram library's text written in where the mock
+  // draws a diagram.
+  var EXPORT_CSS = "\nbody.round-export { min-height: 0; padding: 40px 24px; background: var(--bg); -webkit-print-color-adjust: exact; print-color-adjust: exact; }\nbody.round-export::before { display: none; }\n.export-doc { max-width: 1065px; margin: 0 auto; }\n.export-head { padding-bottom: 20px; border-bottom: 1px solid var(--hairline-2); margin-bottom: 28px; }\n.export-from { font-size: 11px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); margin-bottom: 10px; }\n.export-title { font-size: 22px; font-weight: 650; margin: 0 0 6px; letter-spacing: -0.01em; }\n.export-meta { font-size: 13px; color: var(--muted); display: flex; gap: 14px; flex-wrap: wrap; }\n.export-meta b { color: var(--ink-2); font-weight: 600; }\n.export-section { font-size: 15px; font-weight: 650; margin: 36px 0 14px; display: flex; align-items: center; gap: 10px; break-after: avoid; }\n.export-section::after { content: \"\"; flex: 1; height: 1px; background: var(--hairline-2); }\n.export-decisions { width: 100%; border-collapse: separate; border-spacing: 0; table-layout: fixed; font-size: 13px;\n  background: var(--panel); border: 1px solid var(--hairline); border-radius: var(--r-card); overflow: hidden; }\n.export-decisions th, .export-decisions td { text-align: left; vertical-align: top; padding: 12px 16px; border-bottom: 1px solid var(--hairline); overflow-wrap: anywhere; }\n.export-decisions tr:last-child td { border-bottom: none; }\n.export-decisions th { background: var(--panel-2); font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }\n.export-decisions th:first-child { width: 40%; }\n.export-q { color: var(--ink-2); }\n.export-pick { font-weight: 650; color: var(--ink); white-space: pre-wrap; }\n.export-note { color: var(--muted); font-style: italic; white-space: pre-wrap; }\n.export-empty { color: var(--muted); }\n.export-round { gap: 16px; }\n.export-round .round-history .block, .export-round .block { background: var(--panel); }\n.export-round .folded > .fold-body { max-height: none; overflow: visible; -webkit-mask-image: none; mask-image: none; }\n.export-round .card-choice { cursor: default; opacity: 1; }\n.export-round .opt-check { display: none; }\n.export-round .card-choice.selected, .export-round .variant-card.selected { border-color: var(--good); background: var(--good-soft); box-shadow: inset 3px 0 0 var(--good); }\n.export-round .card-choice.selected .opt-label::before, .export-round .variant-card.selected .opt-label::before { content: \"\\2713  \"; color: var(--good); }\n.export-unsent-note { margin: 0 0 24px; padding: 10px 14px; font-size: 13.5px; color: var(--ink); background: var(--panel-2);\n  border: 1.5px solid var(--ink-2); border-radius: var(--r-md); }\n.export-unsent .card-choice.selected, .export-unsent .variant-card.selected { border: 1px dashed var(--ink-2); background: var(--panel-2); box-shadow: none; }\n.export-unsent .card-choice.selected .opt-label::before, .export-unsent .variant-card.selected .opt-label::before { color: var(--ink-2); }\n.export-unsent .card-choice.selected .opt-label::after, .export-unsent .variant-card.selected .opt-label::after { content: \" \\00b7  picked, unsent\"; white-space: pre;\n  font-weight: 500; color: var(--muted); }\n.export-unsent .answer-status[data-status] { background: var(--panel-2); color: var(--muted); }\n.export-unsent .answer-status[data-status]::after { content: \", unsent\"; }\n.export-round .export-text { white-space: pre-wrap; font-size: 13px; color: var(--ink); background: var(--panel-2); border: 1px solid var(--hairline);\n  border-radius: var(--r-md); padding: 12px 14px; }\n.export-round .export-note-box { font-size: 12.5px; color: var(--ink-2); background: var(--accent-soft); border: 1px solid var(--hairline);\n  border-radius: var(--r-sm); padding: 8px 12px; white-space: pre-wrap; }\n.export-round .export-note-tag { display: block; font-weight: 650; font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); margin-bottom: 3px; }\n.export-round .html-stage { max-height: none; }\n.export-round .export-missing { color: var(--muted); font-style: italic; font-size: 12.5px; }\n.export-round .comment-list { display: block; }\n@media print {\n  body.round-export { padding: 0; background: #fff; }\n  .export-unsent-note { break-after: avoid; }\n  .export-round .block { box-shadow: none; }\n  .export-round .block, .export-round .question-block, .export-round .card-choice, .export-round .variant-card,\n  .export-round .stage-wrap, .export-round pre.mermaid, .export-round .comment-item, .export-decisions tr,\n  .export-round p, .export-round li, .export-round tr, .export-round .export-text, .export-round .export-note-box { break-inside: avoid; }\n  .export-round .card-head, .export-round .question-prompt { break-after: avoid; }\n  .export-round pre.mermaid svg { max-height: 960px; }\n  .export-round pre:not(.mermaid) { height: auto !important; max-height: none; overflow: visible; white-space: pre-wrap; overflow-wrap: anywhere; }\n  .export-round .stage-wrap { container-type: inline-size; }\n  .export-round .export-frame { break-inside: avoid; }\n  @supports (width: 1cqw) and (rotate: atan2(1px, 1px)) {\n    .export-round .export-fit { --export-fit: min(var(--export-scale), tan(atan2(100cqw, var(--export-w))));\n      height: calc(var(--export-h) * var(--export-fit)); overflow: hidden; }\n    .export-round .export-fit > iframe.html-stage { width: var(--export-w); max-width: none;\n      transform: scale(var(--export-fit)); transform-origin: 0 0; }\n  }\n}\n";
   var EXPORT_MERMAID_VARS = {"darkMode":false,"background":"transparent","fontFamily":"Inter, -apple-system, BlinkMacSystemFont, system-ui, sans-serif","fontSize":"13px","primaryColor":"#f5f6fb","primaryTextColor":"#171c2a","primaryBorderColor":"#3251c9","secondaryColor":"#e2e6f0","tertiaryColor":"#ffffff","lineColor":"#515c76","textColor":"#3c4459","mainBkg":"#f5f6fb","nodeBorder":"#3251c9","clusterBkg":"rgba(50, 81, 201, 0.06)","clusterBorder":"rgba(0, 0, 0, 0.18)","edgeLabelBackground":"#ffffff"};
   var decisionRows = function decisionRows(questions, answers) {
   return (questions || []).map(function (q) {
@@ -4503,34 +4504,44 @@
   var printScale = function printScale(height) {
   return height > PRINT_PAGE_H ? PRINT_PAGE_H / height : 1;
 };
-  var stageOwnSource = function stageOwnSource(srcdoc, engineAsset) {
+  var stageOwnSource = function stageOwnSource(srcdoc, marginReset) {
   var text = String(srcdoc == null ? '' : srcdoc);
   var open = '<' + 'script', close = '</' + 'script>';
-  var reset = '<style>html,body{margin:0;padding:0}</style>';
-  if (text.slice(0, reset.length) !== reset) return null;
-  var from = reset.length;
-  var lent = open + ' src="' + engineAsset + '">' + close + open + ">(function () {\n  var CB = 'cb-stage', pending";
-  var engine = text.slice(from, from + lent.length) === lent;
-  if (engine) {
-    var end = text.indexOf(close, from + lent.length);
-    if (end < 0) return null;
-    from = end + close.length;
+  if (text.slice(0, marginReset.length) !== marginReset) return null;
+  var from = marginReset.length, at = from, engine = null;
+  function takes(s) {
+    if (text.slice(at, at + s.length) !== s) return false;
+    at += s.length;
+    return true;
+  }
+  if (takes(open + ' src="')) {
+    var name = (/^mermaid-[0-9a-f]{16}\.js/.exec(text.slice(at, at + 27)) || [''])[0];
+    at += name.length;
+    if (name && takes('">' + close + open + ">(function () {\n  var CB = 'cb-stage', pending")) {
+      var end = text.indexOf(close, at);
+      if (end < 0) return null;
+      engine = name;
+      from = end + close.length;
+    }
   }
   var to = text.lastIndexOf(open + ">(function () {\n  var CB = 'cb-stage';\n");
   if (to < from) return null;
   return { html: text.slice(from, to), engine: engine };
 };
-  var mockDocument = function mockDocument(html, engineSource) {
+  var mockDocument = function mockDocument(html, engineSource, marginReset) {
   if (engineSource && /<\/?script/i.test(engineSource)) throw new Error('the diagram library holds a script tag and cannot be written into a file');
-  return '<!DOCTYPE html>\n<meta charset="utf-8">\n<style>html,body{margin:0;padding:0}</style>\n'
+  return '<!DOCTYPE html>\n<meta charset="utf-8">\n'
+    + '<meta http-equiv="Content-Security-Policy" content="default-src \'unsafe-inline\' https: data: blob:">\n'
+    + marginReset + '\n'
     + (engineSource ? '<' + 'script>' + engineSource + '</' + 'script>\n' : '')
     + String(html == null ? '' : html);
 };
+  var STAGE_MARGIN_RESET = "<style>html,body{margin:0;padding:0}</style>";
   // Everything in a round that is a control or a pin rather than what the round
   // said. The round's chip line goes too: the file's own head names the round.
   var EXPORT_DROP = '.round-chips, .round-end, .comment-btn, .comment-form, .comment-target, .pin-layer, '
     + '.pull-out, .stage-fold, .fold-toggle, .btn-defer, .rank-grip, .question-picks, .note-head, '
-    + '.page-send-bar, .paste-hint, .thumb-remove, '
+    + '.paste-hint, .thumb-remove, '
     + 'script, noscript, source, object, embed, base, meta';
   var nextExportDiagramId = 0;
 
@@ -4691,11 +4702,6 @@
       while (btn.firstChild) box.appendChild(btn.firstChild);
       btn.replaceWith(box);
     });
-    // An artifact round's comments float over it on the board; here they list under it.
-    qsa('.page-comments', copy).forEach(function (rail) {
-      while (rail.firstChild) rail.parentNode.insertBefore(rail.firstChild, rail);
-      rail.remove();
-    });
     qsa('details', copy).forEach(function (d) { d.setAttribute('open', ''); });
     qsa('.folded, .stage-folded, .stage-opened, .stage-scrolls', copy).forEach(function (el) {
       el.classList.remove('folded', 'stage-folded', 'stage-opened', 'stage-scrolls');
@@ -4715,14 +4721,21 @@
     return one.outerHTML;
   }
 
-  function saveHtmlFile(name, html) {
-    var url = URL.createObjectURL(new Blob([html], { type: 'text/html;charset=utf-8' }));
+  // 'html' handed to the browser to save as 'name'. A round's file holds no
+  // script and is a page for a minute. 'ownPage' is a mock's own file, which
+  // runs scripts: its blob is typed as plain bytes, so a browser sent to the
+  // blob's address saves it and never draws it at the board's origin, where
+  // its script would act as the reader; the name still makes the file a page.
+  // It lives a few seconds, enough for the save to begin, and is not dropped
+  // at the click, which has cancelled the save in Safari.
+  function saveHtmlFile(name, html, ownPage) {
+    var url = URL.createObjectURL(new Blob([html], { type: ownPage ? 'application/octet-stream' : 'text/html;charset=utf-8' }));
     var a = document.createElement('a');
     a.href = url;
     a.download = name;
     // Never put in the page: its click would reach the page's own listeners.
     a.click();
-    setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
+    setTimeout(function () { URL.revokeObjectURL(url); }, ownPage ? 4000 : 60000);
   }
 
   // A stage the reader never scrolled to has reported no height: the browser
@@ -4746,30 +4759,52 @@
     return answers;
   }
 
+  var MOCK_UNLOADED_NOTE = 'This mock did not load, so nothing was saved. Press again to retry, or reload the page.';
+  var LIBRARY_UNREAD_NOTE = 'The board could not hand over the diagram library, so nothing was saved. Press again to retry.';
+  var SAVE_FAILED_NOTE = 'Nothing was saved. Press again to retry, or reload the page.';
+
+  // A save that cannot be made, with the words the reader is shown for it
+  // (saveBehind).
+  function saveFailure(note, why) {
+    var e = new Error(why);
+    e.cbNote = note;
+    return e;
+  }
+
   // One mock saved as its own page, named 'name': the source the board holds in
   // 'frame', the mock's stage, less what the board wrote around it. Where the
   // board lent that stage the diagram library, the library's text is read from
-  // the board's own copy beside the page and written into the file, so the
-  // saved page draws its diagrams with no connection. A stage this tab does not
-  // hold saves nothing, and neither does a file: archive, which reads nothing.
+  // the board's own copy beside the page, under the name the stage itself
+  // carries, and written into the file, so the saved page draws its diagrams
+  // with no connection. There is no second-best file: a stage this tab does not
+  // hold, or a library the board does not hand over, saves nothing and says so
+  // (saveBehind). Neither does a file: archive, which reads nothing.
   async function downloadMock(frame, name) {
     if (readonly) return;
-    var own = frame ? stageOwnSource(frame.getAttribute('srcdoc'), MERMAID_ASSET) : null;
-    if (!own) throw new Error('this mock is not loaded on the page');
+    var own = frame ? stageOwnSource(frame.getAttribute('srcdoc'), STAGE_MARGIN_RESET) : null;
+    if (!own) throw saveFailure(MOCK_UNLOADED_NOTE, 'this mock is not loaded on the page');
     var engine = null;
     if (own.engine) {
-      var res = await fetch(MERMAID_ASSET);
-      if (!res.ok) throw new Error('the diagram library could not be read (' + res.status + ')');
-      engine = await res.text();
+      try {
+        var res = await fetch(own.engine);
+        if (!res.ok) throw new Error('status ' + res.status);
+        engine = await res.text();
+      } catch (e) {
+        throw saveFailure(LIBRARY_UNREAD_NOTE, 'the diagram library could not be read: ' + (e && e.message));
+      }
     }
-    saveHtmlFile(name, mockDocument(own.html, engine));
+    saveHtmlFile(name, mockDocument(own.html, engine, STAGE_MARGIN_RESET), true);
   }
 
-  // A round drawn full page is one mock: its file is that mock's own page.
+  // A round drawn full page is one mock: its file is that mock's own page. A
+  // stage a push sent held is read first, as a Pull-out pressed on it does
+  // (pullOutHeldStage); one still held after that saves nothing.
   async function downloadRound(section) {
     var n = Number(section.getAttribute('data-round'));
     if (isPageRound(blocksOfRound(n))) {
-      await downloadMock(section.querySelector('iframe.html-stage'), exportFileName(board.title, n));
+      var stage = section.querySelector('iframe.html-stage');
+      if (stage && stage.hasAttribute('data-held')) await fillHeldStages();
+      await downloadMock(stage, exportFileName(board.title, n));
       return;
     }
     await askStageHeights(section);
@@ -4800,13 +4835,12 @@
       await downloadMock(only.querySelector('iframe.html-stage'), exportFileName(board.title, n, kind + '-' + blockId));
       return;
     }
-    await askStageHeights(block);
     var round = (board.rounds || []).find(function (r) { return r.n === n; }) || {};
     var html = exportDocument({
       title: board.title || '',
       roundN: n,
       roundTitle: round.title || '',
-      only: 'One ' + kind,
+      only: 'One diagram',
       css: pageCssText(),
       exportCss: EXPORT_CSS,
       contentHtml: await exportRoundContent(block, only),
@@ -4814,12 +4848,51 @@
     saveHtmlFile(exportFileName(board.title, n, kind + '-' + blockId), html);
   }
 
+  // What a Download that saved nothing says, on the control itself: 'note' as
+  // the control's label and in a note under it, on screen, or with no note what
+  // the control said before (sayOnHeldStage's way, for a Pull-out). The note
+  // takes no pointer and a screen reader skips it, since the control's own
+  // label says the same words. It goes at the control's next press, when the
+  // lens the control sits in closes, and for the top strip's control when the
+  // reader flips to another round (goToRound).
+  function sayByDownload(btn, note) {
+    var shown = btn.querySelector('.download-note');
+    var was = btn.__cbDownloadLabel;
+    function put(name, value) {
+      if (value == null) btn.removeAttribute(name); else btn.setAttribute(name, value);
+    }
+    if (!note) {
+      if (shown) shown.remove();
+      if (was) { put('title', was.title); put('aria-label', was.label); btn.__cbDownloadLabel = null; }
+      return;
+    }
+    if (!was) btn.__cbDownloadLabel = { title: btn.getAttribute('title'), label: btn.getAttribute('aria-label') };
+    put('title', note);
+    put('aria-label', note);
+    if (!shown) {
+      shown = document.createElement('span');
+      shown.className = 'download-note';
+      shown.setAttribute('aria-hidden', 'true');
+      btn.appendChild(shown);
+    }
+    shown.textContent = note;
+    var lens = btn.closest('dialog');
+    if (lens && !btn.__cbDownloadClears) {
+      btn.__cbDownloadClears = true;
+      lens.addEventListener('close', function () { sayByDownload(btn, null); });
+    }
+  }
+
   // 'btn' is off while its file is made, so a second press saves no second one.
+  // A save that fails leaves the control live again and saying so.
   function saveBehind(btn, saving) {
     btn.disabled = true;
-    saving.catch(function (e) {
+    sayByDownload(btn, null);
+    saving.then(function () { btn.disabled = false; }, function (e) {
       if (window.console) console.error('Download failed', e);
-    }).then(function () { btn.disabled = false; });
+      btn.disabled = false;
+      sayByDownload(btn, (e && e.cbNote) || SAVE_FAILED_NOTE);
+    });
   }
 
   // Pull-out's Download, in either lens's bar.
@@ -6163,6 +6236,9 @@
     // arriving page it would send that page with no check at all.
     var flipped = n !== currentRound;
     if (flipped && sendArmed) disarmSend();
+    // What the top strip's Download said of the round being left (sayByDownload).
+    var headDownload = flipped && document.querySelector('.head-download');
+    if (headDownload) sayByDownload(headDownload, null);
     currentRound = n;
     qsa('.round').forEach(function (s) { s.classList.toggle('round-current', s === section); });
     // The arriving page's diagrams are drawn now, not at load: a diagram drawn
