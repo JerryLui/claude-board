@@ -10,7 +10,8 @@
 // What a reader sees is a view, derived on every read and never stored: a released mission
 // reads released, and a retired one (its `retiredAt` set) waiting, no list showing it once
 // its PRs are merged or closed and no release step waits (ADR 147); else a mission whose
-// board's newest round still waits on an answer reads needs-you; else a parked one reads parked;
+// board's newest round, or a round a hand-over reopened, still waits on an answer reads
+// needs-you; else a parked one reads parked;
 // else a session whose process is
 // gone, a reservation no process bound within `UNBOUND_GRACE_MS`, or a working one silent
 // past `STALL_SILENCE_MS`, reads stalled, and a gone one also carries `gone: { lastSeenAt }`.
@@ -384,11 +385,12 @@ export function roundWantsAnswer(round, questions) {
   return questions.some(q => q.round === round.n);
 }
 
-/** The round of `board` that can hold its mission at needs you: the newest round of one of
- * the sessions that posted there, when it still wants an answer, the latest such. A
- * mission's board is shared (ADR 150), so one session's newer round never hides
- * another's question. An older page a session left open is answered from its own page
- * on the board, and never holds the mission there. Rounds are one session's by
+/** The round of `board` its mission's card takes its buttons from, and one that holds the
+ * mission at needs you: the newest round of one of the sessions that posted there, when it
+ * still wants an answer, the latest such. A mission's board is shared (ADR 150), so one
+ * session's newer round never hides another's question. An older page a session left open
+ * is answered from its own page on the board: it draws no button, and holds the mission at
+ * needs you only as `reopenedRoundWaits` reads it. Rounds are one session's by
  * `sessionMatches`: its id, or its process to the second, so a resumed session or a start
  * read with milliseconds is still one poster. A round from before rounds recorded their
  * poster is the board's first poster's. */
@@ -409,8 +411,15 @@ function waitingRound({ board, questions }) {
   return hit;
 }
 
+/** A round a hand-over reopened (`reopenedAt`, ADR 151) on `board` still wants its answer:
+ * the mission's own question, asked again of its new session, so a later round of that
+ * session does not quiet it (ADR 155). Sent or closed by number, it wants none. */
+function reopenedRoundWaits({ board, questions }) {
+  return (board.rounds || []).some(r => r.reopenedAt && roundWantsAnswer(r, questions));
+}
+
 function boardsNeedYou(linked) {
-  return linked.some(entry => waitingRound(entry) !== null);
+  return linked.some(entry => waitingRound(entry) !== null || reopenedRoundWaits(entry));
 }
 
 function actionsOf(linked) {
