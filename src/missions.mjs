@@ -532,7 +532,8 @@ export function deriveState(m, { home = boardHome(), now = Date.now(), isAlive =
 }
 
 /** The record as a reader gets it: every stored field, `prs` with each PR's facts
- * (`prsOf`), plus `view` (the derived state), `retired` (its `retiredAt` parses), `gone`
+ * (`prsOf`), plus `view` (the derived state), `asking` (it reads needs-you by a session's
+ * newest round, `waitingRound`, not by a reopened round alone), `retired` (its `retiredAt` parses), `gone`
  * (`goneOf`), `live` (a session holds the mission, `hasLiveSession`), `listedAt` (the time
  * of the snapshot that lists its bound session, the heard-from time beside its own
  * `session.seenAt`, else null), `rejoin`
@@ -542,10 +543,12 @@ export function missionView(m, { home = boardHome(), now = Date.now(), isAlive =
   const linked = linkedBoards(m, home);
   const alive = aliveOnce(isAlive);
   const listing = listingOf(currentSession(m), listed);
+  const view = viewState(m, () => linked, now, alive, listed);
   return {
     ...m,
     prs: prsOf(m),
-    view: viewState(m, () => linked, now, alive, listed),
+    view,
+    asking: view === 'needs-you' && linked.some(entry => waitingRound(entry) !== null),
     retired: isRetired(m),
     gone: goneOf(m, now, alive, listed),
     live: hasLiveSession(m, now, alive, listed),
@@ -567,9 +570,9 @@ function liveCounts(views, listed) {
     if (!v.live || isTab(listingOf(currentSession(v), listed))) continue;
     live.alive += 1;
     // The stored state, not the view: a live session stored working still works when it
-    // reads stalled (silent) or waiting (retired, ADR 147). One whose round waits on the PM
-    // holds no working slot.
-    if (v.state === 'working' && v.view !== 'needs-you') live.working += 1;
+    // reads stalled (silent) or waiting (retired, ADR 147), or needs-you behind a reopened
+    // round (ADR 155). One whose newest round waits on the PM holds no working slot.
+    if (v.state === 'working' && !v.asking) live.working += 1;
   }
   return live;
 }

@@ -1760,7 +1760,9 @@ ADR 36): a director idle while its owners work, or a session whose hooks a `/cle
 stalls by silence while Claude Code lists it. With no snapshot held (the watcher down, or none since
 the daemon started) heartbeats alone count. A bound `pid` that no longer exists while the snapshot
 lists the session's `id` in another live process is not gone: the session runs on there (a resume
-no launch made). `listedAt` is that snapshot's time while it lists the bound session, else `null`.
+no launch made). `asking` is whether `view` is `needs-you` by a session's newest round, that session
+waiting on the PM; it is `false` where only a reopened round behind a later one holds the mission
+there, its session working on (ADR 155). `listedAt` is that snapshot's time while it lists the bound session, else `null`.
 `retired` is whether its `retiredAt` parses.
 `gone` is `{ lastSeenAt }`, the session's `seenAt`, while that session is gone and the mission has
 neither recorded its end, retired nor parked, else `null`. `rejoin` is `{ reason, since, id }` while the snapshot lists the bound
@@ -1801,7 +1803,8 @@ latest fact is neither `merged` nor `closed` (no fact yet counts as open), or a 
 `GET /api/mission/:key` still answers it until the prune deletes it, 30 days after `retiredAt`.
 `tabs` and `watcher` are "The session routes"' below. `counts` are per `view` over the
 missions listed, each tab added to its `state`'s count as the Missions view counts its cards; `live` counts every mission holding a
-live session, `working` including one that reads stalled, save one whose bound session the
+live session, `working` those of them stored `working` and not `asking`, so one that reads stalled
+or works on behind a reopened round counts, save one whose bound session the
 watcher lists `interactive` in its own process: a tab the PM runs holds no slot (ADR 149).
 `slotFree` is true while `live` sits under both caps, so a launch would not queue: a reader
 waiting for a slot reads it, never the numbers. Secret or cookie.
