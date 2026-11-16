@@ -3413,25 +3413,20 @@ async function handleMission(req, res, parts, home, stream, cache, heldSecret, l
     else if (route === 'launch') answer = launchMission(key, body, { home, listed });
     else if (route === 'join') {
       const before = boundBefore(key, home);
-      let left;
-      ({ status, left, ...answer } = joinMission(key, body, { home, listed }));
+      let leavers;
+      ({ status, leavers = [], ...answer } = joinMission(key, body, { home, listed }));
       if (status === 200 && answer.session) {
         // A session bound in place of one that went or that a launch replaced: the rounds
         // that session left unanswered are reopened under this one, as a takeover's are
         // (ADR 150, 151). So are the rounds the bound process asked under an id it had before
         // a /clear, told from the ones it asked since by that id alone. The ids are read off
         // the rounds: the mission may hold the new one already, from a heartbeat before
-        // this join. And so are the rounds of the session that left the mission before this
-        // one bound (`left`, ADR 153): the PM still owes their answers. The record names
-        // that session until every linked board was handed over, so a board that failed is
-        // handed over at the next join.
+        // this join. And so are the rounds of each session that left the mission and that no
+        // join was handed yet (`leavers`, ADR 153): the PM still owes their answers.
         const cleared = before && sessionMatches(before, answer.session) ? clearedIds(key, answer.session, home) : [];
-        const leaver = left ? leaverGiver(key, left, answer.session, home) : null;
-        const givers = [answer.session.ended, leaver, ...cleared.map(id => ({ id }))].filter(Boolean);
-        for (const giver of givers) {
-          const clean = handOverMissionRounds(key, giver, answer.session, home, live);
-          if (giver === leaver && clean) dropLeaver(key, home);
-        }
+        const givers = [answer.session.ended, ...cleared.map(id => ({ id }))].filter(Boolean);
+        for (const giver of givers) handOverMissionRounds(key, giver, answer.session, home, live);
+        handOverLeavers(key, leavers, answer.session, home, live);
         // Named on every join while they wait, so a session that joins again (after a
         // /clear, or after a takeover bound it, which answered it nothing) is told what
         // its earlier join was.
@@ -3440,12 +3435,16 @@ async function handleMission(req, res, parts, home, stream, cache, heldSecret, l
       }
     }
     else if (route === 'leave') {
-      answer = leaveMission(key, body, { home });
+      let leavers;
+      ({ leavers = [], ...answer } = leaveMission(key, body, { home }));
       // A takeover: the rounds the giver left unanswered on the mission's boards are reopened
       // under the session that now holds the mission (ADR 150, 151), so the PM's answer
-      // reaches it. Its binding names them: the taker made no call that this one answers.
+      // reaches it, and with them the rounds of each session that left before the giver and
+      // that no join was handed (ADR 153). Its binding names them: the taker made no call
+      // that this one answers.
       if (answer.session) {
         handOverMissionRounds(key, body, answer.session, home, live);
+        handOverLeavers(key, leavers, answer.session, home, live);
         reopenedUnder(key, answer.session, home, req);
       }
     }
@@ -3488,21 +3487,6 @@ function clearedIds(key, session, home) {
   return [...ids];
 }
 
-/** The giver `left` is, the session that left mission `key` before `session` joined (ADR
- * 153): itself, by its id and its process, save back in its own process under a new id (a
- * /clear) with a round on the mission's boards it asked under that id, one recorded under
- * it and handed from no one. It asked that round after a /clear the mission never heard of
- * and left under the new id, so a giver named by its process would hand it its own round.
- * The rounds of its process are then told apart by id alone, as a /clear's are
- * (`clearedIds`): it gives those recorded under the id the mission bound it with. */
-function leaverGiver(key, left, session, home) {
-  const back = left.pid != null && left.pid === session.pid && sameStart(left.procStart, session.procStart);
-  if (!back) return left;
-  const askedSince = linkedMissionBoards(key, home).some(board => (board.rounds || [])
-    .some(r => r.session && r.session.id != null && r.session.id === session.id && r.handedFrom == null));
-  return askedSince ? { id: left.id } : left;
-}
-
 /** The boards mission `key` links, each read once; one that fails is warned and skipped. */
 function linkedMissionBoards(key, home) {
   return readLinkedBoards(key, home).boards;
@@ -3532,13 +3516,20 @@ function readLinkedBoards(key, home) {
   return { boards, clean };
 }
 
-/** The join route's `leaverHandedOver` (src/missions.mjs); a record that fails is warned,
- * and the leaver is offered again at the next join. */
-function dropLeaver(key, home) {
+/** Hands `taker`, the session a join or a takeover bound to mission `key`, the rounds of
+ * each of `leavers`, the sessions that left it and that no join was handed yet (ADR 153),
+ * and drops them from the record (`leaverHandedOver`, src/missions.mjs) once every linked
+ * board was read and handed over. A board that failed keeps them all there, and so does a
+ * record that fails, which is warned: the next join hands over again, finding the rounds
+ * already handed the taker's. */
+function handOverLeavers(key, leavers, taker, home, live) {
+  if (leavers.length === 0) return;
+  const clean = leavers.map(giver => handOverMissionRounds(key, giver, taker, home, live));
+  if (!clean.every(Boolean)) return;
   try {
     leaverHandedOver(key, { home });
   } catch (err) {
-    console.error(`claude-board: mission ${key}'s record still names the session that left: ${(err && err.message) || err}`);
+    console.error(`claude-board: mission ${key}'s record still names the sessions that left: ${(err && err.message) || err}`);
   }
 }
 

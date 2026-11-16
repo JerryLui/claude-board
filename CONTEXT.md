@@ -268,7 +268,8 @@ on it. _Avoid_: task, job, ticket, project, session (a Mission outlives several)
 
 **Hand-over**: the moment a Mission's next session is bound in place of its last: a takeover
 landing, a join after the bound session went, left or was replaced, or the bound session joining
-again after a `/clear`. The rounds the last session left unsent become the new session's.
+again after a `/clear`. The rounds the last session left unsent become the new session's, and
+so do the rounds of an earlier session that left, where no join was handed them.
 _Avoid_: handoff (that is the record's note for the next session), transfer, takeover (one of
 its three causes).
 
