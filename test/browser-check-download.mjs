@@ -8,12 +8,18 @@
 // stage and decisions row is kept whole and fits one page, a mock no taller than a page
 // at its own size and a taller one scaled into its holder. A round not yet sent saves a
 // file that opens on a Not sent line and marks each pick so far as unsent. Pull-out's
-// Download saves the one mock or diagram it shows, alone, as a file that opens offline.
+// Download saves the one mock or diagram it shows, alone, as a file that opens offline: a
+// diagram as the picture the page drew, a mock as its own page (ADR.md entry 154), its
+// scripts run, with the diagram library written in where it draws a diagram. A round
+// drawn full page saves its one mock the same way. Two boards hold a mock that draws a
+// diagram by its own script, each finding the library the way one of the two render
+// templates does: saved, then opened from disk with the network off, each shows its
+// diagram drawn and its own script's work, having reached for no address.
 // A second board holds what is
 // taller than a printed page: a sent artifact round (drawn full page, its Download round
-// in the top strip, its file listing every comment under the mock), a long text,
+// in the top strip), a long text,
 // a diagram, a question with many options, a long free-text answer under a long note and
-// a long comment list; its files are
+// a long comment list; its question round's file is
 // paginated under print media and nothing that must stay whole sits across a page's edge.
 // The top strip's Download round is read over a scrolled artifact, where it stays drawn
 // and takes its click, in a window too narrow for the header to condense, on a third
@@ -38,6 +44,7 @@ import { existsSync, readdirSync, readFileSync, writeFileSync, copyFileSync } fr
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { sessionToken } from '../src/secret.mjs';
+import { MERMAID_SOURCE } from '../src/vendor/mermaid/index.mjs';
 import { runMain, skipFile, withTimeout } from './support.mjs';
 import { CHROME, copyArchive, evalIn, guardRun, measureTab, openTab, postJson, row, scratchDir, startScratchDaemon, withChrome } from './browser-support.mjs';
 
@@ -116,6 +123,113 @@ const SHOWN_TITLE = 'Shown fixture';
 const SHOWN_ROUND_1 = [
   { id: 'h5', kind: 'html', html: '<div style="height:1800px;box-sizing:border-box;border:4px solid #3251c9;background:linear-gradient(#eef,#efe)">Shown mock</div>' },
 ];
+// The fourth and fifth boards: a mock that draws a diagram by its own script. Each finds
+// the diagram library the way one of the two render templates does, and notes in
+// 'reached' every address it asks for one at. The first, in a question round, uses a
+// library already on the window, else loads a file beside the page, else one off a CDN.
+const DRAWN_TITLE = 'Drawn fixture';
+const CDN = 'https://cdn.jsdelivr.net/npm/mermaid@11.16.1/dist';
+const LOADER_MOCK = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>Loader page</title>
+<style>body { margin: 32px; font: 15px/1.5 system-ui, sans-serif; } figure { margin: 0; }</style>
+</head><body>
+<nav id="toc"></nav>
+<h2 id="flow">The flow</h2>
+<figure><pre class="mermaid">flowchart LR
+  ask[Ask] --> pick[Pick]
+  pick --> ship[Ship]</pre></figure>
+<h2 id="quiz">The quiz</h2>
+<button type="button" id="reveal">Reveal</button><p id="answer" hidden>Shipped</p>
+<script>
+var reached = [];
+var MERMAID_SOURCES = ["assets/mermaid.min.js", "${CDN}/mermaid.min.js"];
+var mermaidLoading = false;
+function loadMermaid(i) {
+  if (i >= MERMAID_SOURCES.length) { mermaidLoading = false; return; }
+  var s = document.createElement("script");
+  s.src = MERMAID_SOURCES[i];
+  reached.push(MERMAID_SOURCES[i]);
+  s.onload = function () { mermaidLoading = false; renderMermaidAll(); };
+  s.onerror = function () { loadMermaid(i + 1); };
+  document.head.appendChild(s);
+}
+function renderMermaidAll() {
+  var engine = window.mermaid;
+  if (!engine || !engine.run) {
+    if (!mermaidLoading) { mermaidLoading = true; loadMermaid(0); }
+    return;
+  }
+  engine.initialize({ startOnLoad: false, theme: "base" });
+  engine.run({ nodes: document.querySelectorAll("pre.mermaid"), suppressErrors: true });
+}
+document.querySelectorAll("h2").forEach(function (h) {
+  var a = document.createElement("a");
+  a.href = "#" + h.id;
+  a.textContent = h.textContent;
+  document.getElementById("toc").appendChild(a);
+});
+document.getElementById("reveal").addEventListener("click", function () { document.getElementById("answer").hidden = false; });
+renderMermaidAll();
+</script></body></html>`;
+const DRAWN_ROUND_1 = [
+  { id: 'h6', kind: 'html', title: 'Loader page', html: LOADER_MOCK },
+  { id: 'q11', kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] },
+];
+// The second, drawn full page, mints its diagram's node from a source it carries and
+// uses a library already on the window, else a file beside the page, else imports a
+// module off the CDN.
+const DRAWN_PAGE_TITLE = 'Drawn page fixture';
+const IMPORTER_MOCK = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>Importer page</title>
+<style>body { margin: 0; padding: 32px; font: 15px/1.5 system-ui, sans-serif; }</style>
+</head><body>
+<nav id="toc"></nav>
+<main id="hero"></main>
+<button type="button" id="reveal">Reveal</button><p id="answer" hidden>Checked</p>
+<section class="src" data-name="Map"><script type="text/plain">flowchart TD
+  spec[Spec] --> build[Build]
+  build --> check[Check]</script></section>
+<script>
+var reached = [];
+let mermaidMod = null;
+async function renderMermaid(root) {
+  const nodes = root.querySelectorAll('pre.mermaid');
+  if (!nodes.length) return;
+  try {
+    if (!mermaidMod) {
+      if (!window.mermaid) {
+        reached.push('assets/mermaid.min.js');
+        await new Promise(res => {
+          const s = document.createElement('script');
+          s.src = 'assets/mermaid.min.js';
+          s.onload = s.onerror = res;
+          document.head.appendChild(s);
+        });
+      }
+      if (!window.mermaid) reached.push('${CDN}/mermaid.esm.min.mjs');
+      mermaidMod = window.mermaid || (await import('${CDN}/mermaid.esm.min.mjs')).default;
+    }
+    mermaidMod.initialize({ startOnLoad: false, theme: 'neutral' });
+    await mermaidMod.run({ nodes, suppressErrors: true });
+  } catch (e) { /* no library: the source stays */ }
+}
+document.querySelectorAll('section.src').forEach(function (src) {
+  const a = document.createElement('a');
+  a.textContent = src.dataset.name;
+  document.getElementById('toc').appendChild(a);
+  const holder = document.createElement('div');
+  holder.innerHTML = '<pre class="mermaid"></pre>';
+  holder.firstChild.textContent = src.querySelector('script').textContent;
+  document.getElementById('hero').appendChild(holder);
+});
+document.getElementById('reveal').addEventListener('click', function () { document.getElementById('answer').hidden = false; });
+renderMermaid(document);
+</script></body></html>`;
+const DRAWN_PAGE_ROUND_1 = [{ id: 'h7', kind: 'html', html: IMPORTER_MOCK }];
+// What a saved mock opens with, ahead of its own source: a standards-mode, UTF-8 page
+// with no page margin, as a stage is on the board.
+const SAVED_HEAD = '<!DOCTYPE html>\n<meta charset="utf-8">\n<style>html,body{margin:0;padding:0}</style>\n';
+const SAVED_LIBRARY = '<script>' + MERMAID_SOURCE + '</script>\n';
 // The first board's open round: one question picked on the page and one left alone.
 const OPEN_ROUND = [
   { id: 'q6', kind: 'question', prompt: 'Next?', widget: 'single', options: [{ label: 'Go' }, { label: 'Wait' }] },
@@ -193,29 +307,37 @@ const EXPORT_EXPR = `(function () {
   };
 })()`;
 
-// The artifact round's file as opened: each comment with whether it sits below the mock
-// and whether a box that clips what leaves it hides it, and what is left of the board's
-// controls.
-const PAGE_FILE_EXPR = `(function () {
-  var frameBottom = document.querySelector('section.export-round iframe').getBoundingClientRect().bottom;
-  function hidden(el) {
-    var r = el.getBoundingClientRect();
-    for (var p = el.parentElement; p && p !== document.body; p = p.parentElement) {
-      if (getComputedStyle(p).overflowY === 'visible') continue;
-      var box = p.getBoundingClientRect();
-      if (r.top < box.top - 0.5 || r.bottom > box.bottom + 0.5) return true;
-    }
-    return false;
-  }
-  return {
-    comments: [].slice.call(document.querySelectorAll('section.export-round .comment-item')).map(function (c) {
-      return { text: c.textContent.slice(c.querySelector('.comment-anchor').textContent.length).trim(),
-        below: c.getBoundingClientRect().top >= frameBottom, shown: !hidden(c) };
-    }),
-    controls: document.querySelectorAll('button, textarea, input, form, .pin-layer, .round-download').length,
-    sendBars: document.querySelectorAll('.page-send-bar').length,
-  };
-})()`;
+// A saved mock as opened, once each diagram in it is drawn or five seconds have passed:
+// each diagram as its node count, or its source's first line where it is not drawn; the
+// contents list its script built; whether its Reveal control, pressed here, showed its
+// answer; each address the page asked for a diagram library at, and each the browser
+// fetched; what an earlier script of its own wrote; and the page's own box.
+const SAVED_PAGE_EXPR = `new Promise(function (resolve) {
+  var tries = 0;
+  (function poll() {
+    var pres = [].slice.call(document.querySelectorAll('pre.mermaid'));
+    if (pres.some(function (p) { return !p.querySelector('svg'); }) && ++tries < 100) return setTimeout(poll, 50);
+    var reveal = document.getElementById('reveal'), answer = document.getElementById('answer'), late = document.getElementById('late');
+    if (reveal) reveal.click();
+    var cs = getComputedStyle(document.body);
+    resolve({
+      diagrams: pres.map(function (p) {
+        var svg = p.querySelector('svg');
+        return svg ? svg.querySelectorAll('.node').length + ' nodes' : 'source: ' + p.textContent.trim().split('\\n')[0];
+      }),
+      contents: [].slice.call(document.querySelectorAll('#toc a')).map(function (a) { return a.textContent; }),
+      revealed: answer ? !answer.hidden : null,
+      reached: window.reached || null,
+      fetched: performance.getEntriesByType('resource').map(function (e) { return e.name; }).filter(function (n) { return !/^data:/.test(n); }),
+      late: late ? late.textContent : null,
+      text: document.body.textContent.trim().slice(0, 40),
+      frames: document.querySelectorAll('iframe').length,
+      height: document.documentElement.scrollHeight,
+      pad: parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom),
+      mode: document.compatMode,
+    });
+  })();
+})`;
 
 // An unsent round's file as opened: what it opens on, its head, its table and each option
 // of the open round with what follows its label.
@@ -242,8 +364,8 @@ const UNSENT_EXPR = `(function () {
   };
 })()`;
 
-// One artifact's file as opened: its head, the one mock or diagram it holds and whatever
-// else of the round or the board came along.
+// One diagram's file as opened: its head, the one diagram it holds and whatever else of
+// the round or the board came along.
 const ONE_EXPR = `(function () {
   function texts(sel) { return [].slice.call(document.querySelectorAll(sel)).map(function (e) { return e.textContent.replace(/\\s+/g, ' ').trim(); }); }
   var frame = document.querySelector('iframe');
@@ -420,10 +542,17 @@ const BAND_EXPR = `(function () {
   return parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
 })()`;
 
-/** How tall a saved file draws its mock: its frame's height less the frame's own edge. */
-function savedMockHeight(file) {
-  const m = /<iframe[^>]*style="height: (\d+)px/.exec(readFileSync(file, 'utf8'));
-  return m ? Number(m[1]) - 2 : null;
+/** Opens a saved mock from disk under `prepare` (the network cut) and answers
+ * SAVED_PAGE_EXPR's reading of it. */
+async function openSaved(send, onEvent, file, cookie, prepare) {
+  const tab = await openTab(send, onEvent, pathToFileURL(file).href, cookie, { width: 1280, height: 900, theme: 'dark', expr: '1', prepare });
+  try {
+    const r = await tab.sp('Runtime.evaluate', { expression: SAVED_PAGE_EXPR, awaitPromise: true, returnByValue: true });
+    if (r.exceptionDetails) throw new Error(`the saved mock's read threw: ${r.exceptionDetails.exception?.description || r.exceptionDetails.text}`);
+    return r.result.value;
+  } finally {
+    await tab.close();
+  }
 }
 
 async function waitForDownload(onEvent, dir) {
@@ -466,6 +595,10 @@ async function main() {
     const tallUrl = `${origin}${new URL(tall.url).pathname}`;
     const shown = await postJson(`${origin}/api/board`, { title: SHOWN_TITLE, blocks: SHOWN_ROUND_1 }, daemon.secret);
     const shownUrl = `${origin}${new URL(shown.url).pathname}`;
+    const drawn = await postJson(`${origin}/api/board`, { title: DRAWN_TITLE, blocks: DRAWN_ROUND_1 }, daemon.secret);
+    const drawnUrl = `${origin}${new URL(drawn.url).pathname}`;
+    const drawnPage = await postJson(`${origin}/api/board`, { title: DRAWN_PAGE_TITLE, blocks: DRAWN_PAGE_ROUND_1 }, daemon.secret);
+    const drawnPageUrl = `${origin}${new URL(drawnPage.url).pathname}`;
 
     await withChrome({ tag: 'cb-download', hideScrollbars: true }, async ({ send, onEvent }) => {
       const cookie = sessionToken(daemon.secret);
@@ -543,25 +676,18 @@ async function main() {
       const diagramDownload = await downloadFrom(send, onEvent, board, `document.querySelector('dialog.diagram-lens [data-lens="download"]').click()`);
       await board.evalPage(`document.querySelector('dialog.diagram-lens [data-lens="close"]').click()`);
       await board.until(`!document.querySelector('dialog.diagram-lens[open]')`, 'the diagram\'s Pull-out closed');
-      const oneMock = await measureTab(send, onEvent, pathToFileURL(mockDownload.file).href, cookie,
-        { width: 1280, height: 900, theme: 'dark', expr: ONE_EXPR, prepare: offline });
+      const oneMock = await openSaved(send, onEvent, mockDownload.file, cookie, offline);
       const oneDiagram = await measureTab(send, onEvent, pathToFileURL(diagramDownload.file).href, cookie,
         { width: 1280, height: 900, theme: 'dark', expr: ONE_EXPR, prepare: offline });
-      const quiet = m => ({ scripts: m.scripts, controls: m.controls, fetched: m.fetched, rest: m.rest });
-      await row('Pull-out on a mock has a Download beside close, which saves that mock alone as one file that opens offline, at its full height, script-free', note => {
+      await row('Pull-out on a mock has a Download beside close, which saves the mock alone as its own page: its source under a head of its own, its script run when opened offline', note => {
         const bytes = readFileSync(mockDownload.file, 'utf8');
-        note(`${mockBar.join(' | ')}; ${mockDownload.files.join(', ')}, ${bytes.length} bytes, the mock ${oneMock.frame && oneMock.frame.height}px tall`);
+        note(`${mockBar.join(' | ')}; ${mockDownload.files.join(', ')}, ${bytes.length} bytes; its script wrote "${oneMock.late}"`);
         assert.deepEqual(mockBar.slice(-2), ['download', 'close']);
         assert.deepEqual(mockDownload.files, ['download-fixture-round-1-mock-h1.html']);
-        assert.doesNotMatch(bytes, /<script/i);
-        assert.doesNotMatch(bytes, /allow-scripts/);
-        assert.equal(oneMock.title, TITLE);
-        assert.deepEqual(oneMock.meta, ['Round 1', 'One mock']);
-        assert.deepEqual({ frames: oneMock.frames, svgs: oneMock.svgs }, { frames: 1, svgs: 0 }, 'the mock and no diagram');
-        assert.equal(oneMock.frame.sandbox, '', 'sandboxed with nothing allowed');
-        assert.ok(oneMock.frame.height >= STAGE_PX, `as tall as the mock, not the ${oneMock.frame.height}px the board folds it to`);
-        assert.match(oneMock.frame.srcdoc, /Static mock/);
-        assert.deepEqual(quiet(oneMock), { scripts: 0, controls: 0, fetched: [], rest: 0 }, 'no script, no control, nothing fetched, nothing else of the round');
+        assert.ok(bytes === SAVED_HEAD + ROUND_1.find(b => b.id === 'h1').html, 'the mock\'s source as posted: no diagram, so no library, and nothing of the board\'s');
+        assert.equal(oneMock.late, 'ran', 'its own script ran');
+        assert.deepEqual({ frames: oneMock.frames, mode: oneMock.mode, fetched: oneMock.fetched }, { frames: 0, mode: 'CSS1Compat', fetched: [] },
+          'the page itself, in standards mode as on the board, nothing fetched');
       });
       await row('Pull-out on a diagram has the same Download, which saves that diagram alone, drawn, as one file that opens offline', note => {
         const bytes = readFileSync(diagramDownload.file, 'utf8');
@@ -573,7 +699,8 @@ async function main() {
         assert.deepEqual({ frames: oneDiagram.frames, svgs: oneDiagram.svgs }, { frames: 0, svgs: 1 }, 'the diagram and no mock');
         assert.ok(oneDiagram.svg.width > 50 && oneDiagram.svg.height > 100, 'drawn at a size to read');
         assert.equal(oneDiagram.svg.nodes, 4, 'all four of its nodes');
-        assert.deepEqual(quiet(oneDiagram), { scripts: 0, controls: 0, fetched: [], rest: 0 }, 'no script, no control, nothing fetched, nothing else of the round');
+        assert.deepEqual({ scripts: oneDiagram.scripts, controls: oneDiagram.controls, fetched: oneDiagram.fetched, rest: oneDiagram.rest },
+          { scripts: 0, controls: 0, fetched: [], rest: 0 }, 'no script, no control, nothing fetched, nothing else of the round');
       });
 
       await send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: downloads, eventsEnabled: true });
@@ -755,22 +882,14 @@ async function main() {
 
       const mockBand = await evalIn(send, tallFrame, BAND_EXPR);
       const pageDownload = await downloadFrom(send, onEvent, tallTab, STRIP_CLICK);
-      await row('its Download round saves the artifact round as one HTML file, the mock at its full height', note => {
-        const saved = savedMockHeight(pageDownload.file);
-        note(`${pageDownload.files.join(', ')}; the artifact is ${TALL_MOCK_PX}px tall, padded ${mockBand}px on the board; the file draws it ${saved}px tall, ${saved - TALL_MOCK_PX}px of that past its end`);
+      const pageFile = await openSaved(send, onEvent, pageDownload.file, cookie, offline);
+      await row('a sent full-page mock round\'s Download saves the mock as its own page, as tall as the mock, with none of the room the board pads it by', note => {
+        const bytes = readFileSync(pageDownload.file, 'utf8');
+        note(`${pageDownload.files.join(', ')}, ${bytes.length} bytes; the artifact is ${TALL_MOCK_PX}px tall, padded ${mockBand}px on the board; the file's page is ${pageFile.height}px tall, padded ${pageFile.pad}px`);
         assert.deepEqual(pageDownload.files, ['tall-fixture-round-1.html']);
         assert.ok(mockBand > 0, 'setup: the board pads the artifact for its own chrome');
-        assert.ok(saved >= TALL_MOCK_PX, 'no shorter than the artifact, which would cut its end off');
-        assert.ok(saved <= TALL_MOCK_PX + Math.ceil(mockBand), 'and no taller than the artifact with the room the board pads it by');
-      });
-
-      const pageFile = await measureTab(send, onEvent, pathToFileURL(pageDownload.file).href, cookie,
-        { width: 1280, height: 900, theme: 'dark', expr: PAGE_FILE_EXPR, prepare: offline });
-      await row('the artifact round\'s file lists every comment below the mock, none hidden in a scroll box, with no control or send bar left', note => {
-        note(pageFile.comments.map(c => `${c.text}: ${c.below ? 'below' : 'over'} the mock, ${c.shown ? 'shown' : 'hidden'}`).join('; '));
-        assert.deepEqual(pageFile.comments, TALL_PAGE_COMMENTS.map(c => ({ text: c.text, below: true, shown: true })));
-        assert.equal(pageFile.controls, 0, 'no control is left in the file');
-        assert.equal(pageFile.sendBars, 0, 'the board\'s send bar stays on the board');
+        assert.ok(bytes === SAVED_HEAD + TALL_ROUND_1[0].html, 'the mock\'s source as posted, and nothing of the board\'s');
+        assert.deepEqual({ height: pageFile.height, pad: pageFile.pad, frames: pageFile.frames }, { height: TALL_MOCK_PX, pad: 0, frames: 0 });
       });
 
       await tallTab.evalPage(`document.querySelector('.round-page[data-round="2"]').click()`);
@@ -783,17 +902,7 @@ async function main() {
       await reportedHeight(tallTab, 'h4');
       await tallTab.quiet();
       const pinnedFrame = await artifactSession(send, 'Pinned body');
-      const pinnedBand = await evalIn(send, pinnedFrame, BAND_EXPR);
-      const pinnedDownload = await downloadFrom(send, onEvent, tallTab, STRIP_CLICK);
-      await row('an artifact whose content spills out of a body pinned to the window is saved at the content\'s full height', note => {
-        const saved = savedMockHeight(pinnedDownload.file);
-        note(`the artifact is ${PINNED_PX}px tall, padded ${pinnedBand}px on the board; the file draws it ${saved}px tall, ${saved - PINNED_PX}px of that past its end`);
-        assert.ok(pinnedBand > 0, 'setup: the board pads the artifact for its own chrome');
-        assert.ok(saved >= PINNED_PX, 'no shorter than the artifact, which would cut its end off');
-        assert.ok(saved <= PINNED_PX + Math.ceil(pinnedBand), 'and no taller than the artifact with the room the board pads it by');
-      });
-
-      // Measured again with the reader at its end. A measure that took the board's padding
+      // Measured with the reader at its end. A measure that took the board's padding
       // off for the read would leave the document shorter than where the reader is.
       const atEnd = await evalIn(send, pinnedFrame, `(function () {
         window.scrollTo(0, document.documentElement.scrollHeight);
@@ -840,19 +949,53 @@ async function main() {
       const shownScrolled = await shownTab.evalPage(STRIP_EXPR);
       const shownDownload = await downloadFrom(send, onEvent, shownTab, STRIP_CLICK);
       await shownTab.close();
-      const shownFile = await measureTab(send, onEvent, pathToFileURL(shownDownload.file).href, cookie,
-        { width: 1280, height: 900, theme: 'dark', prepare: offline, expr: `({
-          meta: [].slice.call(document.querySelectorAll('.export-meta > span')).map(function (e) { return e.textContent.trim(); }),
-          unsentNotes: document.querySelectorAll('.export-unsent-note').length,
-          empty: (document.querySelector('.export-empty') || {}).textContent, frames: document.querySelectorAll('iframe').length })` });
+      const shownFile = await openSaved(send, onEvent, shownDownload.file, cookie, offline);
       await row('an artifact round never sent shows the same Download round in the top strip, at rest and scrolled, and it saves the round', note => {
         note(shownDownload.files.join(', '));
         assert.equal(shownTab.measured, 'open', 'setup: drawn full page, and not sent');
         assert.deepEqual(shownAtRest, { hit: true, drawn: true, inWindow: true, scrolled: false });
         assert.deepEqual(shownScrolled, { hit: true, drawn: true, inWindow: true, scrolled: true });
         assert.deepEqual(shownDownload.files, ['shown-fixture-round-1.html']);
-        assert.deepEqual(shownFile, { meta: ['Round 1'], unsentNotes: 0, empty: 'This round asked no questions.', frames: 1 },
-          'the mock, and no Not sent line: nothing was asked, so nothing is a draft');
+        assert.deepEqual({ text: shownFile.text, frames: shownFile.frames }, { text: 'Shown mock', frames: 0 }, 'the mock as its own page');
+      });
+
+      // A mock that draws a diagram by its own script, saved from its Pull-out in a question round.
+      const drawnTab = await openTab(send, onEvent, drawnUrl, cookie, { width: 1280, height: 900, theme: 'dark',
+        expr: `document.querySelector('.round-current').getAttribute('data-round')` });
+      await drawnTab.evalPage(`document.querySelector('[data-block-id="h6"] .pull-out').click()`);
+      await drawnTab.until(`document.querySelector('dialog.stage-lens[open] iframe')`, 'the diagram-drawing mock pulled out');
+      const loaderDownload = await downloadFrom(send, onEvent, drawnTab, `document.querySelector('dialog.stage-lens [data-lens="download"]').click()`);
+      await drawnTab.close();
+      const loaderFile = await openSaved(send, onEvent, loaderDownload.file, cookie, offline);
+      const savedLine = (download, file) => `${download.files.join(', ')}, ${readFileSync(download.file, 'utf8').length} bytes; diagrams: ${file.diagrams.join(', ') || 'none'}; contents: ${file.contents.join(', ') || 'none'}; reached for: ${(file.reached || []).join(', ') || 'nothing'}`;
+      await row('a mock that draws a diagram, saved from its Pull-out and opened offline, shows the diagram drawn, its contents list filled and its control live, having asked no address for the library', note => {
+        note(savedLine(loaderDownload, loaderFile));
+        assert.deepEqual(loaderDownload.files, ['drawn-fixture-round-1-mock-h6.html']);
+        assert.deepEqual(loaderFile.diagrams, ['3 nodes'], 'drawn by the mock\'s own script');
+        assert.deepEqual(loaderFile.contents, ['The flow', 'The quiz']);
+        assert.equal(loaderFile.revealed, true, 'its Reveal control answers a click');
+        assert.deepEqual({ reached: loaderFile.reached, fetched: loaderFile.fetched, frames: loaderFile.frames }, { reached: [], fetched: [], frames: 0 });
+      });
+      await row('that file is the mock\'s source as posted, under the board\'s diagram library written in as one script, and nothing else', () => {
+        assert.ok(readFileSync(loaderDownload.file, 'utf8') === SAVED_HEAD + SAVED_LIBRARY + LOADER_MOCK,
+          'the head, the vendored library whole in one script, then the mock: no script of the board\'s, no address of its daemon');
+      });
+
+      // The same from the top strip of a round drawn full page.
+      const drawnPageTab = await openTab(send, onEvent, drawnPageUrl, cookie, { width: 1280, height: 800, theme: 'dark',
+        expr: `document.body.classList.contains('page-board')` });
+      const importerDownload = await downloadFrom(send, onEvent, drawnPageTab, STRIP_CLICK);
+      await drawnPageTab.close();
+      const importerFile = await openSaved(send, onEvent, importerDownload.file, cookie, offline);
+      await row('a full-page mock that mints its diagram and would import the library, saved from the top strip and opened offline, shows it drawn the same way', note => {
+        note(savedLine(importerDownload, importerFile));
+        assert.equal(drawnPageTab.measured, true, 'setup: the mock is drawn full page');
+        assert.deepEqual(importerDownload.files, ['drawn-page-fixture-round-1.html']);
+        assert.deepEqual(importerFile.diagrams, ['3 nodes'], 'drawn by the mock\'s own script');
+        assert.deepEqual(importerFile.contents, ['Map']);
+        assert.equal(importerFile.revealed, true, 'its Reveal control answers a click');
+        assert.deepEqual({ reached: importerFile.reached, fetched: importerFile.fetched, frames: importerFile.frames }, { reached: [], fetched: [], frames: 0 });
+        assert.ok(readFileSync(importerDownload.file, 'utf8') === SAVED_HEAD + SAVED_LIBRARY + IMPORTER_MOCK, 'the head, the library, then the mock');
       });
 
       // The board as a reader has it with no daemon behind it: opened from disk, read-only.
@@ -871,18 +1014,6 @@ async function main() {
       await row('a read-only archive, which cannot save a round, shows no Download round in its top strip and no chip line over the artifact', () => {
         assert.equal(archived.measured, true, 'setup: opened from disk, the board is read-only');
         assert.deepEqual(strip, { present: true, display: 'none', chips: 0 });
-      });
-
-      const printedPage = await paginate(send, onEvent, pageDownload.file, cookie, A4_W);
-      await row('printed, a mock taller than a page is scaled to fit one, never cut', note => {
-        note(`${printedPage.mocks.map(mockLine).join(', ')}; ${printedPage.pieces.map(p => `${p.what} ${p.top}..${p.bottom}`).join(', ')}`);
-        assert.equal(printedPage.mocks.length, 1, 'setup: the mock was found');
-        const [mock] = printedPage.mocks;
-        assert.ok(Math.abs(mock.h - FIT_H) <= 1, `one page tall, not ${mock.h}px`);
-        assert.ok(keepsAspect(mock), 'in its drawn proportions');
-        assert.ok(mock.pastHolder <= 0.5, `its right edge is inside its holder, not ${mock.pastHolder}px past it`);
-        assert.ok(Math.abs(mock.holderH - mock.h) <= 1, 'its holder is as tall as it prints');
-        assert.deepEqual(cutPieces(printedPage.pieces), [], 'the mock, its holder and the comments under it');
       });
 
       const printedTall = await paginate(send, onEvent, tallDownload.file, cookie);

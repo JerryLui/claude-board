@@ -3,16 +3,19 @@
 // by src/render.mjs and left live by src/ui.mjs's markRoundHistory when a round goes sent
 // under an open tab. A round drawn full page has no chip line: its control is the one in the
 // top strip. The decisions table's pick text per widget, the Not sent line an unsent round's
-// file opens on, the file of one mock or diagram, and the file's head escaped so no title or
-// stylesheet text can open a script, and how far a printed page's height shrinks a mock. The
-// saved file itself, its layout and its print are test/browser-check-download.mjs's, run by
-// hand.
+// file opens on, the file of one diagram, and the file's head escaped so no title or
+// stylesheet text can open a script, and how far a printed page's height shrinks a mock. A
+// mock saved alone is its own page (ADR.md entry 154): its source read back out of its stage
+// byte for byte, under a head of its own, with the diagram library written in where it draws
+// a diagram. The saved file itself, its layout and its print are
+// test/browser-check-download.mjs's, run by hand.
 
 import assert from 'node:assert/strict';
 import { createBoard, addRound, applySubmit, abandonOpenRounds } from '../src/board.mjs';
-import { renderBoardPage } from '../src/render.mjs';
+import { renderBoardPage, buildStageSrcdoc } from '../src/render.mjs';
 import { buildRoundPushPayload } from '../src/server.mjs';
-import { decisionRows, exportDocument, exportFileName, printScale } from '../src/round-export.mjs';
+import { decisionRows, exportDocument, exportFileName, printScale, stageOwnSource, mockDocument } from '../src/round-export.mjs';
+import { MERMAID_ASSET, MERMAID_SOURCE } from '../src/vendor/mermaid/index.mjs';
 import { parseHTML } from './dom-stand-in.mjs';
 import { check, finish, pageHarness } from './support.mjs';
 
@@ -114,13 +117,53 @@ check('an unsent round\'s file opens on a Not sent line and heads its picks as u
   assert.deepEqual(texts(shown, '.export-meta span'), ['Round 2 · Density']);
 });
 
-check('one mock or diagram saved alone: the file is named for it, says which it is, and holds no decisions table', () => {
+check('one mock or diagram saved alone is named for it; a diagram\'s file says which it is and holds no decisions table', () => {
   assert.equal(exportFileName('Download fixture', 1, 'mock-h1'), 'download-fixture-round-1-mock-h1.html');
   assert.equal(exportFileName('Download fixture', 1), 'download-fixture-round-1.html', 'a whole round\'s name is unchanged');
-  const one = parseHTML(exportDocument({ ...FILE, only: 'One mock', unsent: true, sentDate: '', rows: [{ question: 'Density?', pick: 'Compact', note: '' }] }));
-  assert.deepEqual(texts(one, '.export-meta span'), ['Round 2 · Density', 'One mock']);
+  const one = parseHTML(exportDocument({ ...FILE, only: 'One diagram', unsent: true, sentDate: '', rows: [{ question: 'Density?', pick: 'Compact', note: '' }] }));
+  assert.deepEqual(texts(one, '.export-meta span'), ['Round 2 · Density', 'One diagram']);
   assert.equal(one.querySelectorAll('table, h2.export-section, .export-empty, .export-unsent-note, .export-unsent').length, 0);
   assert.equal(one.querySelector('section.export-round').textContent.trim(), 'drawn');
+});
+
+// What the board's own script opens with: a mock may quote it.
+const AGENT_OPENING = "<script>(function () {\n  var CB = 'cb-stage';\n";
+const DIAGRAM = '<pre class="mermaid">flowchart LR\n  a --> b</pre>';
+
+check('a mock\'s own source comes back out of its stage byte for byte, whatever it holds, with whether the board lent it the diagram library', () => {
+  const rows = [
+    ['a fragment', '<div>Mock</div>', false],
+    ['an empty mock', '', false],
+    ['a whole page', '<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8"><title>T</title></head><body><p>Page</p></body></html>\n', false],
+    ['a page that ends in its own script', '<p id="p"></p><script>document.getElementById("p").textContent = "ran";</script>', false],
+    ['a page that draws a diagram', `<!DOCTYPE html><html><body>${DIAGRAM}<script>window.mermaid.run();</script></body></html>`, true],
+    ['a diagram and nothing after it', DIAGRAM, true],
+    ['a page that quotes the board\'s own script', `<pre>${AGENT_OPENING}</pre><p>after</p>`, false],
+    ['a diagram page that quotes it too', `${DIAGRAM}${AGENT_OPENING}})();</script><p>after</p>`, true],
+    ['a page that opens on a script of the library\'s name and draws no diagram', `<script src="${MERMAID_ASSET}"></script><script>var own = 1;</script><p>after</p>`, false],
+  ];
+  for (const [what, html, engine] of rows) {
+    assert.deepEqual(stageOwnSource(buildStageSrcdoc({ kind: 'html', html }), MERMAID_ASSET), { html, engine }, what);
+  }
+  assert.equal(stageOwnSource('<div>Mock</div>', MERMAID_ASSET), null, 'text that is no stage\'s');
+  assert.equal(stageOwnSource(null, MERMAID_ASSET), null, 'a stage the tab does not hold');
+});
+
+const HEAD = '<!DOCTYPE html>\n<meta charset="utf-8">\n<style>html,body{margin:0;padding:0}</style>\n';
+
+check('a saved mock is its own source under a UTF-8, standards-mode, margin-free head, the diagram library written in ahead of it only where it is given', () => {
+  const page = '<!DOCTYPE html><html><body><p>Page</p><script>go();</script></body></html>';
+  assert.equal(mockDocument(page, null), HEAD + page);
+  assert.equal(mockDocument(page, 'window.mermaid = {};'), HEAD + '<script>window.mermaid = {};</script>\n' + page);
+  assert.equal(mockDocument('', null), HEAD);
+});
+
+check('the vendored diagram library can be written into a file as it is: a text holding a script tag, which would end the script early or swallow the page, is refused', () => {
+  assert.ok(mockDocument('<p>after</p>', MERMAID_SOURCE) === HEAD + '<script>' + MERMAID_SOURCE + '</script>\n<p>after</p>',
+    'the head, the library whole inside one script, then the mock');
+  for (const text of ['var a = "</script>";', 'var a = "</SCRIPT >";', 'var a = "<!--<script>";']) {
+    assert.throws(() => mockDocument('<p>after</p>', text), /script tag/, text);
+  }
 });
 
 check('the decisions table names each question\'s pick in words, per widget and state, with its note', () => {

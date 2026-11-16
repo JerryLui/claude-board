@@ -66,6 +66,7 @@ import { openSharedStream, STREAM_WORKER_URL } from './stream-worker.mjs';
 import { activityMinMs } from './activity.mjs';
 import {
   EXPORT_CSS, PRINT_PAGE_H, decisionRows, exportDate, exportFileName, exportDocument, printScale,
+  stageOwnSource, mockDocument,
 } from './round-export.mjs';
 // The one source of truth for both image limits -- the daemon's own
 // src/images.mjs checks a submit against these same two constants, so a page
@@ -4350,14 +4351,20 @@ export const ui = `
   // --- Download round: a round saved as one HTML file, sent or not, and one
   // mock or diagram saved alone from its Pull-out ---------------------------
   //
-  // Made here, from the round as drawn, so a diagram is already SVG and the
-  // file carries no engine (src/round-export.mjs holds the pure half and says
-  // what the file is). The copy is the round's own markup with every control
-  // and pin taken out, its answers written as text, its images inlined as
-  // data: URLs and its stages script-free: each mock is its srcdoc with every
-  // script removed, in a frame sandboxed with no allow-scripts, as tall as the
-  // stage last reported itself. The file's own policy admits no script at all.
-  // Its diagrams are drawn again in the light palette, since a file is printed.
+  // Two kinds of file (ADR.md entry 154; src/round-export.mjs holds the pure
+  // half of both). A question round's, and one diagram's, is made here from the
+  // round as drawn, so a diagram is already SVG and the file carries no engine.
+  // The copy is the round's own markup with every control and pin taken out, its
+  // answers written as text, its images inlined as data: URLs and its stages
+  // script-free: each mock is its srcdoc with every script removed, in a frame
+  // sandboxed with no allow-scripts, as tall as the stage last reported itself.
+  // The file's own policy admits no script at all. Its diagrams are drawn again
+  // in the light palette, since a file is printed.
+  //
+  // A mock saved alone, from its Pull-out or as the one mock of a round drawn
+  // full page, is the mock's own page instead (downloadMock): its source as
+  // posted, its scripts kept, with the diagram library's text written in where
+  // the mock draws a diagram.
   var EXPORT_CSS = ${JSON.stringify(EXPORT_CSS)};
   var EXPORT_MERMAID_VARS = ${JSON.stringify(EXPORT_MERMAID_VARS)};
   var decisionRows = ${decisionRows.toString()};
@@ -4366,6 +4373,8 @@ export const ui = `
   var exportDocument = ${exportDocument.toString()};
   var PRINT_PAGE_H = ${PRINT_PAGE_H};
   var printScale = ${printScale.toString()};
+  var stageOwnSource = ${stageOwnSource.toString()};
+  var mockDocument = ${mockDocument.toString()};
   // Everything in a round that is a control or a pin rather than what the round
   // said. The round's chip line goes too: the file's own head names the round.
   var EXPORT_DROP = '.round-chips, .round-end, .comment-btn, .comment-form, .comment-target, .pin-layer, '
@@ -4586,9 +4595,33 @@ export const ui = `
     return answers;
   }
 
+  // One mock saved as its own page, named 'name': the source the board holds in
+  // 'frame', the mock's stage, less what the board wrote around it. Where the
+  // board lent that stage the diagram library, the library's text is read from
+  // the board's own copy beside the page and written into the file, so the
+  // saved page draws its diagrams with no connection. A stage this tab does not
+  // hold saves nothing, and neither does a file: archive, which reads nothing.
+  async function downloadMock(frame, name) {
+    if (readonly) return;
+    var own = frame ? stageOwnSource(frame.getAttribute('srcdoc'), MERMAID_ASSET) : null;
+    if (!own) throw new Error('this mock is not loaded on the page');
+    var engine = null;
+    if (own.engine) {
+      var res = await fetch(MERMAID_ASSET);
+      if (!res.ok) throw new Error('the diagram library could not be read (' + res.status + ')');
+      engine = await res.text();
+    }
+    saveHtmlFile(name, mockDocument(own.html, engine));
+  }
+
+  // A round drawn full page is one mock: its file is that mock's own page.
   async function downloadRound(section) {
-    await askStageHeights(section);
     var n = Number(section.getAttribute('data-round'));
+    if (isPageRound(blocksOfRound(n))) {
+      await downloadMock(section.querySelector('iframe.html-stage'), exportFileName(board.title, n));
+      return;
+    }
+    await askStageHeights(section);
     var round = (board.rounds || []).find(function (r) { return r.n === n; }) || {};
     var questions = questionBlocks({ blocks: (board.blocks || []).filter(function (b) { return b.round === n; }) });
     var unsent = section.getAttribute('data-round-status') !== 'sent';
@@ -4607,11 +4640,16 @@ export const ui = `
   }
 
   // One mock or diagram saved alone: 'only' is its holder inside 'block', the
-  // block its Pull-out was opened from, and 'kind' says which it is.
+  // block its Pull-out was opened from, and 'kind' says which it is. A mock is
+  // saved as its own page, a diagram as the picture the page drew.
   async function downloadArtifact(block, only, kind, blockId) {
-    await askStageHeights(block);
     var section = block.closest('.round');
     var n = Number(section && section.getAttribute('data-round'));
+    if (kind === 'mock') {
+      await downloadMock(only.querySelector('iframe.html-stage'), exportFileName(board.title, n, kind + '-' + blockId));
+      return;
+    }
+    await askStageHeights(block);
     var round = (board.rounds || []).find(function (r) { return r.n === n; }) || {};
     var html = exportDocument({
       title: board.title || '',

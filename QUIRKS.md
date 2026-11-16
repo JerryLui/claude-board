@@ -798,6 +798,7 @@ read from there.
 ## The check suite's own shapes
 
 - [A client script that parses is not a client script that is on the page](#a-client-script-that-parses-is-not-a-client-script-that-is-on-the-page)
+- [The client script's text is read as the page's: a whole script tag in a string, and every `fetch(`](#the-client-scripts-text-is-read-as-the-pages-a-whole-script-tag-in-a-string-and-every-fetch)
 - [A loader that skips `themeBootScript` finds `#theme-toggle` dead](#a-loader-that-skips-themebootscript-finds-theme-toggle-dead)
 - [Finding the real `<style>` tag in rendered bytes](#finding-the-real-style-tag-in-rendered-bytes)
 - [A block-comment stripper needs to know about regex literals, not just strings](#a-block-comment-stripper-needs-to-know-about-regex-literals-not-just-strings)
@@ -830,6 +831,21 @@ separate check asserting the STRING IDENTITY of what `renderIndexPage` embeds ag
 Worth checking on any file that exports a string meant to be *embedded* somewhere
 (`indexScript`, `stageAgentScript()` in `src/render.mjs`, `ui` in `src/ui.mjs`): a check
 that the string is well-formed is not a check that the assembly step uses it.
+
+### The client script's text is read as the page's: a whole script tag in a string, and every `fetch(`
+
+Two checks read `src/ui.mjs`'s `ui` as text, and so read every function it embeds by
+`.toString()` (`src/round-export.mjs`, `src/badge.mjs`) too. Both bit one change, 2026-11-16
+(the saved mock, ADR 154):
+
+- `test/check-assets.mjs` ("a page already on disk still opens correctly from Finder") lists
+  every file a page names, the client script's text included. A string literal that spells a
+  script tag with a `src` whole reads as a sibling the page references and fails with "the
+  stand-in still references something". Spell the tag in parts: `'<' + 'script'`,
+  `'</' + 'script>'`.
+- `test/check-pure.mjs` ("mode detection is synchronous") counts the `fetch(` calls in the
+  client script, names each, and wants each one's function to open on `if (readonly) return;`.
+  A new read fails it until the count, the comment and a guard row there say what it is.
 
 ### A loader that skips `themeBootScript` finds `#theme-toggle` dead
 
