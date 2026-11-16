@@ -3413,16 +3413,18 @@ async function handleMission(req, res, parts, home, stream, cache, heldSecret, l
     else if (route === 'launch') answer = launchMission(key, body, { home, listed });
     else if (route === 'join') {
       const before = boundBefore(key, home);
-      ({ status, ...answer } = joinMission(key, body, { home, listed }));
+      let left;
+      ({ status, left, ...answer } = joinMission(key, body, { home, listed }));
       if (status === 200 && answer.session) {
         // A session bound in place of one that went or that a launch replaced: the rounds
         // that session left unanswered are reopened under this one, as a takeover's are
         // (ADR 150, 151). So are the rounds the bound process asked under an id it had before
         // a /clear, told from the ones it asked since by that id alone. The ids are read off
         // the rounds: the mission may hold the new one already, from a heartbeat before
-        // this join.
+        // this join. And so are the rounds of the session that left the mission before this
+        // one bound (`left`): the PM still owes their answers.
         const cleared = before && sessionMatches(before, answer.session) ? clearedIds(key, answer.session, home) : [];
-        const givers = [answer.session.ended, ...cleared.map(id => ({ id }))].filter(Boolean);
+        const givers = [answer.session.ended, left, ...cleared.map(id => ({ id }))].filter(Boolean);
         for (const giver of givers) handOverMissionRounds(key, giver, answer.session, home, live);
         // Named on every join while they wait, so a session that joins again (after a
         // /clear, or after a takeover bound it, which answered it nothing) is told what
@@ -3501,7 +3503,7 @@ function linkedMissionBoards(key, home) {
 }
 
 /** Hand the rounds session `giver` left unanswered on every board mission `key` links to
- * `taker`, the session a takeover, or a join after `giver` went, bound in its place, each
+ * `taker`, the session a takeover, or a join after `giver` went or left, bound in its place, each
  * that asks for an answer reopened in place (`handOverRounds`, ADR 151): needs you reads
  * every linked board, so an older one's round is handed too. A reopened round's new
  * deadline goes to the board's tabs, marked `reopened`, and the index streams as a moved
