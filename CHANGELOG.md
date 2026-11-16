@@ -21,7 +21,7 @@
   treat one as you would the session that made it. A full-page round's file no longer lists the
   comments made on the mock. A question round's file is unchanged: no script anywhere in it, each
   mock inside it a still copy.
-- **A mission's next session picks up the questions the last one left (ADR 151)**: when a session
+- **A mission's next session picks up the questions the last one left (ADR 151, 153)**: when a session
   joins a mission in place of the one before it, or takes the mission over, each round that
   session left unanswered goes back to waiting in place, whether it was closed at a `/clear` or
   the session's end, had timed out, or was still waiting at the takeover. It keeps its round

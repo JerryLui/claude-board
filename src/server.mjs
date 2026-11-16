@@ -74,7 +74,7 @@ import { createMissionWatch } from './mission-watch.mjs';
 import { createMissionsCache } from './missions-cache.mjs';
 import { MAX_POST_BYTES, MAX_DRAINED_BYTES, MAX_SUBMIT_BYTES, postTooLargeMessage } from './post-limit.mjs';
 import { activityMinMs } from './activity.mjs';
-import { getMissionView, missionView, upsertMission, launchMission, bindSession, joinMission, leaveMission, recordReopened, sessionMatches, sameStart, addOrder, ackOrder, seenOrder, resentOrder, linkBoard, missionBoardId, recordFire, recordPrFacts, assertMissionKey } from './missions.mjs';
+import { getMissionView, missionView, upsertMission, launchMission, bindSession, joinMission, leaveMission, leaverHandedOver, recordReopened, sessionMatches, sameStart, addOrder, ackOrder, seenOrder, resentOrder, linkBoard, missionBoardId, recordFire, recordPrFacts, assertMissionKey } from './missions.mjs';
 import { createBindingIndex } from './bindings.mjs';
 import { readSpinDown, setSpinDown, spinDownBrief } from './spin-down.mjs';
 import { createSessionList, validateSessionRef, bindBoardSession } from './sessions.mjs';
@@ -3422,10 +3422,16 @@ async function handleMission(req, res, parts, home, stream, cache, heldSecret, l
         // a /clear, told from the ones it asked since by that id alone. The ids are read off
         // the rounds: the mission may hold the new one already, from a heartbeat before
         // this join. And so are the rounds of the session that left the mission before this
-        // one bound (`left`): the PM still owes their answers.
+        // one bound (`left`, ADR 153): the PM still owes their answers. The record names
+        // that session until every linked board was handed over, so a board that failed is
+        // handed over at the next join.
         const cleared = before && sessionMatches(before, answer.session) ? clearedIds(key, answer.session, home) : [];
-        const givers = [answer.session.ended, left, ...cleared.map(id => ({ id }))].filter(Boolean);
-        for (const giver of givers) handOverMissionRounds(key, giver, answer.session, home, live);
+        const leaver = left ? leaverGiver(key, left, answer.session, home) : null;
+        const givers = [answer.session.ended, leaver, ...cleared.map(id => ({ id }))].filter(Boolean);
+        for (const giver of givers) {
+          const clean = handOverMissionRounds(key, giver, answer.session, home, live);
+          if (giver === leaver && clean) dropLeaver(key, home);
+        }
         // Named on every join while they wait, so a session that joins again (after a
         // /clear, or after a takeover bound it, which answered it nothing) is told what
         // its earlier join was.
@@ -3482,13 +3488,36 @@ function clearedIds(key, session, home) {
   return [...ids];
 }
 
+/** The giver `left` is, the session that left mission `key` before `session` joined (ADR
+ * 153): itself, by its id and its process, save back in its own process under a new id (a
+ * /clear) with a round on the mission's boards recorded under that id. It asked that round
+ * after a /clear the mission never heard of and left under the new id, so a giver named by
+ * its process would hand it its own round. The rounds of its process are then told apart by
+ * id alone, as a /clear's are (`clearedIds`): it gives those recorded under the id the
+ * mission bound it with. */
+function leaverGiver(key, left, session, home) {
+  const back = left.pid != null && left.pid === session.pid && sameStart(left.procStart, session.procStart);
+  if (!back) return left;
+  const askedSince = linkedMissionBoards(key, home).some(board => (board.rounds || [])
+    .some(r => r.session && r.session.id != null && r.session.id === session.id));
+  return askedSince ? { id: left.id } : left;
+}
+
 /** The boards mission `key` links, each read once; one that fails is warned and skipped. */
 function linkedMissionBoards(key, home) {
+  return readLinkedBoards(key, home).boards;
+}
+
+/** `linkedMissionBoards` with `clean`, false when the mission's links or one of its boards
+ * failed to read. A linked board no longer stored is no failure. */
+function readLinkedBoards(key, home) {
   const boards = [];
   let links = [];
+  let clean = true;
   try {
     links = (readMission(key, home) || {}).boards || [];
   } catch (err) {
+    clean = false;
     console.error(`claude-board: mission ${key}'s boards were not read: ${(err && err.message) || err}`);
   }
   for (const { id } of links) {
@@ -3496,10 +3525,21 @@ function linkedMissionBoards(key, home) {
       const board = readBoard(id, home);
       if (board) boards.push(board);
     } catch (err) {
+      clean = false;
       console.error(`claude-board: mission ${key}'s board ${id} was not read: ${(err && err.message) || err}`);
     }
   }
-  return boards;
+  return { boards, clean };
+}
+
+/** The join route's `leaverHandedOver` (src/missions.mjs); a record that fails is warned,
+ * and the leaver is offered again at the next join. */
+function dropLeaver(key, home) {
+  try {
+    leaverHandedOver(key, { home });
+  } catch (err) {
+    console.error(`claude-board: mission ${key}'s record still names the session that left: ${(err && err.message) || err}`);
+  }
 }
 
 /** Hand the rounds session `giver` left unanswered on every board mission `key` links to
@@ -3508,9 +3548,12 @@ function linkedMissionBoards(key, home) {
  * every linked board, so an older one's round is handed too. A reopened round's new
  * deadline goes to the board's tabs, marked `reopened`, and the index streams as a moved
  * one does, the waiting count is published and the stranded rule asked again. A board
- * that fails is warned and the rest go on: the leave or join has happened. */
+ * that fails is warned and the rest go on: the leave or join has happened. Answers whether
+ * every linked board was read and handed over, none failing. */
 function handOverMissionRounds(key, giver, taker, home, { req, sse, stranded, stream, waiting }) {
-  for (const board of linkedMissionBoards(key, home)) {
+  const { boards, clean: allRead } = readLinkedBoards(key, home);
+  let clean = allRead;
+  for (const board of boards) {
     try {
       const { handed, reopened } = handOverRounds(board, giver, taker, { awaitTimeoutMs: waitTimeoutMs() });
       if (handed.length === 0) continue;
@@ -3522,9 +3565,11 @@ function handOverMissionRounds(key, giver, taker, home, { req, sse, stranded, st
       broadcastWaiting(stream, waiting, board);
       stranded.evaluate(board.id, strandedTarget(req, board.id));
     } catch (err) {
+      clean = false;
       console.error(`claude-board: mission ${key}'s open rounds on board ${board.id} were not handed over: ${(err && err.message) || err}`);
     }
   }
+  return clean;
 }
 
 /** The rounds reopened under `session` on mission `key`'s boards that still wait (ADR 151),

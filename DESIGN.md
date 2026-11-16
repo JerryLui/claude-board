@@ -891,6 +891,17 @@ review. Copied by hand, it costs nothing until someone wants it. Also rejected: 
 leaving the description to carry the whole load — the description says *that* a caller should reach
 the board, and nothing shows what a caller that defers its mechanism actually looks like.
 
+### Entry 153: a leaver's rounds reopen at the next join
+
+**Rejected: they stay closed, as first built.** Entry 151 kept the board's standing rule that a
+session that left its mission is no longer the mission's, so it gave nothing: the rounds it left
+unanswered stayed closed, and only the leaver joining again could get an answer to them. That
+left a question the PM still owed an answer to read-only and off Waiting on you while the next
+session worked the mission, the very state entry 151 ended for a session that went or was
+replaced, and it made a leave the one way out of a mission that lost its open questions. A
+takeover already moves a live session's rounds to the taker, so a leave with nobody waiting to
+take over follows the same rule one join later.
+
 ## Out of Scope
 
 - Live revision of the artifact after feedback. Lavish edits the page in place; we re-render from
