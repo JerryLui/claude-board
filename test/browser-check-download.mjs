@@ -262,7 +262,7 @@ const DRAWN_PAGE_ROUND_1 = [{ id: 'h7', kind: 'html', html: IMPORTER_MOCK }];
 // under a policy that admits what the file holds and https: addresses and no file on the
 // disk, with no page margin, as a stage is on the board.
 const SAVED_HEAD = '<!DOCTYPE html>\n<meta charset="utf-8">\n'
-  + '<meta http-equiv="Content-Security-Policy" content="default-src \'unsafe-inline\' \'unsafe-eval\' https: data: blob:">\n'
+  + '<meta http-equiv="Content-Security-Policy" content="default-src \'unsafe-inline\' https: data: blob:">\n'
   + STAGE_MARGIN_RESET + '\n';
 const SAVED_LIBRARY = '<script>' + MERMAID_SOURCE + '</script>\n';
 // The first board's open round: one question picked on the page and one left alone.
@@ -598,15 +598,16 @@ async function openSaved(send, onEvent, file, cookie, prepare) {
 }
 
 /** A Download that saves nothing: presses `control` (a selector) on the open board tab,
- * waits for the note under it and answers what the control then shows, with every file the
- * press saved. */
+ * waits for the control to be live again and answers what it then shows (`note` null where
+ * it says nothing), with every file the press saved. */
 async function failedDownload(send, tab, control) {
   const dir = scratchDir('cb-download-files-');
   await send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: dir, eventsEnabled: true });
   await tab.evalPage(`document.querySelector(${JSON.stringify(control)}).click()`);
-  await tab.until(`document.querySelector(${JSON.stringify(control + ' .download-note')})`, 'the note under the Download that saved nothing');
+  await tab.until(`!document.querySelector(${JSON.stringify(control)}).disabled`, 'the pressed Download coming live again');
   const shown = await tab.evalPage(`(function () {
     var btn = document.querySelector(${JSON.stringify(control)}), note = btn.querySelector('.download-note');
+    if (!note) return { note: null, label: btn.getAttribute('aria-label'), live: !btn.disabled, drawn: false, under: false };
     var r = note.getBoundingClientRect(), b = btn.getBoundingClientRect(), cs = getComputedStyle(note);
     return { note: note.textContent, label: btn.getAttribute('aria-label'), live: !btn.disabled,
       drawn: r.width > 0 && r.height > 0 && cs.visibility === 'visible' && r.left >= 0 && r.right <= window.innerWidth && r.bottom <= window.innerHeight,
@@ -1069,7 +1070,7 @@ async function main() {
       await row('a full-page mock the tab does not hold, its read refused, saves no file: Download round says so under itself and is live again', note => {
         note(`${heldRefused.note} | files: ${heldRefused.files.join(', ') || 'none'}`);
         assert.deepEqual(heldRefused.files, []);
-        assert.match(heldRefused.note, /did not load, so nothing was saved/);
+        assert.match(String(heldRefused.note), /did not load, so nothing was saved/);
         assert.equal(heldRefused.label, heldRefused.note, 'the control\'s own label says the same');
         assert.deepEqual({ live: heldRefused.live, drawn: heldRefused.drawn, under: heldRefused.under }, { live: true, drawn: true, under: true });
       });
@@ -1110,7 +1111,7 @@ async function main() {
       await row('with the board not handing over its diagram library, Download on a diagram-drawing mock\'s Pull-out saves no file, says so under itself and is live again; pressed again once the library is back, it saves and the note is gone', note => {
         note(`${libraryRefused.note} | files: ${libraryRefused.files.join(', ') || 'none'}`);
         assert.deepEqual(libraryRefused.files, []);
-        assert.match(libraryRefused.note, /diagram library, so nothing was saved/);
+        assert.match(String(libraryRefused.note), /diagram library, so nothing was saved/);
         assert.equal(libraryRefused.label, libraryRefused.note, 'the control\'s own label says the same');
         assert.deepEqual({ live: libraryRefused.live, drawn: libraryRefused.drawn, under: libraryRefused.under }, { live: true, drawn: true, under: true });
         assert.deepEqual(loaderDownload.files, ['drawn-fixture-round-1-mock-h6.html']);
@@ -1119,9 +1120,9 @@ async function main() {
       await row('a saved mock\'s script that asks for a script and an image by file: address loads neither, while its own inline script ran and its diagram is drawn, nothing else asked for', note => {
         const r = reachFile.reach || {};
         note(`script ${r.script}, image ${r.image}; refused: ${(r.refused || []).join(', ') || 'nothing'}; diagrams: ${reachFile.diagrams.join(', ')}; fetched: ${reachFile.fetched.join(', ') || 'nothing'}`);
-        assert.ok(readFileSync(reachDownload.file, 'utf8') === SAVED_HEAD + SAVED_LIBRARY + REACH_MOCK, 'the policy ahead of the library, then the mock as posted');
         assert.deepEqual({ script: r.script, image: r.image }, { script: 'refused', image: 'refused' }, 'neither file on the disk loads');
         assert.deepEqual((r.refused || []).map(line => line.split(' ')[0]).sort(), ['img-src', 'script-src-elem'], 'each refused by the file\'s own policy');
+        assert.ok(readFileSync(reachDownload.file, 'utf8') === SAVED_HEAD + SAVED_LIBRARY + REACH_MOCK, 'the policy ahead of the library, then the mock as posted');
         // The browser lists a refused address among the page's requests too.
         assert.deepEqual({ late: reachFile.late, diagrams: reachFile.diagrams, fetched: reachFile.fetched.filter(url => !url.startsWith(pathToFileURL(disk).href)) },
           { late: 'ran', diagrams: ['3 nodes'], fetched: [] }, 'its own script ran and its diagram is drawn from the library written in');

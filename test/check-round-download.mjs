@@ -173,7 +173,7 @@ check('text that is no stage the board wrote gives no source: no margin reset, n
 // The file's policy: inline, data:, blob: and https: sources, and none that matches a file on
 // the disk the page is opened from (no file:, no 'self', no *). What it stops in a browser is
 // test/browser-check-download.mjs's.
-const POLICY = '<meta http-equiv="Content-Security-Policy" content="default-src \'unsafe-inline\' \'unsafe-eval\' https: data: blob:">';
+const POLICY = '<meta http-equiv="Content-Security-Policy" content="default-src \'unsafe-inline\' https: data: blob:">';
 const HEAD = `<!DOCTYPE html>\n<meta charset="utf-8">\n${POLICY}\n${STAGE_MARGIN_RESET}\n`;
 
 check('a saved mock is its own source under a UTF-8, standards-mode, margin-free head whose policy admits no file: source and sits ahead of every script in the file, the diagram library written in after it only where it is given', () => {

@@ -136,8 +136,9 @@ export function stageOwnSource(srcdoc, marginReset) {
  * as a script or an image. The policy is what stops that (ADR.md entry 154): it
  * admits what is written in the file, `data:` and `blob:`, and `https:`
  * addresses, so a library the mock names by web address still loads, and no
- * `file:` address, nor the page's own folder. It sits ahead of the library, so
- * it governs every script in the file. It does not stop a script sending what
+ * `file:` address, nor the page's own folder, nor code built from text, which
+ * the board's own policy gives a stage none of either. It sits ahead of the
+ * library, so it governs every script in the file. It does not stop a script sending what
  * it holds to an `https:` host.
  *
  * The library is written as it is, so its text may hold no script tag, opening
@@ -145,7 +146,7 @@ export function stageOwnSource(srcdoc, marginReset) {
 export function mockDocument(html, engineSource, marginReset) {
   if (engineSource && /<\/?script/i.test(engineSource)) throw new Error('the diagram library holds a script tag and cannot be written into a file');
   return '<!DOCTYPE html>\n<meta charset="utf-8">\n'
-    + '<meta http-equiv="Content-Security-Policy" content="default-src \'unsafe-inline\' \'unsafe-eval\' https: data: blob:">\n'
+    + '<meta http-equiv="Content-Security-Policy" content="default-src \'unsafe-inline\' https: data: blob:">\n'
     + marginReset + '\n'
     + (engineSource ? '<' + 'script>' + engineSource + '</' + 'script>\n' : '')
     + String(html == null ? '' : html);
