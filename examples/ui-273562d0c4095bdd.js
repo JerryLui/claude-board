@@ -389,7 +389,7 @@
   const minutes = Math.ceil((Date.parse(round.awaitDeadline) - nowMs) / 60000);
   return minutes + 'm left';
 };
-  var pageBoardPillMeta = function pageBoardPillMeta(round, nowMs, fullpage = true) {
+  var pageBoardPillMeta = function pageBoardPillMeta(round, nowMs, fullpage = true, sendable = false) {
   const countdown = roundCountdownText(round, nowMs);
   if (countdown) return { text: countdown, title: ROUND_COUNTDOWN_TITLE };
   if (!fullpage && round && round.status === 'sent') return { text: 'submitted', title: PILL_SUBMITTED_TITLE };
@@ -397,8 +397,11 @@
   // abandoned round keeps its live widgets and a working Send exactly like a
   // lapsed one, so telling the reviewer "commenting is off" above a live Send
   // button is the same false statement on both.
-  const title = (!fullpage && round && round.status !== 'sent') ? ROUND_OPEN_UNAWAITED_TITLE : PILL_READONLY_TITLE;
-  return { text: 'read-only', title };
+  const unsent = !fullpage && !!round && round.status !== 'sent';
+  return {
+    text: unsent && sendable ? 'open' : 'read-only',
+    title: unsent ? ROUND_OPEN_UNAWAITED_TITLE : PILL_READONLY_TITLE,
+  };
 };
   // ADR 145: the same gate the daemon's activity route applies, spliced here
   // rather than hand-copied so the page and the route can never quietly
@@ -6051,7 +6054,7 @@
       // that function's own comment (src/badge.mjs): a page board's status
       // never leaves 'open' even once its wait dies, so the round object alone
       // cannot make this call.
-      var m = pageBoardPillMeta(roundEntry(currentRound), now, fullpage);
+      var m = pageBoardPillMeta(roundEntry(currentRound), now, fullpage, !readonly && currentPageSendable());
       meta.textContent = m.text;
       meta.title = m.title;
     }
