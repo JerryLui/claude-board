@@ -155,7 +155,7 @@ check('AC 7: the state label shows on an ordinary board too -- the countdown whi
   const meta2 = notAwaited.querySelector('span#round-meta');
   assert.equal(computed(meta2, 'display'), 'inline');
   // ordinaryBoard()'s round was never Awaited at all, and it is the board's
-  // newest unsent round: its Send works, so its tab says so (ADR 155).
+  // newest unsent round: its Send works, so its tab says so (ADR 156).
   assert.equal(notAwaited.getElementById('send-btn').disabled, false, 'setup: Send works on this round');
   assert.equal(meta2.textContent, 'open', 'a never-Awaited round whose Send works reads "open"');
   // The hover title underneath it must not repeat PILL_READONLY_TITLE's

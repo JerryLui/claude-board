@@ -48,7 +48,7 @@ listener.
 **Submitted**: of a round, that the reviewer sent their answers, which is the reader-facing
 name for the round state the store calls `sent`. One of the two closed states a reader is told
 about by name, Abandoned being the other; Lapsed and never-Awaited rounds read alike, `open`
-where Send works on the round and `read-only` elsewhere (ADR 155). _Avoid_: sent (internal only), answered, completed, done.
+where Send works on the round and `read-only` elsewhere (ADR 156). _Avoid_: sent (internal only), answered, completed, done.
 
 **Abandoned**: of a round, that it was closed with nobody having answered it, because the
 conversation that posted it declared itself over — the `fresh` flag on a later `ask`, or a direct
@@ -319,7 +319,7 @@ a Fire or Merge it offers stays shown. _Avoid_: tile, row.
 **Mission state**: the column a Mission shows in, derived on every read: needs you, working,
 waiting, stalled or released. Between merge and Released a Mission is working, or needs you
 while a release step waits on the person. Needs you is any linked board whose newest round is
-still open and asks the person a question or was posted Awaited, a Lapsed one included; waiting is the Mission waiting on
+still open and asks the person a question or was posted Awaited, a Lapsed one included, or holding such a round a hand-over reopened, behind a later round or not; waiting is the Mission waiting on
 something else (a check, another PR, a Queued launch). A parked Mission, stopped at a spin-down
 as its session's last act, shows under waiting tagged Parked with the line that resumes it, or
 under needs you tagged Parked while a round it left waits on the person; it never reads stalled.

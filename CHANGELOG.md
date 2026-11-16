@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- **A round you can still answer says so (ADR 155)**: the state label in a board's top strip reads
+- **A round you can still answer says so (ADR 156)**: the state label in a board's top strip reads
   `open` on a round not yet sent whose Send works: the newest round, and an older one that still
   asks a question. Before, it read `read-only` there, above a Send that worked. It still reads
   `read-only` on an older round that asks nothing, on a mock drawn full page that nobody is
@@ -44,6 +44,13 @@
   the session after, until you send it or a session declines it: `mission close` closes one
   reopened round whose question no longer stands, for good. Before, such a round stayed
   read-only and a late Send reached a session only when it thought to read the board.
+- **A handed-over question keeps its mission under Needs you (ADR 155)**: a mission's card stays
+  under Needs you while a round reopened for its next session still waits on your answer, also
+  after that session posts something newer. Before, the session's next round took the card back
+  to Working and the question showed under Waiting on you on the Boards page alone. The card
+  clears when you send the round or the session closes it. An older round that merely timed out
+  stays off the card, and the card's Fire and Merge buttons still come from each session's
+  newest round only.
 - **The top strip lets clicks through**: a click on the empty part of a board's top strip now
   lands on the page under it, so the buttons of a mock's or diagram's full-size view take their
   click where the strip floats over them. The strip's title and controls take theirs as before.

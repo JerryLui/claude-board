@@ -3616,7 +3616,7 @@ export function renderBoardPage(board, { stageHtml = false } = {}) {
   // instant it can measure the real rail.
   const pillCount = openRoundQuestionCount(board);
   const pillLabel = `${pillCount} question${pillCount === 1 ? '' : 's'} left`;
-  // The waiting signal (ADR.md entries 46, 47, 40; ADR 89, 155):
+  // The waiting signal (ADR.md entries 46, 47, 40; ADR 89, 156):
   // `#round-meta` (the header's own pill/meta slot, every board since ticket
   // 03) and `#round-countdown` (the ordinary send bar's) are both
   // first-painted from `roundIsAwaitedOpen` and `round.status` alone --

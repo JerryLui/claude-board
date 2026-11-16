@@ -923,7 +923,7 @@ check('pageBoardPillMeta: on an ORDINARY board (fullpage=false), an unsent round
   assert.deepEqual(pageBoardPillMeta(openUnawaited, now, true), { text: 'read-only', title: PILL_READONLY_TITLE },
     'the identical round object, asked about as a page board, must keep the page-board title');
 
-  // ADR 155: the fourth argument is the caller's "Send works on this round,
+  // ADR 156: the fourth argument is the caller's "Send works on this round,
   // here". It moves the word of an ordinary board's unsent round, lapsed or
   // abandoned alike, and nothing else: never the title, a page board's word,
   // a Submitted round's or a countdown.

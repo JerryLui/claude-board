@@ -1,4 +1,4 @@
-# 155. The pill reads `open` on an unsent round whose Send works
+# 156. The pill reads `open` on an unsent round whose Send works
 
 2026-11-16, narrows 89; relates to 44, 114
 
