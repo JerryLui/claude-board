@@ -80,7 +80,7 @@ ask({ title, blocks, wait, fresh })
 
 Two to four options read best, and every answer carries a free-text note. **Every option commits to an answer**: never offer a "your call" or "you decide" option, which leaves every recommended pick ambiguous between agreement and delegation.
 
-`explainer` is one to three sentences of markdown under the prompt; `context` is what the reviewer looks up: one panel beside the options, or the full card width above them when it holds a mock. **A mock and the questions about it share one round**: the mock sits in its question's own `context`, or is the options themselves (`choose-between-rendered-variants`), never a description or a pointer to another round. Attach `code` only to a question about the code.
+`explainer` is one to three sentences of markdown under the prompt; `context` is what the reviewer looks up: one panel beside the options, or the full card width above them when it holds a mock. **A mock and the questions about it share one round**: the mock sits in its question's own `context`, or is the options themselves (`choose-between-rendered-variants`), never a description or a pointer to another round. A page a render skill builds (`/explain`, `/visualize`) is a mock too: when you will ask about it, have the skill hold its own post before it runs, then post its file and your questions as one round yourself (Claude Code's render skills say how in `~/.claude/references/render.md`). Attach `code` only to a question about the code.
 
 ## What comes back
 
