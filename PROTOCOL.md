@@ -2678,14 +2678,25 @@ The tab reads the mock's source back out of its stage's `srcdoc`, the one place 
 (ADR 122), by taking off what `buildStageSrcdoc` wrote around it, and reads the engine's text
 from the board's own `mermaid-<hash>.js` beside the page, under the name that stage's own tag
 carries: a tab left open across an upgrade holds stages that name the build before, and the
-daemon still serves that file. One limit of the read: a mock that draws no diagram and itself
-opens on the board's engine tag followed by the first line of the board's stand-in is taken for
-a stage lent the engine, and is saved without its text up to its first closing script tag.
+daemon still serves that file. The tab knows the board's stand-in by its first line, as its own
+build writes it. A stage that opens on a script naming a file of that shape
+(`mermaid-<16 hex>.js`) with anything else after the name is one a newer build wrote, its
+stand-in worded otherwise: the tab cannot tell where that stand-in ends, so it reads no source
+out of the stage and saves nothing.
+
+One limit of the read, since nothing marks where the mock begins: a mock that draws no diagram
+and itself opens on a script naming a file of that shape is misread. Followed by the first line
+of the board's stand-in it is taken for a stage lent the engine, and is saved without its text
+up to its first closing script tag; followed by anything else it is taken for a newer build's
+stage and is not saved, and the reload its note asks for changes nothing. A mock that opens on
+any other script, its own or an engine under another name or address, is read whole.
 
 There is no second-best file. A full-page round whose stage a push sent held is read first; a
 mock the tab still does not hold, or an engine the board does not hand over (the daemon stopped
-or restarting), saves nothing, and the control that was pressed says so in a note under itself
-and in its own label, live again for another press. The note goes at the next press.
+or restarting), saves nothing, and neither does a stage the tab holds and cannot read, which
+says the page is older than the board and asks for a reload. The control that was pressed says
+which in a note under itself and in its own label, live again for another press. The note goes
+at the next press.
 
 The tab hands a mock's file to the browser as `application/octet-stream` under its `.html` name,
 at an address dropped after a few seconds, so that address saves the file and never draws it at

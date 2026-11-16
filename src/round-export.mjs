@@ -89,11 +89,21 @@ export const STAGE_MARGIN_RESET = '<style>html,body{margin:0;padding:0}</style>'
  * that name the build before, whose file the daemon still serves. A stage whose
  * lent library does not end is no stage this can read, so it answers null too.
  *
+ * So does a stage that opens on a script naming a file of that shape with
+ * anything after the name but the tag's end and the stand-in's first line as
+ * this build writes it:
+ * a build that words its stand-in otherwise wrote that stage, this one cannot
+ * tell where the stand-in ends, and the board's tag and stand-in saved as the
+ * mock's own would be a page that draws nothing.
+ *
  * The board's own script is the last thing in every stage and opens the same way
  * nowhere else in itself, so the last such opening is its own, whatever the mock
- * holds. The front has no such mark: a mock that draws no diagram and itself
- * opens on the board's tag and the stand-in's first line is read as lent the
- * library, and loses its text up to its first closing script tag.
+ * holds. The front has no such mark, so a mock that draws no diagram and itself
+ * opens on a script naming a file of that shape is misread, either way: followed
+ * by the stand-in's first line it is read as lent the library, and loses its
+ * text up to its first closing script tag; followed by anything else it answers
+ * null. A mock that opens on any other script, its own or a library under
+ * another name or address, is read whole.
  *
  * No script tag is spelled whole here or in mockDocument: this text rides in
  * the page's client script, which a check reads for the files a page names. */
@@ -115,6 +125,8 @@ export function stageOwnSource(srcdoc, marginReset) {
       if (end < 0) return null;
       engine = name;
       from = end + close.length;
+    } else if (name) {
+      return null;
     }
   }
   var to = text.lastIndexOf(open + ">(function () {\n  var CB = 'cb-stage';\n");
