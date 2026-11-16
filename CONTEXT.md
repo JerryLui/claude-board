@@ -46,9 +46,9 @@ The late answer it brings is acted on once, as that round's. _Avoid_: poll, back
 listener.
 
 **Submitted**: of a round, that the reviewer sent their answers, which is the reader-facing
-name for the round state the store calls `sent`. One of the two closed states a reader is told
-about by name, Abandoned being the other; Lapsed and never-Awaited rounds read alike, `open`
-where Send works on the round and `read-only` elsewhere (ADR 156). _Avoid_: sent (internal only), answered, completed, done.
+name for the round state the store calls `sent`. The one closed state a reader is told
+about by name in the state label: Abandoned, Lapsed and never-Awaited rounds read alike there,
+`open` where Send works on the round and `read-only` elsewhere (ADR 156). _Avoid_: sent (internal only), answered, completed, done.
 
 **Abandoned**: of a round, that it was closed with nobody having answered it, because the
 conversation that posted it declared itself over — the `fresh` flag on a later `ask`, or a direct
