@@ -4424,14 +4424,20 @@
   // --- Download round: a round saved as one HTML file, sent or not, and one
   // mock or diagram saved alone from its Pull-out ---------------------------
   //
-  // Made here, from the round as drawn, so a diagram is already SVG and the
-  // file carries no engine (src/round-export.mjs holds the pure half and says
-  // what the file is). The copy is the round's own markup with every control
-  // and pin taken out, its answers written as text, its images inlined as
-  // data: URLs and its stages script-free: each mock is its srcdoc with every
-  // script removed, in a frame sandboxed with no allow-scripts, as tall as the
-  // stage last reported itself. The file's own policy admits no script at all.
-  // Its diagrams are drawn again in the light palette, since a file is printed.
+  // Two kinds of file (ADR.md entry 154; src/round-export.mjs holds the pure
+  // half of both). A question round's, and one diagram's, is made here from the
+  // round as drawn, so a diagram is already SVG and the file carries no engine.
+  // The copy is the round's own markup with every control and pin taken out, its
+  // answers written as text, its images inlined as data: URLs and its stages
+  // script-free: each mock is its srcdoc with every script removed, in a frame
+  // sandboxed with no allow-scripts, as tall as the stage last reported itself.
+  // The file's own policy admits no script at all. Its diagrams are drawn again
+  // in the light palette, since a file is printed.
+  //
+  // A mock saved alone, from its Pull-out or as the one mock of a round drawn
+  // full page, is the mock's own page instead (downloadMock): its source as
+  // posted, its scripts kept, with the diagram library's text written in where
+  // the mock draws a diagram.
   var EXPORT_CSS = "\nbody.round-export { min-height: 0; padding: 40px 24px; background: var(--bg); -webkit-print-color-adjust: exact; print-color-adjust: exact; }\nbody.round-export::before { display: none; }\n.export-doc { max-width: 1065px; margin: 0 auto; }\n.export-head { padding-bottom: 20px; border-bottom: 1px solid var(--hairline-2); margin-bottom: 28px; }\n.export-from { font-size: 11px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); margin-bottom: 10px; }\n.export-title { font-size: 22px; font-weight: 650; margin: 0 0 6px; letter-spacing: -0.01em; }\n.export-meta { font-size: 13px; color: var(--muted); display: flex; gap: 14px; flex-wrap: wrap; }\n.export-meta b { color: var(--ink-2); font-weight: 600; }\n.export-section { font-size: 15px; font-weight: 650; margin: 36px 0 14px; display: flex; align-items: center; gap: 10px; break-after: avoid; }\n.export-section::after { content: \"\"; flex: 1; height: 1px; background: var(--hairline-2); }\n.export-decisions { width: 100%; border-collapse: separate; border-spacing: 0; table-layout: fixed; font-size: 13px;\n  background: var(--panel); border: 1px solid var(--hairline); border-radius: var(--r-card); overflow: hidden; }\n.export-decisions th, .export-decisions td { text-align: left; vertical-align: top; padding: 12px 16px; border-bottom: 1px solid var(--hairline); overflow-wrap: anywhere; }\n.export-decisions tr:last-child td { border-bottom: none; }\n.export-decisions th { background: var(--panel-2); font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }\n.export-decisions th:first-child { width: 40%; }\n.export-q { color: var(--ink-2); }\n.export-pick { font-weight: 650; color: var(--ink); white-space: pre-wrap; }\n.export-note { color: var(--muted); font-style: italic; white-space: pre-wrap; }\n.export-empty { color: var(--muted); }\n.export-round { gap: 16px; }\n.export-round .round-history .block, .export-round .block { background: var(--panel); }\n.export-round .folded > .fold-body { max-height: none; overflow: visible; -webkit-mask-image: none; mask-image: none; }\n.export-round .card-choice { cursor: default; opacity: 1; }\n.export-round .opt-check { display: none; }\n.export-round .card-choice.selected, .export-round .variant-card.selected { border-color: var(--good); background: var(--good-soft); box-shadow: inset 3px 0 0 var(--good); }\n.export-round .card-choice.selected .opt-label::before, .export-round .variant-card.selected .opt-label::before { content: \"\\2713  \"; color: var(--good); }\n.export-unsent-note { margin: 0 0 24px; padding: 10px 14px; font-size: 13.5px; color: var(--ink); background: var(--panel-2);\n  border: 1.5px solid var(--ink-2); border-radius: var(--r-md); }\n.export-unsent .card-choice.selected, .export-unsent .variant-card.selected { border: 1px dashed var(--ink-2); background: var(--panel-2); box-shadow: none; }\n.export-unsent .card-choice.selected .opt-label::before, .export-unsent .variant-card.selected .opt-label::before { color: var(--ink-2); }\n.export-unsent .card-choice.selected .opt-label::after, .export-unsent .variant-card.selected .opt-label::after { content: \" \\00b7  picked, unsent\"; white-space: pre;\n  font-weight: 500; color: var(--muted); }\n.export-unsent .answer-status[data-status] { background: var(--panel-2); color: var(--muted); }\n.export-unsent .answer-status[data-status]::after { content: \", unsent\"; }\n.export-round .export-text { white-space: pre-wrap; font-size: 13px; color: var(--ink); background: var(--panel-2); border: 1px solid var(--hairline);\n  border-radius: var(--r-md); padding: 12px 14px; }\n.export-round .export-note-box { font-size: 12.5px; color: var(--ink-2); background: var(--accent-soft); border: 1px solid var(--hairline);\n  border-radius: var(--r-sm); padding: 8px 12px; white-space: pre-wrap; }\n.export-round .export-note-tag { display: block; font-weight: 650; font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); margin-bottom: 3px; }\n.export-round .html-stage { max-height: none; }\n.export-round .export-missing { color: var(--muted); font-style: italic; font-size: 12.5px; }\n.export-round .comment-list { display: block; }\n.export-round .comment-list-wrap { max-height: none; overflow: visible; }\n@media print {\n  body.round-export { padding: 0; background: #fff; }\n  .export-unsent-note { break-after: avoid; }\n  .export-round .block { box-shadow: none; }\n  .export-round .block, .export-round .question-block, .export-round .card-choice, .export-round .variant-card,\n  .export-round .stage-wrap, .export-round pre.mermaid, .export-round .comment-item, .export-decisions tr,\n  .export-round p, .export-round li, .export-round tr, .export-round .export-text, .export-round .export-note-box { break-inside: avoid; }\n  .export-round .card-head, .export-round .question-prompt { break-after: avoid; }\n  .export-round pre.mermaid svg { max-height: 960px; }\n  .export-round pre:not(.mermaid) { height: auto !important; max-height: none; overflow: visible; white-space: pre-wrap; overflow-wrap: anywhere; }\n  .export-round .stage-wrap { container-type: inline-size; }\n  .export-round .export-frame { break-inside: avoid; }\n  @supports (width: 1cqw) and (rotate: atan2(1px, 1px)) {\n    .export-round .export-fit { --export-fit: min(var(--export-scale), tan(atan2(100cqw, var(--export-w))));\n      height: calc(var(--export-h) * var(--export-fit)); overflow: hidden; }\n    .export-round .export-fit > iframe.html-stage { width: var(--export-w); max-width: none;\n      transform: scale(var(--export-fit)); transform-origin: 0 0; }\n  }\n}\n";
   var EXPORT_MERMAID_VARS = {"darkMode":false,"background":"transparent","fontFamily":"Inter, -apple-system, BlinkMacSystemFont, system-ui, sans-serif","fontSize":"13px","primaryColor":"#f5f6fb","primaryTextColor":"#171c2a","primaryBorderColor":"#3251c9","secondaryColor":"#e2e6f0","tertiaryColor":"#ffffff","lineColor":"#515c76","textColor":"#3c4459","mainBkg":"#f5f6fb","nodeBorder":"#3251c9","clusterBkg":"rgba(50, 81, 201, 0.06)","clusterBorder":"rgba(0, 0, 0, 0.18)","edgeLabelBackground":"#ffffff"};
   var decisionRows = function decisionRows(questions, answers) {
@@ -4496,6 +4502,29 @@
   var PRINT_PAGE_H = 960;
   var printScale = function printScale(height) {
   return height > PRINT_PAGE_H ? PRINT_PAGE_H / height : 1;
+};
+  var stageOwnSource = function stageOwnSource(srcdoc, engineAsset) {
+  var text = String(srcdoc == null ? '' : srcdoc);
+  var open = '<' + 'script', close = '</' + 'script>';
+  var reset = '<style>html,body{margin:0;padding:0}</style>';
+  if (text.slice(0, reset.length) !== reset) return null;
+  var from = reset.length;
+  var lent = open + ' src="' + engineAsset + '">' + close + open + ">(function () {\n  var CB = 'cb-stage', pending";
+  var engine = text.slice(from, from + lent.length) === lent;
+  if (engine) {
+    var end = text.indexOf(close, from + lent.length);
+    if (end < 0) return null;
+    from = end + close.length;
+  }
+  var to = text.lastIndexOf(open + ">(function () {\n  var CB = 'cb-stage';\n");
+  if (to < from) return null;
+  return { html: text.slice(from, to), engine: engine };
+};
+  var mockDocument = function mockDocument(html, engineSource) {
+  if (engineSource && /<\/?script/i.test(engineSource)) throw new Error('the diagram library holds a script tag and cannot be written into a file');
+  return '<!DOCTYPE html>\n<meta charset="utf-8">\n<style>html,body{margin:0;padding:0}</style>\n'
+    + (engineSource ? '<' + 'script>' + engineSource + '</' + 'script>\n' : '')
+    + String(html == null ? '' : html);
 };
   // Everything in a round that is a control or a pin rather than what the round
   // said. The round's chip line goes too: the file's own head names the round.
@@ -4717,9 +4746,33 @@
     return answers;
   }
 
+  // One mock saved as its own page, named 'name': the source the board holds in
+  // 'frame', the mock's stage, less what the board wrote around it. Where the
+  // board lent that stage the diagram library, the library's text is read from
+  // the board's own copy beside the page and written into the file, so the
+  // saved page draws its diagrams with no connection. A stage this tab does not
+  // hold saves nothing, and neither does a file: archive, which reads nothing.
+  async function downloadMock(frame, name) {
+    if (readonly) return;
+    var own = frame ? stageOwnSource(frame.getAttribute('srcdoc'), MERMAID_ASSET) : null;
+    if (!own) throw new Error('this mock is not loaded on the page');
+    var engine = null;
+    if (own.engine) {
+      var res = await fetch(MERMAID_ASSET);
+      if (!res.ok) throw new Error('the diagram library could not be read (' + res.status + ')');
+      engine = await res.text();
+    }
+    saveHtmlFile(name, mockDocument(own.html, engine));
+  }
+
+  // A round drawn full page is one mock: its file is that mock's own page.
   async function downloadRound(section) {
-    await askStageHeights(section);
     var n = Number(section.getAttribute('data-round'));
+    if (isPageRound(blocksOfRound(n))) {
+      await downloadMock(section.querySelector('iframe.html-stage'), exportFileName(board.title, n));
+      return;
+    }
+    await askStageHeights(section);
     var round = (board.rounds || []).find(function (r) { return r.n === n; }) || {};
     var questions = questionBlocks({ blocks: (board.blocks || []).filter(function (b) { return b.round === n; }) });
     var unsent = section.getAttribute('data-round-status') !== 'sent';
@@ -4738,11 +4791,16 @@
   }
 
   // One mock or diagram saved alone: 'only' is its holder inside 'block', the
-  // block its Pull-out was opened from, and 'kind' says which it is.
+  // block its Pull-out was opened from, and 'kind' says which it is. A mock is
+  // saved as its own page, a diagram as the picture the page drew.
   async function downloadArtifact(block, only, kind, blockId) {
-    await askStageHeights(block);
     var section = block.closest('.round');
     var n = Number(section && section.getAttribute('data-round'));
+    if (kind === 'mock') {
+      await downloadMock(only.querySelector('iframe.html-stage'), exportFileName(board.title, n, kind + '-' + blockId));
+      return;
+    }
+    await askStageHeights(block);
     var round = (board.rounds || []).find(function (r) { return r.n === n; }) || {};
     var html = exportDocument({
       title: board.title || '',
