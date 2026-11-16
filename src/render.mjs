@@ -40,7 +40,7 @@
 import { palettes, faviconLink, markSvg } from './styles.mjs';
 import { SCRIPT_ASSET, STYLE_ASSET } from './assets.mjs';
 import { STATUS_TONES } from './card-status.mjs';
-import { ROUND_DOWNLOAD_BUTTON, HEAD_DOWNLOAD_BUTTON } from './round-export.mjs';
+import { ROUND_DOWNLOAD_BUTTON, HEAD_DOWNLOAD_BUTTON, STAGE_MARGIN_RESET } from './round-export.mjs';
 import { MAX_IMAGE_BYTES, megabytes } from './post-limit.mjs';
 import { themeBootScript, themeToggle } from './theme.mjs';
 import { resolveComments, stripDaemonOnly } from './board.mjs';
@@ -2701,9 +2701,11 @@ export function stageAgentScript() {
 /** Prepended to every html-stage `srcdoc` (renderHtmlBlock, below) to kill the
  * UA default `body { margin: 8px }` gutter -- see that function's own comment
  * for why this is a bare leading `<style>` and not an explicit document
- * wrapper. Exported (same reasoning as STAGE_ACCENT_HEX above) so a check can
- * assert against this exact string rather than a hand-copied guess at it. */
-export const STAGE_MARGIN_RESET = '<style>html,body{margin:0;padding:0}</style>';
+ * wrapper. Spelled once, in src/round-export.mjs, which takes it off a stage
+ * again and heads a saved mock with it; exported from here too (same reasoning
+ * as STAGE_ACCENT_HEX above) so a check can assert against this exact string
+ * rather than a hand-copied guess at it. */
+export { STAGE_MARGIN_RESET };
 
 /** Does this stage's own markup carry a mermaid diagram? A TEXTUAL test on the
  * class marker, deliberately -- the stage's bytes are all this renderer has, and

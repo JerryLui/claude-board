@@ -646,6 +646,17 @@ body.sent-page .comment-btn { display: none; }
    once the artifact scrolls under the header. Any other round has its own. */
 .head-download { display: none; margin-left: 0; }
 body.page-board .head-download { display: inline-flex; }
+/* What a Download that saved nothing says (src/ui.mjs's sayByDownload): a
+   note under the control that was pressed, in the chrome of the note a held
+   stage's Pull-out wears ('.pull-out-note'), with its still amber dot. It hangs
+   from the control's right edge, over the mock, and takes no pointer. */
+.round-download, .lens-btn[data-lens="download"] { position: relative; }
+.download-note { position: absolute; top: calc(100% + 8px); right: 0; z-index: 30; width: max-content; max-width: min(340px, 70vw);
+  display: flex; align-items: center; gap: 8px; padding: 5px 10px; text-align: left; white-space: normal;
+  border: 1px solid var(--warning-border-strong); border-radius: var(--r-sm); background: var(--panel);
+  color: var(--ink-2); box-shadow: var(--shadow-1); font-size: 12px; font-weight: 550; line-height: 16px;
+  letter-spacing: 0; text-transform: none; pointer-events: none; cursor: default; }
+.download-note::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--warning); }
 /* a Finder-opened archive cannot read its own stylesheet back to save it */
 body.readonly .round-download, body.readonly [data-lens="download"] { display: none; }
 .round-history .block { background: var(--history-bg); box-shadow: none; }

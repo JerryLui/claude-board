@@ -66,7 +66,7 @@ import { openSharedStream, STREAM_WORKER_URL } from './stream-worker.mjs';
 import { activityMinMs } from './activity.mjs';
 import {
   EXPORT_CSS, PRINT_PAGE_H, decisionRows, exportDate, exportFileName, exportDocument, printScale,
-  stageOwnSource, mockDocument,
+  stageOwnSource, mockDocument, STAGE_MARGIN_RESET,
 } from './round-export.mjs';
 // The one source of truth for both image limits -- the daemon's own
 // src/images.mjs checks a submit against these same two constants, so a page
@@ -4362,9 +4362,10 @@ export const ui = `
   // in the light palette, since a file is printed.
   //
   // A mock saved alone, from its Pull-out or as the one mock of a round drawn
-  // full page, is the mock's own page instead (downloadMock): its source as
-  // posted, its scripts kept, with the diagram library's text written in where
-  // the mock draws a diagram.
+  // full page, is the mock's own page instead (downloadMock): its source as its
+  // stage holds it, its scripts kept, under a policy that admits no file on the
+  // reader's disk, with the diagram library's text written in where the mock
+  // draws a diagram.
   var EXPORT_CSS = ${JSON.stringify(EXPORT_CSS)};
   var EXPORT_MERMAID_VARS = ${JSON.stringify(EXPORT_MERMAID_VARS)};
   var decisionRows = ${decisionRows.toString()};
@@ -4375,11 +4376,12 @@ export const ui = `
   var printScale = ${printScale.toString()};
   var stageOwnSource = ${stageOwnSource.toString()};
   var mockDocument = ${mockDocument.toString()};
+  var STAGE_MARGIN_RESET = ${JSON.stringify(STAGE_MARGIN_RESET)};
   // Everything in a round that is a control or a pin rather than what the round
   // said. The round's chip line goes too: the file's own head names the round.
   var EXPORT_DROP = '.round-chips, .round-end, .comment-btn, .comment-form, .comment-target, .pin-layer, '
     + '.pull-out, .stage-fold, .fold-toggle, .btn-defer, .rank-grip, .question-picks, .note-head, '
-    + '.page-send-bar, .paste-hint, .thumb-remove, '
+    + '.paste-hint, .thumb-remove, '
     + 'script, noscript, source, object, embed, base, meta';
   var nextExportDiagramId = 0;
 
@@ -4540,11 +4542,6 @@ export const ui = `
       while (btn.firstChild) box.appendChild(btn.firstChild);
       btn.replaceWith(box);
     });
-    // An artifact round's comments float over it on the board; here they list under it.
-    qsa('.page-comments', copy).forEach(function (rail) {
-      while (rail.firstChild) rail.parentNode.insertBefore(rail.firstChild, rail);
-      rail.remove();
-    });
     qsa('details', copy).forEach(function (d) { d.setAttribute('open', ''); });
     qsa('.folded, .stage-folded, .stage-opened, .stage-scrolls', copy).forEach(function (el) {
       el.classList.remove('folded', 'stage-folded', 'stage-opened', 'stage-scrolls');
@@ -4564,14 +4561,21 @@ export const ui = `
     return one.outerHTML;
   }
 
-  function saveHtmlFile(name, html) {
-    var url = URL.createObjectURL(new Blob([html], { type: 'text/html;charset=utf-8' }));
+  // 'html' handed to the browser to save as 'name'. A round's file holds no
+  // script and is a page for a minute. 'ownPage' is a mock's own file, which
+  // runs scripts: its blob is typed as plain bytes, so a browser sent to the
+  // blob's address saves it and never draws it at the board's origin, where
+  // its script would act as the reader; the name still makes the file a page.
+  // It lives a few seconds, enough for the save to begin, and is not dropped
+  // at the click, which has cancelled the save in Safari.
+  function saveHtmlFile(name, html, ownPage) {
+    var url = URL.createObjectURL(new Blob([html], { type: ownPage ? 'application/octet-stream' : 'text/html;charset=utf-8' }));
     var a = document.createElement('a');
     a.href = url;
     a.download = name;
     // Never put in the page: its click would reach the page's own listeners.
     a.click();
-    setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
+    setTimeout(function () { URL.revokeObjectURL(url); }, ownPage ? 4000 : 60000);
   }
 
   // A stage the reader never scrolled to has reported no height: the browser
@@ -4595,30 +4599,52 @@ export const ui = `
     return answers;
   }
 
+  var MOCK_UNLOADED_NOTE = 'This mock did not load, so nothing was saved. Press again to retry, or reload the page.';
+  var LIBRARY_UNREAD_NOTE = 'The board could not hand over the diagram library, so nothing was saved. Press again to retry.';
+  var SAVE_FAILED_NOTE = 'Nothing was saved. Press again to retry, or reload the page.';
+
+  // A save that cannot be made, with the words the reader is shown for it
+  // (saveBehind).
+  function saveFailure(note, why) {
+    var e = new Error(why);
+    e.cbNote = note;
+    return e;
+  }
+
   // One mock saved as its own page, named 'name': the source the board holds in
   // 'frame', the mock's stage, less what the board wrote around it. Where the
   // board lent that stage the diagram library, the library's text is read from
-  // the board's own copy beside the page and written into the file, so the
-  // saved page draws its diagrams with no connection. A stage this tab does not
-  // hold saves nothing, and neither does a file: archive, which reads nothing.
+  // the board's own copy beside the page, under the name the stage itself
+  // carries, and written into the file, so the saved page draws its diagrams
+  // with no connection. There is no second-best file: a stage this tab does not
+  // hold, or a library the board does not hand over, saves nothing and says so
+  // (saveBehind). Neither does a file: archive, which reads nothing.
   async function downloadMock(frame, name) {
     if (readonly) return;
-    var own = frame ? stageOwnSource(frame.getAttribute('srcdoc'), MERMAID_ASSET) : null;
-    if (!own) throw new Error('this mock is not loaded on the page');
+    var own = frame ? stageOwnSource(frame.getAttribute('srcdoc'), STAGE_MARGIN_RESET) : null;
+    if (!own) throw saveFailure(MOCK_UNLOADED_NOTE, 'this mock is not loaded on the page');
     var engine = null;
     if (own.engine) {
-      var res = await fetch(MERMAID_ASSET);
-      if (!res.ok) throw new Error('the diagram library could not be read (' + res.status + ')');
-      engine = await res.text();
+      try {
+        var res = await fetch(own.engine);
+        if (!res.ok) throw new Error('status ' + res.status);
+        engine = await res.text();
+      } catch (e) {
+        throw saveFailure(LIBRARY_UNREAD_NOTE, 'the diagram library could not be read: ' + (e && e.message));
+      }
     }
-    saveHtmlFile(name, mockDocument(own.html, engine));
+    saveHtmlFile(name, mockDocument(own.html, engine, STAGE_MARGIN_RESET), true);
   }
 
-  // A round drawn full page is one mock: its file is that mock's own page.
+  // A round drawn full page is one mock: its file is that mock's own page. A
+  // stage a push sent held is read first, as a Pull-out pressed on it does
+  // (pullOutHeldStage); one still held after that saves nothing.
   async function downloadRound(section) {
     var n = Number(section.getAttribute('data-round'));
     if (isPageRound(blocksOfRound(n))) {
-      await downloadMock(section.querySelector('iframe.html-stage'), exportFileName(board.title, n));
+      var stage = section.querySelector('iframe.html-stage');
+      if (stage && stage.hasAttribute('data-held')) await fillHeldStages();
+      await downloadMock(stage, exportFileName(board.title, n));
       return;
     }
     await askStageHeights(section);
@@ -4649,13 +4675,12 @@ export const ui = `
       await downloadMock(only.querySelector('iframe.html-stage'), exportFileName(board.title, n, kind + '-' + blockId));
       return;
     }
-    await askStageHeights(block);
     var round = (board.rounds || []).find(function (r) { return r.n === n; }) || {};
     var html = exportDocument({
       title: board.title || '',
       roundN: n,
       roundTitle: round.title || '',
-      only: 'One ' + kind,
+      only: 'One diagram',
       css: pageCssText(),
       exportCss: EXPORT_CSS,
       contentHtml: await exportRoundContent(block, only),
@@ -4663,12 +4688,51 @@ export const ui = `
     saveHtmlFile(exportFileName(board.title, n, kind + '-' + blockId), html);
   }
 
+  // What a Download that saved nothing says, on the control itself: 'note' as
+  // the control's label and in a note under it, on screen, or with no note what
+  // the control said before (sayOnHeldStage's way, for a Pull-out). The note
+  // takes no pointer and a screen reader skips it, since the control's own
+  // label says the same words. It goes at the control's next press, when the
+  // lens the control sits in closes, and for the top strip's control when the
+  // reader flips to another round (goToRound).
+  function sayByDownload(btn, note) {
+    var shown = btn.querySelector('.download-note');
+    var was = btn.__cbDownloadLabel;
+    function put(name, value) {
+      if (value == null) btn.removeAttribute(name); else btn.setAttribute(name, value);
+    }
+    if (!note) {
+      if (shown) shown.remove();
+      if (was) { put('title', was.title); put('aria-label', was.label); btn.__cbDownloadLabel = null; }
+      return;
+    }
+    if (!was) btn.__cbDownloadLabel = { title: btn.getAttribute('title'), label: btn.getAttribute('aria-label') };
+    put('title', note);
+    put('aria-label', note);
+    if (!shown) {
+      shown = document.createElement('span');
+      shown.className = 'download-note';
+      shown.setAttribute('aria-hidden', 'true');
+      btn.appendChild(shown);
+    }
+    shown.textContent = note;
+    var lens = btn.closest('dialog');
+    if (lens && !btn.__cbDownloadClears) {
+      btn.__cbDownloadClears = true;
+      lens.addEventListener('close', function () { sayByDownload(btn, null); });
+    }
+  }
+
   // 'btn' is off while its file is made, so a second press saves no second one.
+  // A save that fails leaves the control live again and saying so.
   function saveBehind(btn, saving) {
     btn.disabled = true;
-    saving.catch(function (e) {
+    sayByDownload(btn, null);
+    saving.then(function () { btn.disabled = false; }, function (e) {
       if (window.console) console.error('Download failed', e);
-    }).then(function () { btn.disabled = false; });
+      btn.disabled = false;
+      sayByDownload(btn, (e && e.cbNote) || SAVE_FAILED_NOTE);
+    });
   }
 
   // Pull-out's Download, in either lens's bar.
@@ -6010,6 +6074,9 @@ export const ui = `
     // arriving page it would send that page with no check at all.
     var flipped = n !== currentRound;
     if (flipped && sendArmed) disarmSend();
+    // What the top strip's Download said of the round being left (sayByDownload).
+    var headDownload = flipped && document.querySelector('.head-download');
+    if (headDownload) sayByDownload(headDownload, null);
     currentRound = n;
     qsa('.round').forEach(function (s) { s.classList.toggle('round-current', s === section); });
     // The arriving page's diagrams are drawn now, not at load: a diagram drawn
