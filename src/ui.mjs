@@ -2039,7 +2039,7 @@ export const ui = `
    * exactly as wide as the controls that survive the condense. Measured rather
    * than hardcoded because one of those controls resizes at runtime: the
    * read-only slot (ADR.md entry 46) appears, goes, and swaps its own text
-   * between a countdown ('38m left') and 'read-only'.
+   * between a countdown ('38m left') and a state word such as 'read-only'.
    *
    * Read off the two survivors' own widths, never off the header's -- the
    * header is full-bleed at every progress by design, so its width says
@@ -5883,7 +5883,7 @@ export const ui = `
     var meta = document.querySelector('span#round-meta');
     if (meta) {
       // 'fullpage' is what tells pageBoardPillMeta which of PILL_READONLY_TITLE
-      // / ROUND_OPEN_UNAWAITED_TITLE is true for the 'read-only' case -- see
+      // / ROUND_OPEN_UNAWAITED_TITLE is true under 'read-only' or 'open' -- see
       // that function's own comment (src/badge.mjs): a page board's status
       // never leaves 'open' even once its wait dies, so the round object alone
       // cannot make this call.
