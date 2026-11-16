@@ -3490,16 +3490,16 @@ function clearedIds(key, session, home) {
 
 /** The giver `left` is, the session that left mission `key` before `session` joined (ADR
  * 153): itself, by its id and its process, save back in its own process under a new id (a
- * /clear) with a round on the mission's boards recorded under that id. It asked that round
- * after a /clear the mission never heard of and left under the new id, so a giver named by
- * its process would hand it its own round. The rounds of its process are then told apart by
- * id alone, as a /clear's are (`clearedIds`): it gives those recorded under the id the
- * mission bound it with. */
+ * /clear) with a round on the mission's boards it asked under that id, one recorded under
+ * it and handed from no one. It asked that round after a /clear the mission never heard of
+ * and left under the new id, so a giver named by its process would hand it its own round.
+ * The rounds of its process are then told apart by id alone, as a /clear's are
+ * (`clearedIds`): it gives those recorded under the id the mission bound it with. */
 function leaverGiver(key, left, session, home) {
   const back = left.pid != null && left.pid === session.pid && sameStart(left.procStart, session.procStart);
   if (!back) return left;
   const askedSince = linkedMissionBoards(key, home).some(board => (board.rounds || [])
-    .some(r => r.session && r.session.id != null && r.session.id === session.id));
+    .some(r => r.session && r.session.id != null && r.session.id === session.id && r.handedFrom == null));
   return askedSince ? { id: left.id } : left;
 }
 
