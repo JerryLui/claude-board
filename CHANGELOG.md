@@ -28,8 +28,9 @@
   number and everything the board holds for it, gets a fresh 40-minute clock, and shows under
   Waiting on you again; a tab you still have open on it takes answers again with no reload. Your
   Send reaches the new session, which is told of each reopened round when it joins. A round you
-  already sent stays read-only, rounds of earlier sessions stay closed, and so do those of a
-  session that left the mission with nobody taking over. A round nobody answers reopens again for
+  already sent stays read-only, and rounds of earlier sessions stay closed. A session that left
+  the mission on purpose (`/mission off`) with nobody taking over hands its unanswered rounds on
+  the same way, to the next session that joins. A round nobody answers reopens again for
   the session after, until you send it or a session declines it: `mission close` closes one
   reopened round whose question no longer stands, for good. Before, such a round stayed
   read-only and a late Send reached a session only when it thought to read the board.

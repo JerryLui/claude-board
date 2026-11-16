@@ -267,10 +267,10 @@ phases, links and closing summaries, never case content, and is written by which
 on it. _Avoid_: task, job, ticket, project, session (a Mission outlives several).
 
 **Hand-over**: the moment a Mission's next session is bound in place of its last: a takeover
-landing, a join after the bound session went or was replaced, or the bound session joining again
-after a `/clear`. The rounds the last session left unsent become the new session's. A session
-that left with no takeover hands nothing over. _Avoid_: handoff (that is the record's note for
-the next session), transfer, takeover (one of its three causes).
+landing, a join after the bound session went, left or was replaced, or the bound session joining
+again after a `/clear`. The rounds the last session left unsent become the new session's.
+_Avoid_: handoff (that is the record's note for the next session), transfer, takeover (one of
+its three causes).
 
 **Reopened**: of a round, that a Hand-over put it back to waiting in place: the same number,
 blocks and comments, Awaited again on a fresh 40-minute wait, its answer the new session's. It
