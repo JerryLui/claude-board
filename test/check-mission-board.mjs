@@ -404,6 +404,11 @@ async function main() {
     const r = readBoard(boardId, home).rounds[n - 1];
     return [r.status, r.awaited, r.session.pid];
   };
+  /** Mission `key`'s card as the Missions view reads it: its column and its buttons. */
+  const card = async key => {
+    const { view, actions } = (await (await fetch(`${base}/api/missions`)).json()).missions.find(m => m.key === key);
+    return [view, actions];
+  };
   /** The session watcher's list, holding `session`'s process under `id` and no other session. */
   const watcherLists = (session, folder, id) => post('/api/sessions', { intervalMs: 30_000, sessions: [{ id, pid: session.ref.pid, procStart: session.ref.procStart, kind: 'interactive', jobId: null, cwd: folder, login: null, name: null, status: 'idle', reason: null }] });
 
@@ -497,6 +502,40 @@ async function main() {
     assert.deepEqual((await join('DECLINED', 'declined-third', third)).body.reopened.map(r => r.round), [2, 3]);
     assert.deepEqual([1, 2, 3].map(n => state(asked.boardId, n)), [['abandoned', false, next.ref.pid], ['open', true, third.ref.pid], ['open', true, third.ref.pid]]);
     assert.equal((await leave('DECLINED', 'declined-third', third)).status, 200);
+  });
+
+  await check('a round a hand-over reopened holds its mission\'s card at needs you behind a later round of its new session that asks nothing, where the card no longer draws the Fire it drew from it as that session\'s newest: of two such rounds the card stays through the PM\'s Send on one, and clears when the session closes the other by number', async () => {
+    const gone = sessionProcess();
+    const next = sessionProcess();
+    const folder = folderWith('owed-card', 'x\n');
+    assert.equal((await join('OWED_CARD', 'owed-gone', gone)).status, 200);
+    const asked = await ask(gone, folder, [question('Left at its clear?')]);
+    assert.equal((await ask(gone, folder, [{ ...question('Fire it?'), action: 'fire' }], { fresh: true })).round, 2);
+    await kill(gone);
+    assert.deepEqual((await join('OWED_CARD', 'owed-next', next)).body.reopened.map(r => r.round), [1, 2]);
+    assert.deepEqual(await card('OWED_CARD'), ['needs-you', [{ kind: 'fire', board: asked.boardId, round: 2, question: questionId(asked.boardId, 2), choice: 'Yes' }]]);
+    assert.equal((await ask(next, folder, [note('carrying on')])).round, 3);
+    assert.deepEqual(await card('OWED_CARD'), ['needs-you', []]);
+
+    assert.equal((await send(asked.boardId, 1, 'Yes')).status, 200);
+    assert.deepEqual(await card('OWED_CARD'), ['needs-you', []]);
+    const closed = await post(`/api/board/${asked.boardId}/abandon`, { session: next.ref, round: 2 });
+    assert.deepEqual([closed.status, closed.body.closed], [200, [2]]);
+    assert.deepEqual(await card('OWED_CARD'), ['working', []]);
+    assert.equal((await leave('OWED_CARD', 'owed-next', next)).status, 200);
+  });
+
+  await check('a round whose wait lapsed, never reopened, holds its mission\'s card at needs you while it is its session\'s newest, and no longer behind a later round of that session that asks nothing, though it stays open', async () => {
+    const s = sessionProcess();
+    const folder = folderWith('lapsed-card', 'x\n');
+    assert.equal((await join('LAPSED_CARD', 'lapsed-card', s)).status, 200);
+    const asked = await ask(s, folder, [question('Left to lapse?')]);
+    lapse(asked.boardId, 1);
+    assert.deepEqual(await card('LAPSED_CARD'), ['needs-you', []]);
+    assert.equal((await ask(s, folder, [note('carrying on')])).round, 2);
+    assert.deepEqual(readBoard(asked.boardId, home).rounds.map(r => [r.status, r.awaitDeadline != null, r.reopenedAt]), [['open', true, undefined], ['open', false, undefined]]);
+    assert.deepEqual(await card('LAPSED_CARD'), ['working', []]);
+    assert.equal((await leave('LAPSED_CARD', 'lapsed-card', s)).status, 200);
   });
 
   // A session that left its mission on purpose (a leave with no takeover pending) gives its

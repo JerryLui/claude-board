@@ -1298,8 +1298,8 @@ the agent's wait ended. A Lapsed round (still `status: 'open'`, ADR 50) always d
 answers are then owed to the thread's next packet, or collected by `read` above, which is the only
 path an abandoned board has, since no wait ever returns to it. The page says as much rather than
 hiding it: the round keeps its widgets and its Send bar live (`historical` in `renderRoundSection`
-is `sent` alone, server-side too, so a reload takes nothing back), and the pill still reads
-`read-only`, with a hover text promising that comments and answers sent here are saved and reach
+is `sent` alone, server-side too, so a reload takes nothing back), and the pill reads `open`
+where Send works (ADR 156), with a hover text promising that comments and answers sent here are saved and reach
 the next agent that reads the board. A page board's comment panel is the one exception: it renders
 only while a wait is open on its round (`renderPageCommentPanel`), so an abandoned page round
 shows its comments and no compose form, exactly as a lapsed one does.
@@ -1750,7 +1750,7 @@ fields derived on each read and never stored. `view` is the column the mission s
 `released` while stored released; else `waiting` while it is retired (its `retiredAt` parses,
 ADR 147), whatever its rounds, its session or its `waitingOn`; else `needs-you` when a linked
 board's newest round is open and asks a question or was minted awaited (a lapsed wait still counts; an older round left open does
-not, ADR 134), whatever its session is doing (ADR 140); else `parked` while stored parked (a
+not, ADR 134, unless a hand-over reopened it, ADR 155), whatever its session is doing (ADR 140); else `parked` while stored parked (a
 mission stopped at a spin-down, its session ended on purpose); else `stalled` when its session is gone (a
 bound `pid` that no longer exists, or a reservation no `pid` or `id` bound within 5 minutes) or it
 is stored `working` and has not been heard from for 15 minutes; else the stored `state`. A session
@@ -1760,7 +1760,9 @@ ADR 36): a director idle while its owners work, or a session whose hooks a `/cle
 stalls by silence while Claude Code lists it. With no snapshot held (the watcher down, or none since
 the daemon started) heartbeats alone count. A bound `pid` that no longer exists while the snapshot
 lists the session's `id` in another live process is not gone: the session runs on there (a resume
-no launch made). `listedAt` is that snapshot's time while it lists the bound session, else `null`.
+no launch made). `asking` is whether `view` is `needs-you` by a session's newest round that no hand-over reopened, that session
+waiting on the PM; it is `false` where only a reopened round holds the mission there, behind a
+later round or still its session's newest, its session working on (ADR 155). `listedAt` is that snapshot's time while it lists the bound session, else `null`.
 `retired` is whether its `retiredAt` parses.
 `gone` is `{ lastSeenAt }`, the session's `seenAt`, while that session is gone and the mission has
 neither recorded its end, retired nor parked, else `null`. `rejoin` is `{ reason, since, id }` while the snapshot lists the bound
@@ -1801,7 +1803,8 @@ latest fact is neither `merged` nor `closed` (no fact yet counts as open), or a 
 `GET /api/mission/:key` still answers it until the prune deletes it, 30 days after `retiredAt`.
 `tabs` and `watcher` are "The session routes"' below. `counts` are per `view` over the
 missions listed, each tab added to its `state`'s count as the Missions view counts its cards; `live` counts every mission holding a
-live session, `working` including one that reads stalled, save one whose bound session the
+live session, `working` those of them stored `working` and not `asking`, so one that reads stalled
+or works on while a reopened round is owed counts, save one whose bound session the
 watcher lists `interactive` in its own process: a tab the PM runs holds no slot (ADR 149).
 `slotFree` is true while `live` sits under both caps, so a launch would not queue: a reader
 waiting for a slot reads it, never the numbers. Secret or cookie.
@@ -2222,7 +2225,7 @@ the waiting count where it was, so no `waiting` goes with it; an amend's restart
 
 `missions` names one mission whose view may have moved, and nothing else: a subscriber re-reads
 `GET /api/missions` for it. It fires on every write under `/api/mission/:key`, on every `waiting`
-caused by a board linked to a mission (its newest round decides whether it reads needs-you), and from the
+caused by a board linked to a mission (its rounds decide whether it reads needs-you), and from the
 daemon's missions watch (ADR 128), which reads every mission each 30 seconds and publishes a
 derived change no write made: a session whose process died, or one gone silent past 15 minutes.
 A read between the watch's ticks can therefore see a stall before the event says so. With `key:
@@ -3129,4 +3132,4 @@ nothing are left as they are; an open round that asked nothing is handed without
 reopened round is the taker's from then on, so one it leaves unanswered reopens again at each
 later hand-over, until it is sent or declined.
 
-**Needs you** reads, on each board, the newest round of every session that posted there, one session being one by its id, or its pid and start to the second. A reopened round is its new session's, so one with a later round of that session after it does not hold the mission's card at needs you: it shows under Waiting on you on the Boards page alone.
+**Needs you** reads, on each board, the newest round of every session that posted there, one session being one by its id, or its pid and start to the second. A round a hand-over reopened holds the card there too while it still wants its answer, whatever rounds its new session posted after it, until it is sent or declined (ADR 155); an older round never reopened does not, though its wait lapsed with it left open. The card's Fire and Merge come from each session's newest round only.

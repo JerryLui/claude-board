@@ -75,7 +75,7 @@ link where it is worth reading.
 | 86 | [The status item learns by push and survives by poll](.agents/adr/0086-the-status-item-learns-by-push-and-survives-by-poll.md) | 2026-08-10 | replaces 79; relates to 77; relates to 72 |
 | 87 | [The index page holds the stream, not only the poll](.agents/adr/0087-the-index-page-holds-the-stream-not-only-the-poll.md) | 2026-08-10 | amends 77; relates to 86 |
 | 88 | [The popover's timer line mirrors the index page](.agents/adr/0088-the-popover-timer-line-mirrors-the-index-page.md) | 2026-08-11 | narrows 83; relates to 81; completed by 90 |
-| 89 | [The pill names a Submitted round](.agents/adr/0089-the-pill-names-a-submitted-round.md) | 2026-08-11 | narrows 40; relates to 50 |
+| 89 | [The pill names a Submitted round](.agents/adr/0089-the-pill-names-a-submitted-round.md) | 2026-08-11 | narrows 40; relates to 50; narrowed by 156 |
 | 90 | [An absent Timer names the state and nothing else](.agents/adr/0090-an-absent-timer-names-the-state-and-nothing-else.md) | 2026-08-11 | completes 88; relates to 83 |
 | 91 | [A fresh board defers to an open tab](.agents/adr/0091-a-fresh-board-defers-to-an-open-tab.md) | 2026-08-11 | narrows 55; widened by 92 |
 | 92 | [The Banner covers a Suppressed content-only board](.agents/adr/0092-the-banner-covers-a-suppressed-content-only-board.md) | 2026-08-11 | widens 55; widens 91; narrowed by 106 |
@@ -120,7 +120,7 @@ link where it is worth reading.
 | 131 | [Sessions reach the board over a route, held in memory](.agents/adr/0131-sessions-reach-the-board-over-a-route-held-in-memory.md) | 2026-10-29 | relates to 5, 123, 125, 128, 129; amended by 141, 147, 150 |
 | 132 | [Any block may carry card fields](.agents/adr/0132-any-block-may-carry-card-fields.md) | 2026-10-29 | relates to 133 |
 | 133 | [Every block is a titled card, with no type caption](.agents/adr/0133-every-block-is-a-titled-card-with-no-type-caption.md) | 2026-10-29 | amends 110; relates to 28, 132 |
-| 134 | [Send covers the page on screen, and needs you reads a board's newest asking round](.agents/adr/0134-send-covers-the-page-on-screen.md) | 2026-10-29 | narrows 123, 125; relates to 42, 114; amended by 150 |
+| 134 | [Send covers the page on screen, and needs you reads a board's newest asking round](.agents/adr/0134-send-covers-the-page-on-screen.md) | 2026-10-29 | narrows 123, 125; relates to 42, 114; amended by 150, 155 |
 | 137 | [Mission cards are as tall as their text, and Boards is one grouped list](.agents/adr/0137-mission-cards-as-tall-as-their-text-and-boards-one-grouped-list.md) | 2026-10-29 | replaces 135; amends 124; relates to 123, 125, 133; narrowed by 142 |
 | 138 | [Round pages are one centred 1100px column, in Linear's card density](.agents/adr/0138-round-pages-one-centred-1100px-column-in-linear-card-density.md) | 2026-10-29 | replaces 136; narrows 121, 122; relates to 26, 110, 120, 133, 137 |
 | 139 | [Inter is bundled, and "no web fonts and no external assets" narrows to "no external assets"](.agents/adr/0139-inter-is-bundled-no-external-assets-only.md) | 2026-10-29 | relates to 62, 70, 95, 137, 138 |
@@ -135,7 +135,9 @@ link where it is worth reading.
 | 148 | [At most eight sessions work at once, twelve alive](.agents/adr/0148-at-most-eight-sessions-work-at-once.md) | 2026-11-06 | amends 129; amended by 149 |
 | 149 | [Ten background sessions work at once, fourteen alive; the PM's tab holds no slot](.agents/adr/0149-ten-background-sessions-work-the-pms-tab-holds-no-slot.md) | 2026-11-09 | amends 129, 148 |
 | 150 | [One board per mission, each round its session's](.agents/adr/0150-one-board-per-mission-each-round-its-sessions.md) | 2026-11-11 | amends 69, 131, 134, 141; amended by 151 |
-| 151 | [A hand-over reopens the last session's unanswered rounds in place](.agents/adr/0151-a-hand-over-reopens-the-last-sessions-unanswered-rounds-in-place.md) | 2026-11-15 | amends 150; relates to 69, 114, 145, 146; amended by 153 |
+| 151 | [A hand-over reopens the last session's unanswered rounds in place](.agents/adr/0151-a-hand-over-reopens-the-last-sessions-unanswered-rounds-in-place.md) | 2026-11-15 | amends 150; relates to 69, 114, 145, 146; amended by 153, 155 |
 | 152 | [The top strip takes clicks on its controls only, holds Download round on a full-page round, and leaves for a mock's full-size view](.agents/adr/0152-the-top-strip-takes-clicks-on-its-controls-only-and-leaves-for-a-mocks-full-size-view.md) | 2026-11-15 | amends 40; relates to 33, 59, 120 |
 | 153 | [A session that left its mission hands its unanswered rounds to the next join](.agents/adr/0153-a-session-that-left-its-mission-hands-its-unanswered-rounds-to-the-next-join.md) | 2026-11-16 | amends 151; relates to 150 |
 | 154 | [A saved mock is the page's own file and runs its scripts; a round's file stays script-free](.agents/adr/0154-a-saved-mock-is-the-pages-own-file-and-runs-its-scripts.md) | 2026-11-16 | relates to 22, 32, 78, 95, 108, 120, 122, 152 |
+| 155 | [A reopened round holds its mission's card at needs you behind a later round](.agents/adr/0155-a-reopened-round-holds-its-missions-card-at-needs-you-behind-a-later-round.md) | 2026-11-16 | amends 134, 151; relates to 150 |
+| 156 | [The pill reads `open` on an unsent round whose Send works](.agents/adr/0156-the-pill-reads-open-on-an-unsent-round-whose-send-works.md) | 2026-11-16 | narrows 89; relates to 44, 114 |

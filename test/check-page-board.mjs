@@ -1509,7 +1509,11 @@ check('AC 6: the header pill carries the round\'s countdown as a muted figure, w
 check('AC 8: a page board nobody is waiting on offers no comment control at all, and the pill\'s slot reads "read-only"', () => {
   const board = nonAwaitedPageBoard();
   assert.equal(board.rounds[0].awaited, false, 'setup: posted without wait: true');
-  const document = loadBoard(renderBoardPage(board));
+  const pageHtml = renderBoardPage(board);
+  const firstPaint = parseHTML(pageHtml).querySelector('span#round-meta');
+  assert.deepEqual([firstPaint.textContent, firstPaint.getAttribute('title')], ['read-only', PILL_READONLY_TITLE],
+    'the served bytes already read "read-only", before the page script runs');
+  const document = loadBoard(pageHtml);
   const frame = document.querySelector('.html-stage');
   frame.loadSrcdoc();
 

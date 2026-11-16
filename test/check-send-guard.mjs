@@ -48,6 +48,7 @@
 import assert from 'node:assert/strict';
 import { createBoard, addRound, amendRound, applySubmit } from '../src/board.mjs';
 import { renderBoardPage, renderRoundSection, groupCommentsByBlock } from '../src/render.mjs';
+import { closeLapsedAwaitedRounds } from '../src/badge.mjs';
 // The daemon's own push builder, as test/check-amend-integrity.mjs imports it: an
 // amend payload rebuilt here would assert a local copy of the rule.
 import { buildRoundPushPayload } from '../src/server.mjs';
@@ -720,22 +721,33 @@ await checkAsync('a comment on a page that asks nothing rides the newest unsent 
   assert.equal(queued(), 0, 'and both leave the queue once it lands');
 });
 
-check('Send and Discuss are off on an older page that asks nothing, and on for the newest page whatever it asks', () => {
+check('Send and Discuss are off on an older page that asks nothing, and on for the newest page whatever it asks and an older one still asking, the tab of an unsent page with no wait on it reading "open" exactly where they are on', () => {
   const display = () => [{ kind: 'markdown', text: 'read this' }, { kind: 'code', text: 'const a = 1;', lang: 'js' }];
   const board = createBoard({ title: 'Display then ask', blocks: display() });
   addRound(board, { blocks: [singleSpec()], wait: true });
   const document = loadBoard(renderBoardPage(board));
   const { flip } = pageControls(document);
-  const bar = () => [document.getElementById('send-btn').disabled, document.getElementById('discuss-btn').disabled];
+  const bar = doc => [doc.getElementById('send-btn').disabled, doc.getElementById('discuss-btn').disabled];
+  const tab = doc => doc.querySelector('span#round-meta').textContent;
 
-  assert.deepEqual(bar(), [false, false], 'setup: the newest page asks, so its bar is live');
+  assert.deepEqual(bar(document), [false, false], 'setup: the newest page asks, so its bar is live');
   flip(1);
-  assert.deepEqual(bar(), [true, true], 'no agent waits on the older display page, so neither Send nor Discuss is offered there');
+  assert.deepEqual(bar(document), [true, true], 'no agent waits on the older display page, so neither Send nor Discuss is offered there');
+  assert.equal(tab(document), 'read-only', 'and its tab says nothing can be sent from it');
   flip(2);
-  assert.deepEqual(bar(), [false, false], 'flipping back hands the bar back');
+  assert.deepEqual(bar(document), [false, false], 'flipping back hands the bar back');
 
   const onlyDisplay = loadBoard(renderBoardPage(createBoard({ title: 'Display only', blocks: display() })));
   assert.equal(onlyDisplay.getElementById('send-btn').disabled, false, 'the newest unsent page keeps its Send even when it asks nothing');
+  assert.equal(tab(onlyDisplay), 'open');
+
+  const asked = createBoard({ title: 'Ask then display', blocks: [singleSpec()] });
+  addRound(asked, { blocks: display() });
+  assert.equal(closeLapsedAwaitedRounds(asked, Date.parse(asked.rounds[0].awaitDeadline)), 1, 'setup: the asking page\'s wait lapsed, so no countdown holds its tab');
+  const stillAsking = loadBoard(renderBoardPage(asked));
+  pageControls(stillAsking).flip(1);
+  assert.deepEqual(bar(stillAsking), [false, false], 'an older unsent page that still asks keeps its bar');
+  assert.equal(tab(stillAsking), 'open', 'and its tab reads "open" with it');
 });
 
 check('the send bar\'s countdown shows on the newest unsent page alone', () => {

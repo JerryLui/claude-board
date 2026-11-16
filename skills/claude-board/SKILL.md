@@ -80,7 +80,7 @@ ask({ title, blocks, wait, fresh })
 
 Two to four options read best, and every answer carries a free-text note. **Every option commits to an answer**: never offer a "your call" or "you decide" option, which leaves every recommended pick ambiguous between agreement and delegation.
 
-`explainer` is one to three sentences of markdown under the prompt; `context` is what the reviewer looks up: one panel beside the options, or the full card width above them when it holds a mock. **A mock and the questions about it share one round**: the mock sits in its question's own `context`, or is the options themselves (`choose-between-rendered-variants`), never a description or a pointer to another round. Attach `code` only to a question about the code.
+`explainer` is one to three sentences of markdown under the prompt; `context` is what the reviewer looks up: one panel beside the options, or the full card width above them when it holds a mock. **A mock and the questions about it share one round**: the mock sits in its question's own `context`, or is the options themselves (`choose-between-rendered-variants`), never a description or a pointer to another round. A page a render skill builds (`/explain`, `/visualize`) is a mock too: when you will ask about it, have the skill hold its own post before it runs, then post its file and your questions as one round yourself (the render skill's own instructions say how to hold its post). Attach `code` only to a question about the code.
 
 ## What comes back
 
@@ -113,7 +113,7 @@ A comment anchored to a block (`blockId`, `anchor`) is feedback on that block, n
 
 **What no packet has carried is owed to the next packet the same thread returns, once**, tagged with its own `round`: comments on a page board posted without `wait` (or whose wait timed out), and answers sent after a round's wait ended. Any packet can carry them, `timeout` and `abandoned` included, so check `round` on every answer and comment before assuming it belongs to the round you just posted; the same check spots an entry `read` already showed you. A round the watch handed you is spent: no later packet carries it.
 
-**A `mission` join lists `reopened` rounds**, as `binding` does after a takeover: each is a round the mission's last session left unanswered, open again under your session, so its answer is yours, through your next `ask` packet, `read`, or its `watch` run as a timeout's. `mission({ action: 'close', board, round })` declines one whose question no longer stands, and it stays closed.
+**A `mission` join lists `reopened` rounds**, as `binding` does after a takeover: each is a round the mission's last session left unanswered, open again under your session, so its answer is yours, through your next `ask` packet, `read`, or its `watch` run as a timeout's. Until it is answered or closed it holds the mission's card at needs you, whatever you post after it: `mission({ action: 'close', board, round })` declines one whose question no longer stands, and it stays closed.
 
 ## Collecting a late answer
 

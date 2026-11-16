@@ -100,6 +100,20 @@ function seed(dir, key, fields) {
   }, dir);
 }
 
+/** Writes a board of `rounds` to `dir`'s store, round 1 asking one Fire question, and answers
+ * the link a mission's `boards` holds for it. */
+function seedBoard(dir, boardId, now, rounds) {
+  const at = new Date(now).toISOString();
+  mkdirSync(path.join(dir, 'boards'), { recursive: true });
+  writeFileSync(path.join(dir, 'boards', `${boardId}.json`), JSON.stringify({
+    id: boardId, thread: 't', title: 'q', cwd: null, createdAt: at, updatedAt: at, state: 'open',
+    rounds: rounds.map((r, i) => ({ n: i + 1, postedAt: at, status: 'open', sentAt: null, title: 'q', ...r })),
+    blocks: [{ id: 'q1', kind: 'question', round: 1, prompt: 'Fire?', widget: 'single', action: 'fire', options: [{ label: 'Yes' }] }],
+    answers: {}, comments: [],
+  }));
+  return { id: boardId, url: 'http://x/b/' + boardId, at };
+}
+
 const minutes = n => n * 60 * 1000;
 const iso = ms => new Date(ms).toISOString();
 
@@ -395,7 +409,7 @@ async function main() {
     assert.deepEqual(launchMission('OVER_CAP', { phase: 'direct' }, { home: dir, now, isAlive: alive, listed }), { queued: true });
   });
 
-  await check('a retired mission whose session is still stored working holds a working slot, though its card counts under Waiting (ADR 147)', () => {
+  await check('a retired mission whose session is still stored working holds a working slot, its newest round still asking or not, though its card counts under Waiting (ADR 147)', () => {
     const dir = scratchHome('retired-working');
     const now = Date.now();
     const alive = () => true;
@@ -404,6 +418,7 @@ async function main() {
     }
     seed(dir, 'RETIRED_WORKING', {
       retiredAt: iso(now - minutes(5)), prs: [{ repo: 'service', number: 12, url: 'https://github.com/o/service/pull/12' }],
+      boards: [seedBoard(dir, 'b_retiredworking', now, [{ awaited: true, awaitDeadline: iso(now + minutes(40)) }])],
       session: { pid: 4000, startedAt: iso(now - minutes(30)), seenAt: iso(now) },
     });
     const overview = missionsOverview({ home: dir, now, isAlive: alive });
@@ -828,7 +843,7 @@ async function main() {
     }
   });
 
-  await check('a mission waiting on the PM is alive but not working, so it holds no working slot', () => {
+  await check('a mission whose session\'s newest round waits on the PM is alive but not working, so it holds no working slot', () => {
     const dir = scratchHome('waiting-on-pm');
     const now = Date.now();
     const alive = () => true;
@@ -836,24 +851,41 @@ async function main() {
       seed(dir, `W${i}`, { session: { pid: 1000 + i, startedAt: iso(now), seenAt: iso(now) } });
     }
     // Stored working, but its board holds an unanswered question: it reads needs-you.
-    const boardId = 'b_waitingonpm';
-    mkdirSync(path.join(dir, 'boards'), { recursive: true });
-    writeFileSync(path.join(dir, 'boards', `${boardId}.json`), JSON.stringify({
-      id: boardId, thread: 't', title: 'q', cwd: null, createdAt: iso(now), updatedAt: iso(now), state: 'open',
-      rounds: [{ n: 1, postedAt: iso(now), status: 'open', sentAt: null, title: 'q', awaited: true, awaitDeadline: iso(now + minutes(40)) }],
-      blocks: [{ id: 'q1', kind: 'question', round: 1, prompt: 'Fire?', widget: 'single', options: [{ label: 'Yes' }] }],
-      answers: {}, comments: [],
-    }));
-    seed(dir, 'ASKING', { boards: [{ id: boardId, url: 'http://x/b/' + boardId, at: iso(now) }], session: { pid: 3000, startedAt: iso(now), seenAt: iso(now) } });
+    const link = seedBoard(dir, 'b_waitingonpm', now, [{ awaited: true, awaitDeadline: iso(now + minutes(40)) }]);
+    seed(dir, 'ASKING', { boards: [link], session: { pid: 3000, startedAt: iso(now), seenAt: iso(now) } });
     seed(dir, 'PARKED', { state: 'waiting', session: { pid: 3001, startedAt: iso(now), seenAt: iso(now) } });
     const overview = missionsOverview({ home: dir, now, isAlive: alive });
     assert.equal(overview.missions.find(m => m.key === 'ASKING').view, 'needs-you');
+    assert.equal(overview.missions.find(m => m.key === 'ASKING').asking, true);
     assert.deepEqual(overview.live, { working: MAX_WORKING - 1, alive: MAX_WORKING + 1 });
     assert.deepEqual(launchMission('NEXT', { phase: 'direct' }, { home: dir, now, isAlive: alive }), { launch: true },
       'seven working and two waiting on the PM leave a working slot');
   });
 
-  await check('needs you and the card\'s Fire come only from the newest round of each session on a board: an older page left asking holds neither, and one session is one poster by its id or its process start to the second', () => {
+  await check('a session working on while a round a hand-over reopened is owed holds its working slot, though its mission reads needs you, the round behind a later one of its own or still its newest and drawing the card\'s Fire: a launch queues at the cap (ADR 155)', () => {
+    const now = Date.now();
+    const alive = () => true;
+    const reopened = { reopenedAt: iso(now), awaited: true, awaitDeadline: iso(now + minutes(40)) };
+    for (const [label, rounds, fires] of [
+      ['behind-a-later-round', [reopened, {}], []],
+      ['no-later-round', [reopened], [1]],
+    ]) {
+      const dir = scratchHome(`reopened-${label}`);
+      for (let i = 0; i < MAX_WORKING - 1; i++) {
+        seed(dir, `W${i}`, { session: { pid: 1000 + i, startedAt: iso(now), seenAt: iso(now) } });
+      }
+      const link = seedBoard(dir, `b_reopened${rounds.length}`, now, rounds);
+      seed(dir, 'WORKS_ON', { boards: [link], session: { pid: 3000, startedAt: iso(now), seenAt: iso(now) } });
+      const overview = missionsOverview({ home: dir, now, isAlive: alive });
+      const worksOn = overview.missions.find(m => m.key === 'WORKS_ON');
+      assert.deepEqual([worksOn.view, worksOn.actions.map(a => [a.kind, a.round])], ['needs-you', fires.map(n => ['fire', n])], label);
+      assert.equal(worksOn.asking, false, label);
+      assert.deepEqual([overview.live, overview.slotFree], [{ working: MAX_WORKING, alive: MAX_WORKING }, false], label);
+      assert.deepEqual(launchMission('NEXT', { phase: 'direct' }, { home: dir, now, isAlive: alive }), { queued: true }, label);
+    }
+  });
+
+  await check('the card\'s Fire comes only from the newest round of each session on a board, and needs you from that round or a reopened one (held in check-mission-board.mjs): an older page left asking, never reopened, holds neither, and one session is one poster by its id or its process start to the second', () => {
     const dir = scratchHome('newest-page');
     const now = Date.now();
     const fireQ = (id, round) => ({ id, kind: 'question', round, prompt: 'Fire?', widget: 'single', action: 'fire', options: [{ label: 'Fire /direct' }, { label: 'Not yet' }] });
