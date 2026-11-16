@@ -30,7 +30,8 @@
   Send reaches the new session, which is told of each reopened round when it joins. A round you
   already sent stays read-only, and rounds of earlier sessions stay closed. A session that left
   the mission on purpose (`/mission off`) with nobody taking over hands its unanswered rounds on
-  the same way, to the next session that joins. A round nobody answers reopens again for
+  the same way, to the next session that joins, also when a session in between started on the
+  mission and ended or left before it joined. A round nobody answers reopens again for
   the session after, until you send it or a session declines it: `mission close` closes one
   reopened round whose question no longer stands, for good. Before, such a round stayed
   read-only and a late Send reached a session only when it thought to read the board.

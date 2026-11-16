@@ -902,6 +902,21 @@ replaced, and it made a leave the one way out of a mission that lost its open qu
 takeover already moves a live session's rounds to the taker, so a leave with nobody waiting to
 take over follows the same rule one join later.
 
+**Rejected: they stay the leaver's when the session after it never joined, as first built.**
+The first build let only the session before the one that joins give. A session bound by its
+heartbeat that went or left before its join so took the leaver's rounds out of reach: the record
+dropped the leaver with it, and the join after was handed that session's rounds alone. That
+session was handed nothing and never held the mission's questions, and a launched session dying
+between its first heartbeat and its join is an ordinary failure, so the PM was left owing
+answers no session could receive. A session whose join was handed the rounds still ends the
+line, which keeps a long mission's old closed rounds from all coming back.
+
+**Rejected: a joined stamp on the record, to tell a session that joined from one that did not.**
+The record says it already: `left` stays until a join was handed every board, so a record
+holding it is one whose rounds are still owed. A stamp would call a session joined whose
+hand-over failed on a board, and its going would strand the leaver's rounds there; carrying
+`left` covers that with no second field.
+
 ## Out of Scope
 
 - Live revision of the artifact after feedback. Lavish edits the page in place; we re-render from
