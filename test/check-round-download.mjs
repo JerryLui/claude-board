@@ -91,6 +91,7 @@ check('a round drawn full page draws no chip line, open, rendered sent or gone s
     assert.equal(inStrip.length, 1, `${how}: one control in the top strip's controls`);
     assert.equal(doc.querySelectorAll('.head-download').length, 1, `${how}: and nowhere else`);
     assert.equal(inStrip[0].textContent.trim(), 'Download round', how);
+    assert.equal(inStrip[0].getAttribute('title'), 'Download round', how);
     assert.equal(inStrip[0].hasAttribute('disabled'), false, how);
   }
 });

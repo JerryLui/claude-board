@@ -123,15 +123,6 @@ check('AC 7: the pill holds mark, comment toggle, theme, Download round (hidden 
   assert.equal(computed(actions.children[2], 'display'), 'none', 'the strip\'s Download round stays hidden in the pill');
 });
 
-// Where it sits in the condensed pill, and that it is drawn as its icon alone
-// there, is layout: test/browser-check-download.mjs's condensed-bar row.
-check('ADR 152: the strip\'s Download round, its icon alone in the condensed pill, is named and titled "Download round"', () => {
-  const document = loadBoard(renderBoardPage(createBoard({ title: 'a page board', blocks: [{ kind: 'html', html: '<p>hello</p>' }] })));
-  assert.equal(document.body.classList.contains('page-board'), true, 'setup: one html block is drawn full page');
-  const btn = document.querySelector('header.board-head .head-download');
-  assert.deepEqual({ name: btn.getAttribute('aria-label'), title: btn.getAttribute('title') }, { name: 'Download round', title: 'Download round' });
-});
-
 // The strip's box spans the column around a wash or a pill drawn far smaller
 // (ADR.md entry 152). Its own box is all this row can resolve: the rule handing
 // clicks back to the two control groups is a child selector, which the stand-in's

@@ -442,7 +442,7 @@ const STRIP_EXPR = `(function () {
     scrolled: document.body.classList.contains('stage-scrolled') };
 })()`;
 // The strip's drawn buttons, left to right, with Download round's and Theme's boxes,
-// Download round's name and title, and whether a click at its middle lands on it.
+// Download round's title, and whether a click at its middle lands on it.
 const BAR_EXPR = `(function () {
   var named = { 'comment-mode-toggle': 'Comment', 'theme-toggle': 'Theme' };
   var drawn = [].slice.call(document.querySelectorAll('header.board-head .board-head-actions button')).map(function (b) {
@@ -454,7 +454,7 @@ const BAR_EXPR = `(function () {
   var r = btn.getBoundingClientRect();
   var hit = document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2);
   return { order: drawn.map(function (c) { return c.name; }), download: box('Download'), theme: box('Theme'),
-    name: btn.getAttribute('aria-label'), title: btn.getAttribute('title'), hit: !!(hit && hit.closest('.head-download')),
+    title: btn.getAttribute('title'), hit: !!(hit && hit.closest('.head-download')),
     scrolled: document.body.classList.contains('stage-scrolled') };
 })()`;
 const ROUND_CLICK = n => `document.querySelector('.round[data-round="${n}"] .round-download').click()`;
@@ -585,6 +585,14 @@ function reportedHeight(tab, id) {
       setTimeout(poll, 50);
     })();
   })` }).then(r => r.result.value);
+}
+
+/** The accessible name Chrome computes for what `selector` picks on the tab's page. */
+async function accessibleName(tab, selector) {
+  const { root } = await tab.sp('DOM.getDocument', { depth: 0 });
+  const { nodeId } = await tab.sp('DOM.querySelector', { nodeId: root.nodeId, selector });
+  const { nodes } = await tab.sp('Accessibility.getPartialAXTree', { nodeId, fetchRelatives: false });
+  return nodes[0]?.name?.value ?? null;
 }
 
 /** A DevTools session on the artifact whose text holds `marker`: to the browser a stage
@@ -1080,6 +1088,7 @@ async function main() {
         return { held: frame.hasAttribute('data-held'), noteGone: !document.querySelector('.head-download .download-note'),
           label: document.querySelector('.head-download').getAttribute('aria-label'), text: document.querySelector('.head-download').textContent.trim() };
       })()`);
+      heldAfter.name = await accessibleName(shownTab, '.head-download');
       await shownTab.close();
       const shownFile = await openSaved(send, onEvent, shownDownload.file, cookie, offline);
       await row('an artifact round never sent shows the same Download round in the top strip, at rest and scrolled, and it saves the mock as its own page', note => {
@@ -1102,11 +1111,13 @@ async function main() {
         note(heldDownload.files.join(', '));
         assert.deepEqual(heldDownload.files, ['shown-fixture-round-1.html']);
         assert.ok(readFileSync(heldDownload.file, 'utf8') === SAVED_HEAD + SHOWN_ROUND_1[0].html, 'the mock\'s source as posted');
-        assert.deepEqual(heldAfter, { held: false, noteGone: true, label: 'Download round', text: 'Download round' });
+        assert.deepEqual(heldAfter, { held: false, noteGone: true, label: null, text: 'Download round', name: 'Download round' });
       });
 
+      // The condensed rules hold no size, order or icon that depends on the theme: dark is
+      // drawn only for its evidence shot.
       const bars = {};
-      for (const theme of ['light', 'dark']) {
+      for (const theme of process.env.CLAUDE_BOARD_DOWNLOAD_KEEP ? ['light', 'dark'] : ['light']) {
         const iconTab = await openTab(send, onEvent, iconUrl, cookie, { width: 1280, height: 800, theme,
           expr: `document.body.classList.contains('page-board') && !document.body.classList.contains('page-uncommentable')` });
         await reportedHeight(iconTab, 'h10');
@@ -1116,6 +1127,7 @@ async function main() {
         await iconTab.until(`document.body.style.getPropertyValue('--stage-p') === '1.000'`, 'the header fully condensed');
         await iconTab.quiet();
         const condensed = await iconTab.evalPage(BAR_EXPR);
+        condensed.name = await accessibleName(iconTab, 'header.board-head .head-download');
         let shot = null;
         if (process.env.CLAUDE_BOARD_DOWNLOAD_KEEP) {
           const clip = await iconTab.evalPage(`(function () {
@@ -1133,10 +1145,11 @@ async function main() {
         await iconTab.close();
         bars[theme] = { atRest, condensed, narrow, shot };
       }
-      for (const theme of ['light', 'dark']) {
-        const { atRest, condensed, narrow, shot } = bars[theme];
-        await row(`${theme}: over a scrolled full-page mock the condensed bar draws Download round as its icon alone, between Comment and Theme, named "Download round"`, note => {
-          note(`at rest ${atRest.order.join(', ')}, Download ${atRest.download.w}x${atRest.download.h}; condensed ${condensed.order.join(', ')}, Download ${condensed.download.w}x${condensed.download.h}, Theme ${condensed.theme.w}x${condensed.theme.h}${shot ? `; ${shot}` : ''}`);
+      {
+        const { atRest, condensed, narrow } = bars.light;
+        const shots = Object.values(bars).map(b => b.shot).filter(Boolean);
+        await row('over a scrolled full-page mock the condensed bar draws Download round as its icon alone, between Comment and Theme, named "Download round"', note => {
+          note(`at rest ${atRest.order.join(', ')}, Download ${atRest.download.w}x${atRest.download.h}; condensed ${condensed.order.join(', ')}, Download ${condensed.download.w}x${condensed.download.h}, Theme ${condensed.theme.w}x${condensed.theme.h}${shots.length ? `; ${shots.join(', ')}` : ''}`);
           assert.deepEqual(atRest.order, ['Comment', 'Theme', 'Download'], 'the full header keeps it after Theme');
           assert.ok(atRest.download.w > atRest.theme.w + 40, 'with its label');
           assert.equal(condensed.scrolled, true, 'setup: the artifact scrolled under the header');
@@ -1144,7 +1157,7 @@ async function main() {
           assert.deepEqual(condensed.download, condensed.theme, 'the box of the icon-only Theme beside it');
           assert.deepEqual({ name: condensed.name, title: condensed.title, hit: condensed.hit }, { name: 'Download round', title: 'Download round', hit: true });
         });
-        await row(`${theme}: in a window too narrow for the header to condense, a scrolled mock's Download round keeps its label after Theme`, () => {
+        await row('in a window too narrow for the header to condense, a scrolled mock\'s Download round keeps its label after Theme', () => {
           assert.equal(narrow.scrolled, true, 'setup: still scrolled');
           assert.deepEqual(narrow.order, ['Comment', 'Theme', 'Download']);
           assert.ok(narrow.download.w > narrow.theme.w + 40);
