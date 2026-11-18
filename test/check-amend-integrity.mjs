@@ -616,6 +616,44 @@ await checkAsync('a reconnect that missed a Send and the round posted after it l
     'the caught-up record must show the note that was sent');
 });
 
+await checkAsync('a tab whose Send met a 409 for a round another tab sent shows that round as the sent record on its next catch-up, the answer sent from the other tab picked over this tab\'s draft (ablation: drop sentElsewhere from applyResync and the catch-up keeps the draft on screen as the record)', async () => {
+  const board = createBoard({
+    title: 'Sent from another tab',
+    blocks: [{ kind: 'question', prompt: 'Q1: pick one', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] }],
+  });
+  const qid = board.blocks[0].id;
+  const { document, es } = loadBoardWithEventSource(renderBoardPage(board));
+  const choices = () => Array.from(document.querySelector(`.question-block[data-block-id="${qid}"]`).querySelectorAll('.choice-single'));
+  choices().find(el => el.getAttribute('data-choice') === 'No').dispatchEvent(new StandInEvent('click'));
+  applySubmit(board, { action: 'send', answers: [{ id: qid, status: 'answered', choice: 'Yes', note: 'sent from the other tab' }], comments: [] }, 1);
+  const served = renderBoardPage(board);
+  const originalFetch = globalThis.fetch;
+  const originalParser = globalThis.DOMParser;
+  const refused = [];
+  globalThis.fetch = async (url, opts) => {
+    if (opts && opts.method === 'POST') { refused.push(url); return { ok: false, status: 409, json: async () => ({}) }; }
+    return { ok: true, status: 200, text: async () => served };
+  };
+  globalThis.DOMParser = class { parseFromString(text) { return parseHTML(text); } };
+  try {
+    document.getElementById('send-btn').dispatchEvent(new StandInEvent('click'));
+    await flush(1);
+    assert.equal(refused.length, 1, 'setup failure: the Send did not go out');
+    assert.equal(document.querySelector('span#round-meta').textContent, 'submitted', 'setup failure: the 409 did not mark the round sent');
+    es.dispatch('open', '');
+    await flush(1);
+  } finally {
+    globalThis.fetch = originalFetch;
+    globalThis.DOMParser = originalParser;
+  }
+
+  assert.equal(document.querySelector('.round[data-round="1"]').getAttribute('data-round-status'), 'sent', 'round 1 must read sent');
+  assert.deepEqual(choices().filter(el => el.classList.contains('selected')).map(el => el.getAttribute('data-choice')), ['Yes'],
+    'the caught-up record must show the choice that was sent, not this tab\'s own draft');
+  assert.equal(document.querySelector(`textarea[data-note-for="${qid}"]`).textContent, 'sent from the other tab',
+    'the caught-up record must show the note that was sent');
+});
+
 // --- an abandoned board, on an ORDINARY board's surface ----------------------
 //
 // The page board's half of this is test/check-page-board.mjs's (its floating

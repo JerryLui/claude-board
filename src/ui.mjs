@@ -6609,11 +6609,12 @@ export const ui = `
     // purely from which page you are on, and would otherwise re-arm a submit
     // that is already in the air).
     submitInFlight = true;
+    var round = currentRound;
     if (sendStatus) sendStatus.textContent = action === 'discuss' ? 'Handing over to chat...' : 'Sending...';
     fetch('/api/board/' + boardId + '/submit', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ action: action, round: currentRound, answers: answers, comments: wireComments(comments), stages: 'held' }),
+      body: JSON.stringify({ action: action, round: round, answers: answers, comments: wireComments(comments), stages: 'held' }),
     }).then(function (r) {
       // 409 is not an error: it means this round was already sent (a second tab,
       // or a double click that beat the disable). The right response is the same
@@ -6646,6 +6647,12 @@ export const ui = `
               + pendingComments.length + ' queued comment(s) are still here and will go with the next round.'
             : 'Already sent.';
         }
+        var entry = roundEntry(round);
+        if (entry && entry.status !== 'sent') {
+          entry.status = 'sent';
+          sentElsewhere[round] = true;
+        }
+        refreshPager();
         return;
       }
       // What went out leaves the queue first, then the pin layers re-render: those
@@ -7551,6 +7558,8 @@ export const ui = `
   var resyncNewest = 0;
   // The rounds whose 'submitted' payload this tab has applied (applySubmittedPush).
   var submittedApplied = {};
+  // The rounds this tab marked sent from its Send's 409, whose record it has not seen.
+  var sentElsewhere = {};
 
   // --- a push leaves a stage it does not change alone (ADR 122) -----------------
   //
@@ -8194,7 +8203,10 @@ export const ui = `
     // just above.
     adoptReopenedRounds(fresh, doc);
     if (roundsClosedUnsent(fresh).length) adoptClosedRounds(fresh);
-    if (!patch.addedBlockIds.length && !patch.changedBlockIds.length && !patch.roundsNowSent.length) return;
+    var nowSent = patch.roundsNowSent.concat((fresh.rounds || []).filter(function (r) {
+      return sentElsewhere[r.n] && !submittedApplied[r.n] && r.status === 'sent';
+    }).map(function (r) { return r.n; }));
+    if (!patch.addedBlockIds.length && !patch.changedBlockIds.length && !nowSent.length) return;
     lensClose(); // see applyRoundPush above -- after the no-op early return, not before
     stageLensClose();
 
@@ -8245,7 +8257,7 @@ export const ui = `
       // (roundsClosedUnsent above), while we were away.
       board = fresh;
       clearFieldState(patch.changedBlockIds);
-      applySentRounds(patch.roundsNowSent, fresh, doc);
+      applySentRounds(nowSent, fresh, doc);
       // The pager states everything this branch changed -- the badge, the dot
       // on a round that no longer owes an answer, and the send bar, which a
       // round going sent while this client was away must take away even though
@@ -8278,7 +8290,7 @@ export const ui = `
     // After the replays: each diffs this tab's board against the snapshot, which
     // takes the board to it, so a sent round applied first would leave them nothing
     // to diff. The replay marks such a round history; this swaps in its record.
-    applySentRounds(patch.roundsNowSent, fresh, doc);
+    applySentRounds(nowSent, fresh, doc);
     refreshPins(document);
   }
 
