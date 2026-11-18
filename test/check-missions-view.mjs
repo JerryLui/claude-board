@@ -262,7 +262,7 @@ async function main() {
           'a url that is not a web address is shown, never linked, and with no fact yet the PR is checking');
         const needs = cardFor(tab.document, 'NEEDS_ONE');
         assert.deepEqual([needs.querySelector('b.mission-title a.mission-link').getAttribute('href'), needs.getAttribute('tabindex')],
-          [`/b/${needsBoard.boardId}`, null], 'the card\'s title is the link to the latest board the mission posted, the one stop for Tab');
+          [`/b/${needsBoard.boardId}#round:1`, null], 'the card\'s title is the link to the round waiting on the PM, the one stop for Tab');
         assert.equal(needs.querySelector('a.mission-btn'), null, 'no Open board button');
         assert.ok(cardFor(tab.document, 'WORKING_ONE').querySelector('button.mission-stop'), 'a live session offers Stop');
         assert.equal(cardFor(tab.document, 'STALLED_ONE').querySelector('button.mission-stop'), null, 'a stalled one does not');
@@ -287,7 +287,7 @@ async function main() {
         try {
           const card = cardFor(tab.document, key);
           assert.deepEqual(actionButtons(card), [{ kind, label }]);
-          assert.equal(card.querySelector('a.mission-link').getAttribute('href'), `/b/${boardId}`, 'the card opens the round waiting on the PM');
+          assert.equal(card.querySelector('a.mission-link').getAttribute('href'), `/b/${boardId}#round:${round}`, 'the card opens the round waiting on the PM');
           assert.equal(card.querySelector('a.mission-btn'), null, 'no Open round button');
           await tab.click(card.querySelector('button.mission-act'));
 

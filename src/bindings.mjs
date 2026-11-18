@@ -4,7 +4,8 @@
 //
 // The records are kept here per file, by each file's size, mtime and inode, so a call
 // re-reads only the records that moved since the last one: one readdir and a stat per
-// record, nothing derived, no board read. A record that will not parse is skipped.
+// record, nothing derived, no board read but a reopened round's. A record that will not parse
+// is skipped.
 
 import { readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
@@ -53,7 +54,7 @@ export function createBindingIndex({ home = boardHome() } = {}) {
 
   return {
     binding(ref, listed = null) {
-      return bindingFor(records(), ref, { listed });
+      return bindingFor(records(), ref, { listed, home });
     },
     ended(key, ref) {
       return records().some(m => m.key === key && endedHere(m, ref));

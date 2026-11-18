@@ -2068,7 +2068,7 @@ function missionsParts(overview, ui) {
     var boards = Array.isArray(m.boards) ? m.boards : [];
     var latest = boards.length ? boards[boards.length - 1] : null;
     // The card opens the round waiting on the PM where there is one, else its latest board.
-    var href = actions.length ? '/b/' + actions[0].board : latest ? '/b/' + latest.id : '';
+    var href = m.waiting ? '/b/' + m.waiting.board + '#round:' + m.waiting.round : latest ? '/b/' + latest.id : '';
     var busy = pick('sending', key);
     var title = m.title || key;
     // A card whose title is its key names it once, in the title.

@@ -51,6 +51,12 @@
   clears when you send the round or the session closes it. An older round that merely timed out
   stays off the card, and the card's Fire and Merge buttons still come from each session's
   newest round only.
+- **A mission's card opens the question that waits on you**: clicking a card under Needs you opens
+  its board at the round that waits on you, a handed-over one included, rather than at the newest
+  round. A new question from the mission is announced even while a handed-over one already holds
+  the card. A handed-over round you answered or the session closed no longer shows in the
+  session's mission lookup. An old open question handed over to a mission's next session goes
+  back to waiting like the rest.
 - **The top strip lets clicks through**: a click on the empty part of a board's top strip now
   lands on the page under it, so the buttons of a mock's or diagram's full-size view take their
   click where the strip floats over them. The strip's title and controls take theirs as before.

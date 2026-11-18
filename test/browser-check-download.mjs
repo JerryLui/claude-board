@@ -27,7 +27,8 @@
 // The top strip's Download round is read over a scrolled artifact, where it stays drawn
 // and takes its click, in a window too narrow for the header to condense, on a third
 // board whose one artifact round was never sent, and in the board's
-// archive opened from disk, which shows none. Layout, a real download and a file: page, none of which the DOM
+// archive opened from disk, which shows none. Over an awaited artifact scrolled under
+// the condensed bar, light and dark, it is its icon alone between Comment and Theme. Layout, a real download and a file: page, none of which the DOM
 // stand-in has (test/check-round-download.mjs holds the markup).
 //
 // The fixture's images: one pasted on a note and one on a comment, sent with the round
@@ -40,7 +41,7 @@
 //   node test/browser-check-download.mjs
 //
 // Without Chrome it prints a skip line and exits 0. CLAUDE_BOARD_DOWNLOAD_KEEP=<dir>
-// copies the saved files there.
+// copies the saved files there, with the condensed bar's two shots.
 
 import assert from 'node:assert/strict';
 import { existsSync, readdirSync, readFileSync, writeFileSync, copyFileSync } from 'node:fs';
@@ -127,6 +128,11 @@ const TALL_ROUND_3 = [
 const SHOWN_TITLE = 'Shown fixture';
 const SHOWN_ROUND_1 = [
   { id: 'h5', kind: 'html', html: '<div style="height:1800px;box-sizing:border-box;border:4px solid #3251c9;background:linear-gradient(#eef,#efe)">Shown mock</div>' },
+];
+// An awaited artifact, so the strip carries Comment beside Theme and Download round.
+const ICON_TITLE = 'Icon fixture';
+const ICON_ROUND_1 = [
+  { id: 'h10', kind: 'html', html: '<div style="height:1800px;box-sizing:border-box;border:4px solid #3251c9;background:linear-gradient(#eef,#efe)">Icon mock</div>' },
 ];
 // The fourth and fifth boards: a mock that draws a diagram by its own script. Each finds
 // the diagram library the way one of the two render templates does, and notes in
@@ -435,6 +441,22 @@ const STRIP_EXPR = `(function () {
     inWindow: r.top >= 0 && r.left >= 0 && r.bottom <= window.innerHeight && r.right <= window.innerWidth,
     scrolled: document.body.classList.contains('stage-scrolled') };
 })()`;
+// The strip's drawn buttons, left to right, with Download round's and Theme's boxes,
+// Download round's title, and whether a click at its middle lands on it.
+const BAR_EXPR = `(function () {
+  var named = { 'comment-mode-toggle': 'Comment', 'theme-toggle': 'Theme' };
+  var drawn = [].slice.call(document.querySelectorAll('header.board-head .board-head-actions button')).map(function (b) {
+    var r = b.getBoundingClientRect();
+    return { name: b.classList.contains('head-download') ? 'Download' : named[b.id], left: r.left, w: Math.round(r.width), h: Math.round(r.height) };
+  }).filter(function (c) { return c.w > 0; }).sort(function (a, b) { return a.left - b.left; });
+  function box(name) { var c = drawn.filter(function (d) { return d.name === name; })[0]; return c && { w: c.w, h: c.h }; }
+  var btn = document.querySelector('header.board-head .head-download');
+  var r = btn.getBoundingClientRect();
+  var hit = document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+  return { order: drawn.map(function (c) { return c.name; }), download: box('Download'), theme: box('Theme'),
+    title: btn.getAttribute('title'), hit: !!(hit && hit.closest('.head-download')),
+    scrolled: document.body.classList.contains('stage-scrolled') };
+})()`;
 const ROUND_CLICK = n => `document.querySelector('.round[data-round="${n}"] .round-download').click()`;
 const STRIP_CLICK = `document.querySelector('header.board-head .board-head-actions .head-download').click()`;
 
@@ -565,6 +587,14 @@ function reportedHeight(tab, id) {
   })` }).then(r => r.result.value);
 }
 
+/** The accessible name Chrome computes for what `selector` picks on the tab's page. */
+async function accessibleName(tab, selector) {
+  const { root } = await tab.sp('DOM.getDocument', { depth: 0 });
+  const { nodeId } = await tab.sp('DOM.querySelector', { nodeId: root.nodeId, selector });
+  const { nodes } = await tab.sp('Accessibility.getPartialAXTree', { nodeId, fetchRelatives: false });
+  return nodes[0]?.name?.value ?? null;
+}
+
 /** A DevTools session on the artifact whose text holds `marker`: to the browser a stage
  * is a frame of its own, with a target of its own. */
 async function artifactSession(send, marker) {
@@ -665,6 +695,8 @@ async function main() {
     const tallUrl = `${origin}${new URL(tall.url).pathname}`;
     const shown = await postJson(`${origin}/api/board`, { title: SHOWN_TITLE, blocks: SHOWN_ROUND_1 }, daemon.secret);
     const shownUrl = `${origin}${new URL(shown.url).pathname}`;
+    const icon = await postJson(`${origin}/api/board`, { title: ICON_TITLE, wait: true, blocks: ICON_ROUND_1 }, daemon.secret);
+    const iconUrl = `${origin}${new URL(icon.url).pathname}`;
     // Two files on the disk the saved mock is opened from, for its script to ask for.
     const disk = scratchDir('cb-download-disk-');
     writeFileSync(path.join(disk, 'other.js'), 'window.__fromDisk = true;');
@@ -1056,6 +1088,7 @@ async function main() {
         return { held: frame.hasAttribute('data-held'), noteGone: !document.querySelector('.head-download .download-note'),
           label: document.querySelector('.head-download').getAttribute('aria-label'), text: document.querySelector('.head-download').textContent.trim() };
       })()`);
+      heldAfter.name = await accessibleName(shownTab, '.head-download');
       await shownTab.close();
       const shownFile = await openSaved(send, onEvent, shownDownload.file, cookie, offline);
       await row('an artifact round never sent shows the same Download round in the top strip, at rest and scrolled, and it saves the mock as its own page', note => {
@@ -1078,8 +1111,58 @@ async function main() {
         note(heldDownload.files.join(', '));
         assert.deepEqual(heldDownload.files, ['shown-fixture-round-1.html']);
         assert.ok(readFileSync(heldDownload.file, 'utf8') === SAVED_HEAD + SHOWN_ROUND_1[0].html, 'the mock\'s source as posted');
-        assert.deepEqual(heldAfter, { held: false, noteGone: true, label: null, text: 'Download round' });
+        assert.deepEqual(heldAfter, { held: false, noteGone: true, label: null, text: 'Download round', name: 'Download round' });
       });
+
+      // The condensed rules hold no size, order or icon that depends on the theme: dark is
+      // drawn only for its evidence shot.
+      const bars = {};
+      for (const theme of process.env.CLAUDE_BOARD_DOWNLOAD_KEEP ? ['light', 'dark'] : ['light']) {
+        const iconTab = await openTab(send, onEvent, iconUrl, cookie, { width: 1280, height: 800, theme,
+          expr: `document.body.classList.contains('page-board') && !document.body.classList.contains('page-uncommentable')` });
+        await reportedHeight(iconTab, 'h10');
+        await iconTab.quiet();
+        const atRest = await iconTab.evalPage(BAR_EXPR);
+        await evalIn(send, await artifactSession(send, 'Icon mock'), 'window.scrollTo(0, 400)');
+        await iconTab.until(`document.body.style.getPropertyValue('--stage-p') === '1.000'`, 'the header fully condensed');
+        await iconTab.quiet();
+        const condensed = await iconTab.evalPage(BAR_EXPR);
+        condensed.name = await accessibleName(iconTab, 'header.board-head .head-download');
+        let shot = null;
+        if (process.env.CLAUDE_BOARD_DOWNLOAD_KEEP) {
+          const clip = await iconTab.evalPage(`(function () {
+            var a = document.querySelector('header.board-head .back-to-index').getBoundingClientRect();
+            var b = document.querySelector('header.board-head .board-head-actions').getBoundingClientRect();
+            var h = document.querySelector('header.board-head').getBoundingClientRect();
+            return { x: Math.max(0, a.left - 32), y: 0, width: b.right - a.left + 64, height: h.bottom + 16, scale: 2 };
+          })()`);
+          shot = path.join(process.env.CLAUDE_BOARD_DOWNLOAD_KEEP, `condensed-bar-${theme}.png`);
+          writeFileSync(shot, Buffer.from((await iconTab.sp('Page.captureScreenshot', { format: 'png', clip })).data, 'base64'));
+        }
+        await iconTab.sp('Emulation.setDeviceMetricsOverride', { width: 560, height: 800, deviceScaleFactor: 1, mobile: false });
+        await iconTab.quiet();
+        const narrow = await iconTab.evalPage(BAR_EXPR);
+        await iconTab.close();
+        bars[theme] = { atRest, condensed, narrow, shot };
+      }
+      {
+        const { atRest, condensed, narrow } = bars.light;
+        const shots = Object.values(bars).map(b => b.shot).filter(Boolean);
+        await row('over a scrolled full-page mock the condensed bar draws Download round as its icon alone, between Comment and Theme, named "Download round"', note => {
+          note(`at rest ${atRest.order.join(', ')}, Download ${atRest.download.w}x${atRest.download.h}; condensed ${condensed.order.join(', ')}, Download ${condensed.download.w}x${condensed.download.h}, Theme ${condensed.theme.w}x${condensed.theme.h}${shots.length ? `; ${shots.join(', ')}` : ''}`);
+          assert.deepEqual(atRest.order, ['Comment', 'Theme', 'Download'], 'the full header keeps it after Theme');
+          assert.ok(atRest.download.w > atRest.theme.w + 40, 'with its label');
+          assert.equal(condensed.scrolled, true, 'setup: the artifact scrolled under the header');
+          assert.deepEqual(condensed.order, ['Comment', 'Download', 'Theme']);
+          assert.deepEqual(condensed.download, condensed.theme, 'the box of the icon-only Theme beside it');
+          assert.deepEqual({ name: condensed.name, title: condensed.title, hit: condensed.hit }, { name: 'Download round', title: 'Download round', hit: true });
+        });
+        await row('in a window too narrow for the header to condense, a scrolled mock\'s Download round keeps its label after Theme', () => {
+          assert.equal(narrow.scrolled, true, 'setup: still scrolled');
+          assert.deepEqual(narrow.order, ['Comment', 'Theme', 'Download']);
+          assert.ok(narrow.download.w > narrow.theme.w + 40);
+        });
+      }
 
       // A mock that draws a diagram by its own script, saved from its Pull-out in a question round.
       const drawnTab = await openTab(send, onEvent, drawnUrl, cookie, { width: 1280, height: 900, theme: 'dark',

@@ -67,6 +67,43 @@ async function main() {
     r.watch.close();
   });
 
+  await check('a needs-you mission whose card comes to open a round posted later, on its board or another, a reopened one already holding it, is spoken again, its session gone or not; one whose card falls back to a round posted earlier, on either board, once the later is answered is not', () => {
+    const clock = { t: T0 };
+    const posted = [];
+    const read = { gone: null, waiting: null };
+    const watch = createMissionWatch({
+      now: () => clock.t,
+      read: () => [{ key: 'ALPHA', title: 'ALPHA', view: 'needs-you', updatedAt: 'u', ...read }],
+      notify: line => posted.push(line),
+    });
+    const at = (offsetMs, next) => {
+      clock.t = T0 + offsetMs;
+      Object.assign(read, next);
+      watch.tick();
+    };
+    const round = (board, n, minute) => ({ board, round: n, postedAt: new Date(T0 - (60 - minute) * 60 * SECOND).toISOString() });
+    at(0, { waiting: round('b_one', 1, 0) });
+    at(10 * SECOND, { waiting: round('b_one', 3, 10) });
+    at(71 * SECOND);
+    assert.deepEqual(posted, ['ALPHA needs you']);
+    at(80 * SECOND, { waiting: round('b_one', 1, 0) });
+    at(141 * SECOND);
+    assert.deepEqual(posted, ['ALPHA needs you'], 'the earlier round asks nothing new');
+    at(150 * SECOND, { waiting: round('b_two', 1, 20) });
+    at(211 * SECOND);
+    assert.deepEqual(posted, ['ALPHA needs you', 'ALPHA needs you'], 'a round posted later on another board');
+    at(220 * SECOND, { waiting: round('b_one', 1, 0) });
+    at(281 * SECOND);
+    assert.deepEqual(posted, ['ALPHA needs you', 'ALPHA needs you'], 'the earlier board asks nothing new');
+    at(290 * SECOND, { gone: { lastSeenAt: new Date(T0).toISOString() } });
+    at(351 * SECOND);
+    assert.deepEqual(posted.slice(2), ['ALPHA stalled'], 'setup: its session went');
+    at(360 * SECOND, { waiting: round('b_two', 2, 30) });
+    at(421 * SECOND);
+    assert.deepEqual(posted.slice(2), ['ALPHA stalled', 'ALPHA needs you'], 'a round posted later, its session gone');
+    watch.close();
+  });
+
   await check('transitions more than a minute apart post two notifications, each naming its own mission', () => {
     const r = rig();
     for (const key of ['ALPHA', 'BRAVO']) r.set(key, { state: 'working' });

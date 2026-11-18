@@ -385,16 +385,12 @@ export function roundWantsAnswer(round, questions) {
   return questions.some(q => q.round === round.n);
 }
 
-/** The round of `board` its mission's card takes its buttons from, and one that holds the
- * mission at needs you: the newest round of one of the sessions that posted there, when it
- * still wants an answer, the latest such. A mission's board is shared (ADR 150), so one
- * session's newer round never hides another's question. An older page a session left open
- * is answered from its own page on the board: it draws no button, and holds the mission at
- * needs you only as `reopenedRoundWaits` reads it. Rounds are one session's by
- * `sessionMatches`: its id, or its process to the second, so a resumed session or a start
- * read with milliseconds is still one poster. A round from before rounds recorded their
- * poster is the board's first poster's. */
-function waitingRound({ board, questions }) {
+/** The newest round of each session that posted on `board`. A mission's board is shared
+ * (ADR 150), so one session's newer round never hides another's. Rounds are one session's
+ * by `sessionMatches`: its id, or its process to the second, so a resumed session or a
+ * start read with milliseconds is still one poster. A round from before rounds recorded
+ * their poster is the board's first poster's. */
+function sessionsNewest(board) {
   const newest = [];
   for (const r of board.rounds || []) {
     const poster = (r && r.session) || board.session || null;
@@ -406,40 +402,50 @@ function waitingRound({ board, questions }) {
       if (!slot.posters.includes(poster)) slot.posters.push(poster);
     } else newest.push({ posters: [poster], round: r });
   }
+  return new Set(newest.map(e => e.round));
+}
+
+/** The rounds of `board` that hold its mission at needs you, newest first: a session's
+ * newest round (`sessionsNewest`) when it still wants an answer, and every round a hand-over
+ * reopened (`reopenedAt`, ADR 151) that still does, whatever rounds its session posted since
+ * (ADR 155). An older page a session left open, never reopened, is answered from its own
+ * page on the board. */
+function owedRounds({ board, questions }) {
+  const newest = sessionsNewest(board);
+  return (board.rounds || [])
+    .filter(r => (r.reopenedAt || newest.has(r)) && roundWantsAnswer(r, questions))
+    .sort((a, b) => b.n - a.n);
+}
+
+/** The round `m`'s card opens, `{ entry, round }`, or null: the newest of its linked boards'
+ * `owedRounds`, by when it was posted. */
+function waitingOf(linked) {
   let hit = null;
-  for (const { round: r } of newest) if (roundWantsAnswer(r, questions) && (!hit || r.n > hit.n)) hit = r;
+  for (const entry of linked) {
+    const [round] = owedRounds(entry);
+    if (round && (!hit || Date.parse(round.postedAt) > Date.parse(hit.round.postedAt))) hit = { entry, round };
+  }
   return hit;
-}
-
-/** A round a hand-over reopened (`reopenedAt`, ADR 151) on `board` still wants its answer:
- * the mission's own question, asked again of its new session, so a later round of that
- * session does not quiet it (ADR 155). Sent or closed by number, it wants none. */
-function reopenedRoundWaits({ board, questions }) {
-  return (board.rounds || []).some(r => r.reopenedAt && roundWantsAnswer(r, questions));
-}
-
-function boardsNeedYou(linked) {
-  return linked.some(entry => waitingRound(entry) !== null || reopenedRoundWaits(entry));
 }
 
 function actionsOf(linked) {
   const actions = [];
   for (const entry of linked) {
-    const round = waitingRound(entry);
+    const newest = sessionsNewest(entry.board);
+    const round = owedRounds(entry).find(r => newest.has(r));
     if (!round) continue;
-    const { board, questions } = entry;
-    for (const q of questions) {
+    for (const q of entry.questions) {
       if (q.round !== round.n || !q.action || q.widget !== 'single' || !q.options?.length) continue;
-      actions.push({ kind: q.action, board: board.id, round: round.n, question: q.id, choice: q.options[0].label });
+      actions.push({ kind: q.action, board: entry.board.id, round: round.n, question: q.id, choice: q.options[0].label });
     }
   }
   return actions;
 }
 
 /** The buttons `m`'s card offers: one per question carrying an `action` (Fire or Merge)
- * in a linked board's newest round while it waits on the PM, as `waitingRound` reads it. A
- * click answers `question` in `round` of `board` with option 0, whose label is `choice`. A
- * sent or abandoned round, or an older one, offers none. */
+ * in a linked board's newest round of a session while it waits on the PM, the latest such
+ * (ADR 155). A click answers `question` in `round` of `board` with option 0, whose label is
+ * `choice`. A sent or abandoned round, or an older one, reopened or not, offers none. */
 export function missionActions(m, { home = boardHome() } = {}) {
   return actionsOf(linkedBoards(m, home));
 }
@@ -464,7 +470,7 @@ function viewState(m, linked, now, isAlive, listed) {
   // A retired mission asks nothing and is expected to stop, whatever its rounds or its
   // session do: it waits on its open work, if any (ADR 147).
   if (isRetired(m)) return 'waiting';
-  if (boardsNeedYou(linked())) return 'needs-you';
+  if (linked().some(entry => owedRounds(entry).length)) return 'needs-you';
   // A parked mission's session is ended on purpose: it never reads stalled.
   if (m.state === 'parked') return 'parked';
   if (sessionStalled(m, now, isAlive, listed)) return 'stalled';
@@ -533,7 +539,8 @@ export function deriveState(m, { home = boardHome(), now = Date.now(), isAlive =
 
 /** The record as a reader gets it: every stored field, `prs` with each PR's facts
  * (`prsOf`), plus `view` (the derived state), `asking` (it reads needs-you by a session's
- * newest round, `waitingRound`, one no hand-over reopened), `retired` (its `retiredAt` parses), `gone`
+ * newest round, one no hand-over reopened, `owedRounds`), `waiting` (the round its card
+ * opens, `{ board, round, postedAt }` by id, number and posting time, `waitingOf`, else null), `retired` (its `retiredAt` parses), `gone`
  * (`goneOf`), `live` (a session holds the mission, `hasLiveSession`), `listedAt` (the time
  * of the snapshot that lists its bound session, the heard-from time beside its own
  * `session.seenAt`, else null), `rejoin`
@@ -544,11 +551,13 @@ export function missionView(m, { home = boardHome(), now = Date.now(), isAlive =
   const alive = aliveOnce(isAlive);
   const listing = listingOf(currentSession(m), listed);
   const view = viewState(m, () => linked, now, alive, listed);
+  const waiting = waitingOf(linked);
   return {
     ...m,
     prs: prsOf(m),
     view,
-    asking: view === 'needs-you' && linked.map(waitingRound).some(round => round && !round.reopenedAt),
+    asking: view === 'needs-you' && linked.some(entry => owedRounds(entry).some(round => !round.reopenedAt)),
+    waiting: waiting && { board: waiting.entry.board.id, round: waiting.round.n, postedAt: waiting.round.postedAt },
     retired: isRetired(m),
     gone: goneOf(m, now, alive, listed),
     live: hasLiveSession(m, now, alive, listed),
@@ -1046,11 +1055,11 @@ const unseenOrders = m => (m.orders || []).filter(o => o.kind === 'pm' && !o.ack
  * stored `records`, with its pending `takeover` (`{ by, at }`), its pm orders not yet seen,
  * its `handoff`, its `rejoin` (`rejoinOf`, read off `listed`, the watcher's latest
  * snapshot) and `reopened`, the rounds reopened under it as its latest join or takeover
- * recorded them (`recordReopened`); all null and empty when it is bound to none. A released mission, a launch's
+ * recorded them (`recordReopened`), less any since sent or closed; all null and empty when it is bound to none. A released mission, a launch's
  * bare reservation and a session that left bind no one. A plain scan of the records and the
- * snapshot in memory, no board or process read: a hook asks it every minute
- * (src/bindings.mjs keeps the records). */
-export function bindingFor(records, ref, { listed = null } = {}) {
+ * snapshot in memory, no process read, and a board read only for a reopened round: a hook
+ * asks it every minute (src/bindings.mjs keeps the records). */
+export function bindingFor(records, ref, { listed = null, home = boardHome() } = {}) {
   let hit = null;
   for (const m of records) {
     if (m.state === 'released' || !boundTo(m, ref)) continue;
@@ -1063,8 +1072,20 @@ export function bindingFor(records, ref, { listed = null } = {}) {
     orders: unseenOrders(hit),
     handoff: hit.handoff ?? null,
     rejoin: rejoinOf(hit, listed),
-    reopened: hit.session.reopened ?? [],
+    reopened: (hit.session.reopened ?? []).filter(entry => stillOwed(entry, home)),
   };
+}
+
+/** Round `round` of board `board` still wants an answer (`roundWantsAnswer`). */
+function stillOwed({ board: id, round: n }, home) {
+  let board;
+  try {
+    board = readBoard(id, home);
+  } catch {
+    return false;
+  }
+  const round = board?.rounds?.find(r => r.n === n);
+  return !!round && roundWantsAnswer(round, questionBlocks(board));
 }
 
 /** Records on mission `key`'s bound session the rounds reopened under it and still waiting
