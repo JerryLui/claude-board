@@ -6647,34 +6647,27 @@
   }
   onFragmentSentinel(onStrandedRound, maybeJumpToStrandedRound, true);
 
-  // '#round:<round>': a mission card opens the round waiting on the PM (src/indexpage.mjs),
-  // which a later round of its board may sit past. Resolved as '#question:' below is.
-  function fragmentRound() {
-    var m = location && /^#round:([0-9]+)$/.exec(location.hash || '');
-    return m ? Number(m[1]) : null;
-  }
-  function jumpToFragmentRound() {
-    var target = fragmentRound();
-    if (target != null && target !== currentRound) goToRound(target);
-  }
-  onFragmentSentinel(fragmentRound, function () { afterPaint(jumpToFragmentRound); }, true);
-
   // '#question:<round>:<question id>': a mission card's Merge (src/indexpage.mjs, ADR
-  // 142) opens the landing brief at its merge question rather than answering it. A
-  // sentinel resolved here for the reason '#open-round' is: no id this page emits is safe
-  // to navigate by, and no heading slug holds a colon. The round is flipped to without
-  // its own scroll, then the question's top is put on screen and given the focus, the
-  // questions-left pill's landing. Run after load and one frame, as '#open-round' is, and
-  // on 'hashchange' for a tab already on this board. Inert on a round or question this
-  // page does not hold.
+  // 142) opens the landing brief at its merge question rather than answering it, and
+  // '#round:<round>' opens the round waiting on the PM, which a later round of its board
+  // may sit past. A sentinel resolved here for the reason '#open-round' is: no id this
+  // page emits is safe to navigate by, and no heading slug holds a colon. The round is
+  // flipped to, without its own scroll for a question, whose top is then put on screen
+  // and given the focus, the questions-left pill's landing. Run after load and one
+  // frame, as '#open-round' is, and on 'hashchange' for a tab already on this board.
+  // Inert on a round or question this page does not hold.
   function fragmentQuestion() {
-    var m = location && /^#question:([0-9]+):([a-z]+[0-9]+)$/.exec(location.hash || '');
-    return m ? { round: Number(m[1]), id: m[2] } : null;
+    var m = location && /^#(?:round:([0-9]+)|question:([0-9]+):([a-z]+[0-9]+))$/.exec(location.hash || '');
+    return m ? { round: Number(m[1] || m[2]), id: m[3] } : null;
   }
   function jumpToFragmentQuestion() {
     var target = fragmentQuestion();
     var section = target && roundSectionEl(target.round);
     if (!section) return;
+    if (!target.id) {
+      if (target.round !== currentRound) goToRound(target.round);
+      return;
+    }
     var block = section.querySelector('.question-block[data-block-id="' + target.id + '"]');
     if (!block) return;
     if (target.round !== currentRound) goToRound(target.round, false);
@@ -7739,6 +7732,13 @@
   var submittedApplied = {};
   // The rounds this tab marked sent from its Send's 409, whose record it has not seen.
   var sentElsewhere = {};
+  // Those of them the board 'fresh' reads sent: this tab's own copy already read sent, so no
+  // patch against it reports them as newly sent.
+  function roundsSentElsewhere(fresh) {
+    return (fresh.rounds || []).filter(function (r) {
+      return sentElsewhere[r.n] && !submittedApplied[r.n] && r.status === 'sent';
+    }).map(function (r) { return r.n; });
+  }
 
   // --- a push leaves a stage it does not change alone (ADR 122) -----------------
   //
@@ -8121,7 +8121,7 @@
     // 'resize' handler and submitBoard().then already do.
     refreshPins(document);
 
-    patch.roundsNowSent.forEach(markRoundHistory);
+    patch.roundsNowSent.concat(roundsSentElsewhere(data.board)).forEach(markRoundHistory);
     // Re-observe AFTER markRoundHistory: a round this push just collapsed into
     // history had its .round-end stripped above, and the round this push just
     // inserted (if any) carries its own, server-rendered -- setupSendBarDock has
@@ -8382,9 +8382,7 @@
     // just above.
     adoptReopenedRounds(fresh, doc);
     if (roundsClosedUnsent(fresh).length) adoptClosedRounds(fresh);
-    var nowSent = patch.roundsNowSent.concat((fresh.rounds || []).filter(function (r) {
-      return sentElsewhere[r.n] && !submittedApplied[r.n] && r.status === 'sent';
-    }).map(function (r) { return r.n; }));
+    var nowSent = patch.roundsNowSent.concat(roundsSentElsewhere(fresh));
     if (!patch.addedBlockIds.length && !patch.changedBlockIds.length && !nowSent.length) return;
     lensClose(); // see applyRoundPush above -- after the no-op early return, not before
     stageLensClose();

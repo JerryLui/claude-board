@@ -654,6 +654,32 @@ await checkAsync('a tab whose Send met a 409 for a round another tab sent shows 
     'the caught-up record must show the note that was sent');
 });
 
+await checkAsync('a tab whose Send met a 409 collapses that round into history when the next round arrives by push, ahead of any catch-up', async () => {
+  const board = createBoard({
+    title: 'Sent from another tab, then a new round',
+    blocks: [{ kind: 'question', prompt: 'Q1: pick one', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] }],
+  });
+  const qid = board.blocks[0].id;
+  const { document, es } = loadBoardWithEventSource(renderBoardPage(board));
+  document.querySelector(`.question-block[data-block-id="${qid}"] .choice-single[data-choice="No"]`).dispatchEvent(new StandInEvent('click'));
+  applySubmit(board, { action: 'send', answers: [{ id: qid, status: 'answered', choice: 'Yes' }], comments: [] }, 1);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: false, status: 409, json: async () => ({}) });
+  try {
+    document.getElementById('send-btn').dispatchEvent(new StandInEvent('click'));
+    await flush(1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(document.querySelector('span#round-meta').textContent, 'submitted', 'setup failure: the 409 did not mark the round sent');
+  addRound(board, { blocks: [{ kind: 'question', prompt: 'Q2: and another', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] }] });
+  es.dispatch('round', JSON.stringify(buildRoundPushPayload(board, 2, 'new-round', [])));
+  await flush(1);
+
+  assert.ok(document.querySelector('.round[data-round="2"] .question-block'), 'setup failure: the pushed round did not land');
+  assert.equal(document.querySelector('.round[data-round="1"]').getAttribute('data-round-status'), 'sent');
+});
+
 // --- an abandoned board, on an ORDINARY board's surface ----------------------
 //
 // The page board's half of this is test/check-page-board.mjs's (its floating
