@@ -14,8 +14,7 @@ import { SECRET_HEADER } from '../src/secret.mjs';
 import { WAIT_CEILING_MS } from '../src/handoff.mjs';
 import { readBoard, readMission, writeBoard } from '../src/store.mjs';
 import { linkBoard } from '../src/missions.mjs';
-import { handOverRounds } from '../src/board.mjs';
-import { abandonOpenRounds, addRound, createBoard } from '../src/board.mjs';
+import { abandonOpenRounds, addRound, createBoard, handOverRounds } from '../src/board.mjs';
 import { processStartUtc } from '../src/proc-start.mjs';
 import { McpClient, check, mcpBin, openSseClient, rawRequest, repoRoot, runMain, secretFetch, secretHome, waitFor, writeHeaders } from './support.mjs';
 
