@@ -17,6 +17,7 @@ import {
   missionsOverview, missionView, getMissionView, launchMission, bindSession, joinMission, leaveMission, leaverHandedOver, upsertMission, bindingFor, deriveState, pidAlive, MAX_WORKING, MAX_ALIVE, STALL_SILENCE_MS, UNBOUND_GRACE_MS, RELEASED_VISIBLE_MS,
 } from '../src/missions.mjs';
 import { createMissionsCache, MISSIONS_CACHE_MS } from '../src/missions-cache.mjs';
+import { createBindingIndex } from '../src/bindings.mjs';
 import { processStartUtc } from '../src/proc-start.mjs';
 import { check, deadPid, openSseClient, rawRequest, runMain, secretFetch, secretHome, sessionCookieHeader, waitFor, writeHeaders } from './support.mjs';
 
@@ -850,7 +851,7 @@ async function main() {
       const link = seedBoard(dir, `b_bound${status}`, now, [{ reopenedAt: iso(now), awaited: true, awaitDeadline: iso(now + minutes(40)) }]);
       const reopened = [{ board: link.id, round: 1, awaitDeadline: iso(now + minutes(40)) }];
       seed(dir, `BOUND_${status.toUpperCase()}`, { boards: [link], session: { id: `sess-${status}`, pid: 6100, startedAt: iso(now), seenAt: iso(now), reopened } });
-      const bound = () => bindingFor([readMission(`BOUND_${status.toUpperCase()}`, dir)], { id: `sess-${status}` }, { home: dir }).reopened;
+      const bound = () => createBindingIndex({ home: dir }).binding({ id: `sess-${status}` }).reopened;
       assert.deepEqual(bound(), reopened, `${status}: while it waits`);
       const board = readBoard(link.id, dir);
       Object.assign(board.rounds[0], { status, awaited: false, ...extra });
@@ -894,7 +895,7 @@ async function main() {
       seed(dir, 'WORKS_ON', { boards: [link], session: { pid: 3000, startedAt: iso(now), seenAt: iso(now) } });
       const overview = missionsOverview({ home: dir, now, isAlive: alive });
       const worksOn = overview.missions.find(m => m.key === 'WORKS_ON');
-      assert.deepEqual([worksOn.view, worksOn.waiting, worksOn.actions.map(a => [a.kind, a.round])], ['needs-you', { board: link.id, round: 1 }, fires.map(n => ['fire', n])], label);
+      assert.deepEqual([worksOn.view, worksOn.waiting, worksOn.actions.map(a => [a.kind, a.round])], ['needs-you', { board: link.id, round: 1, postedAt: link.at }, fires.map(n => ['fire', n])], label);
       assert.equal(worksOn.asking, false, label);
       assert.deepEqual([overview.live, overview.slotFree], [{ working: MAX_WORKING, alive: MAX_WORKING }, false], label);
       assert.deepEqual(launchMission('NEXT', { phase: 'direct' }, { home: dir, now, isAlive: alive }), { queued: true }, label);
@@ -913,8 +914,18 @@ async function main() {
     seed(dir, 'ASKS_TOO', { boards: [link], session: own });
     const overview = missionsOverview({ home: dir, now, isAlive: alive });
     const v = overview.missions.find(m => m.key === 'ASKS_TOO');
-    assert.deepEqual([v.view, v.asking, v.waiting], ['needs-you', true, { board: link.id, round: 2 }]);
+    assert.deepEqual([v.view, v.asking, v.waiting], ['needs-you', true, { board: link.id, round: 2, postedAt: link.at }]);
     assert.deepEqual(overview.live, { working: 0, alive: 1 });
+  });
+
+  await check('a mission linking two boards that both wait on the PM opens the round posted later, whichever board it is on', () => {
+    const dir = scratchHome('waiting-across-boards');
+    const now = Date.now();
+    const early = seedBoard(dir, 'b_postedearly', now - minutes(10), [{}]);
+    const late = seedBoard(dir, 'b_postedlate', now, [{}]);
+    seed(dir, 'TWO_BOARDS', { boards: [early, late], session: { pid: 3000, startedAt: iso(now), seenAt: iso(now) } });
+    const v = missionsOverview({ home: dir, now, isAlive: () => true }).missions.find(m => m.key === 'TWO_BOARDS');
+    assert.deepEqual([v.view, v.waiting], ['needs-you', { board: late.id, round: 1, postedAt: late.at }]);
   });
 
   await check('the card\'s Fire comes only from the newest round of each session on a board, and needs you from that round or a reopened one (held in check-mission-board.mjs): an older page left asking, never reopened, holds neither, and one session is one poster by its id or its process start to the second', () => {

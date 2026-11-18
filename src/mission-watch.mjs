@@ -12,7 +12,8 @@
 //    BATCH_WINDOW_MS after its first entry, as one notification naming the work or
 //    counting it ("2 missions need you, FRONT_AGENT released"). A needs-you mission whose
 //    session goes (`gone` set) joins it as stalled, though its view stays needs-you, and
-//    one whose card opens a newer round than at the last read (`waiting`) joins it again.
+//    one whose card opens a round posted after the last read's (`waiting`) joins it again,
+//    its session gone or not.
 //
 // The first read after start is the baseline and says nothing, so a restart never floods
 // the screen with every mission already waiting. A mission that moves on before its batch
@@ -79,10 +80,10 @@ export function missionsLine(entries) {
   return groups.map(({ state, members }) => counted(members.length, state)).join(', ');
 }
 
-/** `now`, a view's `waiting`, is a round to announce over `before`: one on another board, or
- * a later one on the same board. */
+/** `now`, a view's `waiting`, is a round to announce over `before`: one posted later, on any
+ * board, the order `waitingOf` (src/missions.mjs) picks the card's round by. */
 function newerRound(before, now) {
-  return !!now && (!before || before.board !== now.board || now.round > before.round);
+  return !!now && (!before || Date.parse(now.postedAt) > Date.parse(before.postedAt));
 }
 
 /** The watch over `home`. Every collaborator is a parameter so a check can hand it a clock
@@ -171,7 +172,7 @@ export function createMissionWatch({
         // Needs-you reads ahead of stalled, so a session dying under its open round moves
         // no view: its going is spoken as stalled, since nothing else will answer the round.
         if (v.view !== 'needs-you') continue;
-        if (gone) joining.push({ ...v, view: 'stalled' });
+        if (gone && !prev.gone) joining.push({ ...v, view: 'stalled' });
         else if (asksAnew) joining.push(v);
         else if (batch.get(v.key)?.state === 'stalled') batch.delete(v.key);
         continue;

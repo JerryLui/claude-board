@@ -540,7 +540,7 @@ export function deriveState(m, { home = boardHome(), now = Date.now(), isAlive =
 /** The record as a reader gets it: every stored field, `prs` with each PR's facts
  * (`prsOf`), plus `view` (the derived state), `asking` (it reads needs-you by a session's
  * newest round, one no hand-over reopened, `owedRounds`), `waiting` (the round its card
- * opens, `{ board, round }` by id and number, `waitingOf`, else null), `retired` (its `retiredAt` parses), `gone`
+ * opens, `{ board, round, postedAt }` by id, number and posting time, `waitingOf`, else null), `retired` (its `retiredAt` parses), `gone`
  * (`goneOf`), `live` (a session holds the mission, `hasLiveSession`), `listedAt` (the time
  * of the snapshot that lists its bound session, the heard-from time beside its own
  * `session.seenAt`, else null), `rejoin`
@@ -557,7 +557,7 @@ export function missionView(m, { home = boardHome(), now = Date.now(), isAlive =
     prs: prsOf(m),
     view,
     asking: view === 'needs-you' && linked.some(entry => owedRounds(entry).some(round => !round.reopenedAt)),
-    waiting: waiting && { board: waiting.entry.board.id, round: waiting.round.n },
+    waiting: waiting && { board: waiting.entry.board.id, round: waiting.round.n, postedAt: waiting.round.postedAt },
     retired: isRetired(m),
     gone: goneOf(m, now, alive, listed),
     live: hasLiveSession(m, now, alive, listed),
