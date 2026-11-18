@@ -482,6 +482,13 @@ body.sent-page .comment-btn { display: none; }
    once the artifact scrolls under the header. Any other round has its own. */
 .head-download { display: none; margin-left: 0; }
 body.page-board .head-download { display: inline-flex; }
+/* Over a scrolled artifact it is its icon alone, between Comment and Theme
+   (ADR.md entry 152); at 560px and under the header never condenses. */
+@media (width > 560px) {
+  body.page-board.stage-scrolled button#comment-mode-toggle, body.page-board.stage-scrolled .head-download { order: -1; }
+  body.page-board.stage-scrolled .head-download { gap: 0; padding: 7px; font-size: 0; }
+  body.page-board.stage-scrolled .head-download svg { width: 12px; height: 12px; }
+}
 /* What a Download that saved nothing says (src/ui.mjs's sayByDownload): a
    note under the control that was pressed, in the chrome of the note a held
    stage's Pull-out wears ('.pull-out-note'), with its still amber dot. It hangs
