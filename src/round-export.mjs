@@ -21,19 +21,20 @@
 const DOWNLOAD_ICON = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="M7 11l5 5 5-5"/><path d="M5 21h14"/></svg>';
 
 /** Download round's markup, with `extraClass` after its own class where a
- * second place draws it. */
-function downloadButton(extraClass) {
-  return `<button type="button" class="round-download${extraClass ? ' ' + extraClass : ''}" title="Save this round as one HTML file">${DOWNLOAD_ICON}Download round</button>`;
+ * second place draws it, and `attrs` after its title. */
+function downloadButton(extraClass, title, attrs) {
+  return `<button type="button" class="round-download${extraClass ? ' ' + extraClass : ''}" title="${title}"${attrs || ''}>${DOWNLOAD_ICON}Download round</button>`;
 }
 
 /** The ghost control at the right end of a question round's chip line, sent or
  * not. */
-export const ROUND_DOWNLOAD_BUTTON = downloadButton();
+export const ROUND_DOWNLOAD_BUTTON = downloadButton('', 'Save this round as one HTML file');
 
 /** The same control among the top strip's own, for the round in view. It shows
  * only while that round is drawn full page (src/styles.mjs), where the round has
- * no chip line, and stays in the pill once the artifact scrolls under it. */
-export const HEAD_DOWNLOAD_BUTTON = downloadButton('head-download');
+ * no chip line, and stays in the pill once the artifact scrolls under it, there
+ * as its icon alone, so its name is its title and label too. */
+export const HEAD_DOWNLOAD_BUTTON = downloadButton('head-download', 'Download round', ' aria-label="Download round"');
 
 /** One decisions-table row per question of the round, in board order:
  * `{ question, pick, note }`, all plain text. `questions` is the round's question
