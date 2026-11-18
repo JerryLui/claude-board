@@ -139,7 +139,7 @@ async function main() {
       assert.equal(columnOf(doc, 'PARKED_ASKING'), 'needs-you');
       assert.deepEqual(tags(card), ['Parked']);
       assert.deepEqual(card.querySelectorAll('p.mission-fact').map(n => n.textContent), ['Waiting onyour pick']);
-      assert.equal(card.querySelector('a.mission-link').getAttribute('href'), `/b/${posted.boardId}`);
+      assert.equal(card.querySelector('a.mission-link').getAttribute('href'), `/b/${posted.boardId}#round:1`);
     });
   } finally {
     server.close();
