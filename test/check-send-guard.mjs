@@ -545,19 +545,27 @@ await checkAsync('a Send that lands leaves the send bar disabled, and only a fai
   }
 });
 
-await checkAsync('Send names the open round in its body, and a 409 for a round already sent reads as already sent: no error, and no Send offering it again', async () => {
+await checkAsync('Send names the open round in its body, and a 409 for a round already sent reads as already sent: no error, no Send offering it again, and the tab reading "submitted" once the 409 lands, never while the Send is in flight', async () => {
   const board = createBoard({ title: 'Already sent', blocks: [singleSpec()] });
   applySubmit(board, { action: 'send', answers: [], comments: [] }, 1);
   addRound(board, { blocks: [singleSpec()] });
+  assert.equal(closeLapsedAwaitedRounds(board, Date.parse(board.rounds[1].awaitDeadline)), 1, 'setup: the round\'s wait lapsed, so no countdown holds its tab');
   const document = loadBoard(renderBoardPage(board));
+  const tab = () => document.querySelector('span#round-meta').textContent;
   answerSingle(openBlocks(document)[0], 'Yes');
+  assert.equal(tab(), 'open', 'setup: the unsent round\'s tab reads "open"');
 
-  const posted = await pressSendAndLand(document, () => Promise.resolve({ ok: false, status: 409, json: async () => ({}) }));
+  let land;
+  const posted = await pressSendAndLand(document, () => new Promise(resolve => { land = resolve; }));
   assert.equal(posted.length, 1, 'setup failure: the open round must submit on the first press');
   assert.equal(posted[0].round, 2, 'the body must name the round it is for, or the daemon cannot refuse a stale submit');
+  assert.equal(tab(), 'open', 'a Send in flight leaves the tab\'s word alone');
+  land({ ok: false, status: 409, json: async () => ({}) });
+  await flush(1);
   assert.equal(document.getElementById('send-status').textContent, 'Already sent.',
     'a 409 means the round already went out -- not a red error the reviewer clears by pressing Send again');
   assert.equal(document.getElementById('send-btn').disabled, true, 'and Send stays disabled, as on a Send that landed');
+  assert.equal(tab(), 'submitted', 'the 409 says another tab sent the round, so this tab reads it sent with no push');
 });
 
 // === Send covers the page on screen ==============================================
