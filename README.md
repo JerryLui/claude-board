@@ -270,9 +270,9 @@ process is gone, or it has been working and silent for fifteen minutes. Missions
 Boards share one top bar, the board page's own header, with a tab each; the Boards tab
 counts the rounds waiting.
 
-A card's **Fire** and **Merge** buttons show only while the newest round on that
-mission's own board asks for that answer, and a click is that round's answer, exactly a
-Send. Stop (the circle-slash icon) and a comment on a card are orders for an agent
+A card opens its board at the round that waits on you, and its **Fire** and **Merge**
+buttons show only while that round asks for that answer; a click is that round's answer,
+exactly a Send. Stop (the circle-slash icon) and a comment on a card are orders for an agent
 fronting the sessions to carry to the mission's session; the board itself stops
 nothing. That agent can also answer a round on your typed words, and the round then
 says it was relayed and quotes them.

@@ -1161,7 +1161,7 @@ export function abandonOpenRounds(board, { session = null, except = null, only =
 /** A hand-over (ADR 150, 151): the rounds session `giver` left unanswered on `board` become
  * session `taker`'s, the one now holding the mission, so its packets carry their answers.
  * Each keeps `handedFrom`, the giver's id. One that asks for an answer (it was minted with a
- * deadline) is reopened in place, whether the giver's boundary closed it, its wait lapsed
+ * deadline, or a question in it) is reopened in place, whether the giver's boundary closed it, its wait lapsed
  * or it still waited: `open` and awaited again, its deadline `awaitTimeoutMs` from `now`,
  * `reopenedAt` stamped and `abandonedAt` dropped. Nothing else of the round moves. A sent
  * round, one its session closed by number (`declined`) and a closed one that asked nothing
@@ -1172,6 +1172,7 @@ export function handOverRounds(board, giver, taker, { now = Date.now(), awaitTim
   const handed = [];
   const reopened = [];
   const at = new Date(now).toISOString();
+  const questions = board ? questionBlocks(board) : [];
   for (const r of (board && board.rounds) || []) {
     // Only rounds recorded as the giver's own (`round.session`): one no session posted is no
     // one's to hand, even once a later poster has given the board a session. A round from
@@ -1180,7 +1181,7 @@ export function handOverRounds(board, giver, taker, { now = Date.now(), awaitTim
     // A giver back in its own process under a new id (a /clear) is named by that process:
     // the round it asked, or was handed, under the id it takes with is not handed to itself.
     if (taker.id != null && r.session.id === taker.id) continue;
-    const asks = r.awaitDeadline != null;
+    const asks = r.awaitDeadline != null || questions.some(q => q.round === r.n);
     if (r.status !== 'open' && !asks) continue;
     const from = (r.session && r.session.id) || giver.id || null;
     r.session = sessionStamp(taker);

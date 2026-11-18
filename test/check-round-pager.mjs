@@ -783,4 +783,13 @@ check('the page board\'s comment panel clears the round pager by the dock\'s mea
   assert.match(ui, /setupPagerDockHeightTracking\(\);/, 'the function must actually be CALLED on the page, not merely defined and left unused');
 });
 
+await check('a board opened at #round:<n>, a mission card\'s link, shows round n though a later round is the newest, and inert on a round it does not hold', () => {
+  const board = threeRounds();
+  for (const [hash, shown] of [['#round:1', '1'], ['#round:9', '3']]) {
+    const document = loadBoard(renderBoardPage(board), { location: { protocol: 'http:', hash } });
+    document.defaultView.dispatchEvent(new StandInEvent('load'));
+    assert.equal(currentPage(document), shown, hash);
+  }
+});
+
 finish('round-pager', { failText: n => `${n} round-pager check(s) failed` });

@@ -11,7 +11,8 @@
 //  - a mission turning needs-you, stalled or released joins a batch that speaks once,
 //    BATCH_WINDOW_MS after its first entry, as one notification naming the work or
 //    counting it ("2 missions need you, FRONT_AGENT released"). A needs-you mission whose
-//    session goes (`gone` set) joins it as stalled, though its view stays needs-you.
+//    session goes (`gone` set) joins it as stalled, though its view stays needs-you, and
+//    one whose card opens a newer round than at the last read (`waiting`) joins it again.
 //
 // The first read after start is the baseline and says nothing, so a restart never floods
 // the screen with every mission already waiting. A mission that moves on before its batch
@@ -78,6 +79,12 @@ export function missionsLine(entries) {
   return groups.map(({ state, members }) => counted(members.length, state)).join(', ');
 }
 
+/** `now`, a view's `waiting`, is a round to announce over `before`: one on another board, or
+ * a later one on the same board. */
+function newerRound(before, now) {
+  return !!now && (!before || before.board !== now.board || now.round > before.round);
+}
+
 /** The watch over `home`. Every collaborator is a parameter so a check can hand it a clock
  * and a notifier; production passes `home` and `broadcast` alone. `read(now)` answers the
  * mission views at `now`; `broadcast(key)` publishes `missions` for one mission;
@@ -92,7 +99,7 @@ export function createMissionWatch({
   intervalMs = missionWatchMs(),
   windowMs = BATCH_WINDOW_MS,
 } = {}) {
-  let seen = null; // key -> { view, updatedAt }, null until the baseline read
+  let seen = null; // key -> { view, gone, updatedAt, waiting }, null until the baseline read
   const batch = new Map(); // key -> { name, state }
   let dueAt = null;
   let flushTimer = null;
@@ -146,7 +153,7 @@ export function createMissionWatch({
       if (closing) flush();
       return;
     }
-    const next = new Map(views.map(v => [v.key, { view: v.view, gone: !!v.gone, updatedAt: v.updatedAt }]));
+    const next = new Map(views.map(v => [v.key, { view: v.view, gone: !!v.gone, updatedAt: v.updatedAt, waiting: v.waiting ?? null }]));
     if (seen === null) {
       seen = next;
       return;
@@ -155,7 +162,8 @@ export function createMissionWatch({
     for (const v of views) {
       const prev = seen.get(v.key);
       const gone = !!v.gone;
-      if (prev && prev.view === v.view && prev.gone === gone) continue;
+      const asksAnew = v.view === 'needs-you' && prev?.view === 'needs-you' && newerRound(prev.waiting, v.waiting);
+      if (prev && prev.view === v.view && prev.gone === gone && !asksAnew) continue;
       if (prev && prev.updatedAt === v.updatedAt) {
         try { broadcast(v.key); } catch (err) { warnOnce('publish a change', err); }
       }
@@ -164,6 +172,7 @@ export function createMissionWatch({
         // no view: its going is spoken as stalled, since nothing else will answer the round.
         if (v.view !== 'needs-you') continue;
         if (gone) joining.push({ ...v, view: 'stalled' });
+        else if (asksAnew) joining.push(v);
         else if (batch.get(v.key)?.state === 'stalled') batch.delete(v.key);
         continue;
       }

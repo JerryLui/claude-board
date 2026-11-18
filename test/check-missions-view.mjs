@@ -22,7 +22,7 @@ import { mkdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { SECRET_HEADER } from '../src/secret.mjs';
 import { startServer } from '../src/server.mjs';
-import { readBoard } from '../src/store.mjs';
+import { readBoard, writeBoard } from '../src/store.mjs';
 import { StandInEvent, fetchSettler, parseHTML } from './dom-stand-in.mjs';
 import { check, deadPid, runMain, secretHome, writeStub, rawRequest, writeHeaders, pageHarness, postBoard } from './support.mjs';
 
@@ -262,7 +262,7 @@ async function main() {
           'a url that is not a web address is shown, never linked, and with no fact yet the PR is checking');
         const needs = cardFor(tab.document, 'NEEDS_ONE');
         assert.deepEqual([needs.querySelector('b.mission-title a.mission-link').getAttribute('href'), needs.getAttribute('tabindex')],
-          [`/b/${needsBoard.boardId}`, null], 'the card\'s title is the link to the latest board the mission posted, the one stop for Tab');
+          [`/b/${needsBoard.boardId}#round:1`, null], 'the card\'s title is the link to the round waiting on the PM, the one stop for Tab');
         assert.equal(needs.querySelector('a.mission-btn'), null, 'no Open board button');
         assert.ok(cardFor(tab.document, 'WORKING_ONE').querySelector('button.mission-stop'), 'a live session offers Stop');
         assert.equal(cardFor(tab.document, 'STALLED_ONE').querySelector('button.mission-stop'), null, 'a stalled one does not');
@@ -287,7 +287,7 @@ async function main() {
         try {
           const card = cardFor(tab.document, key);
           assert.deepEqual(actionButtons(card), [{ kind, label }]);
-          assert.equal(card.querySelector('a.mission-link').getAttribute('href'), `/b/${boardId}`, 'the card opens the round waiting on the PM');
+          assert.equal(card.querySelector('a.mission-link').getAttribute('href'), `/b/${boardId}#round:${round}`, 'the card opens the round waiting on the PM');
           assert.equal(card.querySelector('a.mission-btn'), null, 'no Open round button');
           await tab.click(card.querySelector('button.mission-act'));
 
@@ -303,6 +303,24 @@ async function main() {
         }
       });
     }
+
+    await check('a card whose reopened round waits behind a later round of the same session that asks nothing opens the reopened round and offers its Fire', async () => {
+      await liveMission('REOPENED_BEHIND');
+      const { boardId, round } = await actionRound('REOPENED_BEHIND', 'fire', ['Fire /direct', 'Not yet']);
+      const board = readBoard(boardId, home);
+      const owed = board.rounds.find(r => r.n === round);
+      owed.reopenedAt = new Date().toISOString();
+      board.rounds.push({ ...owed, n: round + 1, title: 'later', reopenedAt: undefined, awaited: false, awaitDeadline: null });
+      writeBoard(board, home);
+      const tab = await openMissionsTab();
+      try {
+        const card = cardFor(tab.document, 'REOPENED_BEHIND');
+        assert.equal(card.querySelector('a.mission-link').getAttribute('href'), `/b/${boardId}#round:${round}`);
+        assert.deepEqual(actionButtons(card), [{ kind: 'fire', label: 'Fire' }]);
+      } finally {
+        tab.restoreFetch();
+      }
+    });
 
     // ADR 142: Merge opens the brief at its merge question and answers nothing.
     await check('Merge shows while the round asks for it as a link to that round\'s merge question, and a click posts nothing', async () => {

@@ -6480,6 +6480,18 @@ export const ui = `
   }
   onFragmentSentinel(onStrandedRound, maybeJumpToStrandedRound, true);
 
+  // '#round:<round>': a mission card opens the round waiting on the PM (src/indexpage.mjs),
+  // which a later round of its board may sit past. Resolved as '#question:' below is.
+  function fragmentRound() {
+    var m = location && /^#round:([0-9]+)$/.exec(location.hash || '');
+    return m ? Number(m[1]) : null;
+  }
+  function jumpToFragmentRound() {
+    var target = fragmentRound();
+    if (target != null && target !== currentRound) goToRound(target);
+  }
+  onFragmentSentinel(fragmentRound, function () { afterPaint(jumpToFragmentRound); }, true);
+
   // '#question:<round>:<question id>': a mission card's Merge (src/indexpage.mjs, ADR
   // 142) opens the landing brief at its merge question rather than answering it. A
   // sentinel resolved here for the reason '#open-round' is: no id this page emits is safe
