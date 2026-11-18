@@ -14,6 +14,7 @@ import { SECRET_HEADER } from '../src/secret.mjs';
 import { WAIT_CEILING_MS } from '../src/handoff.mjs';
 import { readBoard, readMission, writeBoard } from '../src/store.mjs';
 import { linkBoard } from '../src/missions.mjs';
+import { handOverRounds } from '../src/board.mjs';
 import { abandonOpenRounds, addRound, createBoard } from '../src/board.mjs';
 import { processStartUtc } from '../src/proc-start.mjs';
 import { McpClient, check, mcpBin, openSseClient, rawRequest, repoRoot, runMain, secretFetch, secretHome, waitFor, writeHeaders } from './support.mjs';
@@ -412,6 +413,18 @@ async function main() {
   /** The session watcher's list, holding `session`'s process under `id` and no other session. */
   const watcherLists = (session, folder, id) => post('/api/sessions', { intervalMs: 30_000, sessions: [{ id, pid: session.ref.pid, procStart: session.ref.procStart, kind: 'interactive', jobId: null, cwd: folder, login: null, name: null, status: 'idle', reason: null }] });
 
+  await check('a hand-over reopens a giver\'s open round with no deadline that asks a question, as one minted with a deadline, and hands one that asks nothing with no stamp', () => {
+    const giver = { pid: 4100, procStart: '2026-11-18T08:00:00Z', id: 'nodeadline-giver' };
+    const taker = { pid: 4200, procStart: '2026-11-18T09:00:00Z', id: 'nodeadline-taker' };
+    const round = n => ({ n, postedAt: '2026-11-18T08:01:00Z', status: 'open', sentAt: null, title: 'q', session: giver });
+    const board = { id: 'b_nodeadline', rounds: [round(1), round(2)], blocks: [{ ...question('Asked before deadlines?'), id: 'q1', round: 1 }] };
+    const at = Date.parse('2026-11-18T10:00:00Z');
+    assert.deepEqual(handOverRounds(board, giver, taker, { now: at, awaitTimeoutMs: WAIT_MS }), { handed: [1, 2], reopened: [1] });
+    const [asks, shows] = board.rounds;
+    assert.deepEqual([asks.reopenedAt, asks.awaited, asks.awaitDeadline], [new Date(at).toISOString(), true, new Date(at + WAIT_MS).toISOString()]);
+    assert.deepEqual([shows.reopenedAt, shows.session.id], [undefined, 'nodeadline-taker']);
+  });
+
   await check('a join after the mission\'s session went reopens in place each round it left unanswered, one closed by its clear and one lapsed: the same number, nothing on the board moved but the round\'s state, a fresh 40-minute clock, the new session\'s; the join names each, the PM\'s Send on one answers the answer watch\'s collect and read, and on the other rides the new session\'s next packet', async () => {
     const gone = sessionProcess();
     const next = sessionProcess();
@@ -504,7 +517,7 @@ async function main() {
     assert.equal((await leave('DECLINED', 'declined-third', third)).status, 200);
   });
 
-  await check('a round a hand-over reopened holds its mission\'s card at needs you behind a later round of its new session that asks nothing, where the card no longer draws the Fire it drew from it as that session\'s newest: of two such rounds the card stays through the PM\'s Send on one, and clears when the session closes the other by number', async () => {
+  await check('a round a hand-over reopened holds its mission\'s card at needs you behind a later round of its new session that asks nothing, where the card no longer draws the Fire it drew from it as that session\'s newest: of two such rounds the card stays through the PM\'s Send on one, and clears when the session closes the other by number, each leaving the session\'s binding as it goes', async () => {
     const gone = sessionProcess();
     const next = sessionProcess();
     const folder = folderWith('owed-card', 'x\n');
@@ -513,15 +526,20 @@ async function main() {
     assert.equal((await ask(gone, folder, [{ ...question('Fire it?'), action: 'fire' }], { fresh: true })).round, 2);
     await kill(gone);
     assert.deepEqual((await join('OWED_CARD', 'owed-next', next)).body.reopened.map(r => r.round), [1, 2]);
-    assert.deepEqual(await card('OWED_CARD'), ['needs-you', [{ kind: 'fire', board: asked.boardId, round: 2, question: questionId(asked.boardId, 2), choice: 'Yes' }]]);
+    const fire = [{ kind: 'fire', board: asked.boardId, round: 2, question: questionId(asked.boardId, 2), choice: 'Yes' }];
+    assert.deepEqual(await card('OWED_CARD'), ['needs-you', fire]);
     assert.equal((await ask(next, folder, [note('carrying on')])).round, 3);
     assert.deepEqual(await card('OWED_CARD'), ['needs-you', []]);
+    const bound = async () => (await binding('owed-next', next)).reopened.map(r => r.round);
+    assert.deepEqual(await bound(), [1, 2]);
 
     assert.equal((await send(asked.boardId, 1, 'Yes')).status, 200);
     assert.deepEqual(await card('OWED_CARD'), ['needs-you', []]);
+    assert.deepEqual(await bound(), [2]);
     const closed = await post(`/api/board/${asked.boardId}/abandon`, { session: next.ref, round: 2 });
     assert.deepEqual([closed.status, closed.body.closed], [200, [2]]);
     assert.deepEqual(await card('OWED_CARD'), ['working', []]);
+    assert.deepEqual(await bound(), []);
     assert.equal((await leave('OWED_CARD', 'owed-next', next)).status, 200);
   });
 

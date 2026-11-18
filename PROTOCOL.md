@@ -1762,7 +1762,9 @@ the daemon started) heartbeats alone count. A bound `pid` that no longer exists 
 lists the session's `id` in another live process is not gone: the session runs on there (a resume
 no launch made). `asking` is whether `view` is `needs-you` by a session's newest round that no hand-over reopened, that session
 waiting on the PM; it is `false` where only a reopened round holds the mission there, behind a
-later round or still its session's newest, its session working on (ADR 155). `listedAt` is that snapshot's time while it lists the bound session, else `null`.
+later round or still its session's newest, its session working on (ADR 155). `waiting` is the
+round the card opens, `{ board, round }` by board id and round number, the newest round that holds
+the mission at needs you, else `null`. `listedAt` is that snapshot's time while it lists the bound session, else `null`.
 `retired` is whether its `retiredAt` parses.
 `gone` is `{ lastSeenAt }`, the session's `seenAt`, while that session is gone and the mission has
 neither recorded its end, retired nor parked, else `null`. `rejoin` is `{ reason, since, id }` while the snapshot lists the bound
@@ -1904,8 +1906,8 @@ wait ends. A 200 join carries it on every join while such a round waits, the rou
 reopened included, and omits it when none does; there each entry also carries `title`, the
 round's, and `url`, the board's page on the origin the join came in on. The binding carries the
 list as the session's latest join, or the takeover that bound it, recorded it on the mission
-(`session.reopened`), which holds neither a round's text nor a url, so a round sent, closed or
-lapsed since is still listed there until the next join:
+(`session.reopened`), which holds neither a round's text nor a url, less a round sent or closed
+since, read off its board; one lapsed since is still listed there until the next join:
 a takeover's taker, whose own join answered 202, reads its rounds here. Each is the session's
 round from then on ("One board per mission" below).
 
@@ -2228,6 +2230,7 @@ the waiting count where it was, so no `waiting` goes with it; an amend's restart
 caused by a board linked to a mission (its rounds decide whether it reads needs-you), and from the
 daemon's missions watch (ADR 128), which reads every mission each 30 seconds and publishes a
 derived change no write made: a session whose process died, or one gone silent past 15 minutes.
+A needs-you mission whose `waiting` moves to a newer round is spoken again.
 A read between the watch's ticks can therefore see a stall before the event says so. With `key:
 null` it names the tab cards instead ("The session routes"): a changed snapshot, the watcher up or
 down, a tab's order, or a round on a board a session posted.
@@ -3120,8 +3123,8 @@ rounds that board holds. When the session is taken over before its join, the lea
 the taker hands them over with the giver's. A session whose join was handed them ends the line:
 the join after it is handed that session's rounds alone.
 
-Each handed round that asks for an answer (it was minted with an `awaitDeadline`) is **reopened in
-place**, whether the giver's boundary abandoned it, its wait lapsed or it still waited: `open`,
+Each handed round that asks for an answer (it was minted with an `awaitDeadline`, or a question in
+it) is **reopened in place**, whether the giver's boundary abandoned it, its wait lapsed or it still waited: `open`,
 `awaited`, its deadline one wait (40 minutes) from the hand-over, `reopenedAt` stamped,
 `abandonedAt` dropped. Its number, blocks and comments stand, so the PM's page keeps what it
 holds. It counts in `GET /api/waiting` and the Boards page's Waiting on you again, and the join or
@@ -3132,4 +3135,5 @@ nothing are left as they are; an open round that asked nothing is handed without
 reopened round is the taker's from then on, so one it leaves unanswered reopens again at each
 later hand-over, until it is sent or declined.
 
-**Needs you** reads, on each board, the newest round of every session that posted there, one session being one by its id, or its pid and start to the second. A round a hand-over reopened holds the card there too while it still wants its answer, whatever rounds its new session posted after it, until it is sent or declined (ADR 155); an older round never reopened does not, though its wait lapsed with it left open. The card's Fire and Merge come from each session's newest round only.
+**Needs you** reads, on each board, the newest round of every session that posted there, one session being one by its id, or its pid and start to the second. A round a hand-over reopened holds the card there too while it still wants its answer, whatever rounds its new session posted after it, until it is sent or declined (ADR 155); an older round never reopened does not, though its wait lapsed with it left open. The card opens the newest of these rounds, at `/b/<id>#round:<n>`, which the board page resolves by
+flipping to round `n`. The card's Fire and Merge come from each session's newest round only.

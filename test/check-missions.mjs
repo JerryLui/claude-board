@@ -843,6 +843,22 @@ async function main() {
     }
   });
 
+  await check('a binding names a reopened round it recorded while the round waits, and no longer once it is sent or closed by number', () => {
+    const dir = scratchHome('binding-reopened');
+    const now = Date.now();
+    for (const [status, extra] of [['sent', { sentAt: iso(now) }], ['abandoned', { declined: true }]]) {
+      const link = seedBoard(dir, `b_bound${status}`, now, [{ reopenedAt: iso(now), awaited: true, awaitDeadline: iso(now + minutes(40)) }]);
+      const reopened = [{ board: link.id, round: 1, awaitDeadline: iso(now + minutes(40)) }];
+      seed(dir, `BOUND_${status.toUpperCase()}`, { boards: [link], session: { id: `sess-${status}`, pid: 6100, startedAt: iso(now), seenAt: iso(now), reopened } });
+      const bound = () => bindingFor([readMission(`BOUND_${status.toUpperCase()}`, dir)], { id: `sess-${status}` }, { home: dir }).reopened;
+      assert.deepEqual(bound(), reopened, `${status}: while it waits`);
+      const board = readBoard(link.id, dir);
+      Object.assign(board.rounds[0], { status, awaited: false, ...extra });
+      writeBoard(board, dir);
+      assert.deepEqual(bound(), [], status);
+    }
+  });
+
   await check('a mission whose session\'s newest round waits on the PM is alive but not working, so it holds no working slot', () => {
     const dir = scratchHome('waiting-on-pm');
     const now = Date.now();
@@ -862,7 +878,7 @@ async function main() {
       'seven working and two waiting on the PM leave a working slot');
   });
 
-  await check('a session working on while a round a hand-over reopened is owed holds its working slot, though its mission reads needs you, the round behind a later one of its own or still its newest and drawing the card\'s Fire: a launch queues at the cap (ADR 155)', () => {
+  await check('a session working on while a round a hand-over reopened is owed holds its working slot, though its mission reads needs you, the round behind a later one of its own or still its newest, the card opening it, and drawing the card\'s Fire only as its session\'s newest: a launch queues at the cap (ADR 155)', () => {
     const now = Date.now();
     const alive = () => true;
     const reopened = { reopenedAt: iso(now), awaited: true, awaitDeadline: iso(now + minutes(40)) };
@@ -878,11 +894,27 @@ async function main() {
       seed(dir, 'WORKS_ON', { boards: [link], session: { pid: 3000, startedAt: iso(now), seenAt: iso(now) } });
       const overview = missionsOverview({ home: dir, now, isAlive: alive });
       const worksOn = overview.missions.find(m => m.key === 'WORKS_ON');
-      assert.deepEqual([worksOn.view, worksOn.actions.map(a => [a.kind, a.round])], ['needs-you', fires.map(n => ['fire', n])], label);
+      assert.deepEqual([worksOn.view, worksOn.waiting, worksOn.actions.map(a => [a.kind, a.round])], ['needs-you', { board: link.id, round: 1 }, fires.map(n => ['fire', n])], label);
       assert.equal(worksOn.asking, false, label);
       assert.deepEqual([overview.live, overview.slotFree], [{ working: MAX_WORKING, alive: MAX_WORKING }, false], label);
       assert.deepEqual(launchMission('NEXT', { phase: 'direct' }, { home: dir, now, isAlive: alive }), { queued: true }, label);
     }
+  });
+
+  await check('a session\'s own newest round asking frees its working slot though another session\'s reopened round is newer on the board: each session\'s newest round is read, and the card opens the newer, reopened round', () => {
+    const dir = scratchHome('reopened-and-fresh');
+    const now = Date.now();
+    const alive = () => true;
+    const own = { pid: 3000, startedAt: iso(now), seenAt: iso(now) };
+    const link = seedBoard(dir, 'b_reopenedfresh', now, [
+      { session: { pid: 3000, procStart: null, id: 'own' }, awaited: true, awaitDeadline: iso(now + minutes(40)) },
+      { session: { pid: 4000, procStart: null, id: 'other' }, reopenedAt: iso(now), awaited: true, awaitDeadline: iso(now + minutes(40)) },
+    ]);
+    seed(dir, 'ASKS_TOO', { boards: [link], session: own });
+    const overview = missionsOverview({ home: dir, now, isAlive: alive });
+    const v = overview.missions.find(m => m.key === 'ASKS_TOO');
+    assert.deepEqual([v.view, v.asking, v.waiting], ['needs-you', true, { board: link.id, round: 2 }]);
+    assert.deepEqual(overview.live, { working: 0, alive: 1 });
   });
 
   await check('the card\'s Fire comes only from the newest round of each session on a board, and needs you from that round or a reopened one (held in check-mission-board.mjs): an older page left asking, never reopened, holds neither, and one session is one poster by its id or its process start to the second', () => {

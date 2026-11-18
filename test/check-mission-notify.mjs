@@ -67,6 +67,30 @@ async function main() {
     r.watch.close();
   });
 
+  await check('a needs-you mission whose card comes to open a newer round, a reopened one already holding it, is spoken again; one whose card falls back to an older round once the newer is answered is not', () => {
+    const clock = { t: T0 };
+    const posted = [];
+    let waiting = { board: 'b_one', round: 1 };
+    const watch = createMissionWatch({
+      now: () => clock.t,
+      read: () => [{ key: 'ALPHA', title: 'ALPHA', view: 'needs-you', gone: null, updatedAt: 'u', waiting }],
+      notify: line => posted.push(line),
+    });
+    const at = (offsetMs, next) => {
+      clock.t = T0 + offsetMs;
+      waiting = next;
+      watch.tick();
+    };
+    at(0, waiting);
+    at(10 * SECOND, { board: 'b_one', round: 3 });
+    at(71 * SECOND, waiting);
+    assert.deepEqual(posted, ['ALPHA needs you']);
+    at(80 * SECOND, { board: 'b_one', round: 1 });
+    at(141 * SECOND, waiting);
+    assert.deepEqual(posted, ['ALPHA needs you'], 'the older round asks nothing new');
+    watch.close();
+  });
+
   await check('transitions more than a minute apart post two notifications, each naming its own mission', () => {
     const r = rig();
     for (const key of ['ALPHA', 'BRAVO']) r.set(key, { state: 'working' });
