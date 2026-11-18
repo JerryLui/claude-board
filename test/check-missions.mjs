@@ -878,12 +878,12 @@ async function main() {
       'seven working and two waiting on the PM leave a working slot');
   });
 
-  await check('a session working on while a round a hand-over reopened is owed holds its working slot, though its mission reads needs you, the round behind a later one of its own or still its newest, the card opening it and drawing its Fire: a launch queues at the cap (ADR 155)', () => {
+  await check('a session working on while a round a hand-over reopened is owed holds its working slot, though its mission reads needs you, the round behind a later one of its own or still its newest, the card opening it, and drawing the card\'s Fire only as its session\'s newest: a launch queues at the cap (ADR 155)', () => {
     const now = Date.now();
     const alive = () => true;
     const reopened = { reopenedAt: iso(now), awaited: true, awaitDeadline: iso(now + minutes(40)) };
     for (const [label, rounds, fires] of [
-      ['behind-a-later-round', [reopened, {}], [1]],
+      ['behind-a-later-round', [reopened, {}], []],
       ['no-later-round', [reopened], [1]],
     ]) {
       const dir = scratchHome(`reopened-${label}`);

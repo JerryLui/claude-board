@@ -385,16 +385,12 @@ export function roundWantsAnswer(round, questions) {
   return questions.some(q => q.round === round.n);
 }
 
-/** The rounds of `board` that hold its mission at needs you, newest first: the newest
- * round of each session that posted there, when it still wants an answer, and every round
- * a hand-over reopened (`reopenedAt`, ADR 151) that still does, whatever rounds its session
- * posted since (ADR 155). A mission's board is shared (ADR 150), so one session's newer
- * round never hides another's question. An older page a session left open, never
- * reopened, is answered from its own page on the board. Rounds are one session's by
- * `sessionMatches`: its id, or its process to the second, so a resumed session or a start
- * read with milliseconds is still one poster. A round from before rounds recorded their
- * poster is the board's first poster's. */
-function owedRounds({ board, questions }) {
+/** The newest round of each session that posted on `board`. A mission's board is shared
+ * (ADR 150), so one session's newer round never hides another's. Rounds are one session's
+ * by `sessionMatches`: its id, or its process to the second, so a resumed session or a
+ * start read with milliseconds is still one poster. A round from before rounds recorded
+ * their poster is the board's first poster's. */
+function sessionsNewest(board) {
   const newest = [];
   for (const r of board.rounds || []) {
     const poster = (r && r.session) || board.session || null;
@@ -406,14 +402,23 @@ function owedRounds({ board, questions }) {
       if (!slot.posters.includes(poster)) slot.posters.push(poster);
     } else newest.push({ posters: [poster], round: r });
   }
-  const heads = new Set(newest.map(e => e.round));
+  return new Set(newest.map(e => e.round));
+}
+
+/** The rounds of `board` that hold its mission at needs you, newest first: a session's
+ * newest round (`sessionsNewest`) when it still wants an answer, and every round a hand-over
+ * reopened (`reopenedAt`, ADR 151) that still does, whatever rounds its session posted since
+ * (ADR 155). An older page a session left open, never reopened, is answered from its own
+ * page on the board. */
+function owedRounds({ board, questions }) {
+  const newest = sessionsNewest(board);
   return (board.rounds || [])
-    .filter(r => (r.reopenedAt || heads.has(r)) && roundWantsAnswer(r, questions))
+    .filter(r => (r.reopenedAt || newest.has(r)) && roundWantsAnswer(r, questions))
     .sort((a, b) => b.n - a.n);
 }
 
-/** The round `m`'s card opens and takes its buttons from, `{ board, round }`, or null: the
- * newest of its linked boards' `owedRounds`, by when it was posted. */
+/** The round `m`'s card opens, `{ entry, round }`, or null: the newest of its linked boards'
+ * `owedRounds`, by when it was posted. */
 function waitingOf(linked) {
   let hit = null;
   for (const entry of linked) {
@@ -423,19 +428,26 @@ function waitingOf(linked) {
   return hit;
 }
 
-function actionsOf(waiting) {
-  if (!waiting) return [];
-  const { entry: { board, questions }, round } = waiting;
-  return questions
-    .filter(q => q.round === round.n && q.action && q.widget === 'single' && q.options?.length)
-    .map(q => ({ kind: q.action, board: board.id, round: round.n, question: q.id, choice: q.options[0].label }));
+function actionsOf(linked) {
+  const actions = [];
+  for (const entry of linked) {
+    const newest = sessionsNewest(entry.board);
+    const round = owedRounds(entry).find(r => newest.has(r));
+    if (!round) continue;
+    for (const q of entry.questions) {
+      if (q.round !== round.n || !q.action || q.widget !== 'single' || !q.options?.length) continue;
+      actions.push({ kind: q.action, board: entry.board.id, round: round.n, question: q.id, choice: q.options[0].label });
+    }
+  }
+  return actions;
 }
 
 /** The buttons `m`'s card offers: one per question carrying an `action` (Fire or Merge)
- * in the round it opens (`waitingOf`). A click answers `question` in `round` of `board`
- * with option 0, whose label is `choice`. */
+ * in a linked board's newest round of a session while it waits on the PM, the latest such
+ * (ADR 155). A click answers `question` in `round` of `board` with option 0, whose label is
+ * `choice`. A sent or abandoned round, or an older one, reopened or not, offers none. */
 export function missionActions(m, { home = boardHome() } = {}) {
-  return actionsOf(waitingOf(linkedBoards(m, home)));
+  return actionsOf(linkedBoards(m, home));
 }
 
 /** `m` carries a retired time: its `retiredAt` parses (ADR 147). */
@@ -551,7 +563,7 @@ export function missionView(m, { home = boardHome(), now = Date.now(), isAlive =
     live: hasLiveSession(m, now, alive, listed),
     listedAt: listing ? iso(listing.at) : null,
     rejoin: rejoinOf(m, listed),
-    actions: actionsOf(waiting),
+    actions: actionsOf(linked),
   };
 }
 

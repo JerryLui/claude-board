@@ -517,7 +517,7 @@ async function main() {
     assert.equal((await leave('DECLINED', 'declined-third', third)).status, 200);
   });
 
-  await check('a round a hand-over reopened holds its mission\'s card at needs you behind a later round of its new session that asks nothing, the card still drawing its Fire: of two such rounds the card stays through the PM\'s Send on one, and clears when the session closes the other by number, each leaving the session\'s binding as it goes', async () => {
+  await check('a round a hand-over reopened holds its mission\'s card at needs you behind a later round of its new session that asks nothing, where the card no longer draws the Fire it drew from it as that session\'s newest: of two such rounds the card stays through the PM\'s Send on one, and clears when the session closes the other by number, each leaving the session\'s binding as it goes', async () => {
     const gone = sessionProcess();
     const next = sessionProcess();
     const folder = folderWith('owed-card', 'x\n');
@@ -529,12 +529,12 @@ async function main() {
     const fire = [{ kind: 'fire', board: asked.boardId, round: 2, question: questionId(asked.boardId, 2), choice: 'Yes' }];
     assert.deepEqual(await card('OWED_CARD'), ['needs-you', fire]);
     assert.equal((await ask(next, folder, [note('carrying on')])).round, 3);
-    assert.deepEqual(await card('OWED_CARD'), ['needs-you', fire]);
+    assert.deepEqual(await card('OWED_CARD'), ['needs-you', []]);
     const bound = async () => (await binding('owed-next', next)).reopened.map(r => r.round);
     assert.deepEqual(await bound(), [1, 2]);
 
     assert.equal((await send(asked.boardId, 1, 'Yes')).status, 200);
-    assert.deepEqual(await card('OWED_CARD'), ['needs-you', fire]);
+    assert.deepEqual(await card('OWED_CARD'), ['needs-you', []]);
     assert.deepEqual(await bound(), [2]);
     const closed = await post(`/api/board/${asked.boardId}/abandon`, { session: next.ref, round: 2 });
     assert.deepEqual([closed.status, closed.body.closed], [200, [2]]);

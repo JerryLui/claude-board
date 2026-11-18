@@ -343,8 +343,8 @@ A ```` ```mermaid ```` fence in `summary` or `details` is diagram input like any
 An amend into the open round stores them the same way.
 
 **`action`** is `'fire'` or `'merge'`, on a `single` question only, and absent on one that carries
-none: the question's yes is option 0, and while its round is the one the card of the mission
-whose board it is opens (`waiting`, below), that card offers that yes as a Fire or Merge button. A Fire click answers the round
+none: the question's yes is option 0, and while its round, its board's newest, waits on an
+answer, the card of the mission whose board it is offers that yes as a Fire or Merge button. A Fire click answers the round
 through `POST /api/board/:id/submit`, that question set to option 0's label and the body marked
 `via: 'card'`, exactly as a Send with that pick would. Merge answers nothing: it is a link to
 `/b/<id>#question:<round>:<question id>`, which the round page resolves by flipping to that
@@ -3136,4 +3136,4 @@ reopened round is the taker's from then on, so one it leaves unanswered reopens 
 later hand-over, until it is sent or declined.
 
 **Needs you** reads, on each board, the newest round of every session that posted there, one session being one by its id, or its pid and start to the second. A round a hand-over reopened holds the card there too while it still wants its answer, whatever rounds its new session posted after it, until it is sent or declined (ADR 155); an older round never reopened does not, though its wait lapsed with it left open. The card opens the newest of these rounds, at `/b/<id>#round:<n>`, which the board page resolves by
-flipping to round `n`, and takes its Fire and Merge from that round alone.
+flipping to round `n`. The card's Fire and Merge come from each session's newest round only.

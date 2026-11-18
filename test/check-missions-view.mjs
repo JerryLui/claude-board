@@ -304,7 +304,7 @@ async function main() {
       });
     }
 
-    await check('a card whose reopened round waits behind a later round of the same session that asks nothing opens the reopened round and offers its Fire', async () => {
+    await check('a card whose reopened round waits behind a later round of the same session that asks nothing opens the reopened round, with no Fire on the card (ADR 155)', async () => {
       await liveMission('REOPENED_BEHIND');
       const { boardId, round } = await actionRound('REOPENED_BEHIND', 'fire', ['Fire /direct', 'Not yet']);
       const board = readBoard(boardId, home);
@@ -316,7 +316,7 @@ async function main() {
       try {
         const card = cardFor(tab.document, 'REOPENED_BEHIND');
         assert.equal(card.querySelector('a.mission-link').getAttribute('href'), `/b/${boardId}#round:${round}`);
-        assert.deepEqual(actionButtons(card), [{ kind: 'fire', label: 'Fire' }]);
+        assert.deepEqual(actionButtons(card), []);
       } finally {
         tab.restoreFetch();
       }
