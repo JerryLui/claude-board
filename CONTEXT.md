@@ -170,9 +170,9 @@ holding the title and the controls; scrolled, it condenses to the Pill. It takes
 title and controls alone, a click on its empty part reaching the page under it, and it leaves
 while a mock drawn full page shows its own full-size view. _Avoid_: toolbar, nav, top bar.
 
-**Pill**: the header once it condenses while scrolling — the mark, the comment toggle, the
-theme control, Download round on a Page board and the state label, in that order, on a floating
-centred band. Also names the
+**Pill**: the header once it condenses while scrolling — the mark, the comment toggle, Download
+round's icon on a Page board, the theme control and the state label, in that order, on a
+floating centred band. Also names the
 pager dock and the unanswered-count chip elsewhere in this codebase, a collision left
 unresolved. _Avoid_: capsule, chip, bar, collapse, minimize, shrink.
 

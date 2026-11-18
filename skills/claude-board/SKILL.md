@@ -137,4 +137,4 @@ It works in a session with nobody watching; only a stopped daemon refuses it.
 
 ## When questions go to the board
 
-Questions go to the board where your session's own rules send them there; elsewhere, ask where those rules say. Where they do, every question goes through `ask`, a lone follow-up and a plain yes/no included: one question is a round of one, and an in-chat question popup is the fallback only while the board is down, under "When the board is unavailable" above.
+Questions go to the board where your session's own rules send them there; elsewhere, ask where those rules say. Where they do, every question goes through `ask`, a lone follow-up and a plain yes/no included: one question is a round of one, and an in-chat question popup is the fallback only while the board is down, under "When the board is unavailable" above. A session whose own rules forbid that popup, a mission session among them, stashes the question as those rules say instead.

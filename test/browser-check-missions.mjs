@@ -204,7 +204,7 @@ async function press(tab, selector, modifiers = 0, times = 1) {
   }
 }
 
-/** The path the tab's top frame has gone to once it leaves the Missions page (`/`), or
+/** The path and fragment the tab's top frame has gone to once it leaves the Missions page (`/`), or
  * '/' when it has not left within five seconds. A read that lands mid-swap ("Not attached
  * to an active page") is read again. */
 async function landedAt(tab) {
@@ -212,7 +212,8 @@ async function landedAt(tab) {
   for (let i = 0; i < 100 && path === '/'; i++) {
     try {
       const { currentIndex, entries } = await tab.sp('Page.getNavigationHistory');
-      path = new URL(entries[currentIndex].url).pathname;
+      const { pathname, hash } = new URL(entries[currentIndex].url);
+      path = pathname + hash;
     } catch (err) {
       if (!/Not attached to an active page/.test(err.message)) throw err;
     }
@@ -342,11 +343,12 @@ async function main() {
     const byKey = Object.fromEntries(overview.missions.map(m => [m.key, m]));
     // Where a click on a card lands: the round waiting on the PM, else the latest board.
     const target = {
-      MODEL_MAP: `/b/${byKey.MODEL_MAP.actions[0].board}`,
+      MODEL_MAP: `/b/${byKey.MODEL_MAP.waiting.board}#round:${byKey.MODEL_MAP.waiting.round}`,
       FILETYPE_FOLLOWUP: `/b/${byKey.FILETYPE_FOLLOWUP.boards.at(-1).id}`,
       [ASKING_TAB]: `/b/${asked.boardId}`,
     };
-    assert.notEqual(target.MODEL_MAP, `/b/${byKey.MODEL_MAP.boards.at(-1).id}`, 'setup: MODEL_MAP posted a board after its merge round');
+    assert.deepEqual([byKey.MODEL_MAP.waiting.board, byKey.MODEL_MAP.waiting.round], [byKey.MODEL_MAP.actions[0].board, 2], 'setup: MODEL_MAP waits on its merge round, round 2');
+    assert.notEqual(byKey.MODEL_MAP.waiting.board, byKey.MODEL_MAP.boards.at(-1).id, 'setup: MODEL_MAP posted a board after its merge round');
     // The cards Stop is offered on: a live session with no stop on its way, and every tab.
     const stoppable = [...overview.missions.filter(m => m.live).map(m => m.key), ...overview.tabs.map(t => `tab:${t.id}`)].sort();
 

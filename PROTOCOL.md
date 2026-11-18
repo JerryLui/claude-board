@@ -1763,8 +1763,8 @@ lists the session's `id` in another live process is not gone: the session runs o
 no launch made). `asking` is whether `view` is `needs-you` by a session's newest round that no hand-over reopened, that session
 waiting on the PM; it is `false` where only a reopened round holds the mission there, behind a
 later round or still its session's newest, its session working on (ADR 155). `waiting` is the
-round the card opens, `{ board, round }` by board id and round number, the newest round that holds
-the mission at needs you, else `null`. `listedAt` is that snapshot's time while it lists the bound session, else `null`.
+round the card opens, `{ board, round, postedAt }` by board id, round number and posting time, the
+newest round that holds the mission at needs you, else `null`. `listedAt` is that snapshot's time while it lists the bound session, else `null`.
 `retired` is whether its `retiredAt` parses.
 `gone` is `{ lastSeenAt }`, the session's `seenAt`, while that session is gone and the mission has
 neither recorded its end, retired nor parked, else `null`. `rejoin` is `{ reason, since, id }` while the snapshot lists the bound
