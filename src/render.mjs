@@ -3699,8 +3699,8 @@ ${faviconLink}
     </div>
     <div class="board-head-actions">
       ${commentModeToggle()}
-      ${themeToggle()}
       ${HEAD_DOWNLOAD_BUTTON}
+      ${themeToggle()}
       <span class="round-meta" id="round-meta" title="${escAttr(roundMeta.title)}">${escHtml(roundMeta.text)}</span>
     </div>
   </header>

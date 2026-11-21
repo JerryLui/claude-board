@@ -1150,16 +1150,16 @@ async function main() {
         const shots = Object.values(bars).map(b => b.shot).filter(Boolean);
         await row('over a scrolled full-page mock the condensed bar draws Download round as its icon alone, between Comment and Theme, named "Download round"', note => {
           note(`at rest ${atRest.order.join(', ')}, Download ${atRest.download.w}x${atRest.download.h}; condensed ${condensed.order.join(', ')}, Download ${condensed.download.w}x${condensed.download.h}, Theme ${condensed.theme.w}x${condensed.theme.h}${shots.length ? `; ${shots.join(', ')}` : ''}`);
-          assert.deepEqual(atRest.order, ['Comment', 'Theme', 'Download'], 'the full header keeps it after Theme');
+          assert.deepEqual(atRest.order, ['Comment', 'Download', 'Theme'], 'the full header holds the condensed bar\'s order');
           assert.ok(atRest.download.w > atRest.theme.w + 40, 'with its label');
           assert.equal(condensed.scrolled, true, 'setup: the artifact scrolled under the header');
           assert.deepEqual(condensed.order, ['Comment', 'Download', 'Theme']);
           assert.deepEqual(condensed.download, condensed.theme, 'the box of the icon-only Theme beside it');
           assert.deepEqual({ name: condensed.name, title: condensed.title, hit: condensed.hit }, { name: 'Download round', title: 'Download round', hit: true });
         });
-        await row('in a window too narrow for the header to condense, a scrolled mock\'s Download round keeps its label after Theme', () => {
+        await row('in a window too narrow for the header to condense, a scrolled mock\'s Download round keeps its label, before Theme', () => {
           assert.equal(narrow.scrolled, true, 'setup: still scrolled');
-          assert.deepEqual(narrow.order, ['Comment', 'Theme', 'Download']);
+          assert.deepEqual(narrow.order, ['Comment', 'Download', 'Theme']);
           assert.ok(narrow.download.w > narrow.theme.w + 40);
         });
       }

@@ -101,7 +101,7 @@ check('AC 7: the condense is a ramp with no threshold, exactly like the page boa
   assert.equal(progress(document), '1.000', 'a long document cannot push the progress past 1');
 });
 
-check('AC 7: the pill holds mark, comment toggle, theme, Download round (hidden unless the round is drawn full page), then the state label -- the expanded header\'s own order', () => {
+check('AC 7: the pill holds mark, comment toggle, Download round (hidden unless the round is drawn full page), theme, then the state label -- the expanded header\'s own order', () => {
   const document = loadBoard(renderBoardPage(ordinaryBoard()));
   const head = document.querySelector('.board-head');
   const titleGroup = document.querySelector('.board-head-title');
@@ -110,9 +110,9 @@ check('AC 7: the pill holds mark, comment toggle, theme, Download round (hidden 
   assert.equal(head.children[0], titleGroup, 'setup: the mark/identity group leads the header');
   assert.equal(head.children[1], actions, 'setup: the actions group follows it');
   assert.ok(titleGroup.children[0].classList.contains('back-to-index'), 'the mark is the first thing in that group');
-  assert.deepEqual(actions.children.map((c) => c.id || c.className), ['comment-mode-toggle', 'theme-toggle', 'round-download head-download', 'round-meta'],
-    'comment toggle, theme, state label -- ADR.md entry 42\'s order, with no round badge back between theme and the label; Download round, which only a full-page round shows, sits ahead of the label');
-  assert.equal(computed(actions.children[2], 'display'), 'none',
+  assert.deepEqual(actions.children.map((c) => c.id || c.className), ['comment-mode-toggle', 'round-download head-download', 'theme-toggle', 'round-meta'],
+    'comment toggle, Download round (which only a full-page round shows), theme, state label -- ADR.md entry 152\'s order, expanded or condensed, with no round badge back between theme and the label');
+  assert.equal(computed(actions.children[1], 'display'), 'none',
     'this board\'s rounds each have a chip line with their own Download round, so the strip\'s is hidden');
 
   scrollDocumentTo(document, 800);
@@ -120,7 +120,7 @@ check('AC 7: the pill holds mark, comment toggle, theme, Download round (hidden 
   assert.equal(computed(document.querySelector('button#comment-mode-toggle'), 'display'), 'inline-flex',
     'condensing hides the header\'s identity text, never its controls');
   assert.equal(computed(document.querySelector('button#theme-toggle'), 'display'), 'inline-flex');
-  assert.equal(computed(actions.children[2], 'display'), 'none', 'the strip\'s Download round stays hidden in the pill');
+  assert.equal(computed(actions.children[1], 'display'), 'none', 'the strip\'s Download round stays hidden in the pill');
 });
 
 // The strip's box spans the column around a wash or a pill drawn far smaller
