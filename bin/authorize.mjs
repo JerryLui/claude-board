@@ -18,20 +18,12 @@
 // boundary and not an inconvenience: anything that could authorize a browser without the
 // secret would be a way around the gate this exists to serve.
 
-import http from 'node:http';
 import { spawn } from 'node:child_process';
-import { readSecret, secretPath, daemonPort, SECRET_HEADER } from '../src/secret.mjs';
-import { HANDOFF_TOKEN_RE, SAFE_BOARD_ID } from '../src/handoff.mjs';
+import { daemonPort } from '../src/secret.mjs';
+import { SAFE_BOARD_ID } from '../src/handoff.mjs';
+import { die, mintHandoff } from '../src/mint-handoff.mjs';
 
-const PORT = daemonPort();
-const BASE_URL = `http://127.0.0.1:${PORT}`;
 const OPEN_CMD = process.env.CLAUDE_BOARD_OPEN_CMD || 'open';
-const REQUEST_TIMEOUT_MS = Number(process.env.CLAUDE_BOARD_POST_TIMEOUT_MS) || 10_000;
-
-function die(...lines) {
-  console.error(lines.join('\n'));
-  process.exit(1);
-}
 
 const args = process.argv.slice(2);
 const printOnly = args.includes('--print');
@@ -42,80 +34,11 @@ if (boardId !== null && !SAFE_BOARD_ID.test(boardId)) {
     'Usage: node bin/authorize.mjs [--print] [boardId]');
 }
 
-const secret = readSecret();
-if (!secret) {
-  // Same fix, same wording discipline as bin/mcp.mjs `missingSecretMessage`: name the
-  // command that actually helps, and no others. A kickstart fixes nothing here.
-  die(
-    `claude-board authorize: no local secret at ${secretPath()}.`,
-    'Authorizing a browser requires it — the daemon derives the browser\'s cookie from it.',
-    'Fix: run ./install.sh from the claude-board repository. It generates the secret if there',
-    'isn\'t one and never rotates an existing one.'
-  );
-}
-
-/** POST a JSON body and resolve the parsed response, or reject with a tagged error.
- * Plain node:http, zero dependencies, same as the rest of this repository. */
-function postJson(urlStr, body) {
-  return new Promise((resolve, reject) => {
-    const u = new URL(urlStr);
-    const data = JSON.stringify(body);
-    const req = http.request({
-      hostname: u.hostname,
-      port: u.port,
-      path: u.pathname,
-      method: 'POST',
-      headers: {
-        host: u.host,
-        'content-type': 'application/json',
-        'content-length': Buffer.byteLength(data),
-        [SECRET_HEADER]: secret,
-      },
-    }, res => {
-      const chunks = [];
-      res.on('data', c => chunks.push(c));
-      res.on('end', () => {
-        const text = Buffer.concat(chunks).toString('utf8');
-        if (res.statusCode >= 400) {
-          return reject(Object.assign(new Error(text || `daemon responded ${res.statusCode}`), { statusCode: res.statusCode }));
-        }
-        try { resolve(JSON.parse(text || '{}')); } catch (err) { reject(new Error(`invalid JSON from daemon: ${err.message}`)); }
-      });
-    });
-    req.setTimeout(REQUEST_TIMEOUT_MS, () => req.destroy(new Error('daemon request timed out')));
-    req.on('error', reject);
-    req.end(data);
-  });
-}
-
-let minted;
-try {
-  minted = await postJson(`${BASE_URL}/api/handoff`, { boardId });
-} catch (err) {
-  if (err.statusCode === 401) {
-    die(
-      'claude-board authorize: the daemon rejected this machine\'s local secret (HTTP 401).',
-      `The daemon is running, so this is a credential mismatch: it was started with a different secret than the one now at ${secretPath()}.`,
-      'Fix: restart the service so it re-reads the file — launchctl kickstart -k gui/$(id -u)/claude-board'
-    );
-  }
-  if (typeof err.statusCode === 'number') {
-    die(`claude-board authorize: the daemon refused to mint a handoff (HTTP ${err.statusCode}): ${err.message}`);
-  }
-  die(
-    `claude-board authorize: the daemon is not reachable at ${BASE_URL} (${err.code || err.message}).`,
-    'Revive it with: launchctl kickstart -k gui/$(id -u)/claude-board',
-    'If it was never installed on this machine, run ./install.sh from the claude-board repository first.'
-  );
-}
-
+const minted = await mintHandoff('authorize', { boardId });
 // Built from THIS process's own base URL, never from anything in the response body:
 // during a restart window whatever bound the port first answers here, and the next step
 // hands the result to a GUI launcher. Same guard, same reason, as bin/mcp.mjs.
-if (typeof minted.token !== 'string' || !HANDOFF_TOKEN_RE.test(minted.token)) {
-  die('claude-board authorize: the daemon returned no usable handoff token. Something other than the daemon may be listening on the port.');
-}
-const url = `${BASE_URL}/auth/${minted.token}`;
+const url = `http://127.0.0.1:${daemonPort()}/auth/${minted.token}`;
 
 if (printOnly) {
   // stdout, alone on a line, so it can be piped or copied. The advisory goes to stderr.

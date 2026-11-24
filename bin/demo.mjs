@@ -10,25 +10,19 @@
 // Plain node:http, exactly like bin/authorize.mjs and bin/mcp.mjs, and deliberately
 // not curl and not fetch()/undici. node:http consults no HTTP_PROXY/HTTPS_PROXY/
 // ALL_PROXY environment variable at all -- that plumbing lives in CLI tools like curl
-// and in undici's opt-in EnvHttpProxyAgent, neither of which this file touches -- so a
+// and in undici's opt-in EnvHttpProxyAgent, neither of which this command touches -- so a
 // `*_proxy` set for the rest of the shell cannot intercept this loopback call. There is
 // no `--noproxy` to remember here because there is no proxy path to opt out of.
 
-import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { readSecret, secretPath, daemonPort, SECRET_HEADER } from '../src/secret.mjs';
+import { readSecret, secretPath, daemonPort } from '../src/secret.mjs';
+import { die, postJson } from '../src/mint-handoff.mjs';
 
 const PORT = daemonPort();
 const BASE_URL = `http://127.0.0.1:${PORT}`;
 const OPEN_CMD = process.env.CLAUDE_BOARD_OPEN_CMD || 'open';
-const REQUEST_TIMEOUT_MS = Number(process.env.CLAUDE_BOARD_POST_TIMEOUT_MS) || 10_000;
-
-function die(...lines) {
-  console.error(lines.join('\n'));
-  process.exit(1);
-}
 
 // Checked before any network call, same as bin/authorize.mjs: a caller with no
 // secret can never post, so there is nothing to gain from waiting on a socket first.
@@ -75,43 +69,9 @@ const payload = {
   blocks: (sample.blocks || []).map(toPostableBlock),
 };
 
-/** POST a JSON body and resolve the parsed response, or reject with a tagged error.
- * Same shape as bin/authorize.mjs's postJson. */
-function postJson(urlStr, body) {
-  return new Promise((resolve, reject) => {
-    const u = new URL(urlStr);
-    const data = JSON.stringify(body);
-    const req = http.request({
-      hostname: u.hostname,
-      port: u.port,
-      path: u.pathname,
-      method: 'POST',
-      headers: {
-        host: u.host,
-        'content-type': 'application/json',
-        'content-length': Buffer.byteLength(data),
-        [SECRET_HEADER]: secret,
-      },
-    }, res => {
-      const chunks = [];
-      res.on('data', c => chunks.push(c));
-      res.on('end', () => {
-        const text = Buffer.concat(chunks).toString('utf8');
-        if (res.statusCode >= 400) {
-          return reject(Object.assign(new Error(text || `daemon responded ${res.statusCode}`), { statusCode: res.statusCode }));
-        }
-        try { resolve(JSON.parse(text || '{}')); } catch (err) { reject(new Error(`invalid JSON from daemon: ${err.message}`)); }
-      });
-    });
-    req.setTimeout(REQUEST_TIMEOUT_MS, () => req.destroy(new Error('daemon request timed out')));
-    req.on('error', reject);
-    req.end(data);
-  });
-}
-
 let result;
 try {
-  result = await postJson(`${BASE_URL}/api/board`, payload);
+  result = await postJson(`${BASE_URL}/api/board`, payload, secret);
 } catch (err) {
   if (err.statusCode === 401) {
     die(

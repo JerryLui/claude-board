@@ -48,7 +48,7 @@ import { buildSteps, stepsToPath, pathToSteps, resolveSteps, videoIdentity, vide
 import { grammarFor, Prism } from './vendor/prism/index.mjs';
 import { MERMAID_ASSET } from './vendor/mermaid/index.mjs';
 import {
-  roundPageLabel, isPageRound, roundHasCommentable,
+  roundPageLabel, foldRounds, PAGER_GAP_LABEL, isPageRound, roundHasCommentable,
   roundIsAwaitedOpen, pageBoardPillMeta,
   ANSWER_CHIP_LABEL,
 } from './badge.mjs';
@@ -651,11 +651,15 @@ function renderTextWidget(block, answer, historical) {
   return `<textarea class="answer-textarea" data-answer-for="${escAttr(block.id)}" rows="8" placeholder="Write your answer…"${historical ? ' disabled' : ''}>${escHtml(value)}</textarea>${imageTray(`answer:${block.id}`, historical, false)}`;
 }
 
-/** Drag-to-rank: every option, in the stored order if there is a prior answer, else
- * options order. The answer is the ordered array of option labels; the drag gesture
- * itself lives in src/ui.mjs and is not asserted by the node checks (that check
- * "is not automated and should not pretend to
- * be"), but the markup and data shape here are. */
+function rankMoveButton(direction, label, disabled) {
+  const points = direction === 'up' ? '6 15 12 9 18 15' : '6 9 12 15 18 9';
+  return `<button type="button" class="rank-move" data-move="${direction}" aria-label="${escAttr(`Move ${label} ${direction}`)}"${disabled ? ' disabled' : ''}><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="${points}"/></svg></button>`;
+}
+
+/** Ranking: every option, in the stored order if there is a prior answer, else
+ * options order. The answer is the ordered array of option labels; the moves (the
+ * up and down buttons, and the drag, whose gesture no node check drives) live in
+ * src/ui.mjs. */
 function renderRankWidget(block, answer, historical) {
   const hasOrder = answer && Array.isArray(answer.choice) && answer.choice.length;
   const order = hasOrder ? answer.choice : block.options.map(o => o.label);
@@ -666,6 +670,7 @@ function renderRankWidget(block, answer, historical) {
       <span class="rank-index">${i + 1}</span>
       <span class="rank-grip" aria-hidden="true"><svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg></span>
       ${renderOptionBody(opt)}
+      <span class="rank-moves">${rankMoveButton('up', label, historical || i === 0)}${rankMoveButton('down', label, historical || i === order.length - 1)}</span>
     </li>`;
   }).join('');
   return `<ul class="rank-list" data-question-id="${escAttr(block.id)}">${items}</ul>`;
@@ -865,7 +870,7 @@ function renderContextInner(block, board, commentsByBlock, historical, fold = NO
       // applySubmit backfilled `unanswered` and the packet told the agent the reviewer
       // left blank a question they were never shown -- the same outcome src/board.mjs
       // refuses an unknown widget for. Worse, bin/mcp.mjs counts it as a question and
-      // blocks the ask on /wait, so the call sat for the full 40-minute cap on something
+      // blocks the ask on /wait, so the call sat for the full wall-clock cap on something
       // the page could not draw. The identical block under a stage-free question always
       // rendered fine; only this fork dropped it.
       return renderBlock(block, board, commentsByBlock, historical);
@@ -1049,7 +1054,7 @@ function renderQuestionBlock(block, board, commentsByBlock, historical) {
  * already says. */
 const PICKS_LINE = {
   multi: 'Pick as many as apply.',
-  rank: 'Drag them into order, most important first.',
+  rank: 'Drag or use the arrows to put them in order, most important first.',
 };
 
 function answerChip(status) {
@@ -2767,6 +2772,13 @@ export function stageCarriesMermaid(html) {
  *    carrying `id="mermaid"` becomes `window.mermaid` for free, and so does half
  *    a truncated download, so the served surface is detected by API shape and
  *    never by truthiness.
+ *  - The engine appends an empty `.mermaidTooltip` to the body, absolutely
+ *    positioned with no `top` or `left`, so it lands 6px past the content and is
+ *    measured only while the document overflows: the frame flips between two
+ *    heights for good. The rule parks it at the start; the engine's own inline
+ *    `top` and `left` place a tooltip that is shown. The script adds it, because
+ *    stageOwnSource (src/round-export.mjs) reads a stage's lent library as these
+ *    two tags and nothing else.
  *  - The inbound check is `ev.source === window.parent`, not an origin
  *    comparison: a stage cannot know the parent's origin in advance (any port,
  *    or `file://`), and no script in any window can make `event.source` equal a
@@ -2813,7 +2825,10 @@ export function stageMermaidPrelude() {
   var CB = 'cb-stage', pending = {}, seq = 0, config = {}, timer = null, ticks = 0;
   var RESEND_MS = 150, RESEND_TICKS = 80;
   function shaped(m) { return !!m && typeof m.run === 'function' && typeof m.initialize === 'function'; }
-  if (shaped(window.mermaid)) return;
+  if (shaped(window.mermaid)) {
+    document.head.insertAdjacentHTML('beforeend', '<style>.mermaidTooltip{top:0;left:0}</style>');
+    return;
+  }
   function post(msg) {
     try { msg.cb = CB; window.parent.postMessage(msg, '*'); return true; } catch (e) { return false; }
   }
@@ -3473,6 +3488,10 @@ function roundOwesAnswer(board, round) {
   return board.blocks.some(b => b.round === round.n && b.kind === 'question');
 }
 
+/** More entries than the pager's 560px dock can ever hold on one line: each is at
+ * least 30px wide and 2px from the next (src/styles.mjs), beside the row's label. */
+const PAGER_MOST_ENTRIES = 15;
+
 /** The board's pages, named, at the bottom of the page (ADR.md entry 42). Three
  * always-present controls, never two alternatives (criterion 26): the two edge
  * chevrons step one round, the pill in the middle names every round and jumps
@@ -3487,22 +3506,37 @@ function roundOwesAnswer(board, round) {
  * chevrons nested inside would be pinned to the pill's box instead of the
  * viewport's edges.
  *
+ * Every entry is in the markup, and one the fold hides carries `hidden`: whether
+ * the row fits is the client's measurement (fitPager, src/ui.mjs), so first paint
+ * folds only a board that can fit no window. Any other paints every number, on as
+ * many lines as they take.
+ *
  * "Owes an answer" is a round that is not yet sent AND actually asks something:
  * the same rule the index badge counts by, so a page-board
  * round -- open forever, since nothing sends it -- is never dotted as though
  * the reviewer were holding it up. */
 function roundPagerMarkup(board, currentN) {
   const rounds = board.rounds || [];
-  const pages = rounds.map(r => {
+  const numbers = rounds.map(r => r.n);
+  const owed = rounds.filter(r => roundOwesAnswer(board, r)).map(r => r.n);
+  const items = rounds.length > PAGER_MOST_ENTRIES
+    ? foldRounds({ rounds: numbers, current: currentN, owed, narrow: false, oneGap: false })
+    : numbers;
+  const entry = r => {
     const classes = ['round-page'];
     if (r.n === currentN) classes.push('round-page-current');
-    if (roundOwesAnswer(board, r)) classes.push('round-page-owed');
+    if (owed.includes(r.n)) classes.push('round-page-owed');
     // Bare numeral on the face; the round's full NAME is its accessible name and
     // its hover title, so neither a screen reader nor a mouse loses what the
     // caption below only ever says about the current round. See roundNumberLabel
     // (src/badge.mjs) for why a name stopped being printed on the face at all.
     const full = roundPageLabel(r.n, r.title || '');
-    return `<button type="button" class="${classes.join(' ')}" data-round="${r.n}" title="${escAttr(full)}" aria-label="${escAttr(full)}"${r.n === currentN ? ' aria-current="page"' : ''}>${r.n}</button>`;
+    return `<button type="button" class="${classes.join(' ')}" data-round="${r.n}" title="${escAttr(full)}" aria-label="${escAttr(full)}"${r.n === currentN ? ' aria-current="page"' : ''}${items.includes(r.n) ? '' : ' hidden'}>${r.n}</button>`;
+  };
+  const gap = `<button type="button" class="round-gap" title="${PAGER_GAP_LABEL}" aria-label="${PAGER_GAP_LABEL}">…</button>`;
+  const pages = rounds.map(r => {
+    const at = items.indexOf(r.n);
+    return (at > 0 && items[at - 1] === 'gap' ? gap : '') + entry(r);
   }).join('');
   const first = rounds.length ? rounds[0].n : 1;
   const last = rounds.length ? rounds[rounds.length - 1].n : 1;
@@ -3679,7 +3713,7 @@ export function renderBoardPage(board, { stageHtml = false } = {}) {
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="${escAttr(CSP)}">
 <title>${escHtml(board.title || 'board')}</title>
 ${faviconLink}
@@ -3745,8 +3779,58 @@ ${roundPagerMarkup(board, initialRoundInView)}
  * absolute path or username either, for the same reason. Self-contained (inline style
  * only, no script, no network) so it renders under the same locked-down CSP every board
  * page carries. */
-export function renderRefusalPage(recoveryCommand) {
-  // The seven tokens this page actually uses, emitted inline from the real palettes
+export function renderRefusalPage(recoveryCommand, { away = false } = {}) {
+  if (away) {
+    return standalonePage({
+      title: 'claude-board — this device is not signed in',
+      body: `  <h1>This device is not signed in</h1>
+  <p>Open a fresh sign-in link from your Mac. A link works once, for 10 minutes. Run this in
+  the claude-board folder there and open what it prints on this device:</p>
+  <pre><code>${escHtml(recoveryCommand)}</code></pre>`,
+    });
+  }
+  return standalonePage({
+    title: 'claude-board — this browser is not authorized',
+    body: `  <h1>This browser is not authorized</h1>
+  <p>claude-board serves boards only to a browser it has handed a credential to. This
+  one is holding none — a cleared cookie jar, a different browser, or a fresh profile.</p>
+  <p>Run this to authorize it. It opens a tab and nothing else changes: no reinstall, no
+  restart, and your boards are untouched.</p>
+  <pre><code>${escHtml(recoveryCommand)}</code></pre>
+  <p class="muted">Add <code>--print</code> to get a link to paste into some other
+  browser instead of opening your default one.</p>`,
+  });
+}
+
+/** What a list answers a signed-in browser another page sent there. The address is text and the
+ * page holds nothing to press: a double click baited on that other page would land its second
+ * click here, and a link would carry it into the list, whose cards answer in one click. */
+export function renderListFromElsewherePage(address) {
+  return standalonePage({
+    title: 'claude-board — you are signed in here',
+    body: `  <h1>You are signed in here</h1>
+  <p>Another page sent you here, so the list stays closed. Type this address in the address
+  bar, or use your bookmark.</p>
+  <pre style="white-space: pre-wrap; overflow-wrap: anywhere"><code>${escHtml(address)}</code></pre>`,
+  });
+}
+
+export const SIGN_IN_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
+
+/** What an away link opens on. The form names no address, so it posts to the page's own and
+ * the token is nowhere in the markup. */
+export function renderSignInPage() {
+  return standalonePage({
+    title: 'claude-board — sign in',
+    csp: SIGN_IN_CSP,
+    body: `  <h1>Sign in to claude-board</h1>
+  <p>This device will be able to read and answer your boards.</p>
+  <form method="post"><button>Sign this device in</button></form>`,
+  });
+}
+
+function standalonePage({ title, body, csp = CSP }) {
+  // The tokens these pages actually use, emitted inline from the real palettes
   // rather than hand-copied out of them. Self-containment (see above) rules out a
   // link to src/styles.mjs's stylesheet, but it does not rule out reading the same
   // data at render time -- and that is the difference between a page that cannot
@@ -3757,15 +3841,15 @@ export function renderRefusalPage(recoveryCommand) {
   // did not match. The stage keeps its literal because it renders on a surface the
   // page's tokens deliberately never reach; this page renders on the page's own
   // background, so it has no such excuse.
-  const tokens = ['--bg', '--ink', '--ink-2', '--panel-2', '--hairline-2', '--code-ink', '--muted'];
+  const tokens = ['--bg', '--ink', '--ink-2', '--panel-2', '--hairline-2', '--code-ink', '--muted', '--accent', '--accent-ink'];
   const block = (palette) => tokens.map(t => `    ${t}: ${palette[t]};`).join('\n');
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="${escAttr(CSP)}">
-<title>claude-board — this browser is not authorized</title>
+<meta http-equiv="Content-Security-Policy" content="${escAttr(csp)}">
+<title>${escHtml(title)}</title>
 ${faviconLink}
 <style>
   /* The board's saved theme is unreachable here -- it lives in localStorage,
@@ -3792,18 +3876,12 @@ ${block(palettes.light).replace(/^/gm, '  ')}
   pre { background: var(--panel-2); border: 1px solid var(--hairline-2); border-radius: 6px; padding: .85rem 1rem; overflow-x: auto; user-select: all; }
   code { font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--code-ink); }
   .muted { color: var(--muted); font-size: .9rem; }
+  button { min-height: 48px; padding: 0 1.5rem; border: 0; border-radius: 6px; background: var(--accent); color: var(--accent-ink); font: inherit; font-weight: 600; cursor: pointer; }
 </style>
 </head>
 <body>
 <main>
-  <h1>This browser is not authorized</h1>
-  <p>claude-board serves boards only to a browser it has handed a credential to. This
-  one is holding none — a cleared cookie jar, a different browser, or a fresh profile.</p>
-  <p>Run this to authorize it. It opens a tab and nothing else changes: no reinstall, no
-  restart, and your boards are untouched.</p>
-  <pre><code>${escHtml(recoveryCommand)}</code></pre>
-  <p class="muted">Add <code>--print</code> to get a link to paste into some other
-  browser instead of opening your default one.</p>
+${body}
 </main>
 </body>
 </html>

@@ -34,7 +34,7 @@ import { recoveryCommand, shellQuote, WAIT_CEILING_MS, WATCH_INTERVAL_MS } from 
 import { startServer } from '../src/server.mjs';
 // The delivery ledger's own field name, read from the product rather than restated: the
 // `read` checks below assert that reading a board never writes one.
-import { ANSWERS_DELIVERED } from '../src/board.mjs';
+import { ANSWERS_DELIVERED, addRound, createBoard, handOverRounds } from '../src/board.mjs';
 import { runCheck } from './run.mjs';
 import {
   check, runMain, repoRoot, sleep, withTimeout, withEnv, freePort, secretHome, writeHeaders, rawGet,
@@ -662,7 +662,7 @@ async function main() {
 
   await check('when both processes share one cap -- what a shipped install has -- the DAEMON times out first and records that the wait died', async () => {
     // The shim and the daemon read the same CLAUDE_BOARD_TIMEOUT_MS and default to
-    // the same 40 minutes; install.sh writes it to neither. The shim used to start its
+    // the same 50 minutes; install.sh writes it to neither. The shim used to start its
     // deadline at blockingWait entry and the daemon only after connect and parse, so
     // the shim always won by the request latency, aborted, and the daemon returned
     // early on a dead client -- leaving its entire timeout branch (the expiry
@@ -701,6 +701,45 @@ async function main() {
   });
 
   // --- discuss path: returns immediately with partial answers ------------
+
+  await check('with no CLAUDE_BOARD_TIMEOUT_MS set, the board document, the daemon, the shim and the launcher all default to one 50-minute wait', async () => {
+    const fifty = 50 * 60 * 1000;
+    const question = prompt => ({ kind: 'question', prompt, widget: 'single', options: [{ label: 'Yes' }] });
+    const waitOf = round => Date.parse(round.awaitDeadline) - Date.parse(round.postedAt);
+
+    const board = createBoard({ title: 'One wait', blocks: [question('First?')], session: { id: 'giver' } });
+    addRound(board, { blocks: [question('Second?')], session: { id: 'giver' } });
+    const minted = board.rounds.map(waitOf);
+    const now = Date.now();
+    handOverRounds(board, { id: 'giver' }, { id: 'taker' }, { now });
+    const reopened = board.rounds.map(r => Date.parse(r.awaitDeadline) - now);
+
+    const dhome = tempHome('default-wait');
+    const dport = await freePort();
+    const daemon = await startDaemonProcess(dport, dhome, { CLAUDE_BOARD_TIMEOUT_MS: undefined });
+    const shim = spawnShim({ ...baseEnv, CLAUDE_BOARD_PORT: String(dport), CLAUDE_BOARD_TIMEOUT_MS: undefined });
+    let stored;
+    try {
+      const posted = await (await fetch(`http://127.0.0.1:${dport}/api/board`, {
+        method: 'POST',
+        headers: writeHeaders(SECRET),
+        body: JSON.stringify({ title: 'One wait', blocks: [question('Daemon?')] }),
+      })).json();
+      stored = JSON.parse(readFileSync(path.join(dhome, 'boards', `${posted.boardId}.json`), 'utf8')).rounds[0];
+      await shim.request('initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'check', version: '0' } });
+    } finally {
+      shim.close();
+      try { daemon.kill('SIGKILL'); } catch { /* already gone */ }
+    }
+    const shimWait = shim.stderr.match(/shim ready \(.*, timeout (\S+),/)?.[1];
+    const launcher = readFileSync(path.join(repoRoot, 'bin', 'launcher.c'), 'utf8');
+    const clickSeconds = Number(launcher.match(/^#define CLICK_SECONDS_DEFAULT (\d+)$/m)?.[1]);
+
+    assert.deepEqual(
+      { minted, reopened, daemon: waitOf(stored), shim: shimWait, launcher: clickSeconds * 1000 },
+      { minted: [fifty, fifty], reopened: [fifty, fifty], daemon: fifty, shim: '50m', launcher: fifty },
+    );
+  });
 
   await check('discuss-in-chat returns immediately with partial answers and a stop-posting status', async () => {
     const knownIds = listBoardIds(home);

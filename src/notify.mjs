@@ -192,10 +192,10 @@ export const CLICK_LIFETIME_MAX_MS = MAX_CLICK_SECONDS * 1000;
 /** `null` means "this banner gets no click", and the caller must then send no URL either
  * -- see `fire` below. Both cases that produce it are the same case: there is no bound
  * to give the process, and an ABSENT argv slot is not "no click", it is the launcher's
- * compiled-in default of forty minutes. A round with an unparseable `awaitDeadline` is
+ * compiled-in default of fifty minutes. A round with an unparseable `awaitDeadline` is
  * awaited forever as far as `roundIsAwaitedOpen` is concerned (it reads `status` and
  * `awaited`, and `closeLapsedAwaitedRounds` can only sweep a deadline it can parse), so
- * omitting the slot bought exactly that: a forty-minute clickable banner for a round with
+ * omitting the slot bought exactly that: a fifty-minute clickable banner for a round with
  * no bound at all. Sending `'1'` instead is not the fix either -- the process withdraws
  * its own notification on the way out, so a one-second lifetime is a banner that vanishes
  * a second after it lands. */
@@ -492,7 +492,7 @@ function fire(phase, cue, name, url = null, port = null, deadlineAt = null) {
     // The URL, the port and the lifetime cross together or not at all.
     //
     // A URL with no lifetime is not "a click with no deadline", it is a click bounded by
-    // the launcher's own compiled-in forty minutes -- a promise this side cannot keep for
+    // the launcher's own compiled-in fifty minutes -- a promise this side cannot keep for
     // a round whose deadline it could not read. And a URL with no port is one the
     // launcher's `cb_is_board_url` cannot check against the socket the daemon actually
     // bound, which is the whole defence against a poisoned `Host` steering the click.

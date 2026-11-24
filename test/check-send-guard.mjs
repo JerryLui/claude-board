@@ -413,6 +413,45 @@ check('Defer is the one way to leave a rank open: a deferred untouched rank post
   assert.deepEqual(calls[0].body.answers[0].choice, ['A', 'B', 'C']);
 });
 
+check('the up and down buttons reorder a rank: rows, numbers and the posted order follow, the first up and last down are disabled, and focus stays on the row moved', () => {
+  const document = loadRankAndSingle();
+  answerSingle(openBlocks(document)[1], 'Yes');
+  const list = document.querySelector('.rank-list');
+  const button = (label, direction) => list.querySelectorAll('.rank-move').find(b => b.getAttribute('aria-label') === `Move ${label} ${direction}`);
+  const state = () => ({
+    rows: list.querySelectorAll('li').map(li => `${li.querySelector('.rank-index').textContent} ${li.getAttribute('data-choice')}`),
+    disabled: list.querySelectorAll('.rank-move').filter(b => b.disabled).map(b => b.getAttribute('aria-label')),
+    focused: document.activeElement.getAttribute('aria-label'),
+  });
+  assert.deepEqual(state(), { rows: ['1 A', '2 B', '3 C'], disabled: ['Move A up', 'Move C down'], focused: null });
+  for (const b of list.querySelectorAll('.rank-move')) assert.equal(b.getAttribute('type'), 'button');
+
+  const press = (label, direction) => button(label, direction).dispatchEvent(new StandInEvent('click'));
+  press('C', 'up');
+  assert.deepEqual(state(), { rows: ['1 A', '2 C', '3 B'], disabled: ['Move A up', 'Move B down'], focused: 'Move C up' });
+  press('C', 'up');
+  assert.deepEqual(state(), { rows: ['1 C', '2 A', '3 B'], disabled: ['Move C up', 'Move B down'], focused: 'Move C down' },
+    'the pressed button is disabled at the top, so focus goes to its sibling');
+  press('A', 'down');
+  assert.deepEqual(state(), { rows: ['1 C', '2 B', '3 A'], disabled: ['Move C up', 'Move A down'], focused: 'Move A up' });
+
+  const calls = withFetchCapture(() => document.getElementById('send-btn').dispatchEvent(new StandInEvent('click')));
+  assert.equal(calls.length, 1, 'nothing is outstanding, so the first press must submit');
+  assert.deepEqual(calls[0].body.answers[0].choice, ['C', 'B', 'A']);
+});
+
+check('a drop renumbers a rank and moves its disabled buttons as a press does', () => {
+  const document = loadRankAndSingle();
+  const list = document.querySelector('.rank-list');
+  const rows = list.querySelectorAll('li');
+  rows[0].dispatchEvent(new StandInEvent('dragstart'));
+  list.insertBefore(rows[0], null);
+  list.dispatchEvent(new StandInEvent('dragend'));
+
+  assert.deepEqual(list.querySelectorAll('.rank-index').map(el => el.textContent), ['1', '2', '3']);
+  assert.deepEqual(list.querySelectorAll('.rank-move').filter(b => b.disabled).map(b => b.getAttribute('aria-label')), ['Move B up', 'Move A down']);
+});
+
 check('a rank arriving in a round pushed over SSE is answered by the order it shows too', () => {
   const board = createBoard({ title: 'Rank over SSE', blocks: [singleSpec()] });
   const { document, es: captured } = loadBoardWithEventSource(renderBoardPage(board));

@@ -174,7 +174,7 @@ the call immediately with whatever is filled in and a status telling the agent t
 boards. Closing the tab is deliberately not a cancel — the board stays live and the URL reopens —
 because browser disconnects are unreliable, a sleeping laptop reading the same as a deliberate
 close. A wall-clock cap returns no-response rather than letting the call sit for the MCP default of
-roughly 28 hours; its value is `ADR.md` entry 47's.
+roughly 28 hours; its value is `ADR.md` entry 157's.
 
 **Node, zero dependencies, its own repository**, cloned per machine and run from the clone, with
 board JSON and emitted pages outside it so review content is never committed. Rejected: living
@@ -948,8 +948,9 @@ host, which the same policy must admit for a mock's own web addresses.
 
 - Live revision of the artifact after feedback. Lavish edits the page in place; we re-render from
   the store.
-- Anything multi-user or remote. Authentication is not in this list: reads are gated, per
-  `SECURITY.md`.
+- Anything multi-user, or on the public internet. The owner's own other machines came later, by an
+  SSH tunnel (ADR 118) and over Tailscale (ADR 158). Authentication is not in this list: reads are
+  gated, per `SECURITY.md`.
 - Server-side mermaid rendering, and therefore fully offline diagrams.
 - Converting `/diagram`, which emits markdown rather than a page.
 - Migrating the other commands, and whether `/triage` renders its own board or only consumes

@@ -301,6 +301,23 @@
   var roundPageLabel = function roundPageLabel(n, title) {
   return title ? roundNumberLabel(n) + ' · ' + title : roundNumberLabel(n);
 };
+  var foldRounds = function foldRounds({ rounds, current, owed, narrow, oneGap }) {
+  var at = rounds.indexOf(current);
+  var from = at - (narrow ? 0 : 2);
+  var to = at + (narrow ? 1 : 2);
+  var items = [];
+  var run = [];
+  rounds.forEach(function (n, i) {
+    var kept = i === 0 || i === rounds.length - 1 || (i >= from && i <= to) || owed.indexOf(n) !== -1;
+    if (!kept) { run.push(n); return; }
+    if (run.length === 1 && !oneGap) items.push(run[0]);
+    else if (run.length && !(oneGap && items.indexOf('gap') !== -1)) items.push('gap');
+    run = [];
+    items.push(n);
+  });
+  return items;
+};
+  var PAGER_GAP_LABEL = "Show all rounds";
   var isPageRound = function isPageRound(blocks) {
   return blocks.length === 1 && blocks[0].kind === 'html' && !blocks[0].error;
 };
@@ -4172,19 +4189,50 @@
     });
   });
 
-  // Native HTML5 drag and drop. The gesture itself can't be asserted without a
-  // browser; what matters for the node checks is that the answer ends up as the
-  // ordered array of option labels, read from DOM order on drop.
+  // Native HTML5 drag and drop, beside an up and a down button per row. The drag
+  // gesture itself can't be asserted without a browser; what matters for the node
+  // checks is that the answer ends up as the ordered array of option labels, read
+  // from DOM order after a drop or a press.
 
   function rankOrder(list) {
     return qsa('li', list).map(function (li) { return li.getAttribute('data-choice'); });
   }
 
   function renumberRankList(list) {
-    qsa('li', list).forEach(function (li, i) {
+    qsa('li', list).forEach(function (li, i, items) {
       var idx = li.querySelector('.rank-index');
       if (idx) idx.textContent = String(i + 1);
+      rankMoveBtn(li, 'up').disabled = i === 0;
+      rankMoveBtn(li, 'down').disabled = i === items.length - 1;
     });
+  }
+
+  function rankMoveBtn(li, direction) {
+    return li.querySelector('.rank-move[data-move="' + direction + '"]');
+  }
+
+  function settleRank(list) {
+    selections[list.getAttribute('data-question-id')] = rankOrder(list);
+    renumberRankList(list);
+    updateQuestionsLeftPill();
+    reportActivity(list);
+  }
+
+  // The neighbour is what moves past the pressed row: a row taken out of the
+  // document and put back loses the focus inside it.
+  function moveRankRow(list, li, direction) {
+    var items = qsa('li', list);
+    var i = items.indexOf(li);
+    if (direction === 'up') {
+      if (i === 0) return;
+      list.insertBefore(items[i - 1], items[i + 1] || null);
+    } else {
+      if (i === items.length - 1) return;
+      list.insertBefore(items[i + 1], li);
+    }
+    settleRank(list);
+    var pressed = rankMoveBtn(li, direction);
+    (pressed.disabled ? rankMoveBtn(li, direction === 'up' ? 'down' : 'up') : pressed).focus();
   }
 
   qsa('.rank-list', root).forEach(function (list) {
@@ -4204,10 +4252,17 @@
       if (readonly || !dragging) return;
       dragging.classList.remove('dragging');
       dragging = null;
-      selections[qid] = rankOrder(list);
-      renumberRankList(list);
-      updateQuestionsLeftPill();
-      reportActivity(list);
+      settleRank(list);
+    });
+    qsa('.rank-move', list).forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        // Same guard, same Notice -- see the .choice-single wiring above.
+        if (readonly || commentMode) {
+          if (commentMode && !readonly) raiseLockedNotice();
+          return;
+        }
+        moveRankRow(list, btn.closest('li'), btn.getAttribute('data-move'));
+      });
     });
     list.addEventListener('dragover', function (ev) {
       if (readonly || !dragging) return;
@@ -4545,7 +4600,7 @@
   // Everything in a round that is a control or a pin rather than what the round
   // said. The round's chip line goes too: the file's own head names the round.
   var EXPORT_DROP = '.round-chips, .round-end, .comment-btn, .comment-form, .comment-target, .pin-layer, '
-    + '.pull-out, .stage-fold, .fold-toggle, .btn-defer, .rank-grip, .question-picks, .note-head, '
+    + '.pull-out, .stage-fold, .fold-toggle, .btn-defer, .rank-grip, .rank-moves, .question-picks, .note-head, '
     + '.paste-hint, .thumb-remove, '
     + 'script, noscript, source, object, embed, base, meta';
   var nextExportDiagramId = 0;
@@ -6134,7 +6189,7 @@
    * these buttons' disabled state anyway). */
   function refreshPager() {
     var rounds = board.rounds || [];
-    var nav = document.querySelector('nav#round-pager');
+    var nav = pagerNav();
     if (nav) {
       rounds.forEach(function (r) {
         var btn = nav.querySelector('.round-page[data-round="' + r.n + '"]');
@@ -6221,6 +6276,109 @@
     if (!submitInFlight) setSendBarEnabled(currentPageSendable());
 
     refreshAwaitDisplay();
+    fitPager();
+  }
+
+  var pagerOpen = false;
+
+  function pagerNav() {
+    return document.querySelector('nav#round-pager');
+  }
+
+  function pagerEntry(nav, n) {
+    return nav.querySelector('.round-page[data-round="' + n + '"]');
+  }
+
+  function showPagerItems(nav, items) {
+    qsa('.round-gap', nav).forEach(function (gap) { gap.replaceWith(); });
+    qsa('.round-page', nav).forEach(function (btn) {
+      var at = items.indexOf(parseInt(btn.getAttribute('data-round'), 10));
+      if (at === -1) { btn.setAttribute('hidden', ''); return; }
+      btn.removeAttribute('hidden');
+      if (items[at - 1] !== 'gap') return;
+      var gap = document.createElement('button');
+      gap.setAttribute('type', 'button');
+      gap.className = 'round-gap';
+      gap.textContent = '…';
+      gap.setAttribute('title', PAGER_GAP_LABEL);
+      gap.setAttribute('aria-label', PAGER_GAP_LABEL);
+      nav.insertBefore(gap, btn);
+    });
+  }
+
+  /** The row wraps rather than overflows, so it fits while its last entry is on
+   * its first one's line. */
+  function pagerOnOneLine(nav) {
+    var shown = qsa('.round-page', nav).filter(function (btn) { return !btn.hasAttribute('hidden'); });
+    return shown.length < 2 || !(shown[shown.length - 1].offsetTop > shown[0].offsetTop);
+  }
+
+  /** Fold the pager to what its row can hold, measured on the page as it is now:
+   * every number while they fit, or while the reviewer has them open. */
+  function fitPager() {
+    var nav = pagerNav();
+    if (!nav) return;
+    var active = document.activeElement;
+    var focused = active && active.closest && active.closest('nav#round-pager') ? active : null;
+    var narrow = !!(window.matchMedia && window.matchMedia('(max-width: 560px)').matches);
+    var lede = nav.querySelector('.round-pager-lede');
+    if (lede && narrow) lede.setAttribute('hidden', '');
+    else if (lede) lede.removeAttribute('hidden');
+
+    var rounds = board.rounds || [];
+    var numbers = rounds.map(function (r) { return r.n; });
+    var fold = {
+      rounds: numbers,
+      current: currentRound,
+      owed: rounds.filter(roundOwesAnswer).map(function (r) { return r.n; }),
+      narrow: narrow,
+      oneGap: false,
+    };
+    showPagerItems(nav, numbers);
+    if (pagerOnOneLine(nav)) pagerOpen = false;
+    else if (!pagerOpen) {
+      showPagerItems(nav, foldRounds(fold));
+      if (narrow && !pagerOnOneLine(nav)) {
+        fold.oneGap = true;
+        showPagerItems(nav, foldRounds(fold));
+      }
+    }
+
+    var current = pagerEntry(nav, currentRound);
+    if (focused && (!focused.parentElement || focused.hasAttribute('hidden'))) {
+      var heir = (focused.classList.contains('round-gap') && nav.querySelector('.round-gap')) || current;
+      if (heir) heir.focus({ preventScroll: true });
+    }
+    if (current) {
+      var row = nav.getBoundingClientRect();
+      var box = current.getBoundingClientRect();
+      if (box.top < row.top) nav.scrollTop -= row.top - box.top;
+      else if (box.bottom > row.bottom) nav.scrollTop += box.bottom - row.bottom;
+    }
+    liftSendBar();
+  }
+
+  function openPager() {
+    var nav = pagerNav();
+    var revealed = qsa('.round-page', nav).filter(function (btn) { return btn.hasAttribute('hidden'); })[0];
+    pagerOpen = true;
+    fitPager();
+    if (revealed) revealed.focus({ preventScroll: true });
+  }
+
+  /** Where the dock reaches across to Send or Discuss, the bar holds them above it.
+   * Sideways only, which lifting them does not change. */
+  function liftSendBar() {
+    var dock = document.querySelector('div.round-pager-dock');
+    if (readonly || !sendBar || !dock) return;
+    var reach = dock.getBoundingClientRect();
+    var lifted = qsa('.btn-discuss, .btn-send', sendBar).some(function (btn) {
+      var box = btn.getBoundingClientRect();
+      return box.width > 0 && box.left < reach.right && reach.left < box.right;
+    });
+    if (lifted === sendBar.classList.contains('lifted')) return;
+    sendBar.classList.toggle('lifted', lifted);
+    redockSendBar();
   }
 
   /** Flip to round 'n'. The one writer of currentRound.
@@ -6362,7 +6520,7 @@
     // Measured at observe time rather than hardcoded, for the same reason
     // '--round-pager-dock-h' is measured: the bar grows a row on narrow
     // windows (the 560px breakpoint near the end of src/styles.mjs).
-    var barHeight = Math.round(sendBar.getBoundingClientRect().height);
+    var barHeight = sendBarDockHeight = Math.round(sendBar.getBoundingClientRect().height);
     sendBarDockObserver = new IntersectionObserver(function (entries) {
       var entry = entries[0];
       var intersecting = !!entry && entry.isIntersecting;
@@ -6371,6 +6529,14 @@
       updateQuestionsLeftPill();
     }, { rootMargin: '0px 0px -' + barHeight + 'px 0px' });
     sendBarDockObserver.observe(rail);
+  }
+
+  var sendBarDockHeight = 0;
+
+  /** The dock's margin is the bar's height, so it is taken again when that changes. */
+  function redockSendBar() {
+    if (!sendBarDockObserver) return;
+    if (Math.round(sendBar.getBoundingClientRect().height) !== sendBarDockHeight) setupSendBarDock();
   }
 
   /** '.page-comments' (a page board's Tray) has to clear
@@ -6433,8 +6599,11 @@
     var ro = new ResizeObserver(function () {
       write(dock.getBoundingClientRect().height);
       reportStageBand();
+      liftSendBar();
+      redockSendBar();
     });
     ro.observe(dock);
+    if (sendBar) qsa('.btn-discuss, .btn-send', sendBar).forEach(function (btn) { ro.observe(btn); });
   }
 
   setupSendBarDock();
@@ -6494,15 +6663,20 @@
   var roundNextBtn = document.querySelector('button#round-next');
   if (roundPrevBtn) roundPrevBtn.addEventListener('click', function () { stepRound(-1); });
   if (roundNextBtn) roundNextBtn.addEventListener('click', function () { stepRound(1); });
-  var roundPagerNav = document.querySelector('nav#round-pager');
+  var roundPagerNav = pagerNav();
   if (roundPagerNav) {
     roundPagerNav.addEventListener('click', function (ev) {
-      var btn = ev.target && ev.target.closest ? ev.target.closest('.round-page') : null;
+      if (!ev.target || !ev.target.closest) return;
+      if (ev.target.closest('.round-gap')) { openPager(); return; }
+      var btn = ev.target.closest('.round-page');
       if (!btn) return;
+      pagerOpen = false;
       var n = parseInt(btn.getAttribute('data-round'), 10);
       if (isFinite(n)) goToRound(n);
     });
   }
+  window.addEventListener('resize', fitPager);
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(fitPager);
 
   /** Go to the round that still needs an answer -- now a page flip, not a
    * scroll (ADR.md entry 42). Inert exactly when that page is already the one

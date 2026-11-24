@@ -115,7 +115,7 @@ const announcedAt = boardId => (bannerOn(boardId) || {}).at ?? null;
 // Layer 1: the rule itself, with a fake hub and a recording notifier.
 // ====================================================================================
 
-const AWAIT_MS = 40 * 60 * 1000;
+const AWAIT_MS = 50 * 60 * 1000;
 const QUESTION = prompt => ({ kind: 'question', prompt, widget: 'single', options: [{ label: 'Yes' }] });
 
 /** A real board document on disk: awaited (a question round) unless told otherwise.
@@ -1140,7 +1140,7 @@ async function layerOne() {
     // withdrew a banner about round 1 when round 2 was answered -- and then the record
     // still stood, because round 1 was still awaited, so the suppression rule itself
     // forbade a replacement. The reviewer lost the signal for a round still waiting, for
-    // the rest of its forty minutes.
+    // the rest of its wait.
     const { banners, withdrawn, watch } = stand();
     const board = seedBoard();                          // round 1, awaited
     addAwaitedRound(board.id, 'a second, awaited too?'); // round 2, awaited

@@ -2843,7 +2843,7 @@ check('render markup: single, multi-select, text, rank and defer carry the data 
   assert.ok(markup.includes('data-widget="rank"'));
 });
 
-check('the rank widget renders options in the stored order when there is a prior answer', () => {
+check('the rank widget renders options in the stored order when there is a prior answer, its move buttons disabled once sent', () => {
   const board = createBoard({
     title: 'Rank order',
     blocks: [{ kind: 'question', prompt: 'Order these', widget: 'rank', options: [{ label: 'A' }, { label: 'B' }, { label: 'C' }] }],
@@ -2853,6 +2853,8 @@ check('the rank widget renders options in the stored order when there is a prior
   const markup = renderedMarkup(renderBoardPage(board));
   const order = [...markup.matchAll(/data-choice="([^"]+)"/g)].map(m => m[1]);
   assert.deepEqual(order, ['C', 'A', 'B']);
+  assert.equal(parseHTML(markup).querySelectorAll('.rank-move:not([disabled])').length, 0, 'a sent rank takes no move');
+  assert.equal(parseHTML(markup).querySelectorAll('.rank-move').length, 6);
 });
 
 // --- a sent round, on its own page ---------------------------------------
@@ -4086,8 +4088,8 @@ check('every ui.mjs listener that mutates answer/comment state or submits guards
   // route, differing only in `action`) rather than inline in a click listener --
   // the listeners that reach it must still be as inert in readonly as the ones
   // that write selections/notes/deferred directly.
-  const mutators = bodies.filter(b => /selections\[|notes\[|deferred\[|pendingComments\.push|fetch\(|submitBoard\(/.test(b));
-  assert.ok(mutators.length >= 9, `expected at least 9 mutating/submitting listeners, found ${mutators.length}`);
+  const mutators = bodies.filter(b => /selections\[|notes\[|deferred\[|pendingComments\.push|fetch\(|submitBoard\(|settleRank\(|moveRankRow\(/.test(b));
+  assert.ok(mutators.length >= 10, `expected at least 10 mutating/submitting listeners, found ${mutators.length}`);
   for (const b of mutators) {
     assert.ok(/\breadonly\b/.test(b), `listener mutates state without checking readonly:\n${b}`);
   }
@@ -8317,6 +8319,25 @@ check('a handoff expires strictly, not on the boundary', () => {
   assert.equal(store.consume(b.token), null, 'dead at exactly the deadline, not one tick after');
 });
 
+check('a handoff lives as long as its own mint says, and is redeemed on the origin it was minted for alone', () => {
+  let now = 0;
+  const store = createHandoffStore({ ttlMs: 1000, now: () => now });
+  const own = store.mint('/', { ttlMs: 600_000, origin: 'away' });
+  const plain = store.mint('/');
+  now = 599_999;
+  assert.equal(store.consume(plain.token), null, 'the store\'s own lifetime still ends the rest');
+  assert.equal(store.consume(own.token, 'away')?.target, '/');
+  for (const [minted, asked] of [['away', 'loopback'], ['away', undefined], ['loopback', 'away'], [undefined, 'away']]) {
+    const { token } = store.mint('/', { origin: minted });
+    assert.equal(store.consume(token, asked), null, `minted for ${minted}, asked on ${asked}`);
+    assert.equal(store.consume(token, minted), null, 'and the asking spent it');
+  }
+  const looked = store.mint('/', { origin: 'away' });
+  assert.equal(store.peek(looked.token, 'away')?.target, '/');
+  assert.equal(store.peek(looked.token, 'loopback'), null, 'a look on the wrong origin');
+  assert.equal(store.consume(looked.token, 'away'), null, 'spends it too');
+});
+
 check('minting prunes expired handoffs, so a hammered route cannot grow the map', () => {
   let now = 0;
   const store = createHandoffStore({ ttlMs: 100, now: () => now });
@@ -10903,7 +10924,7 @@ check('a question that takes several picks says so in plain words under its prom
     return line ? line.textContent : null;
   };
   assert.equal(picks('multi'), 'Pick as many as apply.');
-  assert.equal(picks('rank'), 'Drag them into order, most important first.');
+  assert.equal(picks('rank'), 'Drag or use the arrows to put them in order, most important first.');
   assert.equal(picks('single'), null);
   assert.equal(picks('text'), null);
 });

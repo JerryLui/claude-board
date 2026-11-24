@@ -14,7 +14,9 @@
 // with a real mouse, plain or with Ctrl, Shift or Alt held, asks once and then sends its
 // order, its Stop and Keep on one line, while a Cmd double-press sends one order with no
 // question; a waiting merge's summary, the brief's digest, shows whole, and its Merge opens
-// the brief scrolled to its merge question with the round left waiting. Layout and a real press, which the DOM stand-in has none of (QUIRKS.md "The DOM
+// the brief scrolled to its merge question with the round left waiting; and on a 390px touch screen
+// both views are one column with nothing scrolling sideways and every control at least 44px,
+// the Stop question, a card's note and the settings panel too. Layout and a real press, which the DOM stand-in has none of (QUIRKS.md "The DOM
 // stand-in's ceilings"): test/check-missions-view.mjs holds the markup and the requests.
 //
 // NOT wired into test/run.mjs's `checks` array, on purpose: that suite has to pass on a
@@ -33,7 +35,7 @@ import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { sessionToken } from '../src/secret.mjs';
 import { deadPid, runMain, skipFile, sleep } from './support.mjs';
-import { CHROME, getJson, guardRun, measureTab, openTab, postJson, row, startScratchDaemon, withChrome } from './browser-support.mjs';
+import { assertPhone, CHROME, getJson, guardRun, measureTab, openPhone, openTab, phoneFaults, postJson, row, startScratchDaemon, withChrome } from './browser-support.mjs';
 
 if (!existsSync(CHROME)) skipFile('browser-check-missions', `browser-check-missions: no Chrome at ${CHROME} (set CLAUDE_BOARD_CHROME_BIN to override)`);
 
@@ -1036,6 +1038,50 @@ async function main() {
           }
         });
       }
+
+      const BAR = ['.back-to-index', '.view-tab', '.pomodoro-settings-summary', '#comment-mode-toggle', '#theme-toggle'];
+      const onPhone = async (path, theme, fn) => {
+        const tab = await openPhone(send, onEvent, `${origin}${path}`, cookie, { theme });
+        try { await fn(tab); } finally { await tab.close(); }
+      };
+      const hold = async (tab, note, what, expected) => {
+        const faults = await phoneFaults(tab, expected);
+        note(`${what}: ${faults.count} controls`);
+        assertPhone(faults, expected);
+      };
+      for (const theme of THEMES) {
+        await row(`on a ${theme} phone Missions is one column that scrolls nothing sideways, each card and control at least 44px`, note => onPhone('/', theme, async tab => {
+          const lefts = await tab.evalPage(`[].slice.call(document.querySelectorAll('section.mission-col')).map(function (c) { return c.getBoundingClientRect().left; })`);
+          assert.equal(lefts.length, COLUMNS.length, 'setup: every column');
+          assert.equal(new Set(lefts).size, 1, 'one column');
+          await hold(tab, note, 'Missions', [...BAR, '.mission-link', '.mission-stop', '.mission-pr', '.mission-foot .mission-btn', '.mission-more > summary']);
+        }));
+        await row(`on a ${theme} phone Boards scrolls nothing sideways, each line and control at least 44px and each title on its own line`, note => onPhone('/boards', theme, async tab => {
+          await hold(tab, note, 'Boards', [...BAR, '.search-input', '.search-btn', '.thread-item']);
+          const cramped = await tab.evalPage(`[].slice.call(document.querySelectorAll('a.thread-item')).filter(function (a) {
+            return a.querySelector('.thread-title').getBoundingClientRect().bottom > a.querySelector('.thread-rounds').getBoundingClientRect().top + 1;
+          }).length`);
+          assert.equal(cramped, 0);
+        }));
+      }
+      await row('on a phone a card\'s Stop question, its note and the settings panel hold the same', note => onPhone('/', 'dark', async tab => {
+        await tab.evalPage(`document.querySelector('article.mission-card[data-mission-key="FILETYPE_FOLLOWUP"] button.mission-stop').click()`);
+        await tab.until(`document.querySelector('div.mission-confirm')`, 'the Stop question');
+        await hold(tab, note, 'Stop question', ['.mission-confirm .mission-btn']);
+        await tab.evalPage(`document.querySelector('button.mission-stop-cancel').click(); document.querySelector('#comment-mode-toggle').click();
+          document.querySelector('article.mission-card[data-mission-key="FILETYPE_FOLLOWUP"]').click()`);
+        await tab.until(`document.querySelector('.mission-comment-text')`, 'the note');
+        await hold(tab, note, 'a note', ['.mission-comment-text', '.mission-comment .mission-btn']);
+        await tab.evalPage(`document.querySelector('#pomodoro-settings').open = true`);
+        await hold(tab, note, 'settings', ['.pomodoro-field select', '.pomodoro-field input', '.pomodoro-btn']);
+      }));
+      await row('on a phone the settings panel and the bar hold the same with the timer on', async note => {
+        await post('/api/pomodoro/settings', { enabled: true });
+        await onPhone('/', 'dark', async tab => {
+          await tab.evalPage(`document.querySelector('#pomodoro-settings').open = true`);
+          await hold(tab, note, 'the timer on', ['.pomodoro-ctl', '.pomodoro-switch', '.pomodoro-field input[type="number"]']);
+        });
+      });
     });
   } finally {
     await daemon.stop();

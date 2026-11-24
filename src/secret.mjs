@@ -38,6 +38,10 @@ export const SECRET_HEADER = 'x-claude-board-secret';
 /** Cookie an authorized browser holds. See sessionToken below. */
 export const SESSION_COOKIE = 'cb_session';
 
+/** Beside it, and worth one thing: opening a board page from a link on another site. See
+ * tapToken below. */
+export const TAP_COOKIE = 'cb_tap';
+
 /** How long that cookie lives, in seconds.
  *
  * It is deliberately NOT a session cookie: bookmarking a board and opening the
@@ -45,15 +49,13 @@ export const SESSION_COOKIE = 'cb_session';
  * cookie that dies with the browser window turns every morning into a
  * re-authorization.
  *
- * 30 days, cut from 400 on 2026-07-31. 400 was the Chrome clamp ceiling —
- * i.e. the longest the browser would honour, chosen for no reason but that. Lifetime is
- * one of only two levers that bound the cookie's exposure, because the other one people
- * reach for does not exist: cookies are NOT port-scoped (RFC 6265 §8.5), so this value
- * travels to every http server on the same host, whatever port it listens on. It cannot
- * be scoped away from them, so it is instead made to expire while it is still worth
- * something to expire. `bin/authorize.mjs` re-mints in one command, so the cost of the
- * cut is one re-authorization a month against a 13x smaller window. */
-export const SESSION_MAX_AGE_S = 30 * 24 * 60 * 60;
+ * 400 days, the longest a browser keeps any cookie, counted from the last use: the daemon
+ * sends it again on each request it authorizes (src/server.mjs `renewsSession`), so a
+ * browser used at least once in 400 days stays signed in. What that accepts: cookies are
+ * NOT port-scoped (RFC 6265 §8.5), so the value travels to every http server on the same
+ * host, whatever port it listens on, and does not expire while it is in use. Rotating the
+ * secret is what ends it, for every browser at once. */
+export const SESSION_MAX_AGE_S = 400 * 24 * 60 * 60;
 
 export function secretPath() {
   return process.env.CLAUDE_BOARD_SECRET_FILE || path.join(os.homedir(), '.config', 'claude-board', 'secret');
@@ -106,8 +108,9 @@ export function secretMatches(provided, expected) {
 
 /** The credential an AUTHORIZED BROWSER holds: an HMAC of a fixed label under the
  * secret, carried in a host-only, HttpOnly, SameSite=Strict cookie that src/server.mjs
- * sets when it consumes a handoff (src/handoff.mjs). It is what lets a browser read
- * boards and press Send, neither of which it could do with a 0600 file it cannot open.
+ * sets when it consumes a handoff (src/handoff.mjs) and renews on use. It is what lets a
+ * browser read boards and press Send, neither of which it could do with a 0600 file it
+ * cannot open.
  *
  * DERIVED, not random, and that is the whole point. A random token would have to live
  * somewhere: in daemon memory, where every `launchctl kickstart`, crash and code reload
@@ -137,20 +140,38 @@ export function secretMatches(provided, expected) {
  *    that server this cookie on a plain navigation, and it can then replay it here.
  *    Found 2026-07-31 and NOT fixable at this layer: the daemon cannot
  *    distinguish a replay from the browser it minted for, and Path cannot be narrowed
- *    below `/` while the index lives at `/`. What is done instead is bounding it —
- *    SESSION_MAX_AGE_S above — and refusing browser-driven cross-origin use in
- *    src/server.mjs `isSameOriginRead`. All three are stated in SECURITY.md rather than
- *    papered over here.
+ *    below `/` while the index lives at `/`. The away name has the same exposure to any
+ *    other port served under it, over https alone since the cookie is `Secure` there. What
+ *    is done instead is refusing browser-driven cross-origin use in src/server.mjs
+ *    `isSameOriginRead`, and rotating the secret, which ends it. All three are stated in
+ *    SECURITY.md rather than papered over here.
  *
- * No `Secure` attribute is set. Not because it would be ignored — Chrome treats
- * `http://127.0.0.1` as a potentially-trustworthy origin and does return `Secure`
- * cookies to it — but because it buys nothing on a loopback-only plain-http daemon and
- * would break any browser that does not implement that carve-out. (This comment used to
- * claim such a cookie "would simply never be sent back", which is wrong; corrected
- * 2026-07-31.) */
+ * The value is the same on loopback and on the away name (src/away.mjs): one token signs in
+ * every browser, and a value taken from one origin works on the other.
+ *
+ * `SameSite=Strict`, so the browser sends it on nothing another site starts, whatever
+ * headers that browser sends besides. `Secure` on the away origin alone: on a loopback-only
+ * plain-http daemon it buys nothing and would break any browser that does not treat
+ * `http://127.0.0.1` as trustworthy. */
 export function sessionToken(secret) {
   if (!secret) return null;
   return createHmac('sha256', secret).update('claude-board/session/v1').digest('hex');
+}
+
+/** The value of the one cookie that arrives on a link tapped on another site (`SameSite=Lax`):
+ * it opens a board page and is accepted for nothing else (src/server.mjs `isAuthorizedRead`).
+ * Derived as the session's is, under a label of its own, so neither stands in for the other
+ * and rotating the secret ends both. */
+export function tapToken(secret) {
+  if (!secret) return null;
+  return createHmac('sha256', secret).update('claude-board/tap/v1').digest('hex');
+}
+
+/** Both cookies of a signed-in browser, as `Set-Cookie` values. */
+export function signInCookies(secret, { secure }) {
+  const cookie = (name, token, sameSite) =>
+    `${name}=${token}; Path=/; Max-Age=${SESSION_MAX_AGE_S}; HttpOnly; SameSite=${sameSite}${secure ? '; Secure' : ''}`;
+  return [cookie(SESSION_COOKIE, sessionToken(secret), 'Strict'), cookie(TAP_COOKIE, tapToken(secret), 'Lax')];
 }
 
 /** True iff this request carries the session cookie for `secret`. Constant-time via
@@ -173,6 +194,11 @@ export function sessionCookieMatches(cookieHeader, secret) {
   // an ordering. It leaks nothing: supplying a value that matches means already holding
   // the credential.
   return cookieValues(cookieHeader, SESSION_COOKIE).some(v => secretMatches(v, expected));
+}
+
+export function tapCookieMatches(cookieHeader, secret) {
+  const expected = tapToken(secret);
+  return cookieValues(cookieHeader, TAP_COOKIE).some(v => secretMatches(v, expected));
 }
 
 /** Every value carried under `name`, in header order. */

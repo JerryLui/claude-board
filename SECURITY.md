@@ -9,9 +9,10 @@ installing.
 
 ## Threat model
 
-One human, one machine, one browser. Everything below assumes an attacker who is *not*
-you and not on your machine, plus a partial defence against local software that is not
-the daemon's own session.
+One human, one machine, and that human's browsers: the ones on the machine and, while
+[away](#away-your-own-devices-over-tailscale) is on, the ones they signed in on their own
+devices. Everything below assumes an attacker who is *not* you and not on your machine, plus
+a partial defence against local software that is not the daemon's own session.
 
 **What is being protected**, in the order that matters:
 
@@ -36,9 +37,60 @@ the daemon's own session.
 
 #### The network
 
-The daemon binds `127.0.0.1` only. Requests whose `Host` header is not
-loopback are refused, which closes DNS rebinding: a page on any origin that resolves a
-hostname it controls to `127.0.0.1` arrives with that hostname in `Host` and is rejected.
+The daemon binds `127.0.0.1` only, with away on as with it off. A request whose `Host` is neither
+a loopback name nor the one configured away name is refused with a bodyless 403, which closes
+DNS rebinding: a page on any origin that resolves a hostname it controls to `127.0.0.1` arrives
+with that hostname in `Host` and is rejected. So is a loopback name that came through a forwarder
+([Away](#away-your-own-devices-over-tailscale)). Each refused host is written to the daemon's log with
+its reason, once an hour per host and reason and at most 20 of them an hour, so a caller cannot
+grow the log at will.
+
+#### Away: your own devices over Tailscale
+
+Off until you run `node bin/away.mjs on <name>` (ADR 158). It puts Tailscale's forwarder
+(`tailscale serve`) in front of the port: a device on your Tailscale network opens
+`https://board.example.ts.net`, Tailscale answers it on this Mac and hands it to the daemon
+over loopback. Nothing listens on your network and nothing is on the internet.
+
+**Who can connect, and who gets in.** Any device your Tailscale network lets reach this Mac can
+connect, every device on your own login among them; the board does not ask which device it is, and
+no header the forwarder adds lets anyone in, since any local program can write one. Connecting gets a
+refusal. What gets in is a browser signed in by a link made on this Mac. The forwarder passes on
+whatever `Host` a device sends, a loopback name included, so a loopback name carrying an
+`X-Forwarded-For`, `-Host` or `-Proto` header, which the forwarder always adds, is refused, with away
+on or off.
+
+| Caller | What it gets |
+| --- | --- |
+| A signed-in browser, on this Mac or away | Reads every board and the missions list, answers any open round, a Fire or merge yes included ("What the cookie may write" below) |
+| A device on your Tailscale network that opened no link | Refused; the sign-in page for a link it holds, and the mermaid engine's public bytes, are all it can fetch |
+| A program on this Mac without the secret | Refused, by the local address and through the forwarder alike, save the open routes below, which a loopback name through the forwarder does not reach |
+| A program holding the secret, through the forwarder | Refused like any other: the secret header is ignored there, so nothing away posts a board, mints a link or reads a file for a caller. It can derive the cookie, as it can here |
+| Another website's page, in any signed-in browser | Refused, save that a tapped link to a board opens it ("A web page you happen to be visiting" below) |
+| A device naming a loopback host through the forwarder | 403 on every route, the open ones included |
+| A request naming any other host | 403 |
+| The internet | Nothing: `on` refuses while Funnel is on, and takes the forwarder down if Funnel is on after. A Funnel you turn on later is yours to notice; `status` names it. It would expose the refusals above, not the boards |
+
+**The setting** is one file beside the secret, `~/.config/claude-board/away`, holding one lowercase
+`<machine>.<tailnet>.ts.net` name. It is read on every request, so `off` stops every request at
+once, and an event stream a device already holds open within one heartbeat (15 s). A file that is not
+plain, not yours, open to other users, a link, longer than one name or anything but one such name
+reads as off. A reinstall and an uninstall both leave it.
+
+**The link** (`node bin/away.mjs link`) works once, for 10 minutes, on the away name alone: shown to
+the local address it is spent and signs in nobody. A `GET` of it answers a page with one button and
+spends nothing, because a chat's link preview fetches it before you do; the button's `POST` spends
+it, and is taken only with an `Origin` of the away name itself. The page runs no script and cannot
+be framed. A link is tied to the secret it was made under, so changing the secret voids it.
+
+**What `on` and `off` check.** `on` publishes only when Tailscale runs, when the name you typed is
+the name Tailscale gives this Mac, when Funnel is off and when the forwarder serves nothing else on port 443, and it
+takes everything back down if the forwarder does not come up whole. `off` removes the file first,
+so the daemon refuses the name even where the forwarder cannot be reached, and leaves alone a
+handler that is not this board's. Neither signs a browser out: a browser signed in before `off` is signed
+in again after the next `on`. Changing the secret is what signs browsers out, all of them.
+
+What this accepts is under [Not defended, by design](#not-defended-by-design).
 
 #### A web page you happen to be visiting
 
@@ -48,7 +100,30 @@ loopback `Host` itself, and the bodyless POST routes — the pomodoro controls �
 requests, so no preflight blocks them. The routes that take a JSON body are not reachable that way
 in the first place: every body must be `application/json` (415 otherwise), which is not a simple
 content type, so those always cost a preflight. The origin check is what stands in front of the
-bodyless ones.
+bodyless ones. The daemon's own origin is the one the request came in on: `http://<host>` on a
+loopback name, `https://<away name>` away, so a page on one is another site to the other.
+
+Reads with the session cookie are held to the same check, and that cookie is `SameSite=Strict`, so a
+browser sends it on nothing another site starts. One thing is opened to another site: a tapped link
+to a board opens it, on a second cookie, `cb_tap` (ADR 159). That one is `SameSite=Lax`, so it travels
+when you follow a link, and is accepted for a `GET` of `/b/<id>` alone: not `/` or `/boards`, whose
+cards answer in one click, and no API, event stream, asset, image or write. It renews no sign-in and
+its value is not the session's. The request may carry no `Origin`, may be no prefetch, and where the
+browser sends `Sec-Fetch-*` must be a top-level navigation to a document. The page that linked it
+reads nothing: the board opens in its own tab, its pages send `Cross-Origin-Opener-Policy:
+same-origin` and refuse to be framed, the id is 128 random bits, and that `GET` writes nothing. Once
+open, the page's own requests are the board's, and carry the session cookie.
+
+The tap cookie also decides what a refused list says. A link followed to `/` or `/boards` from another
+site, or in a browser that sends no `Sec-Fetch-Site`, still answers 401, with a page saying the browser
+is signed in and the address to type. That page has no link, button or script, so the second click of
+a double click baited on another page lands on nothing.
+
+None of that rests on `Sec-Fetch-*`, which a browser may leave off a request to `http://127.0.0.1`:
+in one that does, the session cookie still stays off another site's link. What `SameSite` does not tell apart is
+another site on the same host: to a browser every port on `127.0.0.1` is one site. `Sec-Fetch-Site:
+same-site` refuses such a page every read but the tap's; in a browser that leaves the header off, a
+link on one opens the lists signed in.
 
 #### Another local process asking the daemon to read a file for you
 
@@ -319,35 +394,41 @@ asked of that one descriptor rather than of the name again.
 #### Another local process reading your boards, or forging an answer on one
 
 Every route but `GET /api/health`, `GET /auth/<token>`, `GET /signin/<token>` and
-`GET /b/mermaid-<hash>.js` requires a credential: the index, a board
-page, archive search, the blocking wait and the event stream alike. Not every one of those
+`GET /b/mermaid-<hash>.js` requires a credential; away, all but `/auth/<token>`, its `GET` and its
+page's `POST`, and the mermaid file do, and the cookies are the only credentials taken there. That
+covers the index, a board page, archive search, the blocking wait and the event stream alike. Not every one of those
 accepts the *same* credential, though: `GET /api/board/:id/wait` also writes — `handleWait`
 persists the board on its timeout branch and spends undelivered comments on every branch — so
 it is gated exactly like a write, the secret only, never the cookie alone.
 `GET /api/board/:id/read` (ADR 115) is held to the secret alone for a different reason: it writes
 nothing, but its caller is a tool and never a page, and the session cookie is exactly the
-credential a cross-origin GET could ride in on. Every other route in that list accepts either.
+credential a cross-origin GET could ride in on. Every other route in that list accepts either,
+and a board page the tap cookie too.
 (`/auth/<token>` is the route that *hands out* the credential, so it cannot require one; it is
-protected by the token being unguessable, single-use and seconds-lived. `/signin/<token>` hands out
+protected by the token being unguessable, single-use and short-lived, seconds on this Mac and ten
+minutes away. `/signin/<token>` hands out
 nothing at all: see [The sign-in link](#the-sign-in-link). The last open route is the vendored mermaid
 engine, and only that one name shape: the caller it is open for is a board page's own `html` stage,
 which is sandboxed with no `allow-same-origin` and so holds no credential by construction (the
 board page reads the same file too, with its cookie, to write it into a saved mock, `ADR.md`
 entry 154), and what the route hands back is a third-party library's public bytes under a name that is a digest of
-them — no board, no path, no store contents. `ui-<hash>.js` and `styles-<hash>.css` are this
+them, on this Mac and away alike — no board, no path, no store contents. `ui-<hash>.js` and `styles-<hash>.css` are this
 board's own behaviour and stay gated.) There are exactly two
-credentials: the secret file above, and a cookie the daemon derives from it and hands to
-your browser through that single-use handoff. **The cookie has a caveat worth reading
+credentials: the secret file above, and a session cookie the daemon derives from it and hands to
+your browser through that single-use handoff, with the tap cookie that opens a board page and
+nothing else beside it. **The cookie has a caveat worth reading
 before you rely on it — see "Any other HTTP server on your machine" under [Known and
 unclosed](#known-and-unclosed).** Nothing you can bookmark carries a credential. If a
 browser ends up holding nothing — cleared cookies, a second profile, a different browser —
-the refusal page names one command that fixes it: `node bin/authorize.mjs` from your clone.
+the refusal page names one command that fixes it: `node bin/authorize.mjs` from your clone. A
+signed-in browser another page sent to a list is told to type the address instead.
 
 #### The sign-in link
 
 `GET /signin/<token>` is the one token in a URL with no lifetime, and the handoff's 30 seconds
 are the reason that needs saying. A handoff is short because what it hands out is a credential:
-whoever redeems it reads every board and can answer any open round, for 30 days. A sign-in link
+whoever redeems it reads every board and can answer any open round, for as long as that browser is
+used. An away link is ten minutes, with a page in front of it, for the same reason. A sign-in link
 logs nobody in. Its token lives in a store of its own that `/auth/<token>` never reads, the route
 sets no cookie, and all a click does is start one command, which opens a browser on the Mac
 running the daemon, where a person still has to sign in. Whoever spends a link they should not
@@ -379,12 +460,13 @@ design](#not-defended-by-design).
 
 #### What the cookie may write
 
-The secret authorizes every write; the cookie authorizes a strictly smaller, closed set,
-enumerated in `PROTOCOL.md` "The browser session cookie". Three named lists carry it —
-`BOARD_COOKIE_ACTIONS`, `POMODORO_COOKIE_ACTIONS`, `STORE_COOKIE_ACTIONS` and
-`STREAM_COOKIE_ACTIONS` (a tab registered or beaten for on its browser's shared stream, which
-reaches what holding a board's stream already does), all in
-`src/server.mjs` — and that they are named lists rather than an `/api/<thing>/*` prefix match is
+The tap cookie (ADR 159) writes nothing. The secret authorizes every write, on this Mac; the session
+cookie authorizes a strictly smaller, closed
+set, the same on this Mac and away, enumerated in `PROTOCOL.md` "The browser session cookie". Six
+named lists carry it — `BOARD_COOKIE_ACTIONS`, `POMODORO_COOKIE_ACTIONS`, `STORE_COOKIE_ACTIONS`,
+`MISSION_COOKIE_ACTIONS` and `SESSION_COOKIE_ACTIONS` (a card's order, which an agent carries or
+does not) and `STREAM_COOKIE_ACTIONS` (a tab registered or beaten for on its browser's shared
+stream, which reaches what holding a board's stream already does), all in `src/server.mjs` — and that they are named lists rather than an `/api/<thing>/*` prefix match is
 what keeps a route added later secret-only until someone widens it deliberately. The set reaches
 further than the name suggests: a browser holding only the cookie drives the whole pomodoro clock
 — every duration along with the notify toggle, the round-banner level, and the Master switch (`enabled`) — reports a
@@ -415,7 +497,7 @@ no surviving page or asset still names. It is admitted not because it reaches le
 `submit` — it reaches further — but because the control that fires it lives in the index
 page's settings panel, and that page is exactly a browser holding only the cookie;
 requiring the secret would make the one surface the design names unable to use it. What
-still stands in front of it is the rest of the gate: loopback `Host`, the same-origin
+still stands in front of it is the rest of the gate: the `Host` check, the same-origin
 write check, and a cookie derived from the local secret that rotating the secret revokes.
 The same holder can already read every question, answer and snapshotted source file in
 the archive, so this is not a credential the archive was being protected from. There is
@@ -632,7 +714,7 @@ scoped by port (RFC 6265 §8.5) and `SameSite` is not port-aware — a "site" is
 a host, so every port on `127.0.0.1` is the same site. If you authorize a board and then
 visit `http://127.0.0.1:3000` in the same browser — your own dev server, a notebook kernel,
 a container you published on loopback — that server receives the `cb_session` cookie on a
-plain navigation, and can replay it here to read every board, answer any open round, and — via
+plain navigation (and `cb_tap`, worth only the board pages whose id it knows), and can replay it here to read every board, answer any open round, and — via
 `POST /api/pomodoro/settings` with `bannerLevel: 'off'` — durably switch off every Stranded
 banner on the machine, which is the whole notification safety net that feature exists to be. The
 same replay can just as durably switch pomodoro itself off — `enabled: false` on the same route —
@@ -647,24 +729,31 @@ cookie for, and while the index lives at `/` on `127.0.0.1` the cookie is scoped
 port on that host. Cookies *are* scoped by host, so serving boards from a name of their
 own (`isLoopbackHost` already admits `*.localhost`) would scope `cb_session` away from
 `127.0.0.1:3000` — at the price of an `/etc/hosts` line on Safari and broken bookmarked
-board URLs. That has not been done. What is done instead is bounding it:
+board URLs. That has not been done. The away name has the same exposure to
+anything else served under that name, on any port, over https alone since the cookie is `Secure`
+there; the value is the same on both, so one taken there works here too, and the other way round.
+What is done instead is bounding it:
 
-- **there is no expiry bound worth relying on.** The cookie's value is
-  `HMAC(secret, "claude-board/session/v1")` — a constant with no timestamp in it — and
+- **there is no expiry bound.** The cookie's value is
+  `HMAC(secret, "claude-board/session/v1")`, the tap cookie's the same under `claude-board/tap/v1` —
+  constants with no timestamp in them — and
   `SESSION_MAX_AGE_S` appears only as a `Set-Cookie` attribute, which instructs an honest
-  browser's jar and constrains nothing about a value already copied out of it. A leaked
-  cookie stays valid until the secret is rotated, and the secret is never rotated
+  browser's jar and constrains nothing about a value already copied out of it. That attribute is
+  400 days and is renewed on use (ADR 159), so the jar of a browser you use never lets go of it
+  either. A leaked cookie stays valid until the secret is rotated, and the secret is never rotated
   automatically;
 - a cookie-authenticated request must also look same-origin (`Origin` / `Sec-Fetch-Site`),
   which stops a *web page* on another origin using it through your browser. It does not
   stop the case above, because a local process sets its own headers;
-- rotating the secret revokes every cookie on the next *request* — the daemon re-reads the
-  secret per request rather than at startup. It does **not** close connections already
-  open: the read gate is evaluated once, when a request starts, so an SSE stream
-  (`/api/board/:id/events`) established before the rotation keeps receiving every later
-  round and every submitted answer for that board, and an in-flight `/wait` still returns
-  its packet. Both last until the daemon restarts. If you are rotating because a cookie
-  leaked, restart the daemon too — `launchctl kickstart -k gui/$(id -u)/claude-board`.
+- rotating the secret revokes every cookie: on the next *request*, since the daemon re-reads the
+  secret per request rather than at startup, and on every event stream already open, on this Mac
+  and away, within one heartbeat (15 s), which judges the credential the stream was opened with
+  again, the secret header as well as the cookie. A round posted inside those seconds can still
+  reach it. A secret file that is missing or empty ends a stream at its second heartbeat, so one
+  read halfway through being replaced ends none. What a rotation does **not** end is an in-flight
+  `/wait`, which only the secret opens: it still returns its packet, or runs out. If you are
+  rotating because the secret itself leaked, restart the daemon too —
+  `launchctl kickstart -k gui/$(id -u)/claude-board`.
   That restart is also what ends an unused sign-in link: the click holds no credential, so a link
   survives a rotation, or the secret's deletion, until it is used or the daemon restarts.
 
@@ -712,7 +801,8 @@ process could read the secret file instead.
 **A sign-in link waiting in a chat transcript.** The link reaches you through a session, so until
 it is used its token sits in the Master Chief's chat transcript, on disk and with the model
 provider, which is the one place it is not kept out of. Anything on this machine that can read the
-transcript can spend it. Nothing off the machine connects to the port, but a page your browser
+transcript can spend it. Away the route asks for a sign-in like any other, so off this Mac a
+signed-in browser alone can spend one; a page your browser
 renders here can send it a GET, and the `Host` check passes that, so a leaked token needs a second
 check: the route refuses a `Sec-Fetch-Site` of another site and leaves the token unspent. A click
 from a terminal or a desktop app sends `none` and passes. A link in a web chat reads as cross-site,
@@ -728,8 +818,35 @@ with the three shared files beside it (mermaid joined ui/styles, ADR 70); the ga
 the daemon, not on the archive. Anything that can read that directory can read those
 boards, which is the same statement as "the store is owner-only" above.
 
-**Anything multi-user or remote.** There is no authentication, no accounts, no
-cross-machine access, and none is planned. Do not expose the port.
+**Your own devices, while away is on.** Accepted (ADR 158, 159):
+
+- Every device on your Tailscale login may connect and, once signed in, read everything and answer
+  everything, a merge or Fire yes included. No device has lesser powers, and none is removed on its
+  own: changing the secret cuts off a lost phone, and signs out every other browser with it.
+- Whoever holds an unlocked signed-in device can merge.
+- Each cookie has one value on both origins and goes to any other http server on the same host, for
+  as long as the browser is used ("Any other HTTP server on your machine" above).
+- An away tab counts for opening and banners as any tab does: one left open on another Mac means a
+  new board raises a banner on this one instead of opening.
+- A board page may stay in a browser's storage on the device that read it.
+- A link's page is shown to whoever holds the link for its 10 minutes, and the first to press its
+  button is the one signed in. The link is printed in the terminal that made it.
+- `off` does not void a link already made: it works again if `on` follows inside its 10 minutes.
+  Changing the secret or restarting the daemon voids it.
+- A program running as you can read the secret, turn away on itself and sign any device in: it is
+  inside the boundary above.
+- The first HTTPS certificate publishes this Mac's and your network's name for good, in the public
+  certificate logs, with no way to take it back. Rename the Mac in Tailscale's admin page before the
+  first `on` if its name says anything: `on` checks the name you type against Tailscale's before it
+  publishes anything.
+
+An `http://127.0.0.1` link an agent typed into a question does not work on another device; every
+link the board itself makes does.
+
+**Anything multi-user, or the public internet.** There are no accounts, no second person's powers,
+and none are planned. Never expose the port: not by binding it wider, not by a router, not by
+Funnel or another public tunnel. The one way in from another device is away, or an SSH tunnel of
+your own (INSTALL.md, "Remote review").
 
 **What a board file contains.** Treat the store as you would treat the repository it
 quotes, and the allowlisted roots it may also quote.

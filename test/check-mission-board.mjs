@@ -22,7 +22,7 @@ const { home, secret: SECRET } = secretHome('claude-board-mission-board-');
 const fetch = secretFetch(SECRET);
 process.env.CLAUDE_BOARD_STRANDED_GRACE_MS ??= String(24 * 60 * 60 * 1000);
 // One wait, pinned: a reopened round's deadline is asserted against it.
-const WAIT_MS = 2_400_000;
+const WAIT_MS = 50 * 60 * 1000;
 process.env.CLAUDE_BOARD_TIMEOUT_MS = String(WAIT_MS);
 const START = '2026-11-11T08:00:00Z';
 
@@ -424,7 +424,7 @@ async function main() {
     assert.deepEqual([shows.reopenedAt, shows.session.id], [undefined, 'nodeadline-taker']);
   });
 
-  await check('a join after the mission\'s session went reopens in place each round it left unanswered, one closed by its clear and one lapsed: the same number, nothing on the board moved but the round\'s state, a fresh 40-minute clock, the new session\'s; the join names each, the PM\'s Send on one answers the answer watch\'s collect and read, and on the other rides the new session\'s next packet', async () => {
+  await check('a join after the mission\'s session went reopens in place each round it left unanswered, one closed by its clear and one lapsed: the same number, nothing on the board moved but the round\'s state, a fresh 50-minute clock, the new session\'s; the join names each, the PM\'s Send on one answers the answer watch\'s collect and read, and on the other rides the new session\'s next packet', async () => {
     const gone = sessionProcess();
     const next = sessionProcess();
     const folder = folderWith('reopen', 'x\n');
@@ -565,7 +565,7 @@ async function main() {
     'still waiting, to the session a launch reserved the mission for, its heartbeat there before its join': { launched: true, beatFirst: true },
   };
   for (const [i, [how, { closedSince = false, launched = false, beatFirst = false }]] of Object.entries(leaverCases).entries()) {
-    await check(`a join after the mission's session left it with no takeover reopens in place the round the leaver left unanswered, under the session that joined: the same number, a fresh 40-minute clock, named in the join and under Waiting on you, and the PM's Send on it answers that session's collect and not the leaver's; the round the PM had sent stays sent and the leaver's, and the mission's record names the leaver no longer: ${how}`, async () => {
+    await check(`a join after the mission's session left it with no takeover reopens in place the round the leaver left unanswered, under the session that joined: the same number, a fresh 50-minute clock, named in the join and under Waiting on you, and the PM's Send on it answers that session's collect and not the leaver's; the round the PM had sent stays sent and the leaver's, and the mission's record names the leaver no longer: ${how}`, async () => {
       const key = `LEFT_${i}`;
       const leaver = sessionProcess();
       const next = sessionProcess();
@@ -748,7 +748,7 @@ async function main() {
     'was bound through a launch\'s reservation and went, its process gone': { launched: true },
   };
   for (const [i, [went, { leaves = false, launched = false }]] of Object.entries(passedOn).entries()) {
-    await check(`a leaver's round passes through a session that never joined: after one session left, and the next, bound by its heartbeat with no join, ${went}, the join after reopens the leaver's round in place beside the second one's, each under the session that joined on a fresh 40-minute clock and handed from the session that asked it, both named in the join, and the mission's record names the leaver no longer`, async () => {
+    await check(`a leaver's round passes through a session that never joined: after one session left, and the next, bound by its heartbeat with no join, ${went}, the join after reopens the leaver's round in place beside the second one's, each under the session that joined on a fresh 50-minute clock and handed from the session that asked it, both named in the join, and the mission's record names the leaver no longer`, async () => {
       const key = `LEFT_TWICE_${i}`;
       const first = sessionProcess();
       const second = sessionProcess();

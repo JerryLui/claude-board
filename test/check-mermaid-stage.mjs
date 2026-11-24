@@ -170,6 +170,8 @@ await check('a marked stage names the engine as a BARE SIBLING FILENAME and carr
     'the facade prelude must also come before the stage\'s own content');
   assert.ok(srcdoc.startsWith(STAGE_MARGIN_RESET + stageMermaidPrelude()),
     'the margin reset and the prelude are the srcdoc\'s leading head-only run');
+  assert.ok(stageMermaidPrelude().includes('<style>.mermaidTooltip{top:0;left:0}</style>'),
+    'the prelude keeps the engine\'s empty tooltip at the document\'s start, where it adds no height');
 });
 
 await check('an unmarked stage\'s srcdoc is exactly what it was before any of this existed', () => {

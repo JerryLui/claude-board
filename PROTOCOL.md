@@ -16,6 +16,7 @@ packet's `resolved`, redundant beside `lost`) is the shape of that exception.
 | `bin/daemon.mjs` | the HTTP server's entry point |
 | `bin/mcp.mjs` | stdio MCP shim, one per Claude session |
 | `bin/authorize.mjs` | the recovery command: mint a handoff and open the browser |
+| `bin/away.mjs` | away on, off, status, and the one-time link that signs a device in (ADR 158) |
 | `bin/launcher.c` | launchd entry point, compiled by `install.sh` into a signed app bundle that forks the daemon, so macOS TCC has an application of ours to attribute its file reads to. Also the two C functions both native click surfaces share: the board-URL scanner (`cb_is_board_url`) and the tab surfacer (`cb_surface_tab`) |
 | `bin/notify.m` | the bundle's `--notify` mode: one native notification, posted natively rather than through `osascript`. Its click serves the board through `cb_surface_tab` (`bin/launcher.c`), which does spawn `osascript` — to raise the tab the board is already open in rather than open a second one (ADR 93) |
 | `bin/menubar.m` | the bundle's `--menubar` mode: the macOS status item, forked beside the daemon as a second child of the launcher (ADR 72) |
@@ -31,7 +32,9 @@ packet's `resolved`, redundant beside `lost`) is the shape of that exception.
 | `src/server.mjs` | the `node:http` daemon: routes, SSE, the four gates below |
 | `src/stranded.mjs` | the stranded rule: a board no Watcher is looking at, carrying an awaited round or a Suppressed board's own first round, gets one banner per absence, after a grace. Persistence, grace timers and the click-serving child's lifecycle, all behind `createStrandedWatch` |
 | `src/secret.mjs` | the two credentials: the local secret and the browser session cookie derived from it, shared by the daemon and the shim |
-| `src/handoff.mjs` | single-use, seconds-lived browser handoffs, and `recoveryCommand()` |
+| `src/handoff.mjs` | single-use, short-lived browser handoffs, for a loopback name or the away name, `recoveryCommand()` and `awayCommand()` |
+| `src/mint-handoff.mjs` | the one call to `POST /api/handoff` the commands share, and the JSON POST under it, which the demo shares too |
+| `src/away.mjs` | the away setting: reading, writing and removing its file, and the one name it holds |
 | `src/signin-link.mjs` | the sign-in link: its store, the checks on what it may start, the detached start, its two pages |
 | `src/ui.mjs` | client-side script for the board page, exported as a string |
 | `src/styles.mjs` | page CSS, exported as a string |
@@ -101,8 +104,8 @@ is at least 30 days old (ADR 123). The window has no default; a prune that does
 not name one is refused. This is the only thing in the system that ever deletes a board,
 so how long a board survives is the reader's decision and nothing else's.
 
-Daemon listens on `127.0.0.1:7391` (`CLAUDE_BOARD_PORT` overrides, for the checks).
-Non-daemon callers (shim, demo, authorize) resolve the port as `CLAUDE_BOARD_PORT`,
+Daemon listens on `127.0.0.1:7391` (`CLAUDE_BOARD_PORT` overrides, for the checks), with away on too.
+Non-daemon callers (shim, demo, authorize, away) resolve the port as `CLAUDE_BOARD_PORT`,
 else the port record install.sh writes beside the secret, else 7391 —
 `daemonPort()` in `src/secret.mjs`. The daemon itself never reads the record:
 launchd's plist environment is the one authority for what it binds.
@@ -182,7 +185,7 @@ takes the post's (falling back to the board title), and `amendRound` may refine 
 but never blanks it. `src/render.mjs` renders it in the round heading: `Round 2 · fix/some-branch`,
 plus ` · sent` once the round is out.
 
-**Round `awaited` / `awaitDeadline`** (ADR 45, 47; CONTEXT.md "Awaited"). `awaited` is a
+**Round `awaited` / `awaitDeadline`** (ADR 45, 47, 157; CONTEXT.md "Awaited"). `awaited` is a
 boolean, always present on a round minted by `createBoard` or `addRound`: `true` when the
 round carries a question block anywhere in it (top-level, or nested in a question's
 `context` or a `compare` side), or when it is a page board — one `html` block and nothing
@@ -191,7 +194,7 @@ behind three surfaces: it is what makes a round sendable at all beyond ADR 35's 
 what the index's "N rounds left" badge and the tab mark count, and what gates the SSE
 arrival mark and the daemon's Stranded banner. `awaitDeadline` is `null` when `awaited` is `false`, otherwise the ISO
 8601 instant `postedAt` plus the wait timeout in effect when the round was minted (default
-40 minutes, `CLAUDE_BOARD_TIMEOUT_MS` — the same clock `GET /api/board/:id/wait` enforces,
+50 minutes, `CLAUDE_BOARD_TIMEOUT_MS` — the same clock `GET /api/board/:id/wait` enforces,
 below) — stamped at mint time and never recomputed by an amend of the same round, unless the
 round carries `movingDeadline` (below).
 `wait: true` on a round that already carries a question is **ignored, not refused**: the
@@ -357,6 +360,13 @@ widget produces a question with no control, which Send then reports back as `una
 agent misreports an unanswerable question as "the reviewer left it blank". A
 `single`/`multi`/`rank`/`choose-between-rendered-variants` question with zero options is a 400 for
 the same reason; `text` needs none.
+
+**An option with no label is a 400**: on every widget but `text`, each option is an object whose
+`label` is a string with more in it than whitespace. A missing, empty or whitespace-only label, one
+that is not a string, or an option that is not an object (a bare string, `null`) refuses the post or
+amend, which stores nothing, with `option 2 of question 1 has no label`: the option's place in its
+question and the question's among the post's questions, both from 1. `text` draws no options, so any
+it carries go unchecked, and a `compare` side's `label` may be blank.
 
 **`choose-between-rendered-variants`** is the one widget whose options are not `{ preview }`
 strings: each option's `block` is a real content block of any kind, normalized the same way a
@@ -680,7 +690,7 @@ the drain path `noWait` opens (`POST /api/board` below): what the thread is owed
 carried rides that one response, each entry naming its own round. Without the field, and on a
 daemon older than it, both arrays are empty. `discuss` means the reviewer chose Discuss in chat:
 partial answers are included and the agent must stop posting boards for the rest of the session.
-`timeout` is the wall-clock cap (default 40m, ADR.md entry 47; restarted by the reviewer's activity on a moving round, ADR 145) and carries an explicit no-response about ITS OWN
+`timeout` is the wall-clock cap (default 50m, ADR 157; restarted by the reviewer's activity on a moving round, ADR 145) and carries an explicit no-response about ITS OWN
 round — an empty `answers` and no comments of its own — plus whatever the two exceptions below
 owe the thread, which are owed to a timed-out round exactly as they are to any other. `abandoned`
 is the round being closed under a blocked call — the
@@ -780,8 +790,12 @@ GET  /api/health                    { ok: true, version, daemon, pid }  (open: i
 GET  /api/probe/documents           { ok: true } or { ok: false, code } -- whether macOS lets
                                     the daemon open a file under ~/Documents (install.sh asks
                                     it after the health gate). A code, never a name
-GET  /auth/:token                   consume a handoff -> 302 + Set-Cookie  (open by necessity)
-POST /api/handoff                   { boardId? } -> { token, expiresAt, ttlMs }
+GET  /auth/:token                   consume a handoff -> 302 + Set-Cookie  (open by necessity).
+                                    Away: a page with one button, nothing spent
+POST /auth/:token                   away only, the button: consume the link -> 303 + Set-Cookie.
+                                    No credential; `Origin` must be the away name's own
+POST /api/handoff                   { boardId?, away? } -> { token, expiresAt, ttlMs, origin }.
+                                    Secret only
 GET  /signin/:token                 consume a sign-in link, start the sign-in browser -> a plain
                                     page, no cookie  (open: it grants nothing)
 POST /api/signin-link               { app, recipe } -> { url }  (secret only)
@@ -908,21 +922,61 @@ POST /api/session/:id/order/:oid/ack
 Posting and waiting are separate routes on purpose, so splitting `ask` into post + collect stays
 cheap.
 
-**Four gates, in order:** loopback `Host` (403), same-origin on every non-GET (403), a credential
-on every non-GET -- plus the three GETs held to the secret alone (401): `/wait`, because it also
-writes, and `/read` and `GET /api/mission/:key`, because only a tool ever calls them -- and a credential on every other GET but
-two (401, secret or cookie). Both credential gates are written
+**Four gates, in order:** a `Host` that is loopback, not through a forwarder, or the one away name (403), same-origin on
+every non-GET (403), a credential
+on every non-GET but the away button's -- plus the four GETs held to the secret alone (401): `/wait`, because it also
+writes, and `/read`, `/api/binding` and `GET /api/mission/:key`, because only a tool ever calls them -- and a credential on every other GET but
+the open ones (401, secret or cookie, the tap cookie on `/b/:boardId` alone): four on a loopback name, two away. Both credential gates are written
 as "everything, minus an explicit exception list", so a route added later is gated by default
-rather than by whoever adds it remembering.
+rather than by whoever adds it remembering. A request target that is no URL (`//[`) is a 400 with no
+body, between the second gate and the third.
+
+### The host rule, and away
+
+A request's origin is decided by its `Host`, on every request (ADR 158). No forwarded header grants
+anything, and `Tailscale-*` headers are never read. `X-Forwarded-For`, `X-Forwarded-Host` or
+`X-Forwarded-Proto`, an empty one included, refuses a request whose `Host` is a loopback name, with
+away on or off: a forwarder passes on the `Host` its client sent.
+
+| `Host` | Origin | Credentials taken | Open GETs |
+|---|---|---|---|
+| `127.0.0.1`, `::1`, `localhost`, `*.localhost`, any port, with none of those headers | `http://<host>` | secret, cookie | `/api/health`, `/auth/:token`, `/signin/:token`, `/b/mermaid-<hash>.js` |
+| the away name, bare or with `:443`, in any letter case | `https://<name>` | cookie; the secret header is ignored | `/auth/:token`, `/b/mermaid-<hash>.js` |
+| anything else | none | refused: 403, no body, logged | none |
+
+The away name is the one line of `~/.config/claude-board/away` (beside the secret, wherever
+`CLAUDE_BOARD_SECRET_FILE` puts that), read per request: a lowercase
+`<machine>.<tailnet>.ts.net`. An absent file is away off. A file that is a link or not a plain file,
+not this user's, open to group or others, over 256 bytes or holding anything else is off too. A
+refused host is logged as `claude-board: refused host "<host>": <reason>`, once an hour per host and
+reason and for 20 of them an hour, then one line saying the rest are not logged.
+
+`url` on a post's reply, a round, a mission's `boards`, a tab's `rounds` and `/api/waiting` is the
+board's page on the origin the request came in on; a mission's stored `url` is never given back as
+stored. A `/signin/` url, and a loopback link an agent typed into a block, stay loopback.
+
+```
+node bin/away.mjs on <name>        publish this Mac's board at its Tailscale name, and write the file
+node bin/away.mjs link [boardId]   print one https link, good once for ten minutes
+node bin/away.mjs off              remove the file, then take the forwarder down
+node bin/away.mjs status           the setting, and what the forwarder publishes
+```
+
+Also `npm run away --`. `on` refuses, changing nothing, when there is no secret, when what is at the
+file's path is not a plain file, when Tailscale is missing, not running or has no usable name for
+this Mac, when that name's first label is not `<name>`, when Funnel is on anywhere on this Mac, or
+when the forwarder serves something else on 443; a forwarder that does not come up whole is taken
+back down and the file removed. `link` refuses while away is off, and against a daemon too old to
+answer `origin: 'away'`. `off` leaves a 443 handler that is not this board's, and names it.
 
 The Host check does not cover a browser: a page on any origin doing
 `fetch('http://127.0.0.1:7391/...')` has its `Host` set to loopback by the browser itself. So
-every non-GET additionally refuses (403, no body) when `Origin` is present and is not the daemon's
-own origin, or when `Sec-Fetch-Site` is present and is not `same-origin`, and every body must be
+every non-GET additionally refuses (403, no body) when `Origin` is present and is not the origin the
+request came in on, or when `Sec-Fetch-Site` is present and is not `same-origin`, and every body must be
 `Content-Type: application/json` (415 otherwise) and at most 25,000,000 bytes (413 naming its size
 and the limit; past 100,000,000 the connection is cut with no answer). Non-browser clients (the
 shim, curl, the checks) send neither header and are unaffected. Every HTML response also carries
-`X-Frame-Options: DENY` and a `frame-ancestors 'none'` CSP.
+`X-Frame-Options: DENY`, `Cross-Origin-Opener-Policy: same-origin` and a `frame-ancestors 'none'` CSP.
 
 The two credentials and every route with rules of its own carry them in their own sections, below.
 
@@ -932,14 +986,16 @@ The two credentials and every route with rules of its own carry them in their ow
 ~/.config/claude-board/secret      0600, in a 0700 directory; 32 random bytes as hex
                                    generated by install.sh, NEVER rotated by a reinstall
                                    (CLAUDE_BOARD_SECRET_FILE relocates it, for the checks)
-x-claude-board-secret: <secret>    request header; the file is re-read per gated request,
+x-claude-board-secret: <secret>    request header; the file is re-read per gated request
+                                   and at each heartbeat of an open event stream,
                                    which is what makes rotation revoke; compared with
                                    crypto.timingSafeEqual, length-guarded
 ```
 
-**Every non-GET request** must carry it — except `POST /api/board/:id/submit`,
-`POST /api/board/:id/attended`, `POST /api/store/prune`, `POST /api/mission/:key/order` and
-`POST /api/session/:id/order`, which also take the session cookie below. `POST /api/board/:id/abandon` is deliberately **not** among them: only the
+**Every non-GET request** must carry it — except the cookie-writable routes, which also take the
+session cookie and are listed under it below, and the away button's `POST /auth/:token`, which takes
+neither. On the away name the header is ignored, so a route that takes the secret alone is refused
+there whatever the request carries. `POST /api/board/:id/abandon` is deliberately **not** among them: only the
 shim that owns a board may close its rounds, never a browser looking at it. A missing or wrong
 credential is **401 with no body**: nothing about
 what is behind it, not even whether the board exists. A daemon that finds no secret file says so
@@ -951,31 +1007,64 @@ why a local secret exists at all.
 
 ## The browser session cookie
 
-**Every route but `GET /api/health`, `GET /auth/:token`, `GET /signin/:token` and `GET /b/mermaid-<hash>.js` requires a
-credential**, reads
-included -- except `GET /api/board/:id/wait`, which this cookie alone never satisfies (secret
-only, above). The browser cannot read a 0600 file, so it holds this instead:
+**Every route but the open ones in "The host rule, and away" requires a credential**, reads
+included -- and the GETs held to the secret alone are never satisfied by a cookie. The browser cannot read a 0600 file, so it holds these instead, always set together:
 
 ```
 Set-Cookie: cb_session=<HMAC-SHA256(secret, "claude-board/session/v1")>;
-            Path=/; Max-Age=2592000; HttpOnly; SameSite=Strict
+            Path=/; Max-Age=34560000; HttpOnly; SameSite=Strict[; Secure]
+Set-Cookie: cb_tap=<HMAC-SHA256(secret, "claude-board/tap/v1")>;
+            Path=/; Max-Age=34560000; HttpOnly; SameSite=Lax[; Secure]
 ```
 
-Host-only (no `Domain`), `HttpOnly`, `SameSite=Strict`, and **not** a session cookie: a bookmarked
-board opened days later has to work. No `Secure`, and not because it would be ignored: Chrome treats `http://127.0.0.1` as a
-potentially-trustworthy origin and *does* return `Secure` cookies to it. It is omitted because on a
-loopback-only plain-http daemon it buys nothing, and would break any browser that does not
+Host-only (no `Domain`), `HttpOnly`, and **not** a session cookie: a bookmarked
+board opened days later has to work. Each value is the same on every origin. `cb_session` is the
+sign-in, and "the cookie" everywhere in this file; `cb_tap` opens a board page and nothing else.
+
+**It lasts while it is used** (ADR 159): `Max-Age` is 400 days, and every request
+`cb_session` authorizes answers with both `Set-Cookie` lines again, so a browser holding only the
+first gets the second. These renew neither: a request on `cb_tap`, an event stream
+(`/api/events`, `/api/stream`, `/api/board/:id/events`), a request from another site, a prefetch, an
+open route, a request that also carries the secret, and a refusal.
+
+**What another site can start.** A `cb_session` GET must look same-origin: no `Origin` but its own, no
+`Sec-Fetch-Site` but `same-origin` or `none`; both absent passes. `SameSite=Strict` keeps it off
+another site's requests before that. `cb_tap` travels on a link followed from another site, and is
+accepted on `GET /b/:boardId` alone, never as a write credential and on no other route: no `Origin`,
+no `Sec-Purpose` or `Purpose` naming prefetch, and when any of `Sec-Fetch-Site`, `-Mode`, `-Dest` or
+`-User` is present, `Sec-Fetch-Mode: navigate` and `Sec-Fetch-Dest: document`, whatever the site.
+`/`, `/boards`, the assets and images under `/b/` and everything under `/api/` refuse it. The 401 of
+`/` or `/boards` to a request of that shape carrying a valid `cb_tap`, that accepts `text/html` and
+whose `Sec-Fetch-Site` is neither `same-origin` nor `none` (absent included), is a page of its own: it
+says the browser is signed in and gives the address, without its query, to type. Every other refusal
+is the same with or without `cb_tap`.
+
+`Secure` on the away name alone. It is left off on loopback, and not because it would be ignored there: Chrome treats `http://127.0.0.1` as a
+potentially-trustworthy origin and *does* return `Secure` cookies to it. It is omitted because on
+plain-http loopback it buys nothing, and would break any browser that does not
 implement that carve-out (`src/secret.mjs` records the same correction).
 
 **Derived from the secret, not random**, which is what makes it survive a daemon restart: any
 daemon holding the same secret accepts the same cookie, so `launchctl kickstart`, a crash and a
 code reload are all invisible to an open browser. Rotating the secret invalidates every browser at
-once — intended.
+once, an event stream it holds open within one heartbeat — intended.
 
-Its strength over boards, precisely: "may read every board and answer any open round" — plus the
-two additions below, which reach past that. It is refused in the
+The strength of `cb_session` over boards, precisely: "may read every board and answer any open round" — plus the
+writes below. It is refused in the
 `x-claude-board-secret` header, so it can never create a board and therefore never make the daemon
-resolve a file. It is **not** scoped to one board.
+resolve a file. It is **not** scoped to one board. An away browser holds the two and nothing else, so
+it can do exactly what a signed-in browser on this Mac can.
+
+Every write it reaches, on both origins, as the closed sets in `src/server.mjs` name them:
+
+| Family | Actions |
+|---|---|
+| `/api/board/:id/` | `submit`, `attended`, `activity` |
+| `/api/mission/:key/` | `order` (a `pm` order wants the secret), `recheck` |
+| `/api/session/:id/` | `order` |
+| `/api/stream/:id/` | `watch`, `unwatch`, `beat` |
+| `/api/pomodoro/` | `ensure`, `pause`, `resume`, `reset`, `settings`, `preview`, `notifyTest`, `forward`, `restart` |
+| `/api/store/` | `prune` |
 
 It is additionally accepted on `POST /api/board/:id/attended` — a browser holding the cookie is the
 only party that can honestly report whether its own tab is Attended, and the report reaches less
@@ -1006,17 +1095,26 @@ priced before it is named.
 A credential never appears in a URL a bookmark can capture. Instead:
 
 ```
-POST /api/handoff       { boardId? }  (secret required)  -> { token, expiresAt, ttlMs }
-GET  /auth/<token>      302 -> /b/<boardId> (or /), Set-Cookie: cb_session=…
+POST /api/handoff       { boardId?, away? }  (secret required)  -> { token, expiresAt, ttlMs, origin }
+GET  /auth/<token>      302 -> /b/<boardId> (or /), Set-Cookie: cb_session=… and cb_tap=…
+                        away: 200, the sign-in page; nothing spent, no Set-Cookie
+POST /auth/<token>      away only: 303 -> /b/<boardId> (or /), the same two, Secure
 ```
 
 `POST /api/handoff` mints a **single-use, ~30s** token (`CLAUDE_BOARD_HANDOFF_TTL_MS` overrides,
-for the checks). It takes the secret only — the session cookie is refused here, so a browser
+for the checks). With `away: true` the token is for the away name, lives **10 minutes** and is held
+to the token of that moment, so changing the secret voids it; with away off that is a 409 whose
+`error` is why. `origin` is `'loopback'` or `'away'`; a daemon from before away answers none. It takes the secret only — the session cookie is refused here, so a browser
 cannot mint itself a second credential. The caller names a *board*, never a path: anything that is
 not a board id redirects to the index, so there is no attacker-chosen redirect target to validate.
 
-`GET /auth/<token>` consumes it, sets the cookie, and redirects to a **clean** URL. Expired,
-already used, and never existed are one indistinguishable refusal. The token is process-local, so
+`GET /auth/<token>` consumes it, sets both cookies, and redirects to a **clean** URL. Expired,
+already used, minted for the other origin (which spends it) and never existed are one
+indistinguishable refusal; a browser already signed in is sent to the home page instead. Away the
+`GET` answers a page with one button and spends nothing, since a chat's preview fetches a link nobody
+tapped; its button is `POST /auth/<token>`, whose `Origin` must be there and be the away name's own.
+That page alone answers `Referrer-Policy: strict-origin`: under `no-referrer` a browser sends the
+form's `Origin` as `null`. The token is process-local, so
 it does not survive a daemon restart — the opposite of the cookie it hands out, deliberately. The
 shim opens the tab on a handoff URL rather than a board URL, rebuilding that URL from its own base
 URL and the returned token rather than trusting anything in the response body.
@@ -1070,7 +1168,9 @@ password prompt in front of the page that explains the actual fix, and there is 
 type.
 
 A **browser navigation** (a path outside `/api/` whose `Accept` includes `text/html`) gets an HTML
-page naming the recovery command verbatim. Everything else — `/api/*`, the SSE stream, curl, the
+page naming the recovery command verbatim, away the one that makes a fresh link; a signed-in browser
+another page sent to `/` or `/boards` gets the one naming the address to type ("What another site can
+start"). Everything else — `/api/*`, the SSE stream, curl, the
 shim — gets `{ error, recover }` as JSON and no markup. Neither reveals anything about the store:
 the same page is served whether or not the board exists.
 
@@ -1474,7 +1574,7 @@ change reports again. It applies the `awaitDeadline` it gets back off its own re
 round's countdown earlier.
 
 `moved: true` when the round is open, awaited, minted `movingDeadline` (see "Board document"), its
-deadline has not passed, and now plus the wait timeout (`CLAUDE_BOARD_TIMEOUT_MS`, default 40
+deadline has not passed, and now plus the wait timeout (`CLAUDE_BOARD_TIMEOUT_MS`, default 50
 minutes) is a minute or more past it (a fortieth of the wait, when the wait is shorter): its
 `awaitDeadline` becomes that, the board and `pages/<id>.html` are written together, and the move is
 published as the `deadline` event (see "SSE events"). `moved: false` otherwise, and nothing is
@@ -1597,7 +1697,7 @@ included, SIGTERM to that one is relayed to the daemon, and a supervisor started
 
 ## `GET /api/board/:id/wait?round=N`
 
-A server-side wall-clock ceiling matching `CLAUDE_BOARD_TIMEOUT_MS` (default 40m, ADR.md entry 47): when it fires
+A server-side wall-clock ceiling matching `CLAUDE_BOARD_TIMEOUT_MS` (default 50m, ADR 157): when it fires
 the call returns 200 with a packet whose `status` is `timeout`, carrying whatever partial answers
 the store holds. A client that disconnects ends the wait outright — nothing is written and the
 poll stops.
@@ -1728,7 +1828,8 @@ Mission = {
   waitingOn?, next?,         // short phrases, at most 280 characters each
   prs: [ { repo, number, url, order? } ],          // the session names its PRs (a `state` is dropped)
   prFacts?: [ { repo, number, state, head, checkedAt } ],   // the watcher's, from GitHub (ADR 140)
-  boards: [ { id, url, at } ],                     // linked by a post; the last is the latest
+  boards: [ { id, url, at } ],                     // linked by a post; the last is the latest. Stored
+                                                   // as posted, answered on the reader's own origin
   session: { id?, pid?, procStart?, name?, login?, startedAt, seenAt, typedAt?, ended?,
              left?,          // the sessions that left before it, until a join was handed their rounds
              reopened?: [ { board, round, awaitDeadline } ] }   // the rounds reopened under it (ADR 151)
@@ -2057,7 +2158,7 @@ round of the board, not only its newest) sits on a board of no mission whose
 `session.id` is the tab's, or whose `session.id` is null or names no listed session, with the tab's
 pid and process start (a session resumed in its own process lists under a new id), or while the
 session is `blocked`; else `working` while busy, else `waiting`. A process start matches to the
-second. `rounds` are those rounds, `url` built off the request's host. Each tab adds one to its
+second. `rounds` are those rounds, `url` on the origin the request came in on. Each tab adds one to its
 `state`'s entry in `counts` (`needsYou`, `working`, `waiting`), so `/api/waiting`'s `missions`
 counts match the Missions view; the launch caps' `live` counts no tab.
 
@@ -2092,9 +2193,13 @@ side: printing the board URL in chat as the fallback that cannot fail.
 
 `GET /api/board/:id/events`: a `text/event-stream` subscription, one per connected client, for
 round pushes and submits on `:id`. 404s up front if the board doesn't exist; otherwise the response
-never ends on its own. Heartbeat comment lines (`: heartbeat\n\n`) keep it alive through idle
+ends on its own only at a heartbeat, below. Heartbeat comment lines (`: heartbeat\n\n`) keep it alive through idle
 timers and proxies — invisible to `EventSource`'s message events, so they never surface as a stray
-event. `CLAUDE_BOARD_SSE_HEARTBEAT_MS` overrides the cadence (default 15000), for checks only.
+event. `CLAUDE_BOARD_SSE_HEARTBEAT_MS` overrides the cadence (default 15000), for checks only. Each
+heartbeat judges the stream again, as the gates did when it opened: it ends a stream opened on the
+away origin once the away name is not the one it was opened on, and any stream whose credential, the
+cookie or the secret header, does not hold under the secret as it is now. A missing or empty secret
+ends it at the second heartbeat that finds it so.
 
 Five named events. `round` and `submitted` carry the page's own copy of the board, the same bytes a served
 page inlines as `#board-data` (ADR 122), so a client can diff against its own last-known copy, plus
@@ -2723,10 +2828,10 @@ throughout so the idle timer never fires. A round with no question blocks on `/a
 too, but only when it is a page board — one `html` block and nothing else — AND the call carried
 `wait: true` (ADR.md entry 45, CONTEXT.md "Awaited"); every other content-only shape returns the
 instant the post succeeds regardless of `wait`, packet `status: 'posted'`. `wait` defaults to
-`false`, and the wall-clock cap either route blocks on is the same 40 minutes (ADR.md entry 47).
+`false`, and the wall-clock cap either route blocks on is the same 50 minutes (ADR 157).
 
 **The wait follows the round's stored deadline** (ADR 145, narrowing 47). Every post carries
-`movingDeadline: true`, so the 40 minutes restart on each pick, note or comment the reviewer makes
+`movingDeadline: true`, so the 50 minutes restart on each pick, note or comment the reviewer makes
 on the round. The shim waits to the `awaitDeadline` the post answered, plus a grace (5% of the
 cap, 250 ms to 5 s) that lets the daemon's own timeout branch be the one that fires; when that
 instant comes with the wait still open it reads the round's stored deadline back through `read`
@@ -2916,8 +3021,8 @@ human nothing, and the sessions that write most are the ones nobody watches.
 Additive to `CLAUDE_BOARD_HOME` / `CLAUDE_BOARD_PORT` above.
 
 ```
-CLAUDE_BOARD_TIMEOUT_MS       wall-clock cap on the blocking wait, default 40m (2_400_000,
-                               ADR.md entry 47) -- shared by the daemon's own /wait cap.
+CLAUDE_BOARD_TIMEOUT_MS       wall-clock cap on the blocking wait, default 50m (3_000_000,
+                               ADR 157) -- shared by the daemon's own /wait cap.
                                The daemon stamps a round's deadline with it and moves it
                                to now plus it (ADR 145); the shim waits to that stored
                                deadline, and to this cap only on a daemon reporting none
@@ -2959,7 +3064,18 @@ CLAUDE_BOARD_CLIENT=background
                                CLAUDE_BOARD_HEADLESS=1 still wins over it
 CLAUDE_BOARD_SECRET_FILE      where the local secret lives, default
                                ~/.config/claude-board/secret. Read by install.sh, the daemon
-                               and the shim alike; a testing seam, not configuration
+                               and the shim alike; a testing seam, not configuration. The away
+                               file and the port record sit beside it
+```
+
+`bin/away.mjs` reads two of its own:
+
+```
+CLAUDE_BOARD_TAILSCALE_CMD    Tailscale's command line. Without it: `tailscale` on PATH, else the
+                               one inside Tailscale.app
+CLAUDE_BOARD_TAILSCALE_TIMEOUT_MS
+                               how long one Tailscale command may take, default 30_000: with HTTPS
+                               or Serve off in the tailnet it prints a link and waits
 ```
 
 ## Detecting a session with no human in it
@@ -3125,7 +3241,7 @@ the join after it is handed that session's rounds alone.
 
 Each handed round that asks for an answer (it was minted with an `awaitDeadline`, or a question in
 it) is **reopened in place**, whether the giver's boundary abandoned it, its wait lapsed or it still waited: `open`,
-`awaited`, its deadline one wait (40 minutes) from the hand-over, `reopenedAt` stamped,
+`awaited`, its deadline one wait (50 minutes) from the hand-over, `reopenedAt` stamped,
 `abandonedAt` dropped. Its number, blocks and comments stand, so the PM's page keeps what it
 holds. It counts in `GET /api/waiting` and the Boards page's Waiting on you again, and the join or
 the binding names it (`reopened`, "The missions routes" above). The answer the PM sends on it

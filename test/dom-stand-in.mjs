@@ -1242,8 +1242,10 @@ export class Element extends EventTarget {
   // round's closing rail rather than after it. Real semantics, including the
   // one that matters here: a null (or unparented) reference node degrades to
   // an append, exactly as the DOM specifies, so a round with no rail still
-  // takes the block.
+  // takes the block. A node already in the tree moves, never doubles.
   insertBefore(node, ref) {
+    const from = node.parentElement ? node.parentElement.childNodes : [];
+    if (from.includes(node)) from.splice(from.indexOf(node), 1);
     const idx = ref ? this.childNodes.indexOf(ref) : -1;
     node.parentElement = this;
     if (idx === -1) this.childNodes.push(node); else this.childNodes.splice(idx, 0, node);

@@ -13,7 +13,10 @@
 // 14px by 16px of padding, 8px corners and 8px to the next card, a 13px semibold
 // title, under a 20px board title. Under 1440px the column and the halves do not
 // apply: the 1280px rows hold the board to the layout it had. A page board, one html block and
-// nothing else, still fills the window. All of that is
+// nothing else, still fills the window. The round switcher along the bottom folds to
+// its window: whole in it, on one line on a phone, and never over Send or Discuss,
+// open or folded. On a 390px touch screen a round, its comment forms, its lenses and a
+// page board scroll nothing sideways, with every control at least 44px. All of that is
 // layout, and the DOM stand-in the suite runs on has none (QUIRKS.md "The DOM
 // stand-in's ceilings"): test/check-pure.mjs holds the rules on declared values
 // and this file looks at real ones.
@@ -41,10 +44,14 @@
 // 100-zero probe set in that element's own computed font.
 
 import assert from 'node:assert/strict';
+import path from 'node:path';
+import { abandonOpenRounds, addRound, applySubmit, createBoard } from '../src/board.mjs';
+import { renderBoardPage } from '../src/render.mjs';
 import { sessionToken } from '../src/secret.mjs';
+import { writeBoard, writePage } from '../src/store.mjs';
 import { runMain, sleep, withTimeout } from './support.mjs';
 import {
-  guardRun, postJson, requireChrome, row, setSessionCookie, startScratchDaemon, withChrome,
+  assertPhone, clickAt, copyArchive, guardRun, openPhone, openTab, phoneFaults, postJson, requireChrome, row, setSessionCookie, startScratchDaemon, withChrome,
 } from './browser-support.mjs';
 
 // The numbers this check holds the layout to, written out here rather than read
@@ -507,6 +514,8 @@ async function main() {
       for (const width of [NARROW, ...WIDE]) {
         evidence[width] = await measureAt(viewport => openAt(send, onEvent, evidenceUrl, cookie, viewport), { width, height: HEIGHT });
       }
+      await switcherRows({ send, onEvent, cookie, home: daemon.home, origin: `http://127.0.0.1:${daemonPort}` });
+      await phoneRows({ send, onEvent, cookie, home: daemon.home, origin: `http://127.0.0.1:${daemonPort}`, boardUrl });
       await runRows({
         column, at, evidence, scrollbar,
         pageBoard: () => openAt(send, onEvent, pageUrl, cookie, PAGE_BOARD_VIEWPORT),
@@ -516,6 +525,295 @@ async function main() {
   } finally {
     await daemon.stop();
   }
+}
+
+// ---------------------------------------------------------------------------
+// The round switcher. Round 15 of 19 is long and was closed unanswered, so it keeps
+// its dot, and Send on its page; round 19 is open and short, so its send bar stands
+// at mid-window.
+const PHONE = { width: 390, height: 844, theme: 'dark' };
+const SWITCHER_WINDOWS = [
+  PHONE, { width: 844, height: 390, theme: 'dark' },
+  ...[561, 760, 1000, 1200, 1440].map(width => ({ width, height: 800, theme: 'light' })),
+];
+const SWITCHER_TITLE = 'A round title long enough to be cut short in the caption of a narrow window';
+
+function manyRounds(count, waiting = [15]) {
+  const question = { kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] };
+  const board = createBoard({ title: 'Many rounds', blocks: [question] });
+  for (let n = 2; n <= count; n++) {
+    if (waiting.includes(n - 1)) abandonOpenRounds(board);
+    else applySubmit(board, { action: 'send', answers: [], comments: [] }, n - 1);
+    const blocks = n === 15 ? [{ kind: 'markdown', text: LONG_READ }, ...Array(8).fill(question)] : [question];
+    addRound(board, { title: SWITCHER_TITLE, blocks });
+  }
+  return board;
+}
+
+const SWITCHER_EXPR = `(function () {
+  function box(el) { var r = el.getBoundingClientRect(); return { x: r.left, y: r.top, r: r.right, b: r.bottom, w: r.width, h: r.height, text: el.textContent }; }
+  function shown(sel) { return [].slice.call(document.querySelectorAll(sel)).filter(function (el) { return el.getClientRects().length > 0; }); }
+  // Where a press on each of a grid of points across a control lands on the switcher instead.
+  function strays(el) {
+    var r = el.getBoundingClientRect(), out = [];
+    for (var i = 0; i <= 8; i++) for (var j = 0; j <= 4; j++) {
+      var x = r.left + 1 + (r.width - 2) * i / 8, y = r.top + 1 + (r.height - 2) * j / 4;
+      var hit = document.elementFromPoint(x, y);
+      var over = hit && hit.closest('.round-pager-dock, .round-flip');
+      if (over) out.push(over.className + ' at ' + Math.round(x) + ',' + Math.round(y));
+    }
+    return out;
+  }
+  var nav = document.querySelector('nav#round-pager');
+  var sends = shown('#send-btn, #discuss-btn');
+  return {
+    round: document.querySelector('.round-current').getAttribute('data-round'),
+    face: [].slice.call(nav.children).filter(function (el) { return el.tagName === 'BUTTON' && el.getClientRects().length; }).map(function (el) { return el.textContent; }).join(' '),
+    entries: shown('.round-page, .round-gap').map(box), flips: shown('.round-flip').map(box), nav: box(nav),
+    navClipped: nav.scrollWidth > nav.clientWidth || nav.scrollHeight > nav.clientHeight,
+    sends: sends.map(box), covered: [].concat.apply([], sends.map(function (el) { return strays(el).map(function (s) { return el.id + ' under ' + s; }); })),
+    lifted: document.querySelector('.send-bar').classList.contains('lifted'),
+    docW: document.documentElement.clientWidth, scrollW: document.documentElement.scrollWidth,
+  };
+})()`;
+
+/** Nothing of the switcher runs past the window or its own pill. */
+function cutOff(m) {
+  return [...m.entries, ...m.flips].filter(c => c.x < -0.5 || c.r > m.docW + 0.5).map(c => `${c.text} at ${px(c.x)} to ${px(c.r)} of ${m.docW}px`)
+    .concat(m.navClipped ? ['the pill scrolls its entries'] : [], m.scrollW > m.docW ? ['the page scrolls sideways'] : []);
+}
+
+async function switcherRows({ send, onEvent, cookie, home, origin }) {
+  const boards = Object.fromEntries([5, 13, 19].map(count => [count, manyRounds(count)]));
+  const twoWaiting = manyRounds(19, [7, 15]);
+  for (const board of [...Object.values(boards), twoWaiting]) writeBoard(board, home);
+  writePage(boards[19].id, renderBoardPage(boards[19]), home);
+  const open = (url, viewport) => openTab(send, onEvent, url, cookie, { ...viewport, expr: '1' });
+  const openBoard = (count, viewport) => open(`${origin}/b/${boards[count].id}`, viewport);
+  const look = async tab => { await tab.quiet(); await sleep(300); return tab.evalPage(SWITCHER_EXPR); };
+  const pressAt = async (tab, selector) => {
+    const at = await tab.evalPage(`(function () { var r = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
+    await clickAt(tab, at);
+    return look(tab);
+  };
+  const toRound = (tab, n) => tab.evalPage(`document.documentElement.style.scrollBehavior = 'auto'; document.querySelector('.round-page[data-round="${n}"]').click()`);
+  const ALL = Array.from({ length: 19 }, (_, i) => i + 1).join(' ');
+
+  for (const viewport of SWITCHER_WINDOWS) {
+    await row(`at ${viewport.width}x${viewport.height} the switcher of a 19-round board is whole in the window and never over Send or Discuss, folded or open, on a short round and a long one`, async note => {
+      const tab = await openBoard(19, viewport);
+      try {
+        for (const n of [19, 15]) {
+          await toRound(tab, n);
+          for (const state of ['folded', 'open']) {
+            if (state === 'open') await pressAt(tab, '.round-gap');
+            for (const end of ['top', 'bottom']) {
+              await tab.evalPage(`window.scrollTo(0, ${end === 'top' ? 0 : 'document.documentElement.scrollHeight'})`);
+              const m = await look(tab);
+              note(`round ${m.round} ${state}, ${end}: ${m.face}; pill ${px(m.nav.w)} x ${px(m.nav.h)}, ${m.lifted ? 'bar lifted' : 'bar as it stands'}`);
+              assert.equal(m.round, String(n));
+              assert.equal(m.sends.length, 2, 'setup: Send and Discuss are both on this page');
+              assert.equal(m.face === ALL, state === 'open', `the ${state} face`);
+              assert.deepEqual(m.covered, [], `round ${n} ${state}, ${end}`);
+              assert.deepEqual(cutOff(m), [], `round ${n} ${state}, ${end}`);
+              assert.deepEqual(m.sends.filter(b => b.y < 0 || b.b > viewport.height || b.x < 0 || b.r > m.docW), [], `round ${n} ${state}, ${end}`);
+            }
+          }
+        }
+      } finally { await tab.close(); }
+    });
+  }
+
+  await row('on a phone the folded switcher is one line of first, current, next, last, waiting and the gaps, each at least 44px', async note => {
+    const tab = await openBoard(19, PHONE);
+    try {
+      for (const [n, face] of [[19, '1 … 15 … 19'], [10, '1 … 10 11 … 15 … 19'], [15, '1 … 15 16 … 19'], [1, '1 2 … 15 … 19']]) {
+        await toRound(tab, n);
+        const m = await look(tab);
+        note(`round ${n}: ${m.face}; ${m.entries.map(e => `${px(e.w)}x${px(e.h)}`).join(' ')}`);
+        assert.equal(m.face, face);
+        assert.equal(new Set(m.entries.map(e => e.y)).size, 1, 'one line');
+        assert.deepEqual(m.entries.filter(e => e.w < 44 || e.h < 44), []);
+        assert.deepEqual(cutOff(m), []);
+      }
+    } finally { await tab.close(); }
+    const two = await open(`${origin}/b/${twoWaiting.id}`, PHONE);
+    try {
+      await toRound(two, 10);
+      const m = await look(two);
+      note(`two waiting, round 10: ${m.face}`);
+      assert.equal(m.face, '1 … 7 10 11 15 19');
+      assert.equal(new Set(m.entries.map(e => e.y)).size, 1, 'one line');
+    } finally { await two.close(); }
+  });
+
+  await row('a board whose rounds fit its window shows every number on one line with the send bar where it stands, and folds when the window narrows past them', async note => {
+    const five = await openBoard(5, { width: 1440, height: 800, theme: 'light' });
+    try {
+      const m = await look(five);
+      note(`5 rounds: ${m.face}; pill ${px(m.nav.w)} x ${px(m.nav.h)}`);
+      assert.equal(m.face, '1 2 3 4 5');
+      assert.equal(m.lifted, false);
+    } finally { await five.close(); }
+    const tab = await openBoard(13, { width: 1440, height: 800, theme: 'light' });
+    try {
+      const wide = await look(tab);
+      note(`13 rounds at 1440px: ${wide.face}`);
+      assert.equal(wide.face, '1 2 3 4 5 6 7 8 9 10 11 12 13');
+      assert.equal(new Set(wide.entries.map(e => e.y)).size, 1, 'one line');
+      await tab.sp('Emulation.setDeviceMetricsOverride', { ...PHONE, deviceScaleFactor: 1, mobile: false });
+      const phone = await look(tab);
+      note(`13 rounds at 390px: ${phone.face}`);
+      assert.equal(phone.face, '1 … 13');
+      await tab.sp('Emulation.setDeviceMetricsOverride', { width: 1440, height: 800, deviceScaleFactor: 1, mobile: false });
+      assert.equal((await look(tab)).face, wide.face, 'and unfolds when it widens again');
+    } finally { await tab.close(); }
+  });
+
+  await row('on a saved board at phone width a press on the gap opens every number and a press on one folds them again', async note => {
+    const { pageUrl } = copyArchive(path.join(home, 'pages'), boards[19].id, 'cb-round-width');
+    const tab = await open(pageUrl, PHONE);
+    try {
+      const opened = await pressAt(tab, '.round-gap');
+      note(`open: pill ${px(opened.nav.w)} x ${px(opened.nav.h)}`);
+      assert.equal(opened.face, ALL);
+      assert.deepEqual(cutOff(opened), []);
+      const picked = await pressAt(tab, '.round-page[data-round="8"]');
+      assert.equal(picked.round, '8');
+      assert.equal(picked.face, '1 … 8 9 … 15 … 19');
+    } finally { await tab.close(); }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// The phone: every kind of block and answer widget, each with something too long for a
+// 390px window to hold on one line.
+const UNBROKEN = 'a_name_with_no_place_to_break_'.repeat(4);
+const WIDE_TABLE = [
+  `| ${Array.from({ length: 8 }, (_, i) => `Heading ${i}`).join(' | ')} |`,
+  `| ${Array(8).fill('---').join(' | ')} |`,
+  `| ${Array(8).fill('a_cell_that_does_not_break').join(' | ')} |`,
+].join('\n');
+const CODE_LINE = `const line = '${'a long line of code '.repeat(12)}';`;
+
+const phoneBody = () => ({
+  title: 'A board title too long to stand on one line of a phone', wait: true,
+  blocks: [
+    { kind: 'markdown', title: `Card ${UNBROKEN}`, status: { tone: 'good', label: 'Met' }, summary: LONG,
+      text: `See [a link](https://example.com), https://example.com/${UNBROKEN} and \`${UNBROKEN}\`.`, details: LONG },
+    { kind: 'markdown', title: 'Boxes', text: `\`\`\`js\n${CODE_LINE}\n\`\`\`\n\n${WIDE_TABLE}` },
+    { kind: 'markdown', title: 'A long read', text: LONG_READ },
+    { kind: 'code', lang: 'javascript', text: CODE_LINE },
+    { kind: 'code', lang: 'diff', text: `--- a/x\n+++ b/x\n@@ -1 +1 @@\n-${CODE_LINE}\n+${CODE_LINE}\n` },
+    { kind: 'mermaid', title: 'A diagram', text: chain('Phone') },
+    { kind: 'html', title: 'A tall picture', html: `${mock('tall')}<div style="height:2600px"></div>` },
+    { kind: 'compare', title: 'Pictures', left: { label: 'Before', block: { kind: 'html', html: mock('b') } }, right: { label: 'After', block: { kind: 'html', html: mock('a') } } },
+    { kind: 'compare', title: 'Text', left: { label: 'Before', block: { kind: 'markdown', text: WIDE_TABLE } }, right: { label: 'After', block: { kind: 'markdown', text: UNBROKEN } } },
+    { kind: 'question', prompt: `One: ${UNBROKEN}`, explainer: LONG, widget: 'single',
+      options: [{ label: `${LONG} ${UNBROKEN}`, description: LONG }, { label: 'Two', preview: PREVIEW_CODE }],
+      context: [{ kind: 'markdown', text: `${LONG}\n\n${WIDE_TABLE}` }, { kind: 'mermaid', text: SMALL_DIAGRAM }] },
+    { kind: 'question', prompt: 'Many', widget: 'multi', options: [{ label: 'First' }, { label: UNBROKEN }], context: [{ kind: 'html', html: mock('ctx') }], details: LONG },
+    { kind: 'question', prompt: 'Between mocks', widget: 'choose-between-rendered-variants',
+      options: [{ label: UNBROKEN, block: { kind: 'html', html: mock('v') } }, { label: 'Drawn', block: { kind: 'mermaid', text: SMALL_DIAGRAM } }] },
+    { kind: 'question', prompt: 'In your words', widget: 'text' },
+    { kind: 'question', prompt: 'In order', widget: 'rank', options: [{ label: LONG }, { label: UNBROKEN }, { label: 'Last' }] },
+  ],
+});
+const CHROME_CONTROLS = ['.back-to-index', '#theme-toggle', '.round-flip', '.round-page', '#send-btn', '#discuss-btn'];
+const AT_REST = [...CHROME_CONTROLS, '#comment-mode-toggle', '.round-download', '.fold-toggle', 'summary', '.card-choice', '.choice-multi',
+  '.variant-card', '.rank-move', '.answer-textarea', '.note-field textarea', '.btn-defer', '.comment-btn', '.pull-out', '.stage-fold-toggle', '.questions-left-pill'];
+const PRESS_ALL = sel => `[].slice.call(document.querySelectorAll(${JSON.stringify(sel)})).forEach(function (el) { el.click(); })`;
+
+async function phoneRows({ send, onEvent, cookie, home, origin, boardUrl }) {
+  const roundUrl = await boardUrl(phoneBody());
+  const pageUrl = await boardUrl({ ...pageBody(), wait: true });
+  const many = manyRounds(19);
+  writeBoard(many, home);
+  const onPhone = (url, theme, fn) => async note => {
+    const tab = await openPhone(send, onEvent, url, cookie, { theme });
+    try { await fn(tab, note); } finally { await tab.close(); }
+  };
+  const hold = async (tab, note, what, expected) => {
+    const faults = await phoneFaults(tab, expected);
+    note(`${what}: ${faults.count} controls`);
+    assertPhone(faults, expected);
+  };
+
+  const drawn = async tab => {
+    await tab.until(`[].slice.call(document.querySelectorAll('.round-current pre.mermaid')).every(function (p) { return p.querySelector('svg'); })`, 'the diagrams');
+    await tab.evalPage(`document.documentElement.style.scrollBehavior = 'auto'; document.querySelector('.round-current > .html-block').scrollIntoView()`);
+    await tab.until(`document.querySelector('.stage-folded')`, 'the tall picture folded');
+  };
+
+  for (const theme of ['dark', 'light']) {
+    await row(`on a ${theme} phone a round of every kind of block and widget scrolls nothing sideways and each control is at least 44px and clear of the bars`, onPhone(roundUrl, theme, async (tab, note) => {
+      await drawn(tab);
+      const inside = await tab.evalPage(`['.code-block pre', '.md-content pre', '.table-scroll'].map(function (sel) {
+        var el = document.querySelector('.round-current ' + sel);
+        return [sel, el.scrollWidth > el.clientWidth, getComputedStyle(el).overflowX];
+      })`);
+      assert.deepEqual(inside.map(([sel, , overflow]) => [sel, overflow]), inside.map(([sel]) => [sel, 'auto']));
+      assert.deepEqual(inside.filter(([, over]) => !over), [], 'setup: the long code and the wide table overflow their own boxes');
+      const columns = await tab.evalPage(`[].slice.call(document.querySelectorAll('.round-current .compare-grid, .round-current .options-variants, .round-current > .question-block'))
+        .filter(function (g) { return getComputedStyle(g).gridTemplateColumns.split(' ').length > 1; }).length`);
+      assert.equal(columns, 0, 'one column each');
+      await hold(tab, note, 'at rest', AT_REST);
+    }));
+  }
+
+  await row('on a phone the same holds in comment mode with every fold and form open, a comment pending and an image pasted', onPhone(roundUrl, 'dark', async (tab, note) => {
+    await drawn(tab);
+    await tab.evalPage(`document.querySelector('#comment-mode-toggle').click()`);
+    await tab.evalPage(PRESS_ALL('.round-current .comment-btn, .round-current .fold-toggle, .round-current .stage-folded .stage-fold-toggle, .round-current summary'));
+    await tab.evalPage(`(function () {
+      var form = document.querySelector('.comment-form.open'), input = form.querySelector('input');
+      input.value = 'Pending';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      form.querySelector('button').click();
+      var canvas = document.createElement('canvas');
+      canvas.toBlob(function (blob) {
+        var data = new DataTransfer();
+        data.items.add(new File([blob], 'a.png', { type: 'image/png' }));
+        document.querySelector('.note-field textarea').dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
+      });
+    })()`);
+    await tab.until(`document.querySelector('.thumb-remove') && document.querySelector('.comment-delete')`, 'the thumbnail and the pending comment');
+    await tab.evalPage(`document.querySelector('.card-choice').click()`);
+    await hold(tab, note, 'comment mode', ['.comment-form input', '.comment-form button', '.comment-delete', '.thumb-remove', '.notice-x', '.mode-toggle.active']);
+  }));
+
+  for (const [what, opener, controls] of [
+    ['a diagram', '.mermaid-block .pull-out', ['.lens-btn[data-lens="fit"]', '.lens-btn[data-lens="close"]']],
+    ['a variant', '.variant-card .pull-out', ['.lens-pick', '.lens-btn[data-lens="close"]']],
+  ]) {
+    await row(`on a phone ${what} pulled out full size keeps each of its controls at least 44px and on the screen`, onPhone(roundUrl, 'dark', async (tab, note) => {
+      await tab.until(`document.querySelector(${JSON.stringify(opener)})`, 'its Pull-out');
+      await tab.evalPage(`document.querySelector(${JSON.stringify(opener)}).click()`);
+      await tab.until(`document.querySelector('dialog[open]')`, 'the lens');
+      await hold(tab, note, what, controls);
+    }));
+  }
+
+  await row('on a phone a page board keeps each of its controls at least 44px and on the screen, its comment panel open', onPhone(pageUrl, 'dark', async (tab, note) => {
+    await tab.evalPage(`document.querySelector('.page-comments .comment-form').classList.add('open')`);
+    await hold(tab, note, 'page board', ['.back-to-index', '#theme-toggle', '#comment-mode-toggle', '.head-download', '.round-flip', '.round-page', '.page-send-btn', '.page-discuss-btn', '.comment-form input']);
+  }));
+
+  await row('on a phone a round of a 19-round board keeps each control at least 44px and Send and Discuss uncovered, the switcher folded and open', onPhone(`${origin}/b/${many.id}`, 'dark', async (tab, note) => {
+    for (const n of [19, 15]) {
+      await tab.evalPage(`document.querySelector('.round-page[data-round="${n}"]').click()`);
+      for (const state of ['folded', 'open']) {
+        if (state === 'open') await tab.evalPage(`document.querySelector('.round-gap').click()`);
+        await hold(tab, note, `round ${n} ${state}`, [...CHROME_CONTROLS, '.card-choice', '.btn-defer']);
+        const m = await tab.evalPage(SWITCHER_EXPR);
+        assert.deepEqual(m.covered, [], `round ${n} ${state}`);
+        assert.deepEqual(m.flips.map(f => [f.w, f.h >= 44]), [[44, true], [44, true]]);
+      }
+    }
+    await tab.evalPage(`document.querySelector('.round-page[data-round="3"]').click()`);
+    await hold(tab, note, 'a sent round', ['.round-page', '.round-flip', '.card-choice', '.round-download']);
+  }));
 }
 
 // The facts a row's comparison stands on, asserted inside each row that uses
@@ -844,6 +1142,24 @@ async function runRows({ column, at, evidence, scrollbar, pageBoard, round }) {
     }
     assert.deepEqual(wrong, []);
   });
+
+  for (const { width, size } of [{ width: 375, size: 44 }, { width: NARROW, size: 28 }]) {
+    await row(`at a ${width}px window, a rank row's up and down buttons are ${size}px both ways and the row holds its content`, async note => {
+      const page = await round({ width, height: HEIGHT });
+      try {
+        const m = await page.evalPage(`({
+          buttons: [].slice.call(document.querySelectorAll('.round-current .rank-move')).map(function (b) {
+            var r = b.getBoundingClientRect();
+            return [r.width, r.height];
+          }),
+          spill: [].slice.call(document.querySelectorAll('.round-current .rank-list li')).map(function (li) { return li.scrollWidth - li.clientWidth; }),
+        })`);
+        note(`buttons ${JSON.stringify(m.buttons)}; spill ${JSON.stringify(m.spill)}`);
+        assert.deepEqual(m.buttons, Array(4).fill([size, size]));
+        assert.deepEqual(m.spill, [0, 0]);
+      } finally { await page.close(); }
+    });
+  }
 
   await row(`a page board's stage frame fills a ${PAGE_BOARD_VIEWPORT.width}x${PAGE_BOARD_VIEWPORT.height} window exactly`, async note => {
     const page = await pageBoard();

@@ -21,7 +21,7 @@ ask({ title, blocks, wait, fresh })
 - `blocks`: the ordered array the page shows. Each call posts one round to this conversation's board, which surfaces itself.
 - **A round carries at most 6 questions or about 4,000 characters of prompts, explainers and options**, whichever comes first. Post a branch's questions together and split a branch too big for one round across rounds; only a question whose shape depends on an answer in this round waits for the next.
 - `fresh` (default `false`) declares **you have posted no board in this conversation**. Pass it on your first `ask` whenever no board URL of yours is visible further up, and always after a `/clear`; never on later rounds, or each round gets its own board. It closes any open round on the board it leaves and names that board (`Abandoned board: <url>`) for `read`.
-- `wait` (default `false`): a question round blocks until the reviewer submits, chooses Discuss, or the clock runs out: 40 minutes by default, restarted by each pick, note or comment the reviewer makes on the round. A content-only round returns once it lands. `wait: true` makes a page board round (below) block too and return its comments, possibly none, in this call's packet. It does nothing elsewhere.
+- `wait` (default `false`): a question round blocks until the reviewer submits, chooses Discuss, or the clock runs out: 50 minutes by default, restarted by each pick, note or comment the reviewer makes on the round. A content-only round returns once it lands. `wait: true` makes a page board round (below) block too and return its comments, possibly none, in this call's packet. It does nothing elsewhere.
 
 **Say the board's URL in chat after every round.** A `/compact` rebuilds your context from the conversation, not from tool results, and a board you forget you have is abandoned by your next `ask`.
 
@@ -67,7 +67,7 @@ ask({ title, blocks, wait, fresh })
   prompt: 'Which timeout does the wait route need?',
   explainer: 'The route holds one HTTP connection open for the whole wait.',
   widget: 'single',
-  options: [{ label: '40m (Recommended)', description: 'matches the wall-clock cap' }, { label: '2h' }],
+  options: [{ label: '50m (Recommended)', description: 'matches the wall-clock cap' }, { label: '2h' }],
   context: [{ kind: 'code', source: { path: 'src/server.mjs', lines: [40, 72] } }]
 }
 ```
@@ -75,7 +75,7 @@ ask({ title, blocks, wait, fresh })
 - `single`: one choice. The recommended option goes first, labelled "(Recommended)", its reasoning in `description`.
 - `multi`: whenever more than one option can be true. Always carry a None option ("None of these", labelled "(Recommended)" when it is): a multi with nothing ticked reads back as `unanswered`.
 - `text`: free text, for genuinely open questions; the only widget with no options.
-- `rank`: drag-to-rank, shown in your recommended order. It is answered by the order it shows, so Defer is the only way to leave it open.
+- `rank`: the reviewer orders the options by dragging or with each row's up and down buttons, shown in your recommended order. It is answered by the order it shows, so Defer is the only way to leave it open.
 - `choose-between-rendered-variants`: the reviewer clicks a rendered block. Each option carries `block` instead of `preview`; `choice` comes back as its `label`.
 
 Two to four options read best, and every answer carries a free-text note. **Every option commits to an answer**: never offer a "your call" or "you decide" option, which leaves every recommended pick ambiguous between agreement and delegation.

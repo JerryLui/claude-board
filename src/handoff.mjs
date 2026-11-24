@@ -6,7 +6,12 @@
 //   POST /api/handoff   (secret required, like every other write)  -> { token }
 //   GET  /auth/<token>  consumes it, sets the cookie, 302s to a CLEAN url
 //
-// The token is process-local state with a seconds-long TTL and exactly one use. That is
+// That is the loopback half. On the away origin (src/away.mjs) the link travels through
+// chats, whose previews fetch it, so the GET there answers a page with one button and
+// spends nothing, and the button's same-origin POST /auth/<token> consumes the token.
+//
+// The token is process-local state with a short TTL (seconds, or ten minutes for an away
+// link) and exactly one use. That is
 // the opposite of the session cookie it hands out (src/secret.mjs `sessionToken`), which
 // is derived from the secret precisely so it survives a daemon restart — and the
 // contrast is deliberate. A handoff that survived a restart would be a long-lived
@@ -31,6 +36,10 @@ import { fileURLToPath } from 'node:url';
  * nothing to aim at. Overridable for the checks, which need to watch one expire without
  * sleeping for half a minute. */
 export const DEFAULT_HANDOFF_TTL_MS = 30_000;
+
+/** An away link is carried to another device by hand, so it lives longer than a handoff the
+ * browser on this Mac is already opening. */
+export const AWAY_LINK_TTL_MS = 10 * 60 * 1000;
 
 export function handoffTtlMs() {
   const v = Number(process.env.CLAUDE_BOARD_HANDOFF_TTL_MS);
@@ -69,6 +78,12 @@ export function handoffTarget(boardId) {
  * has to live on the side that does not import back, and recoveryCommand below needs it
  * to know whether the port is worth naming. */
 export const DEFAULT_PORT = 7391;
+
+/** How long a round waits (ADR 157) unless `CLAUDE_BOARD_TIMEOUT_MS` says otherwise. Here
+ * because src/board.mjs, src/server.mjs and the shim all import this module;
+ * bin/launcher.c's `CLICK_SECONDS_DEFAULT` is the one copy, and test/check-mcp.mjs holds
+ * the two equal. */
+export const DEFAULT_WAIT_TIMEOUT_MS = 50 * 60 * 1000;
 
 /** The longest anything waits on one round, however often the reviewer's activity moves
  * its deadline (ADR 145): the daemon's ceiling on a `/wait`, the shim's (that plus its
@@ -139,10 +154,27 @@ export function shellQuote(s) {
  * inside the clone, which is the fix this whole route exists to point at. Every other
  * caller keeps the absolute form, because it is read by something that already holds a
  * terminal on this machine — pasting it works from any cwd, which is the point there. */
-export function recoveryCommand(port = Number(process.env.CLAUDE_BOARD_PORT) || DEFAULT_PORT, { absolute = true } = {}) {
-  const cmd = `node ${absolute ? shellQuote(path.join(repoRoot(), 'bin', 'authorize.mjs')) : 'bin/authorize.mjs'}`;
-  return port === DEFAULT_PORT ? cmd : `CLAUDE_BOARD_PORT=${port} ${cmd}`;
+export function recoveryCommand(port = envPort(), { absolute = true } = {}) {
+  return withPort(`node ${absolute ? shellQuote(path.join(repoRoot(), 'bin', 'authorize.mjs')) : 'bin/authorize.mjs'}`, port);
 }
+
+/** A `bin/away.mjs` command line. Always relative: an away refusal names one to a caller the
+ * gate could not verify. */
+export function awayCommand(args, port = envPort()) {
+  return withPort(`node bin/away.mjs ${args}`, port);
+}
+
+function envPort() {
+  return Number(process.env.CLAUDE_BOARD_PORT) || DEFAULT_PORT;
+}
+
+function withPort(command, port) {
+  return port === DEFAULT_PORT ? command : `CLAUDE_BOARD_PORT=${port} ${command}`;
+}
+
+/** The origin kinds a handoff is minted for: this Mac's own loopback names, or the one
+ * configured away name (src/away.mjs). */
+export const HANDOFF_ORIGIN = { loopback: 'loopback', away: 'away' };
 
 /** The live handoffs of ONE daemon instance. Created per request handler rather than at
  * module level, so two servers in one process (as the checks spin up) never hand each
@@ -151,7 +183,7 @@ export function recoveryCommand(port = Number(process.env.CLAUDE_BOARD_PORT) || 
  * `now` and `mintToken` are injected for the checks: a store whose clock and randomness
  * are arguments can be tested for expiry and collision without sleeping or hoping. */
 export function createHandoffStore({ ttlMs = null, now = Date.now, mintToken = () => randomBytes(32).toString('hex') } = {}) {
-  const live = new Map(); // token -> { target, expiresAt }
+  const live = new Map(); // token -> { target, origin, session, expiresAt }
 
   function prune() {
     const t = now();
@@ -161,34 +193,51 @@ export function createHandoffStore({ ttlMs = null, now = Date.now, mintToken = (
   }
 
   return {
-    /** Mint a handoff for `target` (a path from handoffTarget, never caller text). */
-    mint(target) {
+    /** Mint a handoff for `target` (a path from handoffTarget, never caller text), redeemable
+     * only on `origin` (`HANDOFF_ORIGIN`) and for `ttlMs`, the store's own when absent.
+     * `session`, when given, is the sign-in the caller meant to hand out: the redeemer holds
+     * the entry to it, so a link minted before the secret changed signs nobody in after. */
+    mint(target, { ttlMs: mintTtlMs = null, origin = HANDOFF_ORIGIN.loopback, session = null } = {}) {
       // Bounded by construction: every mint drops everything already expired, and a
-      // handoff lives for seconds, so a process that hammers this route cannot grow the
+      // handoff lives for minutes at most, so a process that hammers this route cannot grow the
       // map past the number of mints it manages inside one TTL. The sign-in store has no
       // TTL, so none of that holds there (src/signin-link.mjs).
       prune();
       const token = mintToken();
-      const expiresAt = now() + (ttlMs ?? handoffTtlMs());
-      live.set(token, { target, expiresAt });
+      const expiresAt = now() + (mintTtlMs ?? ttlMs ?? handoffTtlMs());
+      live.set(token, { target, origin, session, expiresAt });
       return { token, expiresAt };
     },
 
-    /** Redeem `token` exactly once, or return null.
+    /** Redeem `token` on `origin` exactly once, or return null.
      *
      * The delete happens BEFORE the expiry test and before anything is returned, which
      * is what makes "single use" hold against a replay racing the real browser: node is
      * single-threaded, so between the `get` and the `delete` no other request can run,
      * and the second caller finds nothing whatever the first one goes on to do.
      *
-     * Expired, already-used and never-existed are one outcome on purpose. Three
-     * distinguishable answers would tell a `ps` poller that it found a real token and
-     * merely arrived late, which is exactly the signal worth denying it. */
-    consume(token) {
+     * Expired, already-used, minted for the other origin (which spends it) and never-existed
+     * are one outcome on purpose. Distinguishable answers would tell a `ps` poller that it
+     * found a real token and merely arrived late, which is exactly the signal worth denying
+     * it. */
+    consume(token, origin = HANDOFF_ORIGIN.loopback) {
       const entry = live.get(token);
       if (!entry) return null;
       live.delete(token);
+      if (entry.origin !== origin) return null;
       if (entry.expiresAt <= now()) return null;
+      return entry;
+    },
+
+    /** The entry `consume` would redeem, left live. Shown to the wrong origin it is spent, as
+     * `consume` spends it. */
+    peek(token, origin) {
+      const entry = live.get(token);
+      if (!entry) return null;
+      if (entry.origin !== origin || entry.expiresAt <= now()) {
+        live.delete(token);
+        return null;
+      }
       return entry;
     },
 

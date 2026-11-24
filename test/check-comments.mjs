@@ -65,9 +65,9 @@
 //     truthfully ("a deadline 400ms away" beside a one-hour ceiling); bound by proximity to
 //     the constant's own name, which is the only precise form, it has zero subjects in the
 //     whole tree. The house style states durations in prose sentences ("up to an hour",
-//     "forty minutes") a paragraph away from any constant, so the digits-beside-the-name shape
+//     "fifty minutes") a paragraph away from any constant, so the digits-beside-the-name shape
 //     the rule needs does not occur. The one live instance of exactly this defect class --
-//     src/stranded.mjs's exit hook, documented as forty minutes against a one-hour
+//     src/stranded.mjs's exit hook, documented as fifty minutes against a one-hour
 //     `CLICK_LIFETIME_MAX_MS` -- is invisible to every variant, spelled in words in a header.
 //
 // Widening any rule below means first proving the wider version stays quiet on this tree.
