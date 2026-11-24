@@ -6158,7 +6158,7 @@ export const ui = `
     });
     if (lifted === sendBar.classList.contains('lifted')) return;
     sendBar.classList.toggle('lifted', lifted);
-    setupSendBarDock();
+    redockSendBar();
   }
 
   /** Flip to round 'n'. The one writer of currentRound.
@@ -6300,7 +6300,7 @@ export const ui = `
     // Measured at observe time rather than hardcoded, for the same reason
     // '--round-pager-dock-h' is measured: the bar grows a row on narrow
     // windows (the 560px breakpoint near the end of src/styles.mjs).
-    var barHeight = Math.round(sendBar.getBoundingClientRect().height);
+    var barHeight = sendBarDockHeight = Math.round(sendBar.getBoundingClientRect().height);
     sendBarDockObserver = new IntersectionObserver(function (entries) {
       var entry = entries[0];
       var intersecting = !!entry && entry.isIntersecting;
@@ -6309,6 +6309,14 @@ export const ui = `
       updateQuestionsLeftPill();
     }, { rootMargin: '0px 0px -' + barHeight + 'px 0px' });
     sendBarDockObserver.observe(rail);
+  }
+
+  var sendBarDockHeight = 0;
+
+  /** The dock's margin is the bar's height, so it is taken again when that changes. */
+  function redockSendBar() {
+    if (!sendBarDockObserver) return;
+    if (Math.round(sendBar.getBoundingClientRect().height) !== sendBarDockHeight) setupSendBarDock();
   }
 
   /** '.page-comments' (a page board's Tray) has to clear
@@ -6372,7 +6380,7 @@ export const ui = `
       write(dock.getBoundingClientRect().height);
       reportStageBand();
       liftSendBar();
-      if (sendBar && sendBar.classList.contains('lifted')) setupSendBarDock();
+      redockSendBar();
     });
     ro.observe(dock);
     if (sendBar) qsa('.btn-discuss, .btn-send', sendBar).forEach(function (btn) { ro.observe(btn); });
