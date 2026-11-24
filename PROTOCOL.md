@@ -33,7 +33,7 @@ packet's `resolved`, redundant beside `lost`) is the shape of that exception.
 | `src/stranded.mjs` | the stranded rule: a board no Watcher is looking at, carrying an awaited round or a Suppressed board's own first round, gets one banner per absence, after a grace. Persistence, grace timers and the click-serving child's lifecycle, all behind `createStrandedWatch` |
 | `src/secret.mjs` | the two credentials: the local secret and the browser session cookie derived from it, shared by the daemon and the shim |
 | `src/handoff.mjs` | single-use, short-lived browser handoffs, for a loopback name or the away name, `recoveryCommand()` and `awayCommand()` |
-| `src/mint-handoff.mjs` | the one call to `POST /api/handoff` the commands share |
+| `src/mint-handoff.mjs` | the one call to `POST /api/handoff` the commands share, and the JSON POST under it, which the demo shares too |
 | `src/away.mjs` | the away setting: reading, writing and removing its file, and the one name it holds |
 | `src/signin-link.mjs` | the sign-in link: its store, the checks on what it may start, the detached start, its two pages |
 | `src/ui.mjs` | client-side script for the board page, exported as a string |

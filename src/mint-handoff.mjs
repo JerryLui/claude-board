@@ -24,7 +24,7 @@ export function requireSecret(command) {
 }
 
 /** POST a JSON body and resolve the parsed response, or reject with a tagged error. */
-function postJson(urlStr, body, secret) {
+export function postJson(urlStr, body, secret) {
   return new Promise((resolve, reject) => {
     const u = new URL(urlStr);
     const data = JSON.stringify(body);
