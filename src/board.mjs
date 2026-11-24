@@ -24,6 +24,7 @@ import { renderBlock, highlightFenceHtml } from './render.mjs';
 // existing `from './board.mjs'` import keeps working unchanged.
 import { isPageRound, questionBlocks } from './badge.mjs';
 import { STATUS_TONES } from './card-status.mjs';
+import { DEFAULT_WAIT_TIMEOUT_MS } from './handoff.mjs';
 import { sessionMatches } from './missions.mjs';
 import { storedImages } from './images.mjs';
 export { questionBlocks };
@@ -139,7 +140,7 @@ function emptyIdLedger() {
   // renderer or a check calls on its own -- parses no diagrams at all, which is what
   // that path did before the door existed. `html` is the post's html allowance on the
   // same terms (`spendHtmlAllowance`): null bounds nothing past each block's own cap.
-  return { taken: new Map(), replaceable: new Set(), minted: new Set(), openRound: null, refusals: [], diagrams: null, html: null };
+  return { taken: new Map(), replaceable: new Set(), minted: new Set(), openRound: null, refusals: [], diagrams: null, html: null, questions: 0 };
 }
 
 /** Resolve a block's id: the caller's `raw.id` when present, well-formed and
@@ -574,6 +575,7 @@ function normalizeBlockContent(raw, round, counters, cwd, ids, { topLevel = true
     }
     case 'question': {
       const id = resolveBlockId(raw, 'question', counters, ids, topLevel);
+      const questionPlace = ids.questions += 1;
       // An unrecognised widget is a rejection, not a silent fallback to 'single': a
       // widget name one word off the spec ('freetext' for 'text') renders a question
       // with no cards and no textarea, which Send then reports back as `unanswered` --
@@ -597,6 +599,7 @@ function normalizeBlockContent(raw, round, counters, cwd, ids, { topLevel = true
           position: { kind: 'question', questionId: id, slot: 'context', index: index + 1 },
         }))
         : [];
+      if (widget !== 'text' && Array.isArray(raw.options)) refuseBlankOptionLabel(raw.options, questionPlace);
       // choose-between-rendered-variants is the one widget whose
       // options are not a { preview } string: each option's `block` is a real
       // content block, normalized the SAME way normalizeCompareSide (below)
@@ -618,14 +621,14 @@ function normalizeBlockContent(raw, round, counters, cwd, ids, { topLevel = true
       const options = Array.isArray(raw.options)
         ? raw.options.map((o, index) => widget === 'choose-between-rendered-variants'
           ? {
-            label: byValueText(o.label ?? '', 'option label'),
+            label: byValueText(o.label, 'option label'),
             description: byValueText(o.description ?? '', 'option description'),
             block: o.block ? normalizeBlock(o.block, round, counters, cwd, ids, {
               topLevel: false,
               position: { kind: 'question', questionId: id, slot: 'option', index: index + 1 },
             }) : null,
           }
-          : { label: byValueText(o.label ?? '', 'option label'), description: byValueText(o.description ?? '', 'option description'), preview: o.preview == null ? null : byValueText(o.preview, 'option preview') })
+          : { label: byValueText(o?.label ?? '', 'option label'), description: byValueText(o?.description ?? '', 'option description'), preview: o?.preview == null ? null : byValueText(o.preview, 'option preview') })
         : [];
       if (widget !== 'text' && options.length === 0) {
         throw new Error(`question widget '${widget}' requires at least one option`);
@@ -745,6 +748,12 @@ function cardMarkdownHtml(text, field, where, ids) {
     recordDiagramRefusal(fence.text, null, `mermaid fence ${fence.ordinal} in ${field} of ${where}`, true, ids);
   }
   return html;
+}
+
+function refuseBlankOptionLabel(options, questionPlace) {
+  const blankIndex = options.findIndex(o => typeof o?.label !== 'string' || !o.label.trim());
+  if (blankIndex === -1) return;
+  throw new Error(`option ${blankIndex + 1} of question ${questionPlace} has no label; every option is an object whose \`label\` is text that is not blank`);
 }
 
 function normalizeCompareSide(side, round, counters, cwd, ids, position) {
@@ -905,17 +914,6 @@ export function roundOwnedBy(board, round, ref) {
 /** The session that posted `round` of `board`, null when none is recorded. */
 const posterOf = (board, round) => (round && round.session) || (board && board.session) || null;
 
-/** 40 minutes (ADR.md entry 47): the default a round's `awaitDeadline` is stamped
- * `awaitTimeoutMs` amount of time past `postedAt` with, when a caller (test or
- * otherwise) mints a round through this module without naming its own. The real
- * daemon path never relies on this default landing correctly on its own --
- * src/server.mjs's `handlePostBoard` always passes the env-resolved
- * `waitTimeoutMs()` explicitly, so `CLAUDE_BOARD_TIMEOUT_MS` governs both the
- * deadline stamped here and the wall-clock cap `/wait` actually enforces (one
- * clock, one env var). Exported so a check can assert this and
- * `DEFAULT_WAIT_TIMEOUT_MS` (src/server.mjs) stay equal rather than drifting. */
-export const DEFAULT_AWAIT_TIMEOUT_MS = 2_400_000;
-
 /** Whether a round being minted is *awaited* (CONTEXT.md), and the absolute instant
  * its wait dies if it is: `{ awaited, awaitDeadline }`. Two ways in, matching the
  * glossary exactly -- a round carrying a question always is (ADR.md entry 42's
@@ -977,7 +975,7 @@ function roundStamp(session, folder, boardFolder) {
  * `threadCwd`). It only ever narrows what `mintThreadId` may draw -- see its own comment
  * for why a collision is a routing fault rather than a cosmetic one -- and is irrelevant
  * when the caller names the thread. */
-export function createBoard({ title, blocks, cwd = null, thread = null, threadCwd = null, wait = false, awaitTimeoutMs = DEFAULT_AWAIT_TIMEOUT_MS, movingDeadline = false, takenThreads = null, mission = null, session = null }) {
+export function createBoard({ title, blocks, cwd = null, thread = null, threadCwd = null, wait = false, awaitTimeoutMs = DEFAULT_WAIT_TIMEOUT_MS, movingDeadline = false, takenThreads = null, mission = null, session = null }) {
   const now = new Date().toISOString();
   const boundCwd = bindBoardCwd(cwd, threadCwd);
   const counters = {};
@@ -1014,7 +1012,7 @@ export function createBoard({ title, blocks, cwd = null, thread = null, threadCw
  * a Send racing an amend, and appending a second block under that id would silently
  * destroy the original round's answer (`board.answers` is keyed by id) and its
  * history-rail entry. Nothing on the board is mutated before the throw. */
-export function addRound(board, { blocks, cwd, title, wait = false, awaitTimeoutMs = DEFAULT_AWAIT_TIMEOUT_MS, movingDeadline = false, session = null, ownFolder = false }) {
+export function addRound(board, { blocks, cwd, title, wait = false, awaitTimeoutMs = DEFAULT_WAIT_TIMEOUT_MS, movingDeadline = false, session = null, ownFolder = false }) {
   const folder = roundFolder(board, cwd, ownFolder);
   const now = new Date().toISOString();
   const n = board.rounds.length + 1;
@@ -1168,7 +1166,7 @@ export function abandonOpenRounds(board, { session = null, except = null, only =
  * stay as they are, and so does a round recorded under the taker's own id, the taker's
  * already though its process names the giver too. Returns `{ handed, reopened }`, the round
  * numbers of each; mutates `board`, caller persists it. */
-export function handOverRounds(board, giver, taker, { now = Date.now(), awaitTimeoutMs = DEFAULT_AWAIT_TIMEOUT_MS } = {}) {
+export function handOverRounds(board, giver, taker, { now = Date.now(), awaitTimeoutMs = DEFAULT_WAIT_TIMEOUT_MS } = {}) {
   const handed = [];
   const reopened = [];
   const at = new Date(now).toISOString();

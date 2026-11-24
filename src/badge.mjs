@@ -40,6 +40,31 @@ export function roundPageLabel(n, title) {
   return title ? roundNumberLabel(n) + ' · ' + title : roundNumberLabel(n);
 }
 
+export const PAGER_GAP_LABEL = 'Show all rounds';
+
+/** The pager's entries when the full row does not fit: the round numbers to show,
+ * in order, with 'gap' where a run of them is hidden. A run of one shows its number,
+ * which is never wider than the gap's button. Only a narrow row that still overflows
+ * is asked for `oneGap`: the first hidden run takes the gap, the rest take nothing,
+ * since that one button opens every number. Spliced into the client script by
+ * `.toString()`, so it names nothing outside itself. */
+export function foldRounds({ rounds, current, owed, narrow, oneGap }) {
+  var at = rounds.indexOf(current);
+  var from = at - (narrow ? 0 : 2);
+  var to = at + (narrow ? 1 : 2);
+  var items = [];
+  var run = [];
+  rounds.forEach(function (n, i) {
+    var kept = i === 0 || i === rounds.length - 1 || (i >= from && i <= to) || owed.indexOf(n) !== -1;
+    if (!kept) { run.push(n); return; }
+    if (run.length === 1 && !oneGap) items.push(run[0]);
+    else if (run.length && !(oneGap && items.indexOf('gap') !== -1)) items.push('gap');
+    run = [];
+    items.push(n);
+  });
+  return items;
+}
+
 // Is this list of blocks a PAGE -- one rendered artifact filling the viewport,
 // rather than a stage in a column? ADR.md entry 33: inferred from shape, never
 // declared, so nothing enters the protocol. Entry 42 made it a question about a

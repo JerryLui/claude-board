@@ -125,7 +125,7 @@ function openRoundPage() {
   const round2 = board.rounds[board.rounds.length - 1];
   round2.status = 'open';
   round2.sentAt = null;
-  round2.awaitDeadline = new Date(Date.now() + 40 * 60 * 1000).toISOString();
+  round2.awaitDeadline = new Date(Date.now() + 50 * 60 * 1000).toISOString();
   board.answers = {};
   for (const block of board.blocks) {
     if (block.kind === 'question' && block.round === round2.n) {

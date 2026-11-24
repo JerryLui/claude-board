@@ -70,6 +70,12 @@ export function handoffTarget(boardId) {
  * to know whether the port is worth naming. */
 export const DEFAULT_PORT = 7391;
 
+/** How long a round waits (ADR 157) unless `CLAUDE_BOARD_TIMEOUT_MS` says otherwise. Here
+ * because src/board.mjs, src/server.mjs and the shim all import this module;
+ * bin/launcher.c's `CLICK_SECONDS_DEFAULT` is the one copy, and test/check-mcp.mjs holds
+ * the two equal. */
+export const DEFAULT_WAIT_TIMEOUT_MS = 50 * 60 * 1000;
+
 /** The longest anything waits on one round, however often the reviewer's activity moves
  * its deadline (ADR 145): the daemon's ceiling on a `/wait`, the shim's (that plus its
  * grace, so the daemon's timeout packet is the one that ends the call) and the answer

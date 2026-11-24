@@ -482,6 +482,19 @@ check('comment mode on: a dragstart on a rank-list row is stood down and raises 
     `the dragstart-raised Notice must read the exact same locked-answers text, got ${JSON.stringify(notice.querySelector('.notice-msg').textContent)}`);
 });
 
+check('comment mode on: a rank row\'s up and down buttons are stood down and raise the same Notice', () => {
+  const { document } = loadSoloRankBoardWithTimers(createFakeTimers());
+  enableCommentMode(document);
+  const down = document.querySelector('.rank-move[data-move="down"]');
+
+  down.dispatchEvent(new StandInEvent('click'));
+
+  assert.deepEqual(document.querySelectorAll('.rank-list li').map(li => li.getAttribute('data-choice')), ['Alpha', 'Beta', 'Gamma']);
+  const notice = document.querySelector('.notice');
+  assert.equal(notice.classList.contains('visible'), true);
+  assert.equal(notice.querySelector('.notice-msg').textContent, 'Comment mode is on, answers locked.');
+});
+
 // --- the hint carries both identity and containing context --------------------
 
 check('the hint for a clicked element reads "<identity> in <context>": a "Send" button inside the compare\'s "After" html stage', () => {
@@ -1091,6 +1104,7 @@ check("comment mode: clicking a question block's own rank item mints no comment 
   const document = loadWrapperBoard();
   enableCommentMode(document);
   assertNotAnchorable(document, document.querySelector('.rank-list li'), 'a rank item');
+  assertNotAnchorable(document, document.querySelector('.rank-move'), 'a rank item\'s move button');
 });
 
 check("comment mode: clicking a question block's own answer textarea mints no comment and shows no hover affordance", () => {

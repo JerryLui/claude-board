@@ -363,7 +363,7 @@ async function main() {
     await fetch(`${base}/api/pomodoro`);
     // `/wait` reads the board before it decides anything, and a round number the board
     // does not have makes it answer at once instead of holding the socket open for the
-    // whole 40-minute cap. The read is the part that matters here.
+    // whole wall-clock cap. The read is the part that matters here.
     assert.equal((await fetch(`${base}/api/board/${ancient}/wait?round=99`)).status, 404);
 
     assert.deepEqual(storeSnapshot(), before, 'no read may delete anything, at any age');

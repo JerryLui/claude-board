@@ -32,7 +32,7 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readSecret, secretPath, daemonPort, SECRET_HEADER } from '../src/secret.mjs';
-import { HANDOFF_TOKEN_RE, recoveryCommand, shellQuote, DEFAULT_PORT, WAIT_CEILING_MS, WATCH_INTERVAL_MS, waitCeilingMs } from '../src/handoff.mjs';
+import { HANDOFF_TOKEN_RE, recoveryCommand, shellQuote, DEFAULT_PORT, DEFAULT_WAIT_TIMEOUT_MS, WAIT_CEILING_MS, WATCH_INTERVAL_MS, waitCeilingMs } from '../src/handoff.mjs';
 import { MAX_DRAINED_BYTES, postTooLargeMessage } from '../src/post-limit.mjs';
 import { processStartUtc } from '../src/proc-start.mjs';
 import { STATUS_TONES } from '../src/card-status.mjs';
@@ -42,10 +42,10 @@ import { STATUS_TONES } from '../src/card-status.mjs';
 
 const PORT = daemonPort();
 const BASE_URL = `http://127.0.0.1:${PORT}`;
-// 40m default (ADR.md entry 47). Since ADR 145 the wait follows the round's stored
+// Since ADR 145 the wait follows the round's stored
 // deadline, which the daemon stamps and the reviewer's activity moves; this is the cap
 // only against a daemon from before that, which reports no deadline.
-const TIMEOUT_MS = Number(process.env.CLAUDE_BOARD_TIMEOUT_MS) || 40 * 60 * 1000;
+const TIMEOUT_MS = Number(process.env.CLAUDE_BOARD_TIMEOUT_MS) || DEFAULT_WAIT_TIMEOUT_MS;
 // The shim outlives the round's deadline by this much, and only this much. Without a
 // margin the shim fires at the same instant the daemon's poll does, aborts, and the
 // daemon sees a dead client and returns early: its whole timeout branch unreachable, no
@@ -54,7 +54,7 @@ const TIMEOUT_MS = Number(process.env.CLAUDE_BOARD_TIMEOUT_MS) || 40 * 60 * 1000
 //
 // Proportional rather than a flat five seconds, because the checks drive the cap down
 // to a few hundred milliseconds and a fixed margin would be the entire runtime there.
-// 5% of the cap, ceilinged at the 5s a 40 minute wait wants (invisible against it, and
+// 5% of the cap, ceilinged at the 5s a 50 minute wait wants (invisible against it, and
 // far longer than loopback latency) and floored at 250ms -- the floor is about the
 // daemon's resolution, not latency: `waitForRound` (src/server.mjs) polls the store
 // every 120ms, so a margin under that lets the shim win again on a short cap.
@@ -234,7 +234,7 @@ function assertCanOpenTab() {
 // ---------------------------------------------------------------------------
 // HTTP client to the daemon. Plain node:http, not fetch/undici: undici's
 // default headersTimeout/bodyTimeout (5 minutes) would kill the /wait call
-// long before the 40m wall-clock cap (TIMEOUT_MS above). http.request has no
+// long before the wall-clock cap (TIMEOUT_MS above). http.request has no
 // such default.
 // ---------------------------------------------------------------------------
 
@@ -679,7 +679,7 @@ const ASK_TOOL = {
     'Post a board (questions plus artifact context) to the local claude-board daemon. ' +
     'Blocks until the reviewer submits when the round carries any question block, or when ' +
     'it is a page board (one html block) posted with wait: true; every other round returns ' +
-    'as soon as the post succeeds, nothing to wait for. The default wait is 40 minutes, restarted by ' +
+    'as soon as the post succeeds, nothing to wait for. The default wait is 50 minutes, restarted by ' +
     'each answer pick, note or comment the reviewer makes on the round. Opens ' +
     'a browser tab on the first board of this conversation; later rounds push into the same tab. ' +
     'Returns a packet naming each question\'s status, choice and note, and every comment ' +
@@ -1331,7 +1331,7 @@ function hasQuestionBlock(blocks) {
  * check than the authoritative one `mintAwait` runs against the normalized board. The
  * gap only matters when a `source` ref is broken AND `wait: true` was passed on it: the
  * shim still blocks (this returns true), the daemon still marks the round not-awaited
- * (its `html` block carries `error`), and the call rides out to the 40-minute timeout
+ * (its `html` block carries `error`), and the call rides out to the wall-clock timeout
  * rather than either side silently disagreeing about which comments are ever read. */
 function isPageRoundShape(blocks) {
   return Array.isArray(blocks) && blocks.length === 1 && blocks[0] && typeof blocks[0] === 'object' && blocks[0].kind === 'html';

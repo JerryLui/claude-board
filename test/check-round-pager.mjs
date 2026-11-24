@@ -29,10 +29,10 @@
 import assert from 'node:assert/strict';
 import { createBoard, addRound, applySubmit, abandonOpenRounds } from '../src/board.mjs';
 import { renderBoardPage, renderRoundSection, groupCommentsByBlock } from '../src/render.mjs';
-import { roundPageLabel, roundNumberLabel } from '../src/badge.mjs';
+import { roundPageLabel, roundNumberLabel, foldRounds } from '../src/badge.mjs';
 import { styles } from '../src/styles.mjs';
 import { ui } from '../src/ui.mjs';
-import { parseHTML, StandInEvent, resolveComputedProperty } from './dom-stand-in.mjs';
+import { Element, parseHTML, StandInEvent, resolveComputedProperty } from './dom-stand-in.mjs';
 import { check, finish, pageHarness } from './support.mjs';
 
 const { loadBoard, loadBoardWithEventSource, click, answerSingle, reportScroll, condensed } = await pageHarness();
@@ -781,6 +781,118 @@ check('the page board\'s comment panel clears the round pager by the dock\'s mea
   assert.match(fnBody, /new ResizeObserver\(/, 'it must be a live observer, not a one-shot read at load');
   assert.match(fnBody, /setProperty\(['"]--round-pager-dock-h['"]/, 'and it must write the exact property .page-comments reads');
   assert.match(ui, /setupPagerDockHeightTracking\(\);/, 'the function must actually be CALLED on the page, not merely defined and left unused');
+});
+
+// =====================================================================================
+// The fold: a pager whose row does not fit shows the numbers around the reader.
+// =====================================================================================
+
+/** `count` rounds, each sent but the newest, and those in `waiting`, closed unanswered,
+ * which keep their dot. */
+function longBoard(count, waiting = []) {
+  const board = createBoard({ title: 'Long', blocks: [Q] });
+  for (let n = 1; n < count; n++) {
+    if (waiting.includes(n)) abandonOpenRounds(board);
+    else applySubmit(board, { action: 'send', answers: [], comments: [] }, n);
+    addRound(board, { title: `Step ${n + 1}`, blocks: [Q] });
+  }
+  return board;
+}
+
+/** The pager's face, left to right: what is on screen of it. */
+const pagerFace = document => [...document.querySelector('nav#round-pager').children]
+  .filter(el => el.tagName === 'BUTTON' && !el.hasAttribute('hidden'))
+  .map(el => el.textContent).join(' ');
+
+/** Runs `fn` on a page whose pager lays out `perLine` entries a line, the one fact of
+ * layout the fold reads. */
+function withPagerLines(perLine, fn) {
+  Object.defineProperty(Element.prototype, 'offsetTop', {
+    configurable: true,
+    get() {
+      const row = this.parentElement.children.filter(el => el.tagName === 'BUTTON' && !el.hasAttribute('hidden'));
+      return Math.floor(row.indexOf(this) / perLine) * 40;
+    },
+  });
+  try { return fn(); } finally { delete Element.prototype.offsetTop; }
+}
+
+const ALL_19 = Array.from({ length: 19 }, (_, i) => i + 1).join(' ');
+
+check('the fold keeps the first, the last, the rounds around the current one and every waiting one, a gap for each hidden run', () => {
+  const rounds = Array.from({ length: 19 }, (_, i) => i + 1);
+  const rows = [
+    ['in the middle', { current: 10 }, '1 gap 8 9 10 11 12 gap 19'],
+    ['on the newest', { current: 19 }, '1 gap 17 18 19'],
+    ['on the first', { current: 1 }, '1 2 3 gap 19'],
+    ['a waiting round splits a run', { current: 10, owed: [15] }, '1 gap 8 9 10 11 12 gap 15 gap 19'],
+    ['a run of one shows its number', { current: 5, owed: [17] }, '1 2 3 4 5 6 7 gap 17 18 19'],
+    ['a phone keeps the next round alone', { current: 10, narrow: true }, '1 gap 10 11 gap 19'],
+    ['a phone keeps a waiting round', { current: 10, owed: [15], narrow: true }, '1 gap 10 11 gap 15 gap 19'],
+    ['a phone whose row still overflows has one gap', { current: 10, owed: [15, 17], narrow: true, oneGap: true }, '1 gap 10 11 15 17 19'],
+  ];
+  for (const [what, given, face] of rows) {
+    assert.equal(foldRounds({ rounds, owed: [], narrow: false, oneGap: false, ...given }).join(' '), face, what);
+  }
+});
+
+check('a pager that fits shows every number and no gap, and one that does not folds around the round on screen, on load and on every flip', () => {
+  const html = renderBoardPage(longBoard(19, [15]));
+  withPagerLines(19, () => assert.equal(pagerFace(loadBoard(html)), ALL_19, 'every number while they fit'));
+  withPagerLines(13, () => {
+    const document = loadBoard(html);
+    assert.equal(pagerFace(document), '1 … 15 16 17 18 19', 'on load');
+    click(document.querySelector('.round-page[data-round="1"]'));
+    assert.equal(pagerFace(document), '1 2 3 … 15 … 19', 'on a jump');
+    keydown(document, 'ArrowRight');
+    click(document.querySelector('button#round-next'));
+    click(document.querySelector('button#round-next'));
+    click(document.querySelector('button#round-next'));
+    assert.equal(currentPage(document), '5', 'an arrow key and the side arrows step one round');
+    assert.equal(pagerFace(document), '1 2 3 4 5 6 7 … 15 … 19', 'on a step');
+    const gaps = [...document.querySelectorAll('.round-gap')];
+    assert.deepEqual(gaps.map(g => [g.tagName, g.getAttribute('aria-label')]),
+      [['BUTTON', 'Show all rounds'], ['BUTTON', 'Show all rounds']]);
+  });
+});
+
+check('a round arriving on a folded pager is on its face, and the round on screen stays there', () => {
+  withPagerLines(13, () => {
+    const board = longBoard(19);
+    const { document, es } = loadBoardWithEventSource(renderBoardPage(board));
+    click(document.querySelector('.round-page[data-round="1"]'));
+    applySubmit(board, { action: 'send', answers: [], comments: [] }, 19);
+    addRound(board, { title: 'Arrived', blocks: [Q] });
+    es.dispatch('round', JSON.stringify({
+      round: 20, mode: 'new-round', blockIds: [], html: renderRoundSection(board, 20, groupCommentsByBlock([])), board,
+    }));
+    assert.equal(pagerFace(document), '1 2 3 … 20');
+  });
+});
+
+check('a gap opens every number until one is picked, on a live board and on a saved one', () => {
+  for (const protocol of ['http:', 'file:']) {
+    withPagerLines(13, () => {
+      const document = loadBoard(renderBoardPage(longBoard(19)), { protocol });
+      const gap = document.querySelector('.round-gap');
+      assert.ok(gap && !gap.disabled, `${protocol} the gap is live`);
+      click(gap);
+      assert.equal(pagerFace(document), ALL_19, `${protocol} every number, no gap`);
+      assert.equal(document.activeElement, document.querySelector('.round-page[data-round="2"]'),
+        `${protocol} focus lands on the first number the gap hid`);
+      keydown(document, 'ArrowLeft');
+      assert.equal(pagerFace(document), ALL_19, `${protocol} a step is no pick`);
+      click(document.querySelector('.round-page[data-round="10"]'));
+      assert.equal(currentPage(document), '10');
+      assert.equal(pagerFace(document), '1 … 8 9 10 11 12 … 19', `${protocol} a pick folds it again`);
+    });
+  }
+});
+
+check('a board with more rounds than any window fits is folded before the script runs, the current round shown', () => {
+  assert.equal(pagerFace(parseHTML(renderBoardPage(longBoard(19)))), '1 … 17 18 19');
+  assert.equal(pagerFace(parseHTML(renderBoardPage(longBoard(14)))), '1 2 3 4 5 6 7 8 9 10 11 12 13 14',
+    'one that may fit paints every number');
 });
 
 await check('a board opened at #round:<n>, a mission card\'s link, shows round n though a later round is the newest, and inert on a round it does not hold', () => {

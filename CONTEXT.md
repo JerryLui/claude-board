@@ -274,7 +274,7 @@ _Avoid_: handoff (that is the record's note for the next session), transfer, tak
 its three causes).
 
 **Reopened**: of a round, that a Hand-over put it back to waiting in place: the same number,
-blocks and comments, Awaited again on a fresh 40-minute wait, its answer the new session's. It
+blocks and comments, Awaited again on a fresh 50-minute wait, its answer the new session's. It
 stays the new session's, so it is Reopened again at each later Hand-over until Submitted or
 Declined. _Avoid_: resumed, re-asked, revived.
 

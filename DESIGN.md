@@ -174,7 +174,7 @@ the call immediately with whatever is filled in and a status telling the agent t
 boards. Closing the tab is deliberately not a cancel — the board stays live and the URL reopens —
 because browser disconnects are unreliable, a sleeping laptop reading the same as a deliberate
 close. A wall-clock cap returns no-response rather than letting the call sit for the MCP default of
-roughly 28 hours; its value is `ADR.md` entry 47's.
+roughly 28 hours; its value is `ADR.md` entry 157's.
 
 **Node, zero dependencies, its own repository**, cloned per machine and run from the clone, with
 board JSON and emitted pages outside it so review content is never committed. Rejected: living

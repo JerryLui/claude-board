@@ -63,7 +63,7 @@ import { createBrowserStreams } from './browser-stream.mjs';
 import { STREAM_WORKER_FILE, STREAM_WORKER_SOURCE } from './stream-worker.mjs';
 import { readSecret, secretPath, secretMatches, sessionToken, sessionCookieMatches, sessionCookie, SECRET_HEADER } from './secret.mjs';
 import { readAway, isAwayHost } from './away.mjs';
-import { createHandoffStore, handoffTarget, recoveryCommand, HANDOFF_TOKEN_RE, HANDOFF_ORIGIN, DEFAULT_PORT, waitCeilingMs } from './handoff.mjs';
+import { createHandoffStore, handoffTarget, recoveryCommand, HANDOFF_TOKEN_RE, HANDOFF_ORIGIN, DEFAULT_PORT, DEFAULT_WAIT_TIMEOUT_MS, waitCeilingMs } from './handoff.mjs';
 import { createSigninStore, signinRefusal, startSignin, SIGNIN_STARTED_PAGE, SIGNIN_SPENT_PAGE } from './signin-link.mjs';
 import { createBoard, addRound, amendRound, abandonOpenRounds, roundOwnedBy, roundFolder, folderOfRound, handOverRounds, applySubmit, buildPacket, roundAnswers, dropResolved, resolveComments, questionBlocks, SUPPRESSED, ANSWERS_DELIVERED, roundContentDrifted } from './board.mjs';
 import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, renderRefusalPage, boardForClient, holdStages, holdAllStages, stageShas, CSP, INDEX_CSP } from './render.mjs';
@@ -429,14 +429,11 @@ const DAEMON_ID = createHash('sha256').update(String(process.argv[1] || ''), 'ut
 /** Wall-clock ceiling on a single /wait call, the server-side twin of the shim's
  * CLAUDE_BOARD_TIMEOUT_MS (PROTOCOL.md "MCP shim environment"): a waiter nobody ever
  * answers gets an explicit `timeout` packet instead of polling the store forever.
- * 40 minutes (ADR.md entry 47), for every round -- awaited page board and question
- * round alike, one clock and one env var rather than a rule per round shape. Must
- * equal src/board.mjs's `DEFAULT_AWAIT_TIMEOUT_MS`, which is what `handlePostBoard`
- * below stamps a round's `awaitDeadline` with, and what an activity report moves a
- * moving round's deadline to from now (ADR 145). A wait on such a round follows its
- * stored deadline instead, under `waitCeilingMs()` (src/handoff.mjs). */
-export const DEFAULT_WAIT_TIMEOUT_MS = 2_400_000;
-
+ * One clock and one env var for every round, awaited page board and question round
+ * alike (ADR.md entry 47), `DEFAULT_WAIT_TIMEOUT_MS` (src/handoff.mjs) without it:
+ * `handlePostBoard` below stamps a round's `awaitDeadline` with it, and an activity
+ * report moves a moving round's deadline to it from now (ADR 145). A wait on such a
+ * round follows its stored deadline instead, under `waitCeilingMs()` (src/handoff.mjs). */
 function waitTimeoutMs() {
   const v = Number(process.env.CLAUDE_BOARD_TIMEOUT_MS);
   return Number.isFinite(v) && v > 0 ? v : DEFAULT_WAIT_TIMEOUT_MS;
@@ -1000,7 +997,7 @@ function sleep(ms) {
  * (src/board.mjs) invented a THIRD round state, and a loop that only recognises
  * `sent` cannot see it. A backgrounded first `ask` -- the ordinary `fresh: true` path
  * after a context compaction -- therefore polled a round the daemon had already closed
- * for the full forty-minute cap and then reported a `timeout` whose text says the board
+ * for the full wall-clock cap and then reported a `timeout` whose text says the board
  * is "still open ... reopen it", which is false in both halves. For this wait an abandoned
  * round is as final as a sent one: it still takes a Send (ADR 114) and a hand-over can
  * reopen it (ADR 151), but neither reaches this caller, whose session closed the round.
@@ -1373,10 +1370,10 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, s
         // Awaited entry names (a question anywhere in the round, or `wait: true` on
         // a page board). `awaitTimeoutMs` is this process's own env-resolved cap, so
         // the deadline stamped on the round and the wall clock `/wait` enforces below
-        // are the same 40 minutes, not two constants that can drift.
+        // are the same 50 minutes, not two constants that can drift.
         // `movingDeadline` (ADR 145): the shim declares it follows the stored deadline, so
         // the reviewer's activity may move this round's. Strictly `=== true`, and never
-        // inferred: a shim from before it sends nothing and keeps its fixed 40 minutes.
+        // inferred: a shim from before it sends nothing and keeps its own fixed cap.
         round = addRound(board, { blocks: body.blocks, title: body.title, cwd, wait: Boolean(body.wait), awaitTimeoutMs: waitTimeoutMs(), movingDeadline: body.movingDeadline === true, session: roundSession, ownFolder });
         touchedBlockIds = board.blocks.filter(b => b.round === round).map(b => b.id);
         pushMode = 'new-round';
@@ -2365,8 +2362,8 @@ async function handleWait(req, res, id, url, home, sse, stream, waiting) {
     // The conversation that owned this board declared itself over (`POST /abandon`,
     // ADR 69) while this call was still blocked on it. Answered AT ONCE and named for
     // what it is: this used to be invisible to `waitForRound`, so the caller sat on a
-    // round the daemon had already closed until the forty-minute cap and was then handed
-    // a `timeout` telling it the board was "still open ... reopen it" -- forty minutes of
+    // round the daemon had already closed until the wall-clock cap and was then handed
+    // a `timeout` telling it the board was "still open ... reopen it" -- a full wait of
     // nothing, ending in advice that could not work.
     //
     // Nothing is written and nothing is broadcast here, unlike the timeout branch
