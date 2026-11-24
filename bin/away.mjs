@@ -136,7 +136,7 @@ async function on(name) {
   }
   if (before.foreign.length) {
     refuse(`Tailscale already serves something else on port ${HTTPS_PORT}:`, ...before.foreign.map(line => `  ${line}`),
-      `Next: turn that off with \`tailscale serve --https=${HTTPS_PORT} off\`, then run this again.`);
+      `Next: turn that off with \`tailscale ${SERVE_OFF.join(' ')}\`, then run this again.`);
   }
 
   const served = await tailscale(SERVE_ON);
