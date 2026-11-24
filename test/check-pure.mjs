@@ -2843,7 +2843,7 @@ check('render markup: single, multi-select, text, rank and defer carry the data 
   assert.ok(markup.includes('data-widget="rank"'));
 });
 
-check('the rank widget renders options in the stored order when there is a prior answer', () => {
+check('the rank widget renders options in the stored order when there is a prior answer, its move buttons disabled once sent', () => {
   const board = createBoard({
     title: 'Rank order',
     blocks: [{ kind: 'question', prompt: 'Order these', widget: 'rank', options: [{ label: 'A' }, { label: 'B' }, { label: 'C' }] }],
