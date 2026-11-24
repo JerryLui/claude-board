@@ -890,8 +890,8 @@ check('a gap opens every number until one is picked, on a live board and on a sa
 });
 
 check('a board with more rounds than any window fits is folded before the script runs, the current round shown', () => {
-  assert.equal(pagerFace(parseHTML(renderBoardPage(longBoard(19)))), '1 … 17 18 19');
-  assert.equal(pagerFace(parseHTML(renderBoardPage(longBoard(14)))), '1 2 3 4 5 6 7 8 9 10 11 12 13 14',
+  assert.equal(pagerFace(parseHTML(renderBoardPage(longBoard(16)))), '1 … 14 15 16');
+  assert.equal(pagerFace(parseHTML(renderBoardPage(longBoard(15)))), '1 2 3 4 5 6 7 8 9 10 11 12 13 14 15',
     'one that may fit paints every number');
 });
 

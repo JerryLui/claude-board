@@ -6,6 +6,9 @@
 // The daemon speaks plain http to a local forwarder, as it does behind Tailscale's: a TLS server
 // here, reached through a CONNECT proxy because the away name is in no DNS.
 //
+// NOT wired into test/run.mjs's `checks` array, on purpose: that suite has to pass on a
+// machine with no Chrome installed. Run this one by hand:
+//
 //   node test/browser-check-away-link.mjs
 //
 // Without Chrome it prints a skip line and exits 0.
