@@ -1361,7 +1361,7 @@ body.comment-mode:not(.readonly) .lens-canvas svg g.cb-anchor-sent:hover { outli
    .btn-primary gives Send. Disabled when the pick would be refused anyway (a
    historical round, comment mode -- src/ui.mjs's stageLensPick), which has to
    look unavailable rather than merely unresponsive. */
-.lens-pick { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.lens-pick { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); overflow-wrap: anywhere; }
 .lens-pick:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-ink); filter: brightness(1.08); }
 .lens-pick:disabled { background: var(--panel-2); border-color: var(--hairline); color: var(--muted); cursor: not-allowed; }
 
@@ -2834,8 +2834,7 @@ body.page-board .board-head { margin-left: env(safe-area-inset-left, 0px); margi
   .thread-title { flex: 1 0 100%; }
   .thread-rounds { width: auto; }
   .thread-updated { width: auto; margin-left: auto; }
-  .mission-card { --mc-btn: 44px; }
-  .mission-card { padding-top: 5px; }
+  .mission-card { --mc-btn: 44px; padding-top: 5px; }
   .mission-text > .mission-title:first-child { margin-top: 8px; }
   .mission-ident { min-height: 34px; align-items: center; }
   .mission-ident + .mission-title { margin-top: 0; }
