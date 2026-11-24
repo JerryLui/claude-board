@@ -3984,7 +3984,14 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
         return;
       }
 
-      const url = new URL(req.url, 'http://internal');
+      let url;
+      try {
+        url = new URL(req.url, 'http://internal');
+      } catch {
+        res.writeHead(400);
+        res.end();
+        return;
+      }
       const parts = url.pathname.split('/').filter(Boolean);
 
       // Gate 3, after the two 403s so a cross-origin page still gets the same refusal

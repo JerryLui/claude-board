@@ -928,7 +928,8 @@ on every non-GET but the away button's -- plus the four GETs held to the secret 
 writes, and `/read`, `/api/binding` and `GET /api/mission/:key`, because only a tool ever calls them -- and a credential on every other GET but
 the open ones (401, secret or cookie, the tap cookie on `/b/:boardId` alone): four on a loopback name, two away. Both credential gates are written
 as "everything, minus an explicit exception list", so a route added later is gated by default
-rather than by whoever adds it remembering.
+rather than by whoever adds it remembering. A request target that is no URL (`//[`) is a 400 with no
+body, between the second gate and the third.
 
 ### The host rule, and away
 

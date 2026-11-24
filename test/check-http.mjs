@@ -2996,6 +2996,20 @@ async function main() {
     }
   });
 
+  await check('AWAY: a request target that is no URL is a 400 with no body on both origins, to a caller holding nothing', async () => {
+    try {
+      awayOn();
+      for (const origin of ORIGINS) {
+        for (const method of ['GET', 'POST']) {
+          const r = await rawRequest(port, method, '//[', { host: origin.host });
+          assert.deepEqual([r.status, r.body], [400, ''], `${method} on ${origin.name}`);
+        }
+      }
+    } finally {
+      awayOff();
+    }
+  });
+
   await check('AWAY: only the mermaid engine is served with no cookie; its neighbours under /b/ are not', async () => {
     try {
       awayOn();
