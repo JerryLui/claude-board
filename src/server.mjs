@@ -64,7 +64,7 @@ import { decodeSubmitImages, boardImageNames, imageContentType, IMAGE_NAME } fro
 import { ASSET_NAME, MERMAID_ASSET_NAME, SHARED_ASSETS, assetContentType } from './assets.mjs';
 import { createBrowserStreams } from './browser-stream.mjs';
 import { STREAM_WORKER_FILE, STREAM_WORKER_SOURCE } from './stream-worker.mjs';
-import { readSecret, secretPath, secretMatches, sessionToken, sessionCookieMatches, sessionCookie, SECRET_HEADER } from './secret.mjs';
+import { readSecret, secretPath, secretMatches, sessionToken, sessionCookieMatches, tapCookieMatches, signInCookies, SECRET_HEADER } from './secret.mjs';
 import { readAway, isAwayHost } from './away.mjs';
 import { createHandoffStore, handoffTarget, recoveryCommand, awayCommand, HANDOFF_TOKEN_RE, HANDOFF_ORIGIN, AWAY_LINK_TTL_MS, DEFAULT_PORT, DEFAULT_WAIT_TIMEOUT_MS, waitCeilingMs } from './handoff.mjs';
 import { createSigninStore, signinRefusal, startSignin, SIGNIN_STARTED_PAGE, SIGNIN_SPENT_PAGE } from './signin-link.mjs';
@@ -552,13 +552,14 @@ function isSameOriginWrite(req) {
  * is not closed by this function, and this comment exists so nobody later reads the check
  * and concludes that it is.
  *
- * `boardPage` is the one relaxation: a link to a board tapped on another site opens it.
- * Every other cross-site read stays refused. */
+ * `boardPage` is the one relaxation: a link to a board tapped on another site opens it, on
+ * the tap cookie. Every other read takes the session cookie, which the browser holds back
+ * from another site. */
 function isAuthorizedRead(req, secret, boardPage = false) {
   if (!secret) return false;
   if (holdsSecret(req, secret)) return true;
-  if (!sessionCookieMatches(req.headers.cookie, secret)) return false;
-  return isSameOriginRead(req) || (boardPage && isLinkTap(req));
+  if (sessionCookieMatches(req.headers.cookie, secret) && isSameOriginRead(req)) return true;
+  return boardPage && tapCookieMatches(req.headers.cookie, secret) && isLinkTap(req);
 }
 
 function holdsSecret(req, secret) {
@@ -572,21 +573,18 @@ function isBoardPage(parts) {
   return parts[0] === 'b' && parts.length === 2 && SAFE_BOARD_ID.test(parts[1]);
 }
 
-/** True iff this is a person following a link on another site in a top-level tab. The cookie
- * is `SameSite=Lax` so that it arrives on such a tap; everything else it would arrive on
- * (`same-site`: a sibling Tailscale name, another port on this host) is told apart here. */
+/** True unless the browser says this is something other than a top-level tab opening the
+ * page. One that sends no `Sec-Fetch-*` at all passes: `SameSite` is what keeps the tap
+ * cookie off another site's frames and subresources there. */
 function isLinkTap(req) {
   const h = req.headers;
-  return req.method === 'GET'
-    && h.origin === undefined
-    && (h['sec-fetch-site'] === 'cross-site' || h['sec-fetch-site'] === 'same-site')
-    && h['sec-fetch-mode'] === 'navigate'
-    && h['sec-fetch-dest'] === 'document'
-    && !isPrefetch(req);
+  if (req.method !== 'GET' || h.origin !== undefined || isPrefetch(req)) return false;
+  const told = ['sec-fetch-site', 'sec-fetch-mode', 'sec-fetch-dest', 'sec-fetch-user'].some(name => h[name] !== undefined);
+  return !told || (h['sec-fetch-mode'] === 'navigate' && h['sec-fetch-dest'] === 'document');
 }
 
-/** True iff the cookie authorized this request and the answer should carry it again, which
- * is what keeps a browser in use signed in. */
+/** True iff the session cookie authorized this request and the answer should carry both
+ * cookies again, which is what keeps a browser in use signed in. The tap cookie renews nothing. */
 function renewsSession(req, parts, secret) {
   if (holdsSecret(req, secret) || !sessionCookieMatches(req.headers.cookie, secret)) return false;
   if (!isSameOriginRead(req) || isPrefetch(req)) return false;
@@ -1816,7 +1814,7 @@ function handleAuthHandoff(req, res, token, handoffs, secret, pathname) {
   }
   res.writeHead(redirectStatus, {
     location: entry.target,
-    'set-cookie': sessionCookie(cookie, { secure: away }),
+    'set-cookie': signInCookies(secret, { secure: away }),
     'cache-control': 'no-store',
     'referrer-policy': 'no-referrer',
     'content-length': '0',
@@ -3987,7 +3985,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
       }
 
       if (!open && !awaySignIn && renewsSession(req, parts, secret)) {
-        res.setHeader('set-cookie', sessionCookie(sessionToken(secret), { secure: req.boardOrigin.away }));
+        res.setHeader('set-cookie', signInCookies(secret, { secure: req.boardOrigin.away }));
       }
 
       if (req.method === 'GET' && url.pathname === '/api/health') {

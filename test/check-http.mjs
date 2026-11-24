@@ -11,7 +11,7 @@ import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { SECRET_HEADER, SESSION_COOKIE, sessionToken } from '../src/secret.mjs';
+import { SECRET_HEADER, SESSION_COOKIE, TAP_COOKIE, sessionToken, tapToken } from '../src/secret.mjs';
 import { HANDOFF_TOKEN_RE, recoveryCommand, repoRoot } from '../src/handoff.mjs';
 import { startServer, createRequestHandler, activeWaitCount, buildPacketWithUndelivered, createSseHub } from '../src/server.mjs';
 import { STRANDED_BANNER, ANSWERS_DELIVERED, MAX_SUBMIT_COMMENTS, MAX_ANSWER_CHOICES, WIDGETS, createBoard } from '../src/board.mjs';
@@ -2037,7 +2037,7 @@ async function main() {
     // from disk with the daemon stopped and no credential anywhere.
     // (Ablation: inline the session token or a handoff into the page and this fails,
     // because renderBoardPage's output would stop being a function of the board JSON.)
-    for (const leak of [SESSION_COOKIE, sessionToken(SECRET), SECRET, SECRET_HEADER, '/auth/']) {
+    for (const leak of [SESSION_COOKIE, sessionToken(SECRET), TAP_COOKIE, tapToken(SECRET), SECRET, SECRET_HEADER, '/auth/']) {
       assert.ok(!served.includes(leak), `the rendered page must not carry ${leak}`);
     }
   });
@@ -2721,18 +2721,22 @@ async function main() {
     assert.equal(redeemed.headers.location, `/b/${boardId}`, 'to the board it was minted for');
     assert.doesNotMatch(redeemed.headers.location, /auth|token|secret|cb_session/, 'and the URL left in the address bar carries no credential');
 
-    const setCookie = [].concat(redeemed.headers['set-cookie'] || []).join('; ');
-    assert.match(setCookie, new RegExp(`${SESSION_COOKIE}=[0-9a-f]{64}`), 'the browser is handed the session cookie');
-    const cookie = setCookie.split(';')[0];
-    assert.equal(setCookie, `${cookie}; Path=/; Max-Age=34560000; HttpOnly; SameSite=Lax`,
-      'host-only, unreadable to page script, 400 days, sent on a link tapped elsewhere, and not Secure on the plain-http loopback origin');
+    const setCookies = redeemed.headers['set-cookie'];
+    const [cookie, tap] = setCookies.map(c => c.split(';')[0]);
+    assert.match(cookie, /^cb_session=[0-9a-f]{64}$/);
+    assert.match(tap, /^cb_tap=[0-9a-f]{64}$/);
+    assert.notEqual(cookie.split('=')[1], tap.split('=')[1], 'neither value stands in for the other');
+    assert.deepEqual(setCookies, [
+      `${cookie}; Path=/; Max-Age=34560000; HttpOnly; SameSite=Strict`,
+      `${tap}; Path=/; Max-Age=34560000; HttpOnly; SameSite=Lax`,
+    ], 'host-only, unreadable to page script, 400 days, not Secure on the plain-http loopback origin, and only the tap one sent on a link tapped elsewhere');
 
     // The cookie alone, with no handoff and no secret, is
     // what makes reloading and bookmarking work.
     const reload = await rawRequest(port, 'GET', `/b/${boardId}`, { headers: { ...BROWSER_NAV, cookie } });
     assert.equal(reload.status, 200, 'the authorized browser renders the board');
     assert.ok(reload.body.includes('id="board-data"'));
-    assert.deepEqual(reload.headers['set-cookie'], [setCookie], 'and a visit renews the sign-in it was made with');
+    assert.deepEqual(reload.headers['set-cookie'], setCookies, 'and a visit renews the sign-in, the tap cookie a browser may not hold yet included');
     assert.ok(!reload.body.includes(cookie.split('=')[1]), 'the markup holds no credential: its bytes stay a pure function of the board JSON');
 
     // Single-use. The replay is what a process that read the URL out of
@@ -2803,7 +2807,11 @@ async function main() {
     { name: 'away', host: AWAY, url: AWAY_ORIGIN, attributes: '; Secure' },
   ];
   const renewed = r => [].concat(r.headers['set-cookie'] || []);
-  const fullCookie = origin => `${COOKIE}; Path=/; Max-Age=34560000; HttpOnly; SameSite=Lax${origin.attributes}`;
+  const TAP_ONLY = `${TAP_COOKIE}=${tapToken(SECRET)}`;
+  const fullCookies = origin => [
+    `${COOKIE}; Path=/; Max-Age=34560000; HttpOnly; SameSite=Strict${origin.attributes}`,
+    `${TAP_ONLY}; Path=/; Max-Age=34560000; HttpOnly; SameSite=Lax${origin.attributes}`,
+  ];
 
   await check('AWAY: the one configured name is answered, and every other host is refused as before it', async () => {
     const get = host => rawRequest(port, 'GET', '/boards', { host, headers: { cookie: COOKIE } });
@@ -3017,53 +3025,114 @@ async function main() {
     }
   });
 
-  await check('a link tapped on another site opens a board and nothing else, renewing no sign-in, on the Mac and away', async () => {
-    const TAP = { ...BROWSER_NAV, cookie: COOKIE, 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', 'sec-fetch-user': '?1' };
+  const NAVIGATION = { 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', 'sec-fetch-user': '?1' };
+  const TAPS = {
+    'a browser that sends no Sec-Fetch header': {},
+    'a tap on another site': { ...NAVIGATION, 'sec-fetch-site': 'cross-site' },
+    'a tap on a same-site page': { ...NAVIGATION, 'sec-fetch-site': 'same-site' },
+    'a typed address': { ...NAVIGATION, 'sec-fetch-site': 'none' },
+    'the board\'s own link': { ...NAVIGATION, 'sec-fetch-site': 'same-origin' },
+  };
+
+  await check('the tap cookie alone opens a board page and nothing else, renewing nothing, on the Mac and away', async () => {
     const before = snapshotTree(home);
     try {
       awayOn();
       for (const origin of ORIGINS) {
-        const get = (pathName, headers) => rawRequest(port, 'GET', pathName, { host: origin.host, headers });
-        for (const site of ['cross-site', 'same-site']) {
-          const r = await get(`/b/${boardId}`, { ...TAP, 'sec-fetch-site': site });
-          assert.equal(r.status, 200, `${origin.name}: a ${site} tap opens a board`);
-          assert.deepEqual(renewed(r), [], `${origin.name}: another site's link renews no sign-in`);
-          // The list answers with one click, and its address is no secret to bait one at.
-          for (const pathName of ['/', '/boards', '/?q=x', '/boards?q=x']) {
-            const list = await get(pathName, { ...TAP, 'sec-fetch-site': site });
-            assert.equal(list.status, 401, `${origin.name}: a ${site} tap opens no ${pathName}`);
-            assert.deepEqual(renewed(list), []);
+        for (const [how, headers] of Object.entries(TAPS)) {
+          for (const { method, pathName, line } of ROUTES) {
+            const r = await rawRequest(port, method, pathName, {
+              host: origin.host,
+              headers: {
+                ...BROWSER_NAV, ...headers, cookie: TAP_ONLY,
+                ...(method === 'POST' ? { 'content-type': 'application/json', origin: origin.url, 'sec-fetch-site': 'same-origin' } : {}),
+              },
+              body: method === 'POST' ? '{}' : null,
+            });
+            const what = `${origin.name}, ${how}: ${line}`;
+            if (pathName === `/b/${boardId}`) {
+              assert.equal(r.status, 200, what);
+              assert.ok(r.body.includes('id="board-data"'), what);
+            } else if (origin.name === 'loopback' && OPEN_ON_LOOPBACK.test(line)) {
+              assert.notEqual(r.status, 401, what);
+            } else {
+              assert.equal(r.status, 401, `${what} answered ${r.status}`);
+            }
+            assert.deepEqual(renewed(r), [], `${what} signs nobody in`);
           }
-        }
-        for (const site of ['same-origin', 'none']) {
-          for (const pathName of ['/', '/boards', `/b/${boardId}`]) {
-            const r = await get(pathName, { ...TAP, 'sec-fetch-site': site });
-            assert.equal(r.status, 200, `${origin.name}: the board's own link, a bookmark or a typed address (${site}) opens ${pathName}`);
+          for (const pathName of ['/?q=x', `/b/${STYLE_ASSET}`]) {
+            assert.equal((await rawRequest(port, 'GET', pathName, { host: origin.host, headers: { ...headers, cookie: TAP_ONLY } })).status, 401, `${origin.name}, ${how}: ${pathName}`);
           }
+          const head = await rawRequest(port, 'HEAD', `/b/${boardId}`, { host: origin.host, headers: { cookie: TAP_ONLY, origin: origin.url } });
+          assert.equal(head.status, 401, `${origin.name}: the tap cookie is for a GET`);
         }
-        for (const pathName of ['/api/missions', '/api/waiting', '/api/search?q=x', '/api/events', '/api/stream', `/api/board/${boardId}/events`,
-          `/b/${SCRIPT_ASSET}`, `/b/${boardId}/${'0'.repeat(64)}.png`, `/auth/${'f'.repeat(64)}`]) {
-          assert.equal((await get(pathName, TAP)).status, 401, `${origin.name}: a tap reads no ${pathName}`);
-        }
-        for (const [what, headers] of Object.entries({
-          'an iframe': { 'sec-fetch-dest': 'iframe' }, 'an embed': { 'sec-fetch-dest': 'embed' }, 'an image': { 'sec-fetch-dest': 'image', 'sec-fetch-mode': 'no-cors' },
-          'a fetch': { 'sec-fetch-dest': 'empty', 'sec-fetch-mode': 'cors' }, 'a navigation to no document': { 'sec-fetch-dest': undefined }, 'a document nobody navigated to': { 'sec-fetch-mode': 'cors' },
-          'a prefetch': { 'sec-purpose': 'prefetch' }, 'a prerender': { 'sec-purpose': 'prefetch;prerender' }, 'an old prefetch': { purpose: 'prefetch' },
-          'a foreign origin': { origin: 'https://evil.example' }, 'a null origin': { origin: 'null' },
-          'no cookie': { cookie: undefined },
-        })) {
-          const sent = Object.fromEntries(Object.entries({ ...TAP, ...headers }).filter(([, v]) => v !== undefined));
-          const r = await get(`/b/${boardId}`, sent);
-          assert.equal(r.status, 401, `${origin.name}: ${what} is no tap`);
-          assert.ok(!r.body.includes('id="board-data"'));
-        }
-        const nullRead = await get('/api/missions', { cookie: COOKIE, origin: 'null' });
-        assert.equal(nullRead.status, 401, `${origin.name}: an opaque origin reads nothing`);
       }
       awayOff();
       const after = snapshotTree(home);
-      for (const [rel, file] of before) assert.equal(after.get(rel)?.sha, file.sha, `opening a board writes nothing: ${rel}`);
+      for (const [rel, file] of before) assert.equal(after.get(rel)?.sha, file.sha, `a tap writes nothing: ${rel}`);
       assert.equal(after.size, before.size);
+    } finally {
+      awayOff();
+    }
+  });
+
+  await check('the tap cookie opens a board only as a top-level page, and only with its own value', async () => {
+    try {
+      awayOn();
+      for (const origin of ORIGINS) {
+        const open = async (what, headers) => {
+          const r = await rawRequest(port, 'GET', `/b/${boardId}`, { host: origin.host, headers: { ...BROWSER_NAV, cookie: TAP_ONLY, ...headers } });
+          assert.equal(r.status, 401, `${origin.name}: ${what}`);
+          assert.ok(!r.body.includes('id="board-data"'));
+        };
+        for (const site of ['cross-site', 'same-site', 'same-origin', 'none']) {
+          for (const [what, headers] of Object.entries({
+            'an iframe': { 'sec-fetch-dest': 'iframe' }, 'an embed': { 'sec-fetch-dest': 'embed' }, 'an image': { 'sec-fetch-dest': 'image', 'sec-fetch-mode': 'no-cors' },
+            'a fetch': { 'sec-fetch-dest': 'empty', 'sec-fetch-mode': 'cors' }, 'a document nobody navigated to': { 'sec-fetch-mode': 'cors' },
+            'a prefetch': { 'sec-purpose': 'prefetch' }, 'a prerender': { 'sec-purpose': 'prefetch;prerender' }, 'an old prefetch': { purpose: 'prefetch' },
+            'a foreign origin': { origin: 'https://evil.example' }, 'a null origin': { origin: 'null' }, 'its own origin': { origin: origin.url },
+          })) await open(`${what} (${site})`, { ...NAVIGATION, 'sec-fetch-site': site, ...headers });
+          await open(`no mode (${site})`, { 'sec-fetch-site': site, 'sec-fetch-dest': 'document' });
+          await open(`no destination (${site})`, { 'sec-fetch-site': site, 'sec-fetch-mode': 'navigate' });
+          await open(`a site alone (${site})`, { 'sec-fetch-site': site });
+        }
+        await open('a prefetch with no Sec-Fetch header', { purpose: 'prefetch' });
+        await open('a null origin with no Sec-Fetch header', { origin: 'null' });
+        const flipped = tapToken(SECRET).replace(/.$/, c => (c === '0' ? '1' : '0'));
+        for (const cookie of ['', `${TAP_COOKIE}=`, `${TAP_COOKIE}=${flipped}`, `${TAP_COOKIE}=${sessionToken(SECRET)}`, `${SESSION_COOKIE}=${tapToken(SECRET)}`, `${TAP_COOKIE}=${SECRET}`]) {
+          await open(`the cookie ${JSON.stringify(cookie)}`, { cookie });
+        }
+        const asSession = await rawRequest(port, 'GET', '/', { host: origin.host, headers: { cookie: `${SESSION_COOKIE}=${tapToken(SECRET)}` } });
+        assert.equal(asSession.status, 401, `${origin.name}: the tap value is no session`);
+      }
+      const asSecret = await rawRequest(port, 'GET', '/', { headers: { [SECRET_HEADER]: tapToken(SECRET) } });
+      assert.equal(asSecret.status, 401, 'nor the secret');
+    } finally {
+      awayOff();
+    }
+  });
+
+  await check('the session cookie opens every page from here and none from another site, whatever the tap cookie beside it opens', async () => {
+    try {
+      awayOn();
+      for (const origin of ORIGINS) {
+        const get = (pathName, headers) => rawRequest(port, 'GET', pathName, { host: origin.host, headers: { ...BROWSER_NAV, ...headers } });
+        const pages = ['/', '/boards', `/b/${boardId}`];
+        for (const [how, headers] of Object.entries(TAPS)) {
+          const elsewhere = /cross-site|same-site/.test(headers['sec-fetch-site']);
+          for (const pathName of pages) {
+            const alone = await get(pathName, { ...headers, cookie: COOKIE });
+            assert.equal(alone.status, elsewhere ? 401 : 200, `${origin.name}, ${how}: ${pathName}`);
+            assert.deepEqual(renewed(alone), elsewhere ? [] : fullCookies(origin));
+            const both = await get(pathName, { ...headers, cookie: `${COOKIE}; ${TAP_ONLY}` });
+            assert.equal(both.status, elsewhere && pathName !== `/b/${boardId}` ? 401 : 200, `${origin.name}, ${how}, with both: ${pathName}`);
+            assert.deepEqual(renewed(both), elsewhere ? [] : fullCookies(origin));
+          }
+        }
+        for (const headers of [{ origin: 'null' }, { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'cors', 'sec-fetch-dest': 'empty' }]) {
+          assert.equal((await get('/api/missions', { ...headers, cookie: COOKIE })).status, 401, `${origin.name}: ${JSON.stringify(headers)} reads nothing`);
+        }
+      }
     } finally {
       awayOff();
     }
@@ -3075,10 +3144,10 @@ async function main() {
       for (const origin of ORIGINS) {
         const ask = (method, pathName, headers, body = null) => rawRequest(port, method, pathName, { host: origin.host, headers, body });
         for (const pathName of ['/', `/b/${boardId}`, '/api/waiting']) {
-          assert.deepEqual(renewed(await ask('GET', pathName, { cookie: COOKIE })), [fullCookie(origin)], `${origin.name} ${pathName}`);
+          assert.deepEqual(renewed(await ask('GET', pathName, { cookie: COOKIE })), fullCookies(origin), `${origin.name} ${pathName}`);
         }
         const write = await ask('POST', '/api/mission/NONE/recheck', { 'content-type': 'application/json', cookie: COOKIE, origin: origin.url, 'sec-fetch-site': 'same-origin' }, '{}');
-        assert.deepEqual(renewed(write), [fullCookie(origin)], `${origin.name}: a write in use renews it too`);
+        assert.deepEqual(renewed(write), fullCookies(origin), `${origin.name}: a write in use renews it too`);
 
         assert.deepEqual(renewed(await ask('GET', '/', { cookie: COOKIE, 'sec-fetch-site': 'same-origin', 'sec-purpose': 'prefetch' })), [], 'a prefetch is not use');
         assert.deepEqual(renewed(await ask('GET', `/b/${MERMAID_ASSET}`, { cookie: COOKIE })), [], 'an open route asks for no sign-in and renews none');
@@ -3110,6 +3179,8 @@ async function main() {
         const r = await rawRequest(port, 'GET', '/', { host: origin.host, headers: { cookie: COOKIE } });
         assert.equal(r.status, 401, `${origin.name}: the old cookie matches nothing`);
         assert.deepEqual(renewed(r), [], `${origin.name}: and is not renewed`);
+        const tap = await rawRequest(port, 'GET', `/b/${boardId}`, { host: origin.host, headers: { ...BROWSER_NAV, cookie: TAP_ONLY } });
+        assert.deepEqual([tap.status, renewed(tap)], [401, []], `${origin.name}: the old tap cookie opens nothing`);
       }
     } finally {
       writeFileSync(SECRET_FILE, `${SECRET}\n`);
@@ -3151,7 +3222,7 @@ async function main() {
           ['no-store', 'strict-origin', 'DENY', "default-src 'none'; style-src 'unsafe-inline'; img-src data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"]);
       }
       const signedIn = await pressButton(token);
-      assert.deepEqual([signedIn.status, signedIn.headers.location, renewed(signedIn)], [303, `/b/${boardId}`, [fullCookie(ORIGINS[1])]]);
+      assert.deepEqual([signedIn.status, signedIn.headers.location, renewed(signedIn)], [303, `/b/${boardId}`, fullCookies(ORIGINS[1])]);
       assert.equal((await rawRequest(port, 'GET', `/b/${boardId}`, { host: AWAY, headers: { ...BROWSER_NAV, cookie: COOKIE, 'sec-fetch-site': 'same-origin' } })).status, 200);
 
       const unknown = await openLink('f'.repeat(64));
@@ -3171,7 +3242,7 @@ async function main() {
       awayOn();
       const { token } = await mintAway();
       const statuses = (await Promise.all([pressButton(token), pressButton(token)])).map(r => [r.status, renewed(r).length]);
-      assert.deepEqual(statuses.sort(), [[303, 1], [401, 0]]);
+      assert.deepEqual(statuses.sort(), [[303, 2], [401, 0]]);
     } finally {
       awayOff();
     }

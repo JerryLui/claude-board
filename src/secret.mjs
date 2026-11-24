@@ -38,6 +38,10 @@ export const SECRET_HEADER = 'x-claude-board-secret';
 /** Cookie an authorized browser holds. See sessionToken below. */
 export const SESSION_COOKIE = 'cb_session';
 
+/** Beside it, and worth one thing: opening a board page from a link on another site. See
+ * tapToken below. */
+export const TAP_COOKIE = 'cb_tap';
+
 /** How long that cookie lives, in seconds.
  *
  * It is deliberately NOT a session cookie: bookmarking a board and opening the
@@ -103,7 +107,7 @@ export function secretMatches(provided, expected) {
 }
 
 /** The credential an AUTHORIZED BROWSER holds: an HMAC of a fixed label under the
- * secret, carried in a host-only, HttpOnly, SameSite=Lax cookie that src/server.mjs
+ * secret, carried in a host-only, HttpOnly, SameSite=Strict cookie that src/server.mjs
  * sets when it consumes a handoff (src/handoff.mjs) and renews on use. It is what lets a
  * browser read boards and press Send, neither of which it could do with a 0600 file it
  * cannot open.
@@ -145,17 +149,29 @@ export function secretMatches(provided, expected) {
  * The value is the same on loopback and on the away name (src/away.mjs): one token signs in
  * every browser, and a value taken from one origin works on the other.
  *
- * `SameSite=Lax`, so a board link tapped on another site arrives signed in; which of the
- * requests it then travels on may read is src/server.mjs `isLinkTap`. `Secure` on the away
- * origin alone: on a loopback-only plain-http daemon it buys nothing and would break any
- * browser that does not treat `http://127.0.0.1` as trustworthy. */
+ * `SameSite=Strict`, so the browser sends it on nothing another site starts, whatever
+ * headers that browser sends besides. `Secure` on the away origin alone: on a loopback-only
+ * plain-http daemon it buys nothing and would break any browser that does not treat
+ * `http://127.0.0.1` as trustworthy. */
 export function sessionToken(secret) {
   if (!secret) return null;
   return createHmac('sha256', secret).update('claude-board/session/v1').digest('hex');
 }
 
-export function sessionCookie(token, { secure }) {
-  return `${SESSION_COOKIE}=${token}; Path=/; Max-Age=${SESSION_MAX_AGE_S}; HttpOnly; SameSite=Lax${secure ? '; Secure' : ''}`;
+/** The value of the one cookie that arrives on a link tapped on another site (`SameSite=Lax`):
+ * it opens a board page and is accepted for nothing else (src/server.mjs `isAuthorizedRead`).
+ * Derived as the session's is, under a label of its own, so neither stands in for the other
+ * and rotating the secret ends both. */
+export function tapToken(secret) {
+  if (!secret) return null;
+  return createHmac('sha256', secret).update('claude-board/tap/v1').digest('hex');
+}
+
+/** Both cookies of a signed-in browser, as `Set-Cookie` values. */
+export function signInCookies(secret, { secure }) {
+  const cookie = (name, token, sameSite) =>
+    `${name}=${token}; Path=/; Max-Age=${SESSION_MAX_AGE_S}; HttpOnly; SameSite=${sameSite}${secure ? '; Secure' : ''}`;
+  return [cookie(SESSION_COOKIE, sessionToken(secret), 'Strict'), cookie(TAP_COOKIE, tapToken(secret), 'Lax')];
 }
 
 /** True iff this request carries the session cookie for `secret`. Constant-time via
@@ -178,6 +194,11 @@ export function sessionCookieMatches(cookieHeader, secret) {
   // an ordering. It leaks nothing: supplying a value that matches means already holding
   // the credential.
   return cookieValues(cookieHeader, SESSION_COOKIE).some(v => secretMatches(v, expected));
+}
+
+export function tapCookieMatches(cookieHeader, secret) {
+  const expected = tapToken(secret);
+  return cookieValues(cookieHeader, TAP_COOKIE).some(v => secretMatches(v, expected));
 }
 
 /** Every value carried under `name`, in header order. */
