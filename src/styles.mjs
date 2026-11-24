@@ -1521,7 +1521,7 @@ body.comment-mode:not(.readonly) .lens-canvas svg g.cb-anchor-sent:hover { outli
    .btn-primary gives Send. Disabled when the pick would be refused anyway (a
    historical round, comment mode -- src/ui.mjs's stageLensPick), which has to
    look unavailable rather than merely unresponsive. */
-.lens-pick { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.lens-pick { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); overflow-wrap: anywhere; }
 .lens-pick:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-ink); filter: brightness(1.08); }
 .lens-pick:disabled { background: var(--panel-2); border-color: var(--hairline); color: var(--muted); cursor: not-allowed; }
 
