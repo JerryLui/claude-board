@@ -673,8 +673,8 @@ for record in "$SECRET_DIR/ref_roots" "$SECRET_DIR/board_home" "$SECRET_DIR/port
 done
 if [ -e "$SECRET_DIR/away" ] || [ -L "$SECRET_DIR/away" ]; then
   echo "     ${CBS_DIM}away setting:                 $SECRET_DIR/away${CBS_RESET}"
-  echo "     ${CBS_DIM}                              turn its forwarder off first: tailscale serve --https=443 off${CBS_RESET}"
 fi
+echo "     ${CBS_DIM}away forwarder, if still on:  turn it off with tailscale serve --https=443 off${CBS_RESET}"
 echo
 echo "  ${CBS_DIM}Remove them yourself if you want them gone.${CBS_RESET}"
 echo

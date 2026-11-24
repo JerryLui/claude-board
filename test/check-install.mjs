@@ -3077,6 +3077,7 @@ http.createServer((req, res) => {
       // remove` propagate under `set -e` -- rather than branching on their exit code --
       // fails this on a machine that has never seen install.sh.)
       assert.equal(r.status, 0, `uninstall on a machine with nothing installed must still exit 0\nstdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
+      assert.ok(r.stdout.includes('tailscale serve --https=443 off'), 'an away turned off while Tailscale could not be asked leaves no setting, so the forwarder is named without one');
     } finally {
       rmSync(freshWorkDir, { recursive: true, force: true });
     }
