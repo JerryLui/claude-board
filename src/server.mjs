@@ -497,7 +497,10 @@ const FORWARDER_HEADERS = ['x-forwarded-for', 'x-forwarded-host', 'x-forwarded-p
  * `X-Forwarded-*` or `Tailscale-*` header is the caller's to write, so none grants anything.
  * One is still enough to refuse a loopback name: `tailscale serve` picks its handler by the
  * TLS server name and passes on the Host the client sent (its target's own, where an HTTP/1.0
- * client sent none), so a device can name loopback, but it adds these headers itself. */
+ * client sent none), so a device can name loopback, but it adds these headers itself.
+ * Node 22 and 24 silently drop every header past a count limit, about 1000 by default (26
+ * answers 431), and a device can send that many ahead of them, so `startServer` lifts the
+ * limit; the byte limit remains. */
 function requestOrigin(headers) {
   const hostHeader = headers.host;
   if (isLoopbackHost(hostHeader)) {
@@ -4364,6 +4367,7 @@ export function startServer({ home = boardHome(), port = Number(process.env.CLAU
   // where it would be much harder to notice. Absent means "read it per request".
   const handler = createRequestHandler({ home, secret, pomodoro, stream });
   const server = http.createServer(handler);
+  server.maxHeadersCount = 0;
 
   pomodoro.boot();
   // Both closed on 'close' rather than left to their own unrefs: the pomodoro clock so a

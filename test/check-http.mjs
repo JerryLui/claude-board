@@ -8,6 +8,7 @@ import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, mkdirSync
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
+import net from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
@@ -2863,6 +2864,31 @@ async function main() {
         }
       }
       assert.ok(said.includes(`claude-board: refused host "127.0.0.1:${ownPort}": a loopback name through a forwarder`), said.join('\n'));
+
+      // Past about 1000 headers node 22 and 24 drop the rest by default, so the forwarder's go
+      // last here, as a sorting forwarder writes them after a device's own.
+      const padded = (method, pathName, headers) => new Promise((resolve, reject) => {
+        const lines = [
+          `${method} ${pathName} HTTP/1.1`, `Host: 127.0.0.1:${ownPort}`, 'Connection: close', ...(method === 'POST' ? ['Content-Length: 2'] : []),
+          ...Object.entries(writeHeaders(SECRET)).map(([name, value]) => `${name}: ${value}`),
+          ...Array.from({ length: 1100 }, (_, i) => `a${i}:`), ...headers,
+        ];
+        const socket = net.connect(ownPort, '127.0.0.1', () => socket.write(`${lines.join('\r\n')}\r\n\r\n${method === 'POST' ? '{}' : ''}`));
+        let answer = '';
+        socket.setEncoding('latin1');
+        socket.on('data', chunk => { answer += chunk; });
+        socket.on('end', () => resolve(Number(/^HTTP\/1\.1 (\d{3}) /.exec(answer)?.[1])));
+        socket.on('error', reject);
+      });
+      const { token } = JSON.parse((await rawRequest(ownPort, 'POST', '/api/handoff', { headers: writeHeaders(SECRET), body: '{}' })).body);
+      for (const [method, pathName] of [['GET', `/auth/${token}`], ['GET', '/api/health'], ['POST', '/api/handoff']]) {
+        for (const [name, value] of Object.entries(FORWARDED)) {
+          assert.equal(await padded(method, pathName, [`${name}: ${value}`]), 403, `${method} ${pathName} with ${name} after 1100 headers`);
+        }
+      }
+      assert.equal(await padded('GET', '/api/health', []), 200, 'the padding alone is no refusal');
+      assert.equal(await padded('GET', `/auth/${token}`, []), 302, 'nor did a padded request spend the handoff');
+
       const signedIn = await rawRequest(ownPort, 'GET', '/boards', { host: AWAY, headers: { ...FORWARDED, 'x-forwarded-host': AWAY, cookie: COOKIE } });
       assert.equal(signedIn.status, 200, 'the away name carries them on every request');
       const none = await rawRequest(ownPort, 'GET', '/boards', { host: AWAY, headers: { ...FORWARDED, 'x-forwarded-host': AWAY } });
