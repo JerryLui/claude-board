@@ -2994,8 +2994,7 @@ body.page-board .board-head { margin-left: env(safe-area-inset-left, 0px); margi
   .thread-title { flex: 1 0 100%; }
   .thread-rounds { width: auto; }
   .thread-updated { width: auto; margin-left: auto; }
-  .mission-card { --mc-btn: 44px; }
-  .mission-card { padding-top: 5px; }
+  .mission-card { --mc-btn: 44px; padding-top: 5px; }
   .mission-text > .mission-title:first-child { margin-top: 8px; }
   .mission-ident { min-height: 34px; align-items: center; }
   .mission-ident + .mission-title { margin-top: 0; }
