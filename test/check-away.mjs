@@ -134,6 +134,7 @@ async function main() {
     assert.equal(missing.code, 1);
     assert.match(missing.stderr, /was not found[\s\S]*Next: /);
     const noSecret = await away(['on', 'board'], { CLAUDE_BOARD_SECRET_FILE: path.join(scratch, 'empty', 'secret') });
+    assert.deepEqual([noSecret.code, noSecret.stdout], [1, '']);
     assert.match(noSecret.stderr, /no local secret[\s\S]*install\.sh/);
     assert.deepEqual(asked(), []);
   });
@@ -255,10 +256,15 @@ async function main() {
     assert.match(isOff.stderr, /away is off[\s\S]*Next: .*node bin\/away\.mjs on <name>/);
     writeFileSync(awayFile, `${HOST}\n`, { mode: 0o600 });
     chmodSync(awayFile, 0o640);
-    assert.match((await away(['link'])).stderr, /mode 640[\s\S]*Next: /);
+    const openToOthers = await away(['link']);
+    assert.deepEqual([openToOthers.code, openToOthers.stdout], [1, '']);
+    assert.match(openToOthers.stderr, /mode 640[\s\S]*Next: /);
     chmodSync(awayFile, 0o600);
-    assert.match((await away(['link', '../x'])).stderr, /not a board id/);
+    const unnamed = await away(['link', '../x']);
+    assert.deepEqual([unnamed.code, unnamed.stdout], [1, '']);
+    assert.match(unnamed.stderr, /not a board id/);
     const down = await away(['link'], { CLAUDE_BOARD_PORT: String(await freePort()) });
+    assert.deepEqual([down.code, down.stdout], [1, '']);
     assert.match(down.stderr, /not reachable[\s\S]*launchctl kickstart/);
     for (const [answer, says] of [
       [{ token: 'f'.repeat(64), ttlMs: 30000 }, /older than away links[\s\S]*install\.sh/],
@@ -278,6 +284,7 @@ async function main() {
     writeFileSync(path.join(other, 'away'), `${HOST}\n`, { mode: 0o600 });
     reset();
     const daemonOff = await away(['link'], { CLAUDE_BOARD_SECRET_FILE: path.join(other, 'secret') });
+    assert.deepEqual([daemonOff.code, daemonOff.stdout], [1, '']);
     assert.match(daemonOff.stderr, /HTTP 409[\s\S]*away is off[\s\S]*Next: .*node bin\/away\.mjs status/);
   });
 
