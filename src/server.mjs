@@ -34,7 +34,8 @@
 //     sign-in link, the only routes that resolve a file.
 //   * the session cookie, derived from the secret, which a browser gets by following a
 //     single-use handoff (src/handoff.mjs). It reads boards and answers them, and is
-//     refused in the secret header, so it can never resolve a file.
+//     refused in the secret header, so it can never resolve a file. The tap cookie set beside
+//     it opens a board page from a link on another site, and nothing else (ADR 159).
 //
 // This overturned "read routes stay open", and deleted the
 // board-scoped submit token that decision forced. What that decision cost, plainly:

@@ -926,7 +926,7 @@ cheap.
 every non-GET (403), a credential
 on every non-GET but the away button's -- plus the four GETs held to the secret alone (401): `/wait`, because it also
 writes, and `/read`, `/api/binding` and `GET /api/mission/:key`, because only a tool ever calls them -- and a credential on every other GET but
-the open ones (401, secret or cookie): four on a loopback name, two away. Both credential gates are written
+the open ones (401, secret or cookie, the tap cookie on `/b/:boardId` alone): four on a loopback name, two away. Both credential gates are written
 as "everything, minus an explicit exception list", so a route added later is gated by default
 rather than by whoever adds it remembering.
 
@@ -1004,27 +1004,32 @@ why a local secret exists at all.
 ## The browser session cookie
 
 **Every route but the open ones in "The host rule, and away" requires a credential**, reads
-included -- and the GETs held to the secret alone are never satisfied by this cookie. The browser cannot read a 0600 file, so it holds this instead:
+included -- and the GETs held to the secret alone are never satisfied by a cookie. The browser cannot read a 0600 file, so it holds these instead, always set together:
 
 ```
 Set-Cookie: cb_session=<HMAC-SHA256(secret, "claude-board/session/v1")>;
+            Path=/; Max-Age=34560000; HttpOnly; SameSite=Strict[; Secure]
+Set-Cookie: cb_tap=<HMAC-SHA256(secret, "claude-board/tap/v1")>;
             Path=/; Max-Age=34560000; HttpOnly; SameSite=Lax[; Secure]
 ```
 
 Host-only (no `Domain`), `HttpOnly`, and **not** a session cookie: a bookmarked
-board opened days later has to work. The value is the same on every origin.
+board opened days later has to work. Each value is the same on every origin. `cb_session` is the
+sign-in, and "the cookie" everywhere in this file; `cb_tap` opens a board page and does nothing else.
 
-**It lasts while it is used** (ADR 159): `Max-Age` is 400 days, and every request it authorizes
-answers with the same `Set-Cookie` again. These do not renew it: an event stream
+**It lasts while it is used** (ADR 159): `Max-Age` is 400 days, and every request
+`cb_session` authorizes answers with both `Set-Cookie` lines again, so a browser holding only the
+first gets the second. These renew neither: a request on `cb_tap`, an event stream
 (`/api/events`, `/api/stream`, `/api/board/:id/events`), a request from another site, a prefetch, an
 open route, a request that also carries the secret, and a refusal.
 
-**`SameSite=Lax`, and the daemon decides what that admits.** A cookie-authorized GET must look
-same-origin: no `Origin` but its own, no `Sec-Fetch-Site` but `same-origin` or `none`; both absent
-passes. The one exception is `GET /b/:boardId` as a link followed from another site: `Sec-Fetch-Site:
-cross-site` or `same-site`, `Sec-Fetch-Mode: navigate`, `Sec-Fetch-Dest: document`, no `Origin`, and
-no `Sec-Purpose` or `Purpose` naming prefetch. `/`, `/boards` and everything under `/api/` stay
-refused to it.
+**What another site can start.** A `cb_session` GET must look same-origin: no `Origin` but its own, no
+`Sec-Fetch-Site` but `same-origin` or `none`; both absent passes. `SameSite=Strict` keeps it off
+another site's requests before that. `cb_tap` travels on a link followed from another site, and is
+accepted on `GET /b/:boardId` alone, never as a write credential and on no other route: no `Origin`,
+no `Sec-Purpose` or `Purpose` naming prefetch, and when any of `Sec-Fetch-Site`, `-Mode`, `-Dest` or
+`-User` is present, `Sec-Fetch-Mode: navigate` and `Sec-Fetch-Dest: document`, whatever the site.
+`/`, `/boards`, the assets and images under `/b/` and everything under `/api/` refuse it.
 
 `Secure` on the away name alone. It is left off on loopback, and not because it would be ignored there: Chrome treats `http://127.0.0.1` as a
 potentially-trustworthy origin and *does* return `Secure` cookies to it. It is omitted because on
@@ -1036,10 +1041,10 @@ daemon holding the same secret accepts the same cookie, so `launchctl kickstart`
 code reload are all invisible to an open browser. Rotating the secret invalidates every browser at
 once — intended.
 
-Its strength over boards, precisely: "may read every board and answer any open round" — plus the
+The strength of `cb_session` over boards, precisely: "may read every board and answer any open round" — plus the
 writes below. It is refused in the
 `x-claude-board-secret` header, so it can never create a board and therefore never make the daemon
-resolve a file. It is **not** scoped to one board. An away browser holds this and nothing else, so
+resolve a file. It is **not** scoped to one board. An away browser holds the two and nothing else, so
 it can do exactly what a signed-in browser on this Mac can.
 
 Every write it reaches, on both origins, as the closed sets in `src/server.mjs` name them:
@@ -1083,9 +1088,9 @@ A credential never appears in a URL a bookmark can capture. Instead:
 
 ```
 POST /api/handoff       { boardId?, away? }  (secret required)  -> { token, expiresAt, ttlMs, origin }
-GET  /auth/<token>      302 -> /b/<boardId> (or /), Set-Cookie: cb_session=…
+GET  /auth/<token>      302 -> /b/<boardId> (or /), Set-Cookie: cb_session=… and cb_tap=…
                         away: 200, the sign-in page; nothing spent, no Set-Cookie
-POST /auth/<token>      away only: 303 -> /b/<boardId> (or /), Set-Cookie: cb_session=…; Secure
+POST /auth/<token>      away only: 303 -> /b/<boardId> (or /), the same two, Secure
 ```
 
 `POST /api/handoff` mints a **single-use, ~30s** token (`CLAUDE_BOARD_HANDOFF_TTL_MS` overrides,
@@ -1095,7 +1100,7 @@ to the token of that moment, so changing the secret voids it; with away off that
 cannot mint itself a second credential. The caller names a *board*, never a path: anything that is
 not a board id redirects to the index, so there is no attacker-chosen redirect target to validate.
 
-`GET /auth/<token>` consumes it, sets the cookie, and redirects to a **clean** URL. Expired,
+`GET /auth/<token>` consumes it, sets both cookies, and redirects to a **clean** URL. Expired,
 already used, minted for the other origin (which spends it) and never existed are one
 indistinguishable refusal; a browser already signed in is sent to the home page instead. Away the
 `GET` answers a page with one button and spends nothing, since a chat's preview fetches a link nobody

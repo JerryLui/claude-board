@@ -97,18 +97,22 @@ content type, so those always cost a preflight. The origin check is what stands 
 bodyless ones. The daemon's own origin is the one the request came in on: `http://<host>` on a
 loopback name, `https://<away name>` away, so a page on one is another site to the other.
 
-Reads with the cookie are held to the same check, with one opening. The cookie is `SameSite=Lax`
-(ADR 159), so it travels when you follow a link on another site, and a `GET` of `/b/<id>` that the
-browser says is such a tap (`Sec-Fetch-Site` of `cross-site` or `same-site`, a top-level
-navigation to a document, no `Origin`, not a prefetch) opens that board. The page that linked it
+Reads with the session cookie are held to the same check, and that cookie is `SameSite=Strict`, so a
+browser sends it on nothing another site starts. One thing is opened to another site: a tapped link
+to a board opens it, on a second cookie, `cb_tap` (ADR 159). That one is `SameSite=Lax`, so it travels
+when you follow a link, and is accepted for a `GET` of `/b/<id>` alone: not `/` or `/boards`, whose
+cards answer in one click, and no API, event stream, asset, image or write. It renews no sign-in and
+its value is not the session's. The request may carry no `Origin`, may be no prefetch, and where the
+browser sends `Sec-Fetch-*` must be a top-level navigation to a document. The page that linked it
 reads nothing: the board opens in its own tab, its pages send `Cross-Origin-Opener-Policy:
-same-origin` and refuse to be framed, the id is 128 random bits, and that `GET` writes nothing and
-renews no sign-in. `/` and `/boards` stay refused: any site could open those without knowing an id,
-and a click baited there could land on a card's one-click Fire or Merge.
+same-origin` and refuse to be framed, the id is 128 random bits, and that `GET` writes nothing. Once
+open, the page's own requests are the board's, and carry the session cookie.
 
-That check reads headers a browser sends and a page cannot forge. A browser that sends no
-`Sec-Fetch-Site` is judged by `Origin` alone, which a navigation does not carry, so in one a link
-elsewhere opens the lists too. Writes are unaffected: a browser sends `Origin` on every `POST`.
+None of that rests on `Sec-Fetch-*`, which a browser may leave off a request to `http://127.0.0.1`:
+in one that does, the session cookie still stays off another site's link. What `SameSite` does not tell apart is
+another site on the same host: to a browser every port on `127.0.0.1` is one site. `Sec-Fetch-Site:
+same-site` refuses such a page every read but the tap's; in a browser that leaves the header off, a
+link on one opens the lists signed in.
 
 #### Another local process asking the daemon to read a file for you
 
@@ -380,14 +384,15 @@ asked of that one descriptor rather than of the name again.
 
 Every route but `GET /api/health`, `GET /auth/<token>`, `GET /signin/<token>` and
 `GET /b/mermaid-<hash>.js` requires a credential; away, all but `/auth/<token>`, its `GET` and its
-page's `POST`, and the mermaid file do, and the cookie is the only credential taken there. That
+page's `POST`, and the mermaid file do, and the cookies are the only credentials taken there. That
 covers the index, a board page, archive search, the blocking wait and the event stream alike. Not every one of those
 accepts the *same* credential, though: `GET /api/board/:id/wait` also writes — `handleWait`
 persists the board on its timeout branch and spends undelivered comments on every branch — so
 it is gated exactly like a write, the secret only, never the cookie alone.
 `GET /api/board/:id/read` (ADR 115) is held to the secret alone for a different reason: it writes
 nothing, but its caller is a tool and never a page, and the session cookie is exactly the
-credential a cross-origin GET could ride in on. Every other route in that list accepts either.
+credential a cross-origin GET could ride in on. Every other route in that list accepts either,
+and a board page the tap cookie too.
 (`/auth/<token>` is the route that *hands out* the credential, so it cannot require one; it is
 protected by the token being unguessable, single-use and short-lived, seconds on this Mac and ten
 minutes away. `/signin/<token>` hands out
@@ -398,8 +403,9 @@ board page reads the same file too, with its cookie, to write it into a saved mo
 entry 154), and what the route hands back is a third-party library's public bytes under a name that is a digest of
 them, on this Mac and away alike — no board, no path, no store contents. `ui-<hash>.js` and `styles-<hash>.css` are this
 board's own behaviour and stay gated.) There are exactly two
-credentials: the secret file above, and a cookie the daemon derives from it and hands to
-your browser through that single-use handoff. **The cookie has a caveat worth reading
+credentials: the secret file above, and a session cookie the daemon derives from it and hands to
+your browser through that single-use handoff, with the tap cookie that opens a board page and
+nothing else beside it. **The cookie has a caveat worth reading
 before you rely on it — see "Any other HTTP server on your machine" under [Known and
 unclosed](#known-and-unclosed).** Nothing you can bookmark carries a credential. If a
 browser ends up holding nothing — cleared cookies, a second profile, a different browser —
@@ -442,7 +448,8 @@ design](#not-defended-by-design).
 
 #### What the cookie may write
 
-The secret authorizes every write, on this Mac; the cookie authorizes a strictly smaller, closed
+The tap cookie (ADR 159) writes nothing. The secret authorizes every write, on this Mac; the session
+cookie authorizes a strictly smaller, closed
 set, the same on this Mac and away, enumerated in `PROTOCOL.md` "The browser session cookie". Six
 named lists carry it — `BOARD_COOKIE_ACTIONS`, `POMODORO_COOKIE_ACTIONS`, `STORE_COOKIE_ACTIONS`,
 `MISSION_COOKIE_ACTIONS` and `SESSION_COOKIE_ACTIONS` (a card's order, which an agent carries or
@@ -695,7 +702,7 @@ scoped by port (RFC 6265 §8.5) and `SameSite` is not port-aware — a "site" is
 a host, so every port on `127.0.0.1` is the same site. If you authorize a board and then
 visit `http://127.0.0.1:3000` in the same browser — your own dev server, a notebook kernel,
 a container you published on loopback — that server receives the `cb_session` cookie on a
-plain navigation, and can replay it here to read every board, answer any open round, and — via
+plain navigation (and `cb_tap`, worth only the board pages whose id it knows), and can replay it here to read every board, answer any open round, and — via
 `POST /api/pomodoro/settings` with `bannerLevel: 'off'` — durably switch off every Stranded
 banner on the machine, which is the whole notification safety net that feature exists to be. The
 same replay can just as durably switch pomodoro itself off — `enabled: false` on the same route —
@@ -716,7 +723,8 @@ there; the value is the same on both, so one taken there works here too, and the
 What is done instead is bounding it:
 
 - **there is no expiry bound.** The cookie's value is
-  `HMAC(secret, "claude-board/session/v1")` — a constant with no timestamp in it — and
+  `HMAC(secret, "claude-board/session/v1")`, the tap cookie's the same under `claude-board/tap/v1` —
+  constants with no timestamp in them — and
   `SESSION_MAX_AGE_S` appears only as a `Set-Cookie` attribute, which instructs an honest
   browser's jar and constrains nothing about a value already copied out of it. That attribute is
   400 days and is renewed on use (ADR 159), so the jar of a browser you use never lets go of it
@@ -802,7 +810,7 @@ boards, which is the same statement as "the store is owner-only" above.
   everything, a merge or Fire yes included. No device has lesser powers, and none is removed on its
   own: changing the token cuts off a lost phone, and signs out every other browser with it.
 - Whoever holds an unlocked signed-in device can merge.
-- The cookie has one value on both origins and goes to any other http server on the same host, for
+- Each cookie has one value on both origins and goes to any other http server on the same host, for
   as long as the browser is used ("Any other HTTP server on your machine" above).
 - An away tab counts for opening and banners as any tab does: one left open on another Mac means a
   new board raises a banner on this one instead of opening.
