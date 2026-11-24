@@ -40,7 +40,8 @@ a partial defence against local software that is not the daemon's own session.
 The daemon binds `127.0.0.1` only, with away on as with it off. A request whose `Host` is neither
 a loopback name nor the one configured away name is refused with a bodyless 403, which closes
 DNS rebinding: a page on any origin that resolves a hostname it controls to `127.0.0.1` arrives
-with that hostname in `Host` and is rejected. Each refused host is written to the daemon's log with
+with that hostname in `Host` and is rejected. So is a loopback name that came through a forwarder
+([Away](#away-your-own-devices-over-tailscale)). Each refused host is written to the daemon's log with
 its reason, once an hour per host and reason and at most 20 of them an hour, so a caller cannot
 grow the log at will.
 
@@ -53,16 +54,20 @@ over loopback. Nothing listens on your network and nothing is on the internet.
 
 **Who can connect, and who gets in.** Any device your Tailscale network lets reach this Mac can
 connect, every device on your own login among them; the board does not ask which device it is, and
-reads no header the forwarder adds, since any local program can write one. Connecting gets a
-refusal. What gets in is a browser signed in by a link made on this Mac.
+no header the forwarder adds lets anyone in, since any local program can write one. Connecting gets a
+refusal. What gets in is a browser signed in by a link made on this Mac. The forwarder passes on
+whatever `Host` a device sends, a loopback name included, so a loopback name carrying an
+`X-Forwarded-For`, `-Host` or `-Proto` header, which the forwarder always adds, is refused, with away
+on or off.
 
 | Caller | What it gets |
 | --- | --- |
 | A signed-in browser, on this Mac or away | Reads every board and the missions list, answers any open round, a Fire or merge yes included ("What the cookie may write" below) |
 | A device on your Tailscale network that opened no link | Refused; the sign-in page for a link it holds, and the mermaid engine's public bytes, are all it can fetch |
-| A program on this Mac without the token | Refused, by the local address and through the forwarder alike, save the open routes below |
+| A program on this Mac without the token | Refused, by the local address and through the forwarder alike, save the open routes below, which a loopback name through the forwarder does not reach |
 | A program holding the secret, through the forwarder | Refused like any other: the secret header is ignored there, so nothing away posts a board, mints a link or reads a file for a caller. It can derive the cookie, as it can here |
 | Another website's page, in any signed-in browser | Refused, save that a tapped link to a board opens it ("A web page you happen to be visiting" below) |
+| A device naming a loopback host through the forwarder | 403 on every route, the open ones included |
 | A request naming any other host | 403 |
 | The internet | Nothing: `on` refuses while Funnel is on, and takes the forwarder down if Funnel is on after. A Funnel you turn on later is yours to notice; `status` names it. It would expose the refusals above, not the boards |
 

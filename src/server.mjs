@@ -4,8 +4,8 @@
 //
 // Four gates, in this order:
 //
-//   1. Host is loopback or the one configured away name, on every route
-//                                                -> 403, no body
+//   1. Host is loopback, with no forwarder's header on it, or the one configured away
+//      name, on every route                      -> 403, no body
 //   2. non-GET is same-origin                    -> 403, no body
 //   3. a write holds a credential                -> 401, no body
 //   4. a read holds a credential                 -> 401, a page naming the fix
@@ -22,10 +22,11 @@
 // `GET /signin/<token>`, which grants nothing
 // (src/signin-link.mjs), and the vendored mermaid file. `isOpenRoute` is the list.
 //
-// Gate 1 also decides the request's origin kind (`requestOrigin`), from the Host alone. A
-// request on the away origin (src/away.mjs) has a signed-in browser's powers and no more:
-// its secret header is ignored, so only the cookie counts, and the open list is
-// `/auth/<token>` and the mermaid file.
+// Gate 1 also decides the request's origin kind (`requestOrigin`), from the Host: a
+// forwarder's header grants nothing, and refuses a loopback name. A request on the away
+// origin (src/away.mjs) has a signed-in browser's powers and no more: its secret header is
+// ignored, so only the cookie counts, and the open list is `/auth/<token>` and the mermaid
+// file.
 //
 // A credential is one of exactly two things (src/secret.mjs):
 //
@@ -489,11 +490,22 @@ export function isLoopbackHost(hostHeader) {
   return name === '127.0.0.1' || name === '::1' || name === 'localhost' || LOCALHOST_SUBDOMAIN.test(name);
 }
 
-/** The origin this request was made on, or `refused` with why its Host names neither. The
- * Host alone decides it: the forwarder brings every away request in over loopback, and any
- * `X-Forwarded-*` or `Tailscale-*` header is the caller's to write. */
-function requestOrigin(hostHeader) {
-  if (isLoopbackHost(hostHeader)) return { away: false, url: `http://${hostHeader}`, refused: null };
+const FORWARDER_HEADERS = ['x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto'];
+
+/** The origin this request was made on, or `refused` with why it is on neither. The Host
+ * decides it: the forwarder brings every away request in over loopback, and any
+ * `X-Forwarded-*` or `Tailscale-*` header is the caller's to write, so none grants anything.
+ * One is still enough to refuse a loopback name: `tailscale serve` picks its handler by the
+ * TLS server name and passes on the Host the client sent (its target's own, where an HTTP/1.0
+ * client sent none), so a device can name loopback, but it adds these headers itself. */
+function requestOrigin(headers) {
+  const hostHeader = headers.host;
+  if (isLoopbackHost(hostHeader)) {
+    if (FORWARDER_HEADERS.some(name => headers[name] !== undefined)) {
+      return { away: false, url: null, refused: 'a loopback name through a forwarder' };
+    }
+    return { away: false, url: `http://${hostHeader}`, refused: null };
+  }
   const { host, reason } = readAway();
   if (isAwayHost(hostHeader, host)) return { away: true, url: `https://${host}`, refused: null };
   return { away: false, url: null, refused: reason ?? 'not a loopback name and not the configured away name' };
@@ -3949,7 +3961,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
   const requestHandler = async function requestHandler(req, res) {
     try {
       const secret = currentSecret();
-      req.boardOrigin = requestOrigin(req.headers.host);
+      req.boardOrigin = requestOrigin(req.headers);
       if (req.boardOrigin.refused) {
         logRefusedHost(req.headers.host, req.boardOrigin.refused);
         res.writeHead(403);

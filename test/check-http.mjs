@@ -2836,6 +2836,45 @@ async function main() {
     }
   });
 
+  await check('AWAY: a loopback name that came through a forwarder is refused on every route, away on or off, and the header changes nothing on the away name', async () => {
+    const FORWARDED = { 'x-forwarded-for': '100.64.0.1', 'x-forwarded-host': `127.0.0.1:${port}`, 'x-forwarded-proto': 'https' };
+    const rows = Object.entries(FORWARDED).flatMap(([name, value]) => [{ [name]: value }, { [name]: '' }]);
+    const ownHome = mkdtempSync(path.join(tmpdir(), 'claude-board-forwarded-'));
+    const { server: own, port: ownPort } = await startServer({ home: ownHome, port: 0, secret: SECRET });
+    const said = [];
+    const realError = console.error;
+    console.error = (...args) => said.push(args.join(' '));
+    try {
+      for (const set of [awayOff, awayOn]) {
+        set();
+        for (const host of [`127.0.0.1:${ownPort}`, `localhost:${ownPort}`, '127.0.0.1', `[::1]:${ownPort}`, 'board.localhost']) {
+          const { token } = JSON.parse((await rawRequest(ownPort, 'POST', '/api/handoff', { headers: writeHeaders(SECRET), body: '{}' })).body);
+          for (const headers of rows) {
+            for (const [method, pathName, given] of [
+              ['GET', '/api/health', {}], ['GET', `/signin/${'f'.repeat(64)}`, {}], ['GET', `/auth/${token}`, BROWSER_NAV],
+              ['GET', '/boards', { cookie: COOKIE }], ['GET', '/boards', { [SECRET_HEADER]: SECRET }], ['POST', '/api/handoff', writeHeaders(SECRET)],
+            ]) {
+              const r = await rawRequest(ownPort, method, pathName, { host, headers: { ...given, ...headers }, body: method === 'POST' ? '{}' : null });
+              assert.deepEqual([r.status, r.body, renewed(r)], [403, '', []], `${method} ${pathName} on "${host}" with ${JSON.stringify(headers)}`);
+            }
+          }
+          const spend = await rawRequest(ownPort, 'GET', `/auth/${token}`, { host, headers: BROWSER_NAV });
+          assert.equal(spend.status, 302, 'no refused request spent the handoff');
+        }
+      }
+      assert.ok(said.includes(`claude-board: refused host "127.0.0.1:${ownPort}": a loopback name through a forwarder`), said.join('\n'));
+      const signedIn = await rawRequest(ownPort, 'GET', '/boards', { host: AWAY, headers: { ...FORWARDED, 'x-forwarded-host': AWAY, cookie: COOKIE } });
+      assert.equal(signedIn.status, 200, 'the away name carries them on every request');
+      const none = await rawRequest(ownPort, 'GET', '/boards', { host: AWAY, headers: { ...FORWARDED, 'x-forwarded-host': AWAY } });
+      assert.equal(none.status, 401, 'and they sign nobody in');
+    } finally {
+      console.error = realError;
+      awayOff();
+      own.close();
+      rmSync(ownHome, { recursive: true, force: true });
+    }
+  });
+
   await check('AWAY: a setting that is not one well-formed name in an owner-only plain file leaves away off, loopback as it was, and is logged', async () => {
     const ownHome = mkdtempSync(path.join(tmpdir(), 'claude-board-awayfile-'));
     const { server: own, port: ownPort } = await startServer({ home: ownHome, port: 0, secret: SECRET });

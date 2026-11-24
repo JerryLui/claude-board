@@ -922,7 +922,7 @@ POST /api/session/:id/order/:oid/ack
 Posting and waiting are separate routes on purpose, so splitting `ask` into post + collect stays
 cheap.
 
-**Four gates, in order:** a `Host` that is loopback or the one away name (403), same-origin on
+**Four gates, in order:** a `Host` that is loopback, not through a forwarder, or the one away name (403), same-origin on
 every non-GET (403), a credential
 on every non-GET but the away button's -- plus the four GETs held to the secret alone (401): `/wait`, because it also
 writes, and `/read`, `/api/binding` and `GET /api/mission/:key`, because only a tool ever calls them -- and a credential on every other GET but
@@ -932,12 +932,14 @@ rather than by whoever adds it remembering.
 
 ### The host rule, and away
 
-A request's origin is decided by its `Host` alone, on every request (ADR 158). `X-Forwarded-*` and
-`Tailscale-*` headers are never read.
+A request's origin is decided by its `Host`, on every request (ADR 158). No forwarded header grants
+anything, and `Tailscale-*` headers are never read. `X-Forwarded-For`, `X-Forwarded-Host` or
+`X-Forwarded-Proto`, an empty one included, refuses a request whose `Host` is a loopback name, with
+away on or off: a forwarder passes on the `Host` its client sent.
 
 | `Host` | Origin | Credentials taken | Open GETs |
 |---|---|---|---|
-| `127.0.0.1`, `::1`, `localhost`, `*.localhost`, any port | `http://<host>` | secret, cookie | `/api/health`, `/auth/:token`, `/signin/:token`, `/b/mermaid-<hash>.js` |
+| `127.0.0.1`, `::1`, `localhost`, `*.localhost`, any port, with none of those headers | `http://<host>` | secret, cookie | `/api/health`, `/auth/:token`, `/signin/:token`, `/b/mermaid-<hash>.js` |
 | the away name, bare or with `:443`, in any letter case | `https://<name>` | cookie; the secret header is ignored | `/auth/:token`, `/b/mermaid-<hash>.js` |
 | anything else | none | refused: 403, no body, logged | none |
 
