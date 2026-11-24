@@ -15,7 +15,8 @@
 // apply: the 1280px rows hold the board to the layout it had. A page board, one html block and
 // nothing else, still fills the window. The round switcher along the bottom folds to
 // its window: whole in it, on one line on a phone, and never over Send or Discuss,
-// open or folded. All of that is
+// open or folded. On a 390px touch screen a round, its comment forms, its lenses and a
+// page board scroll nothing sideways, with every control at least 44px. All of that is
 // layout, and the DOM stand-in the suite runs on has none (QUIRKS.md "The DOM
 // stand-in's ceilings"): test/check-pure.mjs holds the rules on declared values
 // and this file looks at real ones.
@@ -50,7 +51,7 @@ import { sessionToken } from '../src/secret.mjs';
 import { writeBoard, writePage } from '../src/store.mjs';
 import { runMain, sleep, withTimeout } from './support.mjs';
 import {
-  clickAt, copyArchive, guardRun, openTab, postJson, requireChrome, row, setSessionCookie, startScratchDaemon, withChrome,
+  assertPhone, clickAt, copyArchive, guardRun, openPhone, openTab, phoneFaults, postJson, requireChrome, row, setSessionCookie, startScratchDaemon, withChrome,
 } from './browser-support.mjs';
 
 // The numbers this check holds the layout to, written out here rather than read
@@ -514,6 +515,7 @@ async function main() {
         evidence[width] = await measureAt(viewport => openAt(send, onEvent, evidenceUrl, cookie, viewport), { width, height: HEIGHT });
       }
       await switcherRows({ send, onEvent, cookie, home: daemon.home, origin: `http://127.0.0.1:${daemonPort}` });
+      await phoneRows({ send, onEvent, cookie, home: daemon.home, origin: `http://127.0.0.1:${daemonPort}`, boardUrl });
       await runRows({
         column, at, evidence, scrollbar,
         pageBoard: () => openAt(send, onEvent, pageUrl, cookie, PAGE_BOARD_VIEWPORT),
@@ -682,6 +684,136 @@ async function switcherRows({ send, onEvent, cookie, home, origin }) {
       assert.equal(picked.face, '1 … 8 9 … 15 … 19');
     } finally { await tab.close(); }
   });
+}
+
+// ---------------------------------------------------------------------------
+// The phone: every kind of block and answer widget, each with something too long for a
+// 390px window to hold on one line.
+const UNBROKEN = 'a_name_with_no_place_to_break_'.repeat(4);
+const WIDE_TABLE = [
+  `| ${Array.from({ length: 8 }, (_, i) => `Heading ${i}`).join(' | ')} |`,
+  `| ${Array(8).fill('---').join(' | ')} |`,
+  `| ${Array(8).fill('a_cell_that_does_not_break').join(' | ')} |`,
+].join('\n');
+const CODE_LINE = `const line = '${'a long line of code '.repeat(12)}';`;
+
+const phoneBody = () => ({
+  title: 'A board title too long to stand on one line of a phone', wait: true,
+  blocks: [
+    { kind: 'markdown', title: `Card ${UNBROKEN}`, status: { tone: 'good', label: 'Met' }, summary: LONG,
+      text: `See [a link](https://example.com), https://example.com/${UNBROKEN} and \`${UNBROKEN}\`.`, details: LONG },
+    { kind: 'markdown', title: 'Boxes', text: `\`\`\`js\n${CODE_LINE}\n\`\`\`\n\n${WIDE_TABLE}` },
+    { kind: 'markdown', title: 'A long read', text: LONG_READ },
+    { kind: 'code', lang: 'javascript', text: CODE_LINE },
+    { kind: 'code', lang: 'diff', text: `--- a/x\n+++ b/x\n@@ -1 +1 @@\n-${CODE_LINE}\n+${CODE_LINE}\n` },
+    { kind: 'mermaid', title: 'A diagram', text: chain('Phone') },
+    { kind: 'html', title: 'A tall picture', html: `${mock('tall')}<div style="height:2600px"></div>` },
+    { kind: 'compare', title: 'Pictures', left: { label: 'Before', block: { kind: 'html', html: mock('b') } }, right: { label: 'After', block: { kind: 'html', html: mock('a') } } },
+    { kind: 'compare', title: 'Text', left: { label: 'Before', block: { kind: 'markdown', text: WIDE_TABLE } }, right: { label: 'After', block: { kind: 'markdown', text: UNBROKEN } } },
+    { kind: 'question', prompt: `One: ${UNBROKEN}`, explainer: LONG, widget: 'single',
+      options: [{ label: `${LONG} ${UNBROKEN}`, description: LONG }, { label: 'Two', preview: PREVIEW_CODE }],
+      context: [{ kind: 'markdown', text: `${LONG}\n\n${WIDE_TABLE}` }, { kind: 'mermaid', text: SMALL_DIAGRAM }] },
+    { kind: 'question', prompt: 'Many', widget: 'multi', options: [{ label: 'First' }, { label: UNBROKEN }], context: [{ kind: 'html', html: mock('ctx') }], details: LONG },
+    { kind: 'question', prompt: 'Between mocks', widget: 'choose-between-rendered-variants',
+      options: [{ label: UNBROKEN, block: { kind: 'html', html: mock('v') } }, { label: 'Drawn', block: { kind: 'mermaid', text: SMALL_DIAGRAM } }] },
+    { kind: 'question', prompt: 'In your words', widget: 'text' },
+    { kind: 'question', prompt: 'In order', widget: 'rank', options: [{ label: LONG }, { label: UNBROKEN }, { label: 'Last' }] },
+  ],
+});
+const CHROME_CONTROLS = ['.back-to-index', '#theme-toggle', '.round-flip', '.round-page', '#send-btn', '#discuss-btn'];
+const AT_REST = [...CHROME_CONTROLS, '#comment-mode-toggle', '.round-download', '.fold-toggle', 'summary', '.card-choice', '.choice-multi',
+  '.variant-card', '.rank-move', '.answer-textarea', '.note-field textarea', '.btn-defer', '.comment-btn', '.pull-out', '.stage-fold-toggle', '.questions-left-pill'];
+const PRESS_ALL = sel => `[].slice.call(document.querySelectorAll(${JSON.stringify(sel)})).forEach(function (el) { el.click(); })`;
+
+async function phoneRows({ send, onEvent, cookie, home, origin, boardUrl }) {
+  const roundUrl = await boardUrl(phoneBody());
+  const pageUrl = await boardUrl({ ...pageBody(), wait: true });
+  const many = manyRounds(19);
+  writeBoard(many, home);
+  const onPhone = (url, theme, fn) => async note => {
+    const tab = await openPhone(send, onEvent, url, cookie, { theme });
+    try { await fn(tab, note); } finally { await tab.close(); }
+  };
+  const hold = async (tab, note, what, expected) => {
+    const faults = await phoneFaults(tab, expected);
+    note(`${what}: ${faults.count} controls`);
+    assertPhone(faults, expected);
+  };
+
+  const drawn = async tab => {
+    await tab.until(`[].slice.call(document.querySelectorAll('.round-current pre.mermaid')).every(function (p) { return p.querySelector('svg'); })`, 'the diagrams');
+    await tab.evalPage(`document.documentElement.style.scrollBehavior = 'auto'; document.querySelector('.round-current > .html-block').scrollIntoView()`);
+    await tab.until(`document.querySelector('.stage-folded')`, 'the tall picture folded');
+  };
+
+  for (const theme of ['dark', 'light']) {
+    await row(`on a ${theme} phone a round of every kind of block and widget scrolls nothing sideways and each control is at least 44px and clear of the bars`, onPhone(roundUrl, theme, async (tab, note) => {
+      await drawn(tab);
+      const inside = await tab.evalPage(`['.code-block pre', '.md-content pre', '.table-scroll'].map(function (sel) {
+        var el = document.querySelector('.round-current ' + sel);
+        return [sel, el.scrollWidth > el.clientWidth, getComputedStyle(el).overflowX];
+      })`);
+      assert.deepEqual(inside.map(([sel, , overflow]) => [sel, overflow]), inside.map(([sel]) => [sel, 'auto']));
+      assert.deepEqual(inside.filter(([, over]) => !over), [], 'setup: the long code and the wide table overflow their own boxes');
+      const columns = await tab.evalPage(`[].slice.call(document.querySelectorAll('.round-current .compare-grid, .round-current .options-variants, .round-current > .question-block'))
+        .filter(function (g) { return getComputedStyle(g).gridTemplateColumns.split(' ').length > 1; }).length`);
+      assert.equal(columns, 0, 'one column each');
+      await hold(tab, note, 'at rest', AT_REST);
+    }));
+  }
+
+  await row('on a phone the same holds in comment mode with every fold and form open, a comment pending and an image pasted', onPhone(roundUrl, 'dark', async (tab, note) => {
+    await drawn(tab);
+    await tab.evalPage(`document.querySelector('#comment-mode-toggle').click()`);
+    await tab.evalPage(PRESS_ALL('.round-current .comment-btn, .round-current .fold-toggle, .round-current .stage-folded .stage-fold-toggle, .round-current summary'));
+    await tab.evalPage(`(function () {
+      var form = document.querySelector('.comment-form.open'), input = form.querySelector('input');
+      input.value = 'Pending';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      form.querySelector('button').click();
+      var canvas = document.createElement('canvas');
+      canvas.toBlob(function (blob) {
+        var data = new DataTransfer();
+        data.items.add(new File([blob], 'a.png', { type: 'image/png' }));
+        document.querySelector('.note-field textarea').dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
+      });
+    })()`);
+    await tab.until(`document.querySelector('.thumb-remove') && document.querySelector('.comment-delete')`, 'the thumbnail and the pending comment');
+    await tab.evalPage(`document.querySelector('.card-choice').click()`);
+    await hold(tab, note, 'comment mode', ['.comment-form input', '.comment-form button', '.comment-delete', '.thumb-remove', '.notice-x', '.mode-toggle.active']);
+  }));
+
+  for (const [what, opener, controls] of [
+    ['a diagram', '.mermaid-block .pull-out', ['.lens-btn[data-lens="fit"]', '.lens-btn[data-lens="close"]']],
+    ['a variant', '.variant-card .pull-out', ['.lens-pick', '.lens-btn[data-lens="close"]']],
+  ]) {
+    await row(`on a phone ${what} pulled out full size keeps each of its controls at least 44px and on the screen`, onPhone(roundUrl, 'dark', async (tab, note) => {
+      await tab.until(`document.querySelector(${JSON.stringify(opener)})`, 'its Pull-out');
+      await tab.evalPage(`document.querySelector(${JSON.stringify(opener)}).click()`);
+      await tab.until(`document.querySelector('dialog[open]')`, 'the lens');
+      await hold(tab, note, what, controls);
+    }));
+  }
+
+  await row('on a phone a page board keeps each of its controls at least 44px and on the screen, its comment panel open', onPhone(pageUrl, 'dark', async (tab, note) => {
+    await tab.evalPage(`document.querySelector('.page-comments .comment-form').classList.add('open')`);
+    await hold(tab, note, 'page board', ['.back-to-index', '#theme-toggle', '#comment-mode-toggle', '.head-download', '.round-flip', '.round-page', '.page-send-btn', '.page-discuss-btn', '.comment-form input']);
+  }));
+
+  await row('on a phone a round of a 19-round board keeps each control at least 44px and Send and Discuss uncovered, the switcher folded and open', onPhone(`${origin}/b/${many.id}`, 'dark', async (tab, note) => {
+    for (const n of [19, 15]) {
+      await tab.evalPage(`document.querySelector('.round-page[data-round="${n}"]').click()`);
+      for (const state of ['folded', 'open']) {
+        if (state === 'open') await tab.evalPage(`document.querySelector('.round-gap').click()`);
+        await hold(tab, note, `round ${n} ${state}`, [...CHROME_CONTROLS, '.card-choice', '.btn-defer']);
+        const m = await tab.evalPage(SWITCHER_EXPR);
+        assert.deepEqual(m.covered, [], `round ${n} ${state}`);
+        assert.deepEqual(m.flips.map(f => [f.w, f.h >= 44]), [[44, true], [44, true]]);
+      }
+    }
+    await tab.evalPage(`document.querySelector('.round-page[data-round="3"]').click()`);
+    await hold(tab, note, 'a sent round', ['.round-page', '.round-flip', '.card-choice', '.round-download']);
+  }));
 }
 
 // The facts a row's comparison stands on, asserted inside each row that uses

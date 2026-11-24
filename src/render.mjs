@@ -3703,7 +3703,7 @@ export function renderBoardPage(board, { stageHtml = false } = {}) {
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="${escAttr(CSP)}">
 <title>${escHtml(board.title || 'board')}</title>
 ${faviconLink}
