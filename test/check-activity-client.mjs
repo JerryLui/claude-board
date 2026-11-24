@@ -83,6 +83,7 @@ const GESTURES = {
     list.querySelector('li').dispatchEvent(new StandInEvent('dragstart'));
     list.dispatchEvent(new StandInEvent('dragend'));
   },
+  'a rank button press': document => click(blockOf(document, 'rank').querySelector('.rank-move[data-move="down"]')),
   'a rendered-variant pick': document => click(blockOf(document, 'choose-between-rendered-variants').querySelector('.choice-variant')),
   'a Defer': document => deferBlock(blockOf(document, 'single')),
   'a typed answer': document => typeInto(blockOf(document, 'text').querySelector('textarea[data-answer-for]'), 'Ship Friday'),

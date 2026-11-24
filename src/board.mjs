@@ -140,7 +140,7 @@ function emptyIdLedger() {
   // renderer or a check calls on its own -- parses no diagrams at all, which is what
   // that path did before the door existed. `html` is the post's html allowance on the
   // same terms (`spendHtmlAllowance`): null bounds nothing past each block's own cap.
-  return { taken: new Map(), replaceable: new Set(), minted: new Set(), openRound: null, refusals: [], diagrams: null, html: null };
+  return { taken: new Map(), replaceable: new Set(), minted: new Set(), openRound: null, refusals: [], diagrams: null, html: null, questions: 0 };
 }
 
 /** Resolve a block's id: the caller's `raw.id` when present, well-formed and
@@ -575,6 +575,7 @@ function normalizeBlockContent(raw, round, counters, cwd, ids, { topLevel = true
     }
     case 'question': {
       const id = resolveBlockId(raw, 'question', counters, ids, topLevel);
+      const questionPlace = ids.questions += 1;
       // An unrecognised widget is a rejection, not a silent fallback to 'single': a
       // widget name one word off the spec ('freetext' for 'text') renders a question
       // with no cards and no textarea, which Send then reports back as `unanswered` --
@@ -598,6 +599,7 @@ function normalizeBlockContent(raw, round, counters, cwd, ids, { topLevel = true
           position: { kind: 'question', questionId: id, slot: 'context', index: index + 1 },
         }))
         : [];
+      if (widget !== 'text' && Array.isArray(raw.options)) refuseBlankOptionLabel(raw.options, questionPlace);
       // choose-between-rendered-variants is the one widget whose
       // options are not a { preview } string: each option's `block` is a real
       // content block, normalized the SAME way normalizeCompareSide (below)
@@ -619,14 +621,14 @@ function normalizeBlockContent(raw, round, counters, cwd, ids, { topLevel = true
       const options = Array.isArray(raw.options)
         ? raw.options.map((o, index) => widget === 'choose-between-rendered-variants'
           ? {
-            label: byValueText(o.label ?? '', 'option label'),
+            label: byValueText(o.label, 'option label'),
             description: byValueText(o.description ?? '', 'option description'),
             block: o.block ? normalizeBlock(o.block, round, counters, cwd, ids, {
               topLevel: false,
               position: { kind: 'question', questionId: id, slot: 'option', index: index + 1 },
             }) : null,
           }
-          : { label: byValueText(o.label ?? '', 'option label'), description: byValueText(o.description ?? '', 'option description'), preview: o.preview == null ? null : byValueText(o.preview, 'option preview') })
+          : { label: byValueText(o?.label ?? '', 'option label'), description: byValueText(o?.description ?? '', 'option description'), preview: o?.preview == null ? null : byValueText(o.preview, 'option preview') })
         : [];
       if (widget !== 'text' && options.length === 0) {
         throw new Error(`question widget '${widget}' requires at least one option`);
@@ -746,6 +748,12 @@ function cardMarkdownHtml(text, field, where, ids) {
     recordDiagramRefusal(fence.text, null, `mermaid fence ${fence.ordinal} in ${field} of ${where}`, true, ids);
   }
   return html;
+}
+
+function refuseBlankOptionLabel(options, questionPlace) {
+  const blankIndex = options.findIndex(o => typeof o?.label !== 'string' || !o.label.trim());
+  if (blankIndex === -1) return;
+  throw new Error(`option ${blankIndex + 1} of question ${questionPlace} has no label; every option is an object whose \`label\` is text that is not blank`);
 }
 
 function normalizeCompareSide(side, round, counters, cwd, ids, position) {
