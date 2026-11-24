@@ -3015,7 +3015,7 @@ async function main() {
     }
   });
 
-  await check('a link tapped on another site opens a page and nothing else, renewing no sign-in, on the Mac and away', async () => {
+  await check('a link tapped on another site opens a board and nothing else, renewing no sign-in, on the Mac and away', async () => {
     const TAP = { ...BROWSER_NAV, cookie: COOKIE, 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', 'sec-fetch-user': '?1' };
     const before = snapshotTree(home);
     try {
@@ -3023,10 +3023,20 @@ async function main() {
       for (const origin of ORIGINS) {
         const get = (pathName, headers) => rawRequest(port, 'GET', pathName, { host: origin.host, headers });
         for (const site of ['cross-site', 'same-site']) {
+          const r = await get(`/b/${boardId}`, { ...TAP, 'sec-fetch-site': site });
+          assert.equal(r.status, 200, `${origin.name}: a ${site} tap opens a board`);
+          assert.deepEqual(renewed(r), [], `${origin.name}: another site's link renews no sign-in`);
+          // The list answers with one click, and its address is no secret to bait one at.
+          for (const pathName of ['/', '/boards', '/?q=x', '/boards?q=x']) {
+            const list = await get(pathName, { ...TAP, 'sec-fetch-site': site });
+            assert.equal(list.status, 401, `${origin.name}: a ${site} tap opens no ${pathName}`);
+            assert.deepEqual(renewed(list), []);
+          }
+        }
+        for (const site of ['same-origin', 'none']) {
           for (const pathName of ['/', '/boards', `/b/${boardId}`]) {
             const r = await get(pathName, { ...TAP, 'sec-fetch-site': site });
-            assert.equal(r.status, 200, `${origin.name}: a ${site} tap opens ${pathName}`);
-            assert.deepEqual(renewed(r), [], `${origin.name}: another site's link renews no sign-in`);
+            assert.equal(r.status, 200, `${origin.name}: the board's own link, a bookmark or a typed address (${site}) opens ${pathName}`);
           }
         }
         for (const pathName of ['/api/missions', '/api/waiting', '/api/search?q=x', '/api/events', '/api/stream', `/api/board/${boardId}/events`,
@@ -3050,7 +3060,7 @@ async function main() {
       }
       awayOff();
       const after = snapshotTree(home);
-      for (const [rel, file] of before) assert.equal(after.get(rel)?.sha, file.sha, `opening a page writes nothing: ${rel}`);
+      for (const [rel, file] of before) assert.equal(after.get(rel)?.sha, file.sha, `opening a board writes nothing: ${rel}`);
       assert.equal(after.size, before.size);
     } finally {
       awayOff();

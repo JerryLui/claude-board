@@ -549,22 +549,23 @@ function isSameOriginWrite(req) {
  * is not closed by this function, and this comment exists so nobody later reads the check
  * and concludes that it is.
  *
- * `pageRoute` is the one relaxation: on `isPageRoute`'s pages a link tapped on another site
- * opens the page. Every other cross-site read stays refused. */
-function isAuthorizedRead(req, secret, pageRoute = false) {
+ * `boardPage` is the one relaxation: a link to a board tapped on another site opens it.
+ * Every other cross-site read stays refused. */
+function isAuthorizedRead(req, secret, boardPage = false) {
   if (!secret) return false;
   if (holdsSecret(req, secret)) return true;
   if (!sessionCookieMatches(req.headers.cookie, secret)) return false;
-  return isSameOriginRead(req) || (pageRoute && isLinkTap(req));
+  return isSameOriginRead(req) || (boardPage && isLinkTap(req));
 }
 
 function holdsSecret(req, secret) {
   return !req.boardOrigin.away && secretMatches(req.headers[SECRET_HEADER], secret);
 }
 
-/** The pages a link on another site may open: their GETs write nothing and spend nothing. */
-function isPageRoute(url, parts) {
-  if (url.pathname === '/' || url.pathname === '/boards') return true;
+/** The one page a link on another site may open: its GET writes nothing and spends nothing,
+ * and its id cannot be guessed. `/` and `/boards` stay refused: another site could open them
+ * without knowing anything, and a click baited there could land on a card's one-click answer. */
+function isBoardPage(parts) {
   return parts[0] === 'b' && parts.length === 2 && SAFE_BOARD_ID.test(parts[1]);
 }
 
@@ -3934,7 +3935,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
       // refuses is a human looking at a tab, not a program: see sendCredentialRefusal.
       // Without it any local process reads every board, source excerpts included.
       const open = req.method === 'GET' && isOpenRoute(url.pathname, parts, req.boardOrigin.away);
-      if (req.method === 'GET' && !open && !isAuthorizedRead(req, secret, isPageRoute(url, parts))) {
+      if (req.method === 'GET' && !open && !isAuthorizedRead(req, secret, isBoardPage(parts))) {
         return sendCredentialRefusal(req, res, url.pathname);
       }
 
