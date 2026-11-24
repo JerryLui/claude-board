@@ -2887,12 +2887,12 @@ body:not(.page-board) .blocks .comment-list, body:not(.page-board) .blocks .comm
    inset is 0 elsewhere. The dock's is padding, so its measured height carries
    it to the bars and the Tray that clear the dock. */
 body { padding-left: env(safe-area-inset-left, 0px); padding-right: env(safe-area-inset-right, 0px); }
-body.page-board .board-head { left: env(safe-area-inset-left, 0px); right: env(safe-area-inset-right, 0px); }
-.round-flip-prev { left: env(safe-area-inset-left, 0px); }
-.round-flip-next { right: env(safe-area-inset-right, 0px); }
+body.page-board .board-head { margin-left: env(safe-area-inset-left, 0px); margin-right: env(safe-area-inset-right, 0px); }
+.round-flip-prev { margin-left: env(safe-area-inset-left, 0px); }
+.round-flip-next { margin-right: env(safe-area-inset-right, 0px); }
 .round-pager-dock { padding-bottom: env(safe-area-inset-bottom, 0px); }
 .send-bar:not(.lifted) { padding-bottom: calc(var(--space-4) + env(safe-area-inset-bottom, 0px)); }
-.back-to-top { right: calc(var(--space-5) + env(safe-area-inset-right, 0px)); bottom: calc(var(--space-5) + env(safe-area-inset-bottom, 0px)); }
+.back-to-top { margin-right: env(safe-area-inset-right, 0px); margin-bottom: env(safe-area-inset-bottom, 0px); }
 @media (max-width: 860px) {
   .question-block { grid-template-columns: minmax(0, 1fr); }
   .compare-grid { grid-template-columns: 1fr; }
