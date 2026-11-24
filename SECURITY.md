@@ -72,9 +72,10 @@ on or off.
 | The internet | Nothing: `on` refuses while Funnel is on, and takes the forwarder down if Funnel is on after. A Funnel you turn on later is yours to notice; `status` names it. It would expose the refusals above, not the boards |
 
 **The setting** is one file beside the secret, `~/.config/claude-board/away`, holding one lowercase
-`<machine>.<tailnet>.ts.net` name. It is read on every request, so `off` takes effect at once, and
-a file that is not plain, not yours, open to other users, a link, longer than one name or anything
-but one such name reads as off. A reinstall and an uninstall both leave it.
+`<machine>.<tailnet>.ts.net` name. It is read on every request, so `off` stops every request at
+once, and an event stream a device already holds open within one heartbeat (15 s). A file that is not
+plain, not yours, open to other users, a link, longer than one name or anything but one such name
+reads as off. A reinstall and an uninstall both leave it.
 
 **The link** (`node bin/away.mjs link`) works once, for 10 minutes, on the away name alone: shown to
 the local address it is spent and signs in nobody. A `GET` of it answers a page with one button and

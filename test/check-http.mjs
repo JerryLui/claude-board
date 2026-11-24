@@ -3210,6 +3210,46 @@ async function main() {
     }
   });
 
+  await check('turning away off ends each stream a device holds open within one heartbeat, and none the Mac holds', async () => {
+    const open = (origin, pathName) => new Promise((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port, path: pathName, headers: { host: origin.host, cookie: COOKIE } }, res => {
+        const stream = { name: `${origin.name} ${pathName}`, away: origin.name === 'away', heartbeats: 0, ended: false, req };
+        res.setEncoding('utf8');
+        res.on('data', chunk => { stream.heartbeats += chunk.split(': heartbeat').length - 1; });
+        res.on('end', () => { stream.ended = true; });
+        resolve(stream);
+      });
+      req.on('error', reject);
+      req.end();
+    });
+    const until = async (what, met) => {
+      const deadline = Date.now() + 10_000;
+      while (!met()) {
+        assert.ok(Date.now() < deadline, what);
+        await sleep(5);
+      }
+    };
+    const streams = [];
+    try {
+      awayOn();
+      for (const origin of ORIGINS) {
+        for (const pathName of [`/api/board/${boardId}/events`, '/api/events', '/api/stream']) streams.push(await open(origin, pathName));
+      }
+      for (const stream of streams) await until(`${stream.name} lives while away is on`, () => stream.heartbeats >= 2);
+      assert.deepEqual(streams.filter(s => s.ended), []);
+      awayOff();
+      for (const stream of streams.filter(s => s.away)) await until(`${stream.name} ends once away is off`, () => stream.ended);
+      for (const stream of streams.filter(s => !s.away)) {
+        const seen = stream.heartbeats;
+        await until(`${stream.name} lives on`, () => stream.heartbeats >= seen + 2);
+        assert.equal(stream.ended, false, stream.name);
+      }
+    } finally {
+      for (const stream of streams) stream.req.destroy();
+      awayOff();
+    }
+  });
+
   await check('changing the secret signs every browser out, on the Mac and away, at the next request', async () => {
     try {
       awayOn();

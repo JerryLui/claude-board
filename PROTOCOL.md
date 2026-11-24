@@ -2185,9 +2185,11 @@ side: printing the board URL in chat as the fallback that cannot fail.
 
 `GET /api/board/:id/events`: a `text/event-stream` subscription, one per connected client, for
 round pushes and submits on `:id`. 404s up front if the board doesn't exist; otherwise the response
-never ends on its own. Heartbeat comment lines (`: heartbeat\n\n`) keep it alive through idle
+ends on its own only when away goes off under it. Heartbeat comment lines (`: heartbeat\n\n`) keep it alive through idle
 timers and proxies — invisible to `EventSource`'s message events, so they never surface as a stray
-event. `CLAUDE_BOARD_SSE_HEARTBEAT_MS` overrides the cadence (default 15000), for checks only.
+event. `CLAUDE_BOARD_SSE_HEARTBEAT_MS` overrides the cadence (default 15000), for checks only. A
+stream opened on the away origin is ended by its first heartbeat after the away name stops being the
+one it was opened on.
 
 Five named events. `round` and `submitted` carry the page's own copy of the board, the same bytes a served
 page inlines as `#board-data` (ADR 122), so a client can diff against its own last-known copy, plus

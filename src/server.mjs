@@ -2984,9 +2984,23 @@ async function handleActivity(req, res, id, home, sse, stranded, stream, waiting
   return sendJson(res, 200, { round, awaitDeadline: r.awaitDeadline ?? null, moved });
 }
 
+/** Keeps a stream alive, and ends one opened on the away origin once away is off or holds
+ * another name: the Host gate runs once, when the stream opens. */
+function startHeartbeat(req, res) {
+  const heartbeat = setInterval(() => {
+    if (req.boardOrigin.away && !isAwayHost(req.headers.host, readAway().host)) {
+      res.end();
+      return;
+    }
+    try { res.write(': heartbeat\n\n'); } catch { /* connection is gone; the stream's cleanup handles it */ }
+  }, sseHeartbeatMs());
+  heartbeat.unref?.();
+  return heartbeat;
+}
+
 /** GET /api/board/:id/events: subscribe this connection to round pushes and submit
  * notifications for `id`. Never resolves on its own -- the response stays open
- * until the client disconnects -- so unlike the other handlers this is not awaited
+ * until the client disconnects, or away goes off under it -- so unlike the other handlers this is not awaited
  * by the caller. Heartbeat comment lines keep it alive through idle timers and
  * proxies (see DEFAULT_SSE_HEARTBEAT_MS); `req`/`res` close/error tear the
  * subscription and the interval down so a disconnected client is never broadcast
@@ -3027,10 +3041,7 @@ function handleEvents(req, res, id, home, sse, stranded, url) {
   // here or whether this is a buried tab that merely found its socket again.
   stranded.evaluate(id, target);
 
-  const heartbeat = setInterval(() => {
-    try { res.write(': heartbeat\n\n'); } catch { /* connection is gone; cleanup below handles it */ }
-  }, sseHeartbeatMs());
-  heartbeat.unref?.();
+  const heartbeat = startHeartbeat(req, res);
 
   const cleanup = () => {
     clearInterval(heartbeat);
@@ -3055,7 +3066,7 @@ function handleEvents(req, res, id, home, sse, stranded, url) {
  * a `text/event-stream` connection open needs no second set of rules to learn. No
  * `watcher` event, unlike the board stream: nothing here is per-Watcher, so there is no id
  * for a later request to name. Never resolves on its own -- the response stays open until
- * the client disconnects. */
+ * the client disconnects, or away goes off under it. */
 function handleStream(req, res, stream) {
   res.writeHead(200, {
     'content-type': 'text/event-stream; charset=utf-8',
@@ -3065,10 +3076,7 @@ function handleStream(req, res, stream) {
   res.write(': connected\n\n');
   const subId = stream.subscribe(res);
 
-  const heartbeat = setInterval(() => {
-    try { res.write(': heartbeat\n\n'); } catch { /* connection is gone; cleanup below handles it */ }
-  }, sseHeartbeatMs());
-  heartbeat.unref?.();
+  const heartbeat = startHeartbeat(req, res);
 
   const cleanup = () => {
     clearInterval(heartbeat);
@@ -3091,10 +3099,7 @@ function handleBrowserStream(req, res, browserStreams) {
   });
   res.write(': connected\n\n');
   const id = browserStreams.open(res);
-  const heartbeat = setInterval(() => {
-    try { res.write(': heartbeat\n\n'); } catch { /* connection is gone; cleanup below handles it */ }
-  }, sseHeartbeatMs());
-  heartbeat.unref?.();
+  const heartbeat = startHeartbeat(req, res);
   const cleanup = () => {
     clearInterval(heartbeat);
     browserStreams.close(id);
