@@ -739,13 +739,15 @@ What is done instead is bounding it:
 - a cookie-authenticated request must also look same-origin (`Origin` / `Sec-Fetch-Site`),
   which stops a *web page* on another origin using it through your browser. It does not
   stop the case above, because a local process sets its own headers;
-- rotating the secret revokes every cookie on the next *request* — the daemon re-reads the
-  secret per request rather than at startup. It does **not** close connections already
-  open: the read gate is evaluated once, when a request starts, so an SSE stream
-  (`/api/board/:id/events`) established before the rotation keeps receiving every later
-  round and every submitted answer for that board, and an in-flight `/wait` still returns
-  its packet. Both last until the daemon restarts. If you are rotating because a cookie
-  leaked, restart the daemon too — `launchctl kickstart -k gui/$(id -u)/claude-board`.
+- rotating the secret revokes every cookie: on the next *request*, since the daemon re-reads the
+  secret per request rather than at startup, and on every event stream already open, on this Mac
+  and away, within one heartbeat (15 s), which judges the credential the stream was opened with
+  again, the secret header as well as the cookie. A round posted inside those seconds can still
+  reach it. A secret file that is missing or empty ends a stream at its second heartbeat, so one
+  read halfway through being replaced ends none. What a rotation does **not** end is an in-flight
+  `/wait`, which only the secret opens: it still returns its packet, or runs out. If you are
+  rotating because the secret itself leaked, restart the daemon too —
+  `launchctl kickstart -k gui/$(id -u)/claude-board`.
   That restart is also what ends an unused sign-in link: the click holds no credential, so a link
   survives a rotation, or the secret's deletion, until it is used or the daemon restarts.
 

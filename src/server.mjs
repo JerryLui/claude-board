@@ -2992,11 +2992,18 @@ async function handleActivity(req, res, id, home, sse, stranded, stream, waiting
   return sendJson(res, 200, { round, awaitDeadline: r.awaitDeadline ?? null, moved });
 }
 
-/** Keeps a stream alive, and ends one opened on the away origin once away is off or holds
- * another name: the Host gate runs once, when the stream opens. */
-function startHeartbeat(req, res) {
+/** Keeps a stream alive, and ends one the gates would no longer open, since they run once,
+ * when it opens: its away name is gone, or the credential it came with does not hold under
+ * the secret as it stands now. A secret that cannot be read, or is empty, ends a stream at
+ * its second beat and not its first: a file replaced in place is empty for a moment. */
+function startHeartbeat(req, res, currentSecret) {
+  let secretMissing = false;
   const heartbeat = setInterval(() => {
-    if (req.boardOrigin.away && !isAwayHost(req.headers.host, readAway().host)) {
+    const secret = currentSecret();
+    const firstMiss = !secret && !secretMissing;
+    secretMissing = !secret;
+    const awayGone = req.boardOrigin.away && !isAwayHost(req.headers.host, readAway().host);
+    if (awayGone || (!firstMiss && !isAuthorizedRead(req, secret))) {
       res.end();
       return;
     }
@@ -3008,10 +3015,10 @@ function startHeartbeat(req, res) {
 
 /** GET /api/board/:id/events: subscribe this connection to round pushes and submit
  * notifications for `id`. Never resolves on its own -- the response stays open
- * until the client disconnects, or away goes off under it -- so unlike the other handlers this is not awaited
- * by the caller. Heartbeat comment lines keep it alive through idle timers and
- * proxies (see DEFAULT_SSE_HEARTBEAT_MS); `req`/`res` close/error tear the
- * subscription and the interval down so a disconnected client is never broadcast
+ * until the client disconnects, or a heartbeat ends it (`startHeartbeat`) -- so unlike the
+ * other handlers this is not awaited by the caller. Heartbeat comment lines keep it alive
+ * through idle timers and proxies (see DEFAULT_SSE_HEARTBEAT_MS); `req`/`res` close/error
+ * tear the subscription and the interval down so a disconnected client is never broadcast
  * to. See PROTOCOL.md "SSE events".
  *
  * `?stages=held` is the page script declaring it fills a held stage frame (src/ui.mjs,
@@ -3019,7 +3026,7 @@ function startHeartbeat(req, res) {
  * nothing is a tab opened before that script, still running it, and its pushes carry
  * every stage whole (buildRoundPushPayload's `wholeStages`): a held frame would leave
  * its stage blank until a reload. */
-function handleEvents(req, res, id, home, sse, stranded, url) {
+function handleEvents(req, res, id, home, sse, stranded, url, currentSecret) {
   const board = readBoard(id, home);
   if (!board) return sendJson(res, 404, { error: 'board not found' });
   // Captured while the socket is unambiguously alive, because the cleanup below runs
@@ -3049,7 +3056,7 @@ function handleEvents(req, res, id, home, sse, stranded, url) {
   // here or whether this is a buried tab that merely found its socket again.
   stranded.evaluate(id, target);
 
-  const heartbeat = startHeartbeat(req, res);
+  const heartbeat = startHeartbeat(req, res, currentSecret);
 
   const cleanup = () => {
     clearInterval(heartbeat);
@@ -3074,8 +3081,8 @@ function handleEvents(req, res, id, home, sse, stranded, url) {
  * a `text/event-stream` connection open needs no second set of rules to learn. No
  * `watcher` event, unlike the board stream: nothing here is per-Watcher, so there is no id
  * for a later request to name. Never resolves on its own -- the response stays open until
- * the client disconnects, or away goes off under it. */
-function handleStream(req, res, stream) {
+ * the client disconnects, or a heartbeat ends it. */
+function handleStream(req, res, stream, currentSecret) {
   res.writeHead(200, {
     'content-type': 'text/event-stream; charset=utf-8',
     'cache-control': 'no-cache, no-transform',
@@ -3084,7 +3091,7 @@ function handleStream(req, res, stream) {
   res.write(': connected\n\n');
   const subId = stream.subscribe(res);
 
-  const heartbeat = startHeartbeat(req, res);
+  const heartbeat = startHeartbeat(req, res, currentSecret);
 
   const cleanup = () => {
     clearInterval(heartbeat);
@@ -3099,7 +3106,7 @@ function handleStream(req, res, stream) {
  * its worker (src/stream-worker.mjs) for every tab of that browser. Its first frame names
  * it; the worker then registers each board tab (`handleStreamWrite`). Kept alive and torn
  * down exactly as `handleEvents` is, and its close drops every Watcher it carried. */
-function handleBrowserStream(req, res, browserStreams) {
+function handleBrowserStream(req, res, browserStreams, currentSecret) {
   res.writeHead(200, {
     'content-type': 'text/event-stream; charset=utf-8',
     'cache-control': 'no-cache, no-transform',
@@ -3107,7 +3114,7 @@ function handleBrowserStream(req, res, browserStreams) {
   });
   res.write(': connected\n\n');
   const id = browserStreams.open(res);
-  const heartbeat = startHeartbeat(req, res);
+  const heartbeat = startHeartbeat(req, res, currentSecret);
   const cleanup = () => {
     clearInterval(heartbeat);
     browserStreams.close(id);
@@ -4140,11 +4147,11 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
       // a process with no board id to subscribe under `/api/board/:id/events` with. Gated
       // like every other read here -- there is nothing board-scoped about it to exempt.
       if (req.method === 'GET' && url.pathname === '/api/events') {
-        return handleStream(req, res, streamHub);
+        return handleStream(req, res, streamHub, currentSecret);
       }
 
       if (parts[0] === 'api' && parts[1] === 'stream') {
-        if (req.method === 'GET' && parts.length === 2) return handleBrowserStream(req, res, browserStreams);
+        if (req.method === 'GET' && parts.length === 2) return handleBrowserStream(req, res, browserStreams, currentSecret);
         if (req.method === 'GET' && parts.length === 3 && parts[2] === STREAM_WORKER_FILE) return handleStreamWorker(res);
         if (req.method === 'POST' && parts.length === 4) return await handleStreamWrite(req, res, parts[2], parts[3], home, browserStreams);
       }
@@ -4219,7 +4226,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
           return await handleCollect(req, res, boardId, home, sessions);
         }
         if (req.method === 'GET' && action === 'events') {
-          return handleEvents(req, res, boardId, home, sse, stranded, url);
+          return handleEvents(req, res, boardId, home, sse, stranded, url, currentSecret);
         }
         if (req.method === 'POST' && action === 'submit') {
           return await handleSubmit(req, res, boardId, home, sse, stranded, streamHub, waitingCache);

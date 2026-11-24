@@ -3271,40 +3271,46 @@ async function main() {
     }
   });
 
-  await check('turning away off ends each stream a device holds open within one heartbeat, and none the Mac holds', async () => {
-    const open = (origin, pathName) => new Promise((resolve, reject) => {
-      const req = http.request({ host: '127.0.0.1', port, path: pathName, headers: { host: origin.host, cookie: COOKIE } }, res => {
-        const stream = { name: `${origin.name} ${pathName}`, away: origin.name === 'away', heartbeats: 0, ended: false, req };
-        res.setEncoding('utf8');
-        res.on('data', chunk => { stream.heartbeats += chunk.split(': heartbeat').length - 1; });
-        res.on('end', () => { stream.ended = true; });
-        resolve(stream);
+  const STREAM_PATHS = id => [`/api/board/${id}/events`, '/api/events', '/api/stream'];
+  const openStream = (origin, pathName, credential = { cookie: COOKIE }) => new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, path: pathName, headers: { host: origin.host, ...credential } }, res => {
+      const stream = { name: `${origin.name} ${pathName} ${Object.keys(credential)}`, away: origin.name === 'away', status: res.statusCode, text: '', heartbeats: 0, ended: false, req };
+      res.setEncoding('utf8');
+      res.on('data', chunk => {
+        stream.text += chunk;
+        stream.heartbeats = stream.text.split(': heartbeat').length - 1;
       });
-      req.on('error', reject);
-      req.end();
+      res.on('end', () => { stream.ended = true; });
+      resolve(stream);
     });
-    const until = async (what, met) => {
-      const deadline = Date.now() + 10_000;
-      while (!met()) {
-        assert.ok(Date.now() < deadline, what);
-        await sleep(5);
-      }
-    };
+    req.on('error', reject);
+    req.end();
+  });
+  const until = async (what, met) => {
+    const deadline = Date.now() + 10_000;
+    while (!met()) {
+      assert.ok(Date.now() < deadline, what);
+      await sleep(5);
+    }
+  };
+  const livesOn = async stream => {
+    const seen = stream.heartbeats;
+    await until(`${stream.name} lives on`, () => stream.ended || stream.heartbeats >= seen + 3);
+    assert.equal(stream.ended, false, stream.name);
+  };
+
+  await check('turning away off ends each stream a device holds open within one heartbeat, and none the Mac holds', async () => {
     const streams = [];
     try {
       awayOn();
       for (const origin of ORIGINS) {
-        for (const pathName of [`/api/board/${boardId}/events`, '/api/events', '/api/stream']) streams.push(await open(origin, pathName));
+        for (const pathName of STREAM_PATHS(boardId)) streams.push(await openStream(origin, pathName));
       }
       for (const stream of streams) await until(`${stream.name} lives while away is on`, () => stream.heartbeats >= 2);
       assert.deepEqual(streams.filter(s => s.ended), []);
       awayOff();
       for (const stream of streams.filter(s => s.away)) await until(`${stream.name} ends once away is off`, () => stream.ended);
-      for (const stream of streams.filter(s => !s.away)) {
-        const seen = stream.heartbeats;
-        await until(`${stream.name} lives on`, () => stream.heartbeats >= seen + 2);
-        assert.equal(stream.ended, false, stream.name);
-      }
+      await Promise.all(streams.filter(s => !s.away).map(livesOn));
     } finally {
       for (const stream of streams) stream.req.destroy();
       awayOff();
@@ -3325,6 +3331,66 @@ async function main() {
     } finally {
       writeFileSync(SECRET_FILE, `${SECRET}\n`);
       awayOff();
+    }
+  });
+
+  await check('changing the secret ends every stream opened under the old one within two heartbeats, on the Mac and away, and none opened under the new one', async () => {
+    const CHANGED = 'b'.repeat(64);
+    const { boardId: id } = await postBoard(port, SECRET, { title: 'Streamed past a change', blocks: [{ kind: 'markdown', text: 'before' }] });
+    const credentials = secret => [
+      ...ORIGINS.map(origin => [origin, { cookie: sessionCookieHeader(secret) }]),
+      [ORIGINS[0], { [SECRET_HEADER]: secret }],
+    ];
+    const opened = [];
+    const openAll = async secret => {
+      const streams = [];
+      for (const [origin, credential] of credentials(secret)) {
+        for (const pathName of STREAM_PATHS(id)) streams.push(await openStream(origin, pathName, credential));
+      }
+      opened.push(...streams);
+      assert.deepEqual(streams.filter(s => s.status !== 200), []);
+      return streams;
+    };
+    try {
+      awayOn();
+      const old = await openAll(SECRET);
+      await Promise.all(old.map(livesOn));
+      const before = old.map(s => s.heartbeats);
+      writeFileSync(SECRET_FILE, `${CHANGED}\n`);
+      for (const stream of old) await until(`${stream.name} ends once the secret changed`, () => stream.ended);
+      old.forEach((s, i) => assert.ok(s.heartbeats - before[i] <= 2, `${s.name} outlived the change by ${s.heartbeats - before[i]} heartbeats`));
+
+      const fresh = await openAll(CHANGED);
+      const posted = await postBoard(port, CHANGED, { boardId: id, blocks: [{ kind: 'markdown', text: 'Posted after the change' }] });
+      assert.equal(posted.boardId, id);
+      for (const stream of fresh.filter(s => s.name.includes(`/api/board/${id}/`))) {
+        await until(`${stream.name} hears the round`, () => stream.text.includes('Posted after the change'));
+      }
+      assert.deepEqual(old.filter(s => s.text.includes('Posted after the change')), []);
+      await Promise.all(fresh.map(livesOn));
+    } finally {
+      for (const stream of opened) stream.req.destroy();
+      writeFileSync(SECRET_FILE, `${SECRET}\n`);
+      awayOff();
+    }
+  });
+
+  await check('a secret that reads empty for one heartbeat ends no stream, and one that stays gone ends them', async () => {
+    const streams = [];
+    try {
+      await withEnv({ CLAUDE_BOARD_SSE_HEARTBEAT_MS: '500' }, async () => {
+        for (const pathName of STREAM_PATHS(boardId)) streams.push(await openStream(ORIGINS[0], pathName));
+      });
+      const seen = streams.map(s => s.heartbeats);
+      writeFileSync(SECRET_FILE, '');
+      await until('each stream has met the empty secret', () => streams.every((s, i) => s.heartbeats > seen[i] || s.ended));
+      writeFileSync(SECRET_FILE, `${SECRET}\n`);
+      await Promise.all(streams.map(livesOn));
+      rmSync(SECRET_FILE);
+      for (const stream of streams) await until(`${stream.name} ends with no secret`, () => stream.ended);
+    } finally {
+      for (const stream of streams) stream.req.destroy();
+      writeFileSync(SECRET_FILE, `${SECRET}\n`, { mode: 0o600 });
     }
   });
 
