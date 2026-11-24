@@ -206,12 +206,12 @@ async function main() {
       const url = `http://localhost:7391/b/${GOOD_ID}`;
       const p = String(PORT);
       assert.equal(notify(['--notify', 'round', 'p', url, p, '60']).seconds, '60', 'a plain lifetime crosses as sent');
-      assert.equal(notify(['--notify', 'round', 'p', url, p]).seconds, '2400',
-        'absent falls back to the compiled-in default (the 40 minutes ADR.md entry 47 fixes a wait at), never to forever');
+      assert.equal(notify(['--notify', 'round', 'p', url, p]).seconds, '3000',
+        'absent falls back to the compiled-in default (the 50 minutes ADR 157 sets a wait at), never to forever');
       assert.equal(notify(['--notify', 'round', 'p', url, p, '99999']).seconds, '3600', 'clamped to the cap');
       assert.equal(notify(['--notify', 'round', 'p', url, p, '0']).seconds, '1', 'a zero lifetime still runs the exit path once');
       for (const junk of ['abc', '-5', '12x', '999999', '']) {
-        assert.equal(notify(['--notify', 'round', 'p', url, p, junk]).seconds, '2400',
+        assert.equal(notify(['--notify', 'round', 'p', url, p, junk]).seconds, '3000',
           `an unparseable lifetime (${JSON.stringify(junk)}) falls back rather than becoming an unbounded process`);
       }
     });
@@ -357,7 +357,7 @@ process.exit(0);
   // row in the lifetime table above proves the C side of it). `roundIsAwaitedOpen` reads
   // `status` and `awaited` only, and `closeLapsedAwaitedRounds` can sweep only a deadline
   // it can parse -- so a round with an unparseable `awaitDeadline` is awaited forever, and
-  // omitting the slot bought it a forty-minute clickable banner with no bound at all.
+  // omitting the slot bought it a fifty-minute clickable banner with no bound at all.
 
   await check('a bundled round banner hands the caller its process, so it can kill it before the deadline does', async () => {
     const { mod, log } = await inFakeBundle();

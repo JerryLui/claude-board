@@ -1677,7 +1677,7 @@ check('AC 12: an "awaitExpired" SSE push reverts the page to read-only, leaving 
   const realNow = Date.now;
   let flushCalls;
   try {
-    Date.now = () => realNow() + 41 * 60_000; // one minute past the 40-minute default
+    Date.now = () => realNow() + 51 * 60_000; // one minute past the 50-minute default
     // The queue's last exit before the freeze (src/ui.mjs's flushPendingOnExpiry).
     // Captured rather than allowed to hit the real global fetch: what is being
     // asserted is that the comment LEFT the tab, and the tab's own memory is the
@@ -1745,7 +1745,7 @@ check('AC 12: a page round that expires with an EMPTY queue posts nothing at all
   document.querySelector('.html-stage').loadSrcdoc();
   const realNow = Date.now;
   try {
-    Date.now = () => realNow() + 41 * 60_000;
+    Date.now = () => realNow() + 51 * 60_000;
     // Writes only -- see the filter in the check above for why the nudge also
     // issues a read.
     const calls = withFetchCapture(() => es.dispatch('awaitExpired', JSON.stringify({ round: 1 })))
@@ -1782,7 +1782,7 @@ check('AC 8/ADR 46: the comment-mode toggle is gone on a page board nobody is li
   assert.equal(document.body.classList.contains('page-uncommentable'), false, 'setup: still awaited, so the toggle stays');
   const realNow = Date.now;
   try {
-    Date.now = () => realNow() + 41 * 60_000;
+    Date.now = () => realNow() + 51 * 60_000;
     withFetchCapture(() => es.dispatch('awaitExpired', JSON.stringify({ round: 1 })));
     assert.equal(document.body.classList.contains('page-uncommentable'), true,
       'the wait died, so the control that turns commenting on goes with it');
@@ -1876,7 +1876,7 @@ await checkAsync('a page board whose round was abandoned stops counting down, fr
   assert.equal(pageSendBtn(document).disabled, false, 'setup: the send control is live');
 
   // The daemon's own two steps, in order: close the open rounds, then nudge every
-  // tab. The deadline is still 40 minutes away throughout -- no clock is moved
+  // tab. The deadline is still 50 minutes away throughout -- no clock is moved
   // here, deliberately, because this close has nothing to do with one.
   const closed = abandonOpenRounds(board);
   assert.deepEqual(closed, [1], 'setup: abandoning closes the one open round');
@@ -1920,7 +1920,7 @@ await checkAsync('the expired Send label survives the flush it announces (ablati
   const realNow = Date.now;
   let posts;
   try {
-    Date.now = () => realNow() + 41 * 60_000; // past the 40-minute default: the wait itself lapsed
+    Date.now = () => realNow() + 51 * 60_000; // past the 50-minute default: the wait itself lapsed
     // The freeze's own flush is a POST whose .then re-renders the pins -- and
     // refreshPins calls updatePageSendControls. The label is only overwritten
     // once that response lands, which is why this check has to wait for it: the

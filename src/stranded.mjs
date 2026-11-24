@@ -51,7 +51,7 @@ const MAX_TIMEOUT_MS = 2_147_483_647;
  * running" -- is not free: a click-serving process is a separate, deliberately unref'd
  * process (src/notify.mjs) that would otherwise outlive its owner all the way to its
  * own deadline, which is up to an hour of banners for a daemon that is gone -- the bound
- * is src/notify.mjs's `CLICK_LIFETIME_MAX_MS`, not the forty minutes a typical wait runs
+ * is src/notify.mjs's `CLICK_LIFETIME_MAX_MS`, not the fifty minutes a typical wait runs
  * for, and a longer wait is reachable because CLAUDE_BOARD_TIMEOUT_MS is on the
  * launcher's plist passthrough allowlist.
  * src/server.mjs's `startServer` covers the graceful stop (its `server.on('close')` calls

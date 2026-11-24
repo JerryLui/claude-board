@@ -13,8 +13,8 @@ import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { SECRET_HEADER, SESSION_COOKIE, sessionToken } from '../src/secret.mjs';
 import { HANDOFF_TOKEN_RE, recoveryCommand, repoRoot } from '../src/handoff.mjs';
-import { startServer, createRequestHandler, activeWaitCount, buildPacketWithUndelivered, createSseHub, DEFAULT_WAIT_TIMEOUT_MS } from '../src/server.mjs';
-import { DEFAULT_AWAIT_TIMEOUT_MS, STRANDED_BANNER, ANSWERS_DELIVERED, MAX_SUBMIT_COMMENTS, MAX_ANSWER_CHOICES, createBoard } from '../src/board.mjs';
+import { startServer, createRequestHandler, activeWaitCount, buildPacketWithUndelivered, createSseHub } from '../src/server.mjs';
+import { STRANDED_BANNER, ANSWERS_DELIVERED, MAX_SUBMIT_COMMENTS, MAX_ANSWER_CHOICES, createBoard } from '../src/board.mjs';
 // The cap every by-value string on a board shares but an html stage's own markup, and
 // that stage's cap (src/resolve.mjs), read rather than restated so a check cannot pass
 // against a number the product no longer uses. `resolveRefRoots` for the same reason:
@@ -3275,10 +3275,10 @@ async function main() {
   // --- `wait: true` on a page board round (ADR.md entry 45) --------------------
   // the round is minted `awaited`, its own submit carries its own comments back
   // in ITS OWN packet (never through the ADR 35 undelivered path), and the
-  // default clock is 40 minutes. Driven at the HTTP layer (no shim) the way the
+  // default clock is 50 minutes. Driven at the HTTP layer (no shim) the way the
   // rest of this file proves the daemon's own contract.
 
-  await check('AC 1/2/11: a page board posted with wait: true is minted awaited, with a 40-minute deadline off its own postedAt', async () => {
+  await check('AC 1/2/11: a page board posted with wait: true is minted awaited, with a 50-minute deadline off its own postedAt', async () => {
     const html = '<!doctype html><html><body><h1>AWAITED_HTTP_MARKER</h1></body></html>';
     const posted = await (await fetch(`${base}/api/board`, {
       method: 'POST',
@@ -3289,9 +3289,7 @@ async function main() {
     assert.equal(round.awaited, true, 'wait: true on a page board round must mint it awaited');
     assert.ok(round.awaitDeadline, 'an awaited round must carry a deadline');
     const deadlineMs = Date.parse(round.awaitDeadline) - Date.parse(round.postedAt);
-    assert.equal(deadlineMs, DEFAULT_WAIT_TIMEOUT_MS, 'the default deadline is exactly the wall-clock cap /wait itself enforces');
-    assert.equal(DEFAULT_WAIT_TIMEOUT_MS, DEFAULT_AWAIT_TIMEOUT_MS, 'one clock: the two defaults (src/server.mjs, src/board.mjs) must agree');
-    assert.equal(DEFAULT_WAIT_TIMEOUT_MS, 40 * 60 * 1000, 'ADR.md entry 47: 40 minutes, not the old 2h default');
+    assert.equal(deadlineMs, 50 * 60 * 1000);
   });
 
   await check('wait: true is refused on every shape that is not a page board -- the flag is declared, but it is not a way to make any round awaited', async () => {
@@ -3454,7 +3452,7 @@ async function main() {
   // closeLapsedAwaitedRounds check; readBoard runs that sweep). The checks below prove
   // the surfaces keyed on it follow. Set up by writing a lapsed deadline straight to
   // the store (writeBoard does not sweep; readBoard does), because the alternative is a
-  // check that waits out a real 40 minutes.
+  // check that waits out a real 50 minutes.
 
   await check('the requestId dedupe refuses a round whose wait has already died, and mints a fresh one with a live deadline instead', async () => {
     // The livelock this closes: the same artifact re-posted after a timeout was
@@ -3704,7 +3702,7 @@ async function main() {
     // `POST /abandon` invents a third terminal round state (ADR 69, the ordinary
     // `fresh: true` path after a context compaction). `waitForRound` only recognised
     // `sent`, so a call already blocked on that round polled a corpse for the full
-    // forty-minute cap and was then handed a `timeout` saying the board is "still open".
+    // wall-clock cap and was then handed a `timeout` saying the board is "still open".
     const posted = await (await fetch(`${base}/api/board`, {
       method: 'POST',
       headers: writeHeaders(SECRET),
@@ -3714,7 +3712,7 @@ async function main() {
     const started = Date.now();
     // A ceiling of the check's own, and an abort behind it: a daemon that cannot see the
     // abandon has to fail this assertion loudly rather than leave a /wait polling a dead
-    // round for forty minutes and holding this whole check file open behind it (the same
+    // round for the whole wait and holding this whole check file open behind it (the same
     // discipline the wall-clock-ceiling check further up uses).
     const abort = new AbortController();
     const waitPromise = Promise.race([
@@ -3738,7 +3736,7 @@ async function main() {
     assert.equal(activeWaitCount(), 0, 'and leaving no polling loop behind');
 
     // A /wait that arrives AFTER the abandon is answered the same way rather than
-    // starting a fresh forty minutes on a round that is already over.
+    // starting a fresh wait on a round that is already over.
     const late = await fetch(`${base}/api/board/${posted.boardId}/wait?round=1`).then(r => r.json());
     assert.equal(late.status, 'abandoned');
 
@@ -4490,7 +4488,7 @@ async function main() {
   await check('ADR 114 AC 4: a Send on a LAPSED round is stored and the round becomes Submitted', async () => {
     const r = await askRound('LAPSED_LATE_SEND_Q');
     assert.equal((await lapse(r.boardId)).status, 'timeout', 'setup: the wait has to actually die');
-    // `lapse` above shortens the WAIT's own cap, not the round's 40-minute deadline, and
+    // `lapse` above shortens the WAIT's own cap, not the round's 50-minute deadline, and
     // Lapsed is the deadline having passed: `closeLapsedAwaitedRounds` (src/badge.mjs)
     // runs on every readBoard and is what clears `awaited`. Moved on disk rather than
     // waited out, the same way the follow-up-after-the-cap check above does it.
@@ -4964,7 +4962,7 @@ async function main() {
     rawRequest(port, 'POST', `/api/board/${boardId}/activity`, { headers, body: JSON.stringify({ round }) });
 
   const MINUTE_MS = 60 * 1000;
-  const FULL_WAIT_MS = 40 * MINUTE_MS;
+  const FULL_WAIT_MS = 50 * MINUTE_MS;
 
   /** Rewrites round 1's stored deadline to `leftMs` from now, as if that much of the wait
    * were left, and answers it: a restart moves only a deadline it gains a minute on. */
@@ -5372,7 +5370,7 @@ async function main() {
     assert.ok(listedWhileAlive.waiting.some(e => e.boardId === posted.boardId), 'setup: it has to be on the list before the deadline is moved, or this proves nothing');
 
     // Rewind the deadline past now, straight to disk -- the same way the lapsed-wait
-    // checks above reach a state that would otherwise cost a real 40-minute wait.
+    // checks above reach a state that would otherwise cost a real 50-minute wait.
     const boardFile = path.join(home, 'boards', `${posted.boardId}.json`);
     const raw = JSON.parse(readFileSync(boardFile, 'utf8'));
     raw.rounds[0].awaitDeadline = new Date(Date.now() - 1000).toISOString();

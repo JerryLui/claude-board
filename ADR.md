@@ -42,7 +42,7 @@ link where it is worth reading.
 | 44 | ["A page board is never sent" is a browser rule, not a daemon rule](.agents/adr/0044-page-board-is-never-sent-is-a-browser.md) | 2026-08-07 | narrowed by 45 |
 | 45 | [A page board may be awaited, and the caller declares it](.agents/adr/0045-page-board-may-be-awaited-and-the-caller.md) | 2026-08-07 | narrows 35 and 44; completed by 50 |
 | 46 | [Commenting exists only where someone is waiting](.agents/adr/0046-commenting-exists-only-where-someone-is-waiting.md) | 2026-08-07 | narrows 35; widened by 98, 101 |
-| 47 | [The wait is 40 minutes, for every round, and the page shows what is left](.agents/adr/0047-wait-is-40-minutes-for-every-round-and.md) | 2026-08-07 | narrowed by 145, 146 |
+| 47 | [The wait is 40 minutes, for every round, and the page shows what is left](.agents/adr/0047-wait-is-40-minutes-for-every-round-and.md) | 2026-08-07 | narrowed by 145, 146, 157 |
 | 50 | [A wait that dies is recorded on the round](.agents/adr/0050-wait-that-dies-is-recorded-on-the-round.md) | 2026-08-08 | completes 45 |
 | 55 | [A stranded round is announced, not opened onto](.agents/adr/0055-stranded-round-is-announced-not-opened-onto.md) | 2026-08-09 | narrows 4; widened by 58; narrowed by 74; narrowed by 91; widened by 92 |
 | 56 | [The launcher may compose a notification body, behind a filter](.agents/adr/0056-launcher-may-compose-a-notification-body-behind-a.md) | 2026-08-09 | narrows 19; widened by 128 |
@@ -141,3 +141,4 @@ link where it is worth reading.
 | 154 | [A saved mock is the page's own file and runs its scripts; a round's file stays script-free](.agents/adr/0154-a-saved-mock-is-the-pages-own-file-and-runs-its-scripts.md) | 2026-11-16 | relates to 22, 32, 78, 95, 108, 120, 122, 152 |
 | 155 | [A reopened round holds its mission's card at needs you behind a later round](.agents/adr/0155-a-reopened-round-holds-its-missions-card-at-needs-you-behind-a-later-round.md) | 2026-11-16 | amends 134, 151; relates to 150 |
 | 156 | [The pill reads `open` on an unsent round whose Send works](.agents/adr/0156-the-pill-reads-open-on-an-unsent-round-whose-send-works.md) | 2026-11-16 | narrows 89; relates to 44, 114 |
+| 157 | [The wait is 50 minutes, ten inside a session's prompt cache](.agents/adr/0157-the-wait-is-50-minutes-ten-inside-a-sessions-prompt-cache.md) | 2026-11-24 | narrows 47; relates to 145, 151 |

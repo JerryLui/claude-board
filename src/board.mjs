@@ -24,6 +24,7 @@ import { renderBlock, highlightFenceHtml } from './render.mjs';
 // existing `from './board.mjs'` import keeps working unchanged.
 import { isPageRound, questionBlocks } from './badge.mjs';
 import { STATUS_TONES } from './card-status.mjs';
+import { DEFAULT_WAIT_TIMEOUT_MS } from './handoff.mjs';
 import { sessionMatches } from './missions.mjs';
 import { storedImages } from './images.mjs';
 export { questionBlocks };
@@ -905,17 +906,6 @@ export function roundOwnedBy(board, round, ref) {
 /** The session that posted `round` of `board`, null when none is recorded. */
 const posterOf = (board, round) => (round && round.session) || (board && board.session) || null;
 
-/** 40 minutes (ADR.md entry 47): the default a round's `awaitDeadline` is stamped
- * `awaitTimeoutMs` amount of time past `postedAt` with, when a caller (test or
- * otherwise) mints a round through this module without naming its own. The real
- * daemon path never relies on this default landing correctly on its own --
- * src/server.mjs's `handlePostBoard` always passes the env-resolved
- * `waitTimeoutMs()` explicitly, so `CLAUDE_BOARD_TIMEOUT_MS` governs both the
- * deadline stamped here and the wall-clock cap `/wait` actually enforces (one
- * clock, one env var). Exported so a check can assert this and
- * `DEFAULT_WAIT_TIMEOUT_MS` (src/server.mjs) stay equal rather than drifting. */
-export const DEFAULT_AWAIT_TIMEOUT_MS = 2_400_000;
-
 /** Whether a round being minted is *awaited* (CONTEXT.md), and the absolute instant
  * its wait dies if it is: `{ awaited, awaitDeadline }`. Two ways in, matching the
  * glossary exactly -- a round carrying a question always is (ADR.md entry 42's
@@ -977,7 +967,7 @@ function roundStamp(session, folder, boardFolder) {
  * `threadCwd`). It only ever narrows what `mintThreadId` may draw -- see its own comment
  * for why a collision is a routing fault rather than a cosmetic one -- and is irrelevant
  * when the caller names the thread. */
-export function createBoard({ title, blocks, cwd = null, thread = null, threadCwd = null, wait = false, awaitTimeoutMs = DEFAULT_AWAIT_TIMEOUT_MS, movingDeadline = false, takenThreads = null, mission = null, session = null }) {
+export function createBoard({ title, blocks, cwd = null, thread = null, threadCwd = null, wait = false, awaitTimeoutMs = DEFAULT_WAIT_TIMEOUT_MS, movingDeadline = false, takenThreads = null, mission = null, session = null }) {
   const now = new Date().toISOString();
   const boundCwd = bindBoardCwd(cwd, threadCwd);
   const counters = {};
@@ -1014,7 +1004,7 @@ export function createBoard({ title, blocks, cwd = null, thread = null, threadCw
  * a Send racing an amend, and appending a second block under that id would silently
  * destroy the original round's answer (`board.answers` is keyed by id) and its
  * history-rail entry. Nothing on the board is mutated before the throw. */
-export function addRound(board, { blocks, cwd, title, wait = false, awaitTimeoutMs = DEFAULT_AWAIT_TIMEOUT_MS, movingDeadline = false, session = null, ownFolder = false }) {
+export function addRound(board, { blocks, cwd, title, wait = false, awaitTimeoutMs = DEFAULT_WAIT_TIMEOUT_MS, movingDeadline = false, session = null, ownFolder = false }) {
   const folder = roundFolder(board, cwd, ownFolder);
   const now = new Date().toISOString();
   const n = board.rounds.length + 1;
@@ -1168,7 +1158,7 @@ export function abandonOpenRounds(board, { session = null, except = null, only =
  * stay as they are, and so does a round recorded under the taker's own id, the taker's
  * already though its process names the giver too. Returns `{ handed, reopened }`, the round
  * numbers of each; mutates `board`, caller persists it. */
-export function handOverRounds(board, giver, taker, { now = Date.now(), awaitTimeoutMs = DEFAULT_AWAIT_TIMEOUT_MS } = {}) {
+export function handOverRounds(board, giver, taker, { now = Date.now(), awaitTimeoutMs = DEFAULT_WAIT_TIMEOUT_MS } = {}) {
   const handed = [];
   const reopened = [];
   const at = new Date(now).toISOString();

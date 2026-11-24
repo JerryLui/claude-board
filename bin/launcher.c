@@ -877,10 +877,10 @@ int cb_surface_tab(const char *board_url) {
  *
  * Clamped rather than rejected, and defaulted when absent or unparseable: a missing or
  * malformed lifetime must not turn into an immortal process, and must not lose the
- * banner either. The cap is the real guarantee here; the default matches the 40 minutes
- * ADR.md entry 47 fixes every wait at. */
+ * banner either. The cap is the real guarantee here; the default matches the wait
+ * ADR 157 sets. */
 #define CLICK_SECONDS_MAX 3600
-#define CLICK_SECONDS_DEFAULT 2400
+#define CLICK_SECONDS_DEFAULT 3000
 static int click_seconds_from(const char *s) {
   if (s == NULL) return CLICK_SECONDS_DEFAULT;
   size_t len = strlen(s);

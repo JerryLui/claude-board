@@ -237,7 +237,7 @@ click any element of a rendered diagram or artifact to attach a comment to it, t
 pages.
 
 Two other ways out: **Discuss in chat** returns immediately with whatever is filled in,
-and a wall-clock cap (default 40 minutes) returns an explicit no-response. In Claude Code
+and a wall-clock cap (default 50 minutes) returns an explicit no-response. In Claude Code
 that no-response names an answer watch the session runs in the background, so a Send in
 the next 24 hours still wakes it. Closing the tab is deliberately *not* a cancel; the
 board stays live and its URL reopens it.

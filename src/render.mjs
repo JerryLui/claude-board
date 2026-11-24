@@ -865,7 +865,7 @@ function renderContextInner(block, board, commentsByBlock, historical, fold = NO
       // applySubmit backfilled `unanswered` and the packet told the agent the reviewer
       // left blank a question they were never shown -- the same outcome src/board.mjs
       // refuses an unknown widget for. Worse, bin/mcp.mjs counts it as a question and
-      // blocks the ask on /wait, so the call sat for the full 40-minute cap on something
+      // blocks the ask on /wait, so the call sat for the full wall-clock cap on something
       // the page could not draw. The identical block under a stage-free question always
       // rendered fine; only this fork dropped it.
       return renderBlock(block, board, commentsByBlock, historical);

@@ -208,13 +208,13 @@ await check('the report\'s answer moves the countdown and the header pill to the
   const board = boardWith({ deadlineIn: 10 * MINUTE });
   const { document } = loadBoardWithEventSource(renderBoardPage(board));
   assert.equal(countdown(document), '10m left', 'setup: ten minutes left before the pick');
-  const moved = at(40 * MINUTE);
+  const moved = at(50 * MINUTE);
   const { restore } = stubFetch(() => ({ ok: true, status: 200, json: async () => ({ round: 1, awaitDeadline: moved, moved: true }) }));
   try {
     answerSingle(blockOf(document, 'single'), 'Yes');
     await flush(1);
-    assert.equal(countdown(document), '40m left');
-    assert.equal(meta(document), '40m left');
+    assert.equal(countdown(document), '50m left');
+    assert.equal(meta(document), '50m left');
   } finally { restore(); }
 });
 
@@ -222,11 +222,11 @@ await check('a deadline event moves the countdown, and an earlier deadline arriv
   const board = boardWith({ deadlineIn: 10 * MINUTE });
   const { document, es } = loadBoardWithEventSource(renderBoardPage(board));
   assert.equal(countdown(document), '10m left', 'setup: ten minutes left');
-  es.dispatch('deadline', JSON.stringify({ round: 1, awaitDeadline: at(40 * MINUTE) }));
-  assert.equal(countdown(document), '40m left');
-  assert.equal(meta(document), '40m left');
+  es.dispatch('deadline', JSON.stringify({ round: 1, awaitDeadline: at(50 * MINUTE) }));
+  assert.equal(countdown(document), '50m left');
+  assert.equal(meta(document), '50m left');
   es.dispatch('deadline', JSON.stringify({ round: 1, awaitDeadline: at(20 * MINUTE) }));
-  assert.equal(countdown(document), '40m left', 'an overtaken deadline changes nothing');
+  assert.equal(countdown(document), '50m left', 'an overtaken deadline changes nothing');
 });
 
 await check('a tab whose stream dropped while the deadline moved takes the new deadline off its reconnect snapshot', async () => {
@@ -234,7 +234,7 @@ await check('a tab whose stream dropped while the deadline moved takes the new d
   const { document, es } = loadBoardWithEventSource(renderBoardPage(board));
   assert.equal(countdown(document), '10m left', 'setup: ten minutes left');
   const later = structuredClone(board);
-  later.rounds[0].awaitDeadline = at(40 * MINUTE);
+  later.rounds[0].awaitDeadline = at(50 * MINUTE);
   const freshPage = renderBoardPage(later);
   const { restore } = stubFetch(() => ({ ok: true, status: 200, text: async () => freshPage }));
   const originalParser = globalThis.DOMParser;
@@ -242,7 +242,7 @@ await check('a tab whose stream dropped while the deadline moved takes the new d
   try {
     es.dispatch('open', '');
     await flush(1);
-    assert.equal(countdown(document), '40m left');
+    assert.equal(countdown(document), '50m left');
   } finally {
     globalThis.DOMParser = originalParser;
     restore();
@@ -287,13 +287,13 @@ const HELD = {
   'that sat through the round\'s lapse': async (board, net, work) => {
     const tab = loadBoardWithEventSource(renderBoardPage(board));
     work(tab.document);
-    net.ahead(41 * MINUTE);
+    net.ahead(51 * MINUTE);
     closeLapsedAwaitedRounds(board);
     await tell(net, tab.es, board, 'awaitExpired', { round: 1 });
     return tab;
   },
   'opened after the round lapsed': async (board, net, work) => {
-    net.ahead(41 * MINUTE);
+    net.ahead(51 * MINUTE);
     closeLapsedAwaitedRounds(board);
     const tab = loadBoardWithEventSource(renderBoardPage(board));
     work(tab.document);
@@ -325,7 +325,7 @@ for (const [held, open] of Object.entries(HELD)) {
       });
       assert.deepEqual([countdown(document), meta(document)], ['', 'open'], 'setup: the tab holds the round with no wait on it');
       await reopen(net, es, board);
-      assert.deepEqual([countdown(document), meta(document)], ['40m left', '40m left']);
+      assert.deepEqual([countdown(document), meta(document)], ['50m left', '50m left']);
       click(document.getElementById('send-btn'));
       await flush(1);
       assert.deepEqual(net.submits().map(b => [b.round, b.answers]), [[1, [{ id: board.blocks[0].id, status: 'answered', choice: 'Yes', note: 'Only after the review' }]]]);
@@ -350,7 +350,7 @@ for (const [held, open] of Object.entries(HELD)) {
 
       await reopen(net, es, board);
       assert.equal(pagePanel(document).classList.contains('expired'), false);
-      assert.equal(meta(document), '40m left');
+      assert.equal(meta(document), '50m left');
       // `|| ''`: the stand-in reads a title never set as undefined, a browser as ''.
       assert.deepEqual([pageSend(document).disabled, pageSend(document).textContent, pageSend(document).title || ''], [false, 'Nothing to add', '']);
       assert.equal(pagePanel(document).querySelector('.page-discuss-btn').disabled, false);

@@ -182,7 +182,7 @@ takes the post's (falling back to the board title), and `amendRound` may refine 
 but never blanks it. `src/render.mjs` renders it in the round heading: `Round 2 · fix/some-branch`,
 plus ` · sent` once the round is out.
 
-**Round `awaited` / `awaitDeadline`** (ADR 45, 47; CONTEXT.md "Awaited"). `awaited` is a
+**Round `awaited` / `awaitDeadline`** (ADR 45, 47, 157; CONTEXT.md "Awaited"). `awaited` is a
 boolean, always present on a round minted by `createBoard` or `addRound`: `true` when the
 round carries a question block anywhere in it (top-level, or nested in a question's
 `context` or a `compare` side), or when it is a page board — one `html` block and nothing
@@ -191,7 +191,7 @@ behind three surfaces: it is what makes a round sendable at all beyond ADR 35's 
 what the index's "N rounds left" badge and the tab mark count, and what gates the SSE
 arrival mark and the daemon's Stranded banner. `awaitDeadline` is `null` when `awaited` is `false`, otherwise the ISO
 8601 instant `postedAt` plus the wait timeout in effect when the round was minted (default
-40 minutes, `CLAUDE_BOARD_TIMEOUT_MS` — the same clock `GET /api/board/:id/wait` enforces,
+50 minutes, `CLAUDE_BOARD_TIMEOUT_MS` — the same clock `GET /api/board/:id/wait` enforces,
 below) — stamped at mint time and never recomputed by an amend of the same round, unless the
 round carries `movingDeadline` (below).
 `wait: true` on a round that already carries a question is **ignored, not refused**: the
@@ -680,7 +680,7 @@ the drain path `noWait` opens (`POST /api/board` below): what the thread is owed
 carried rides that one response, each entry naming its own round. Without the field, and on a
 daemon older than it, both arrays are empty. `discuss` means the reviewer chose Discuss in chat:
 partial answers are included and the agent must stop posting boards for the rest of the session.
-`timeout` is the wall-clock cap (default 40m, ADR.md entry 47; restarted by the reviewer's activity on a moving round, ADR 145) and carries an explicit no-response about ITS OWN
+`timeout` is the wall-clock cap (default 50m, ADR 157; restarted by the reviewer's activity on a moving round, ADR 145) and carries an explicit no-response about ITS OWN
 round — an empty `answers` and no comments of its own — plus whatever the two exceptions below
 owe the thread, which are owed to a timed-out round exactly as they are to any other. `abandoned`
 is the round being closed under a blocked call — the
@@ -1474,7 +1474,7 @@ change reports again. It applies the `awaitDeadline` it gets back off its own re
 round's countdown earlier.
 
 `moved: true` when the round is open, awaited, minted `movingDeadline` (see "Board document"), its
-deadline has not passed, and now plus the wait timeout (`CLAUDE_BOARD_TIMEOUT_MS`, default 40
+deadline has not passed, and now plus the wait timeout (`CLAUDE_BOARD_TIMEOUT_MS`, default 50
 minutes) is a minute or more past it (a fortieth of the wait, when the wait is shorter): its
 `awaitDeadline` becomes that, the board and `pages/<id>.html` are written together, and the move is
 published as the `deadline` event (see "SSE events"). `moved: false` otherwise, and nothing is
@@ -1597,7 +1597,7 @@ included, SIGTERM to that one is relayed to the daemon, and a supervisor started
 
 ## `GET /api/board/:id/wait?round=N`
 
-A server-side wall-clock ceiling matching `CLAUDE_BOARD_TIMEOUT_MS` (default 40m, ADR.md entry 47): when it fires
+A server-side wall-clock ceiling matching `CLAUDE_BOARD_TIMEOUT_MS` (default 50m, ADR 157): when it fires
 the call returns 200 with a packet whose `status` is `timeout`, carrying whatever partial answers
 the store holds. A client that disconnects ends the wait outright — nothing is written and the
 poll stops.
@@ -2723,10 +2723,10 @@ throughout so the idle timer never fires. A round with no question blocks on `/a
 too, but only when it is a page board — one `html` block and nothing else — AND the call carried
 `wait: true` (ADR.md entry 45, CONTEXT.md "Awaited"); every other content-only shape returns the
 instant the post succeeds regardless of `wait`, packet `status: 'posted'`. `wait` defaults to
-`false`, and the wall-clock cap either route blocks on is the same 40 minutes (ADR.md entry 47).
+`false`, and the wall-clock cap either route blocks on is the same 50 minutes (ADR 157).
 
 **The wait follows the round's stored deadline** (ADR 145, narrowing 47). Every post carries
-`movingDeadline: true`, so the 40 minutes restart on each pick, note or comment the reviewer makes
+`movingDeadline: true`, so the 50 minutes restart on each pick, note or comment the reviewer makes
 on the round. The shim waits to the `awaitDeadline` the post answered, plus a grace (5% of the
 cap, 250 ms to 5 s) that lets the daemon's own timeout branch be the one that fires; when that
 instant comes with the wait still open it reads the round's stored deadline back through `read`
@@ -2916,8 +2916,8 @@ human nothing, and the sessions that write most are the ones nobody watches.
 Additive to `CLAUDE_BOARD_HOME` / `CLAUDE_BOARD_PORT` above.
 
 ```
-CLAUDE_BOARD_TIMEOUT_MS       wall-clock cap on the blocking wait, default 40m (2_400_000,
-                               ADR.md entry 47) -- shared by the daemon's own /wait cap.
+CLAUDE_BOARD_TIMEOUT_MS       wall-clock cap on the blocking wait, default 50m (3_000_000,
+                               ADR 157) -- shared by the daemon's own /wait cap.
                                The daemon stamps a round's deadline with it and moves it
                                to now plus it (ADR 145); the shim waits to that stored
                                deadline, and to this cap only on a daemon reporting none
@@ -3125,7 +3125,7 @@ the join after it is handed that session's rounds alone.
 
 Each handed round that asks for an answer (it was minted with an `awaitDeadline`, or a question in
 it) is **reopened in place**, whether the giver's boundary abandoned it, its wait lapsed or it still waited: `open`,
-`awaited`, its deadline one wait (40 minutes) from the hand-over, `reopenedAt` stamped,
+`awaited`, its deadline one wait (50 minutes) from the hand-over, `reopenedAt` stamped,
 `abandonedAt` dropped. Its number, blocks and comments stand, so the PM's page keeps what it
 holds. It counts in `GET /api/waiting` and the Boards page's Waiting on you again, and the join or
 the binding names it (`reopened`, "The missions routes" above). The answer the PM sends on it
