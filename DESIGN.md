@@ -948,8 +948,9 @@ host, which the same policy must admit for a mock's own web addresses.
 
 - Live revision of the artifact after feedback. Lavish edits the page in place; we re-render from
   the store.
-- Anything multi-user or remote. Authentication is not in this list: reads are gated, per
-  `SECURITY.md`.
+- Anything multi-user, or on the public internet. The owner's own other machines came later, by an
+  SSH tunnel (ADR 118) and over Tailscale (ADR 158). Authentication is not in this list: reads are
+  gated, per `SECURITY.md`.
 - Server-side mermaid rendering, and therefore fully offline diagrams.
 - Converting `/diagram`, which emits markdown rather than a page.
 - Migrating the other commands, and whether `/triage` renders its own board or only consumes

@@ -226,6 +226,9 @@ For when the agent runs on one Mac (the remote Mac, a Mac mini say) and you sit 
 listens on its own loopback only; your Mac reaches it through the SSH connection you already
 open, and your browser shows it at `http://localhost:7392` (ADR 118).
 
+For a phone, or for Macs on one Tailscale network, there is a shorter way with no SSH: README,
+"Reading the board from your phone or another Mac".
+
 ### On the remote Mac
 
 claude-board installed as usual (`install.sh`), Remote Login on (System Settings, General,
@@ -275,8 +278,9 @@ Mac is your own board: `open` rewrites it to `localhost:7392`. A round waiting f
 up as a new board in the pinned index tab and as the session in your terminal stalling on
 `ask`.
 
-**Once a month**: the login is the board's 30-day session cookie. When a tab says it is not
-authorized, run `login` again.
+**Log in once**: the login is the board's session cookie, renewed each time you use the board, and
+it lasts 400 days past the last use (ADR 159). When a tab says it is not authorized, run `login`
+again.
 
 ### Limits
 

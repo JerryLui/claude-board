@@ -232,7 +232,8 @@ it. [PROTOCOL.md](PROTOCOL.md) is the wire format underneath.
 
 A tab opens on the first call. Answer what you want; unanswered comes back explicitly
 marked, never defaulted. Add a note beside any answer, or click **comment mode** and
-click any element of a rendered diagram or artifact to attach a comment to it, then
+click any element of a rendered diagram or artifact to attach a comment to it. A ranking
+is put in order by dragging or with each row's up and down buttons. Then
 **Send**, which sends the page on screen. Follow-up rounds push into the same tab as new
 pages.
 
@@ -319,6 +320,34 @@ Worth reading before writing your own: it shows what a skill built on the board 
 manual (the call, the block kinds, the widgets), which is the split that keeps a caller
 from drifting.
 
+### Reading the board from your phone or another Mac
+
+Off until you turn it on, and then through [Tailscale](https://tailscale.com)'s own forwarder: your
+devices on your Tailscale network open this Mac's board over https, the daemon still listens on
+this Mac alone, and nothing is on the internet. Each browser is signed in once by a link, and then
+reads and answers as the browser on this Mac does, merges included. Read what that accepts in
+[SECURITY.md](SECURITY.md#away-your-own-devices-over-tailscale) first.
+
+1. In Tailscale's admin page, turn on MagicDNS and HTTPS certificates. **Rename this Mac there
+   first if its name says anything**: the first certificate publishes the name, and your network's,
+   for good.
+2. From the clone, with the Mac's Tailscale name, its first part alone:
+   ```sh
+   npm run away -- on <name>
+   ```
+3. One link per browser. Send it to yourself, open it on the device within 10 minutes and tap
+   **Sign this device in**:
+   ```sh
+   npm run away -- link            # or: link <board id>, to land on that board
+   ```
+
+The sign-in lasts while you use the board: 400 days past the last visit, on this Mac too. Changing
+the token (the secret file) signs every browser out, a lost phone's with the rest.
+
+`npm run away -- off` turns it off and takes the forwarder down; `npm run away -- status` says what
+is set and what is published. The setting survives a reboot and a reinstall. A phone gets a layout of
+its own: one column, controls sized for a finger.
+
 ### If a page says "this browser is not authorized"
 
 Boards are served only to a browser claude-board has handed a credential to. The tab a
@@ -326,11 +355,12 @@ session opens is authorized automatically, and its URL carries no credential, so
 and bookmark it freely. Any other browser (cleared cookies, another profile) gets a
 page that prints the `authorize.mjs` command with the right absolute path for your
 machine. It opens an authorized tab and touches nothing else. Add `--print` for a link
-to paste elsewhere, or a board id to land on that board.
+to paste elsewhere, or a board id to land on that board. On another device the page
+asks for a fresh link instead, from `npm run away -- link`.
 
 ## How it works
 
-- **A daemon** on `127.0.0.1:7391`, always on under launchd, owns the browser surface
+- **A daemon** on `127.0.0.1:7391`, and nowhere else, always on under launchd, owns the browser surface
   for every session on the machine.
 - **A stdio MCP server** per session hands boards to it and blocks on the answer,
   emitting progress notifications so the call is never idle-aborted. Claude Code
@@ -356,7 +386,7 @@ bash uninstall.sh
 Removes the launchd job, its plist, the MCP registrations (Claude Code, Codex, and the
 one key in OpenCode's config), the launcher bundle with its LaunchServices record, and
 every installed copy of the manual. It names what it deliberately leaves: the store, the
-secret, the logs. Safe to run twice, and on a machine that never had it.
+secret, the away setting (turn away off first), the logs. Safe to run twice, and on a machine that never had it.
 
 From a plugin install with no clone around:
 `bash ~/Library/Application\ Support/claude-board-checkout/uninstall.sh` (it removes

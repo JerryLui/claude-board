@@ -134,7 +134,7 @@ async function main() {
     const section = doc.slice(doc.indexOf('## Remote review'));
     assert.ok(section.length > 200, 'INSTALL.md has a Remote review section');
     assert.ok(section.includes(`LocalForward ${DEFAULT_REMOTE_PORT} 127.0.0.1:7391`), 'the SSH config line, on the default local port');
-    for (const needle of ['npm run remote -- login', 'npm run remote -- open', 'CLAUDE_BOARD_REMOTE_HOST', 'CLAUDE_BOARD_REMOTE_PORT', 'CLAUDE_BOARD_REMOTE_DIR', DEFAULT_REMOTE_DIR, 'Once a month', 'tunnel must be up', 'must be logged in']) {
+    for (const needle of ['npm run remote -- login', 'npm run remote -- open', 'CLAUDE_BOARD_REMOTE_HOST', 'CLAUDE_BOARD_REMOTE_PORT', 'CLAUDE_BOARD_REMOTE_DIR', DEFAULT_REMOTE_DIR, 'Log in once', 'tunnel must be up', 'must be logged in']) {
       assert.ok(section.includes(needle), `the section names ${needle}`);
     }
     const pkg = JSON.parse(readFileSync(path.join(repoRoot, 'package.json'), 'utf8'));

@@ -281,6 +281,9 @@ one case that matters is also the one no automated check here can produce.
 - [A driven tab does not paint, and half the stage channel needs a paint](#a-driven-tab-does-not-paint-and-half-the-stage-channel-needs-a-paint)
 - [Headless Chrome's scrollbars follow the Mac's Show scroll bars setting](#headless-chromes-scrollbars-follow-the-macs-show-scroll-bars-setting)
 - [A sandboxed frame below the first screen paints blank in a screenshot](#a-sandboxed-frame-below-the-first-screen-paints-blank-in-a-screenshot)
+- [A stage below the fold reports no height in headless Chrome until it is scrolled to](#a-stage-below-the-fold-reports-no-height-in-headless-chrome-until-it-is-scrolled-to)
+- [The stand-in has no `remove()` or `contains()`](#the-stand-in-has-no-remove-or-contains)
+- [The pomodoro master switch navigates the tab](#the-pomodoro-master-switch-navigates-the-tab)
 
 ### `ResizeObserver` does not necessarily deliver an initial observation
 
@@ -793,6 +796,21 @@ full-page shot, raise the viewport to the page's full height
 not in the page target's `Page.getFrameTree` either (it runs out of process), so it cannot be
 read from there.
 
+### A stage below the fold reports no height in headless Chrome until it is scrolled to
+
+Its frame may not lay out, so the board never hears a height and draws no fold. A browser check that
+measures a tall stage scrolls it into view and waits for `.stage-folded` before it reads anything.
+
+### The stand-in has no `remove()` or `contains()`
+
+`test/dom-stand-in.mjs` elements carry neither. Client code a node check drives removes with
+`replaceWith()` and asks for containment with `closest`.
+
+### The pomodoro master switch navigates the tab
+
+Turning it reloads the page under a driven tab, so the rest of that tab's script runs against the
+next page. Set `enabled` over `POST /api/pomodoro/settings` and open a new tab.
+
 ---
 
 ## The check suite's own shapes
@@ -815,6 +833,16 @@ read from there.
 - [A `new Function` harness inherits the host's globals, so a `typeof` guard can pass for the wrong reason](#a-new-function-harness-inherits-the-hosts-globals-so-a-typeof-guard-can-pass-for-the-wrong-reason)
 - [A fixed flush sleep is a bet on node's loopback latency, and node 26 lost it](#a-fixed-flush-sleep-is-a-bet-on-nodes-loopback-latency-and-node-26-lost-it)
 - [A copied homebrew node binary dies before main](#a-copied-homebrew-node-binary-dies-before-main)
+- [The header checks read stylesheet text, so phone rules and safe-area insets have one shape](#the-header-checks-read-stylesheet-text-so-phone-rules-and-safe-area-insets-have-one-shape)
+
+### The header checks read stylesheet text, so phone rules and safe-area insets have one shape
+
+`check-header-condense` takes everything from the sheet's first `@media (max-width: 560px)` to its
+end as the narrow block, so phone rules go in that one block, last. The pinned fixed chrome is
+matched by the text of its `left`, `right` and `bottom`, so a `env(safe-area-inset-*)` goes in as
+margin or padding, never into those. `check-round-pager` refuses a rule that hides a round-page
+class: hide an entry with the `hidden` attribute. And a `flex-wrap` row in a `left: 50%` fixed box
+wraps at half the window unless it has `width: max-content`.
 
 ### A client script that parses is not a client script that is on the page
 
@@ -931,9 +959,9 @@ exercises.
 
 `Promise.race([fetch(.../wait), timeoutPromise])` reads like a ceiling and is not one: the
 losing `fetch` is still an open socket, and the daemon behind it goes on polling for the
-full 40-minute cap. Node then refuses to exit while that handle is alive, so a check whose
+full 50-minute cap. Node then refuses to exit while that handle is alive, so a check whose
 assertion has already FAILED still runs to `test/run.mjs`'s 180s deadline (or, alone with
-output piped, produces nothing for forty minutes) -- the failure is real but the presentation
+output piped, produces nothing for fifty minutes) -- the failure is real but the presentation
 says "hang", which points at the wrong thing entirely. Measured while ablating the abandoned-
 round exit from `waitForRound`.
 
@@ -1808,6 +1836,18 @@ anything about a backoff schedule's own timing — see the cluster-based check i
 - [A temp dir's spelling is not its realpath, and path confinement compares realpaths](#a-temp-dirs-spelling-is-not-its-realpath-and-path-confinement-compares-realpaths)
 - [Two processes racing the same timeout: the daemon loses by its own poll interval](#two-processes-racing-the-same-timeout-the-daemon-loses-by-its-own-poll-interval)
 - [Codex hands a stdio MCP server an allowlist of the environment, not the environment](#codex-hands-a-stdio-mcp-server-an-allowlist-of-the-environment-not-the-environment)
+- [zsh does not split a command held in a variable](#zsh-does-not-split-a-command-held-in-a-variable)
+- [A stub that logs under `umask 777` cannot reopen its log](#a-stub-that-logs-under-umask-777-cannot-reopen-its-log)
+
+### zsh does not split a command held in a variable
+
+`cmd="node bin/away.mjs status"; $cmd` runs a file of that whole name in zsh, where sh splits it.
+Use an array or write the command out.
+
+### A stub that logs under `umask 777` cannot reopen its log
+
+The first append creates the file with mode 000 and the second is refused, which reads as a stub
+called once. Create the log before lowering the umask, as `test/check-away.mjs` does.
 
 ### An apostrophe inside `${VAR:-...}` swallows the rest of a bash script
 
@@ -1907,7 +1947,7 @@ directory, routinely, on a stock Mac. `src/resolve.mjs` compares `dev`+`ino` ins
 
 ### Two processes racing the same timeout: the daemon loses by its own poll interval
 
-The shim and the daemon both read `CLAUDE_BOARD_TIMEOUT_MS` and default to the same 40
+The shim and the daemon both read `CLAUDE_BOARD_TIMEOUT_MS` and default to the same 50
 minutes, and only the daemon's side of that race does anything: its timeout branch is
 what broadcasts `awaitExpired`, closes the lapsed round and returns the timeout packet.
 The shim used to win that race by default twice over: its deadline started at

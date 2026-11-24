@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- **The board from your phone, a longer wait and a lasting sign-in (ADR 157, 158, 159)**: take it
+  with `./install.sh`, which rebuilds the launcher. Running sessions pick it up when they restart.
+  - **A round waits 50 minutes**, up from 40, restarted by each pick, note or comment as before.
+  - **Blank buttons are refused**: a post whose option has a missing, blank or non-text label is a
+    400 naming the question and the option, and nothing is stored.
+  - **The round switcher folds a long board**: when its numbers do not fit it shows the first, the
+    last, the ones around the round you are on and each round that waits on you, with … for the rest
+    (… shows them all). The round you are on is always in view, and the strip never covers Send or
+    Discuss.
+  - **Ranking has up and down buttons** on every row, on any device; dragging stays.
+  - **A phone layout**: at 560px and under, a round and the missions list are one column, nothing
+    scrolls sideways, every control is at least 44px, text fields do not zoom the page, and the round
+    switcher is one row.
+  - **Away: your own devices reach the board over Tailscale**, off until you run
+    `npm run away -- on <name>`. The daemon still listens on this Mac alone; each browser is signed in
+    once by a link made on this Mac (`npm run away -- link`), and then reads and answers as one on
+    the Mac does, merges included. `npm run away -- off` turns it off. Read SECURITY.md, "Away",
+    first. README has the steps.
+  - **A sign-in lasts**: a browser stays signed in while it is used at least once in 400 days, where
+    it was signed out after 30. Changing the token signs every browser out. A board link tapped on a
+    web page opens that board.
 - **A round you can still answer says so (ADR 156)**: the state label in a board's top strip reads
   `open` on a round not yet sent whose Send works: the newest round, and an older one that still
   asks a question. Before, it read `read-only` there, above a Send that worked. It still reads
@@ -34,7 +55,7 @@
   joins a mission in place of the one before it, or takes the mission over, each round that
   session left unanswered goes back to waiting in place, whether it was closed at a `/clear` or
   the session's end, had timed out, or was still waiting at the takeover. It keeps its round
-  number and everything the board holds for it, gets a fresh 40-minute clock, and shows under
+  number and everything the board holds for it, gets a fresh clock, and shows under
   Waiting on you again; a tab you still have open on it takes answers again with no reload. Your
   Send reaches the new session, which is told of each reopened round when it joins. A round you
   already sent stays read-only, and rounds of earlier sessions stay closed. A session that left
@@ -76,11 +97,11 @@
   mission launch now queues past ten sessions working or fourteen alive. A mission held by a tab you
   run yourself no longer takes a slot: the limits count the background sessions alone. While the
   session watcher is down every mission's session counts, as before.
-- **Answering a waiting round restarts its 40-minute wait (ADR 145)**: each answer pick, typed
+- **Answering a waiting round restarts its wait (ADR 145)**: each answer pick, typed
   note or saved comment on a round a session is waiting on now moves that round's deadline to a
-  full 40 minutes from that moment, both on the page's own countdown and in the session's wait. A
-  round that draws none of that activity still ends 40 minutes after it was posted, as before. A
-  session already waiting when the update ships keeps its original fixed 40-minute deadline,
+  full wait from that moment, both on the page's own countdown and in the session's wait. A
+  round that draws none of that activity still ends one wait after it was posted, as before. A
+  session already waiting when the update ships keeps its original fixed deadline,
   unaffected.
 - **A late answer wakes the session that asked**: when a Claude Code session's wait on a round
   ends with nobody having answered, the `timeout` result now names an answer watch, a command the
@@ -158,8 +179,7 @@
   the board as well.
 - **Remote review**: answer a second Mac's boards from the Mac you sit at. One
   `LocalForward 7392 127.0.0.1:7391` in `~/.ssh/config` carries the remote daemon, which stays
-  loopback-only; `npm run remote -- login` logs your browser in over SSH for the cookie's 30
-  days, and `npm run remote -- open <url|id>` opens a board the agent printed. The address is
+  loopback-only; `npm run remote -- login` logs your browser in over SSH, and `npm run remote -- open <url|id>` opens a board the agent printed. The address is
   `localhost:7392`, so the remote login and your own board's login never overwrite each other.
   Setup and limits in INSTALL.md (ADR 118).
 - **A label with `<br/>` or `<b>` no longer waves a diagram through**: the door's sandbox was

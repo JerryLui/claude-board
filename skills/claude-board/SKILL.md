@@ -75,7 +75,7 @@ ask({ title, blocks, wait, fresh })
 - `single`: one choice. The recommended option goes first, labelled "(Recommended)", its reasoning in `description`.
 - `multi`: whenever more than one option can be true. Always carry a None option ("None of these", labelled "(Recommended)" when it is): a multi with nothing ticked reads back as `unanswered`.
 - `text`: free text, for genuinely open questions; the only widget with no options.
-- `rank`: drag-to-rank, shown in your recommended order. It is answered by the order it shows, so Defer is the only way to leave it open.
+- `rank`: the reviewer orders the options by dragging or with each row's up and down buttons, shown in your recommended order. It is answered by the order it shows, so Defer is the only way to leave it open.
 - `choose-between-rendered-variants`: the reviewer clicks a rendered block. Each option carries `block` instead of `preview`; `choice` comes back as its `label`.
 
 Two to four options read best, and every answer carries a free-text note. **Every option commits to an answer**: never offer a "your call" or "you decide" option, which leaves every recommended pick ambiguous between agreement and delegation.

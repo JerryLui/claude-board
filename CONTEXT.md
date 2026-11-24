@@ -69,6 +69,18 @@ _Avoid_: client, connection, viewer.
 run on another, reached through an SSH tunnel to that Mac's loopback; the daemon itself never
 listens beyond loopback. _Avoid_: remote access, LAN mode, network mode.
 
+**Away**: the state in which the board also answers at this Mac's one Tailscale name, for the
+owner's own devices on their Tailscale network; off until the owner turns it on. Remote review is
+the SSH tunnel, between Macs only. _Avoid_: remote (that is Remote review), public, exposed, online.
+
+**Away device**: a browser on another of the owner's devices that an Away link signed in. It can
+do what a signed-in browser on the Mac can, and no more; two browsers on one phone are two.
+_Avoid_: client, paired device, remote.
+
+**Away link**: the one-use, ten-minute link, made on the Mac, that signs in one Away device.
+A sign-in link is another thing: it signs nobody in to the board. _Avoid_: pairing code, invite,
+sign-in link, handoff.
+
 **Attended**: of a board, that a Watcher has it visible and focused, or had it focused within
 the last two minutes, so a tab left open behind the terminal still counts as watched for a
 short while. Reported by the tab, since a live stream proves only that a tab exists.
