@@ -14,7 +14,7 @@ import { spawn } from 'node:child_process';
 import { SECRET_HEADER, SESSION_COOKIE, sessionToken } from '../src/secret.mjs';
 import { HANDOFF_TOKEN_RE, recoveryCommand, repoRoot } from '../src/handoff.mjs';
 import { startServer, createRequestHandler, activeWaitCount, buildPacketWithUndelivered, createSseHub, DEFAULT_WAIT_TIMEOUT_MS } from '../src/server.mjs';
-import { DEFAULT_AWAIT_TIMEOUT_MS, STRANDED_BANNER, ANSWERS_DELIVERED, MAX_SUBMIT_COMMENTS, MAX_ANSWER_CHOICES, createBoard } from '../src/board.mjs';
+import { DEFAULT_AWAIT_TIMEOUT_MS, STRANDED_BANNER, ANSWERS_DELIVERED, MAX_SUBMIT_COMMENTS, MAX_ANSWER_CHOICES, WIDGETS, createBoard } from '../src/board.mjs';
 // The cap every by-value string on a board shares but an html stage's own markup, and
 // that stage's cap (src/resolve.mjs), read rather than restated so a check cannot pass
 // against a number the product no longer uses. `resolveRefRoots` for the same reason:
@@ -1913,6 +1913,58 @@ async function main() {
       assert.match(JSON.parse(r.body).error, message, `${what}: the refusal names the field`);
       assert.deepEqual(storeListing(), before, `${what} stores nothing`);
     }
+  });
+
+  const BLANK_LABEL_OPTIONS = [
+    ['a missing label', { description: 'No label here' }],
+    ['an empty label', { label: '' }],
+    ['a label of only spaces', { label: ' \u00a0\t' }],
+    ['a null label', { label: null }],
+    ['a number as the label', { label: 7 }],
+    ['an object as the label', { label: { text: 'Yes' } }],
+    ['a bare string', 'Yes'],
+    ['null as the option', null],
+  ];
+  const NO_LABEL = /^option 2 of question 2 has no label; every option is an object whose `label` is text that is not blank$/;
+  const noLabelBlocks = (widget, option) => [
+    { kind: 'question', prompt: 'Why?', widget: 'text' },
+    { kind: 'markdown', text: 'Between' },
+    { kind: 'question', prompt: 'Pick', widget, options: [{ label: 'Yes' }, option] },
+  ];
+
+  for (const widget of WIDGETS.filter(w => w !== 'text')) {
+    await check(`an option of a ${widget} question with no label text is a 400 naming the option and its question, on a post and on an amend, and nothing is stored`, async () => {
+      const open = await postBoard(port, SECRET, {
+        title: 'Open round', blocks: [{ kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }] }],
+      });
+      const boardFile = path.join(home, 'boards', `${open.boardId}.json`);
+      for (const [what, option] of BLANK_LABEL_OPTIONS) {
+        for (const [how, target] of [['post', { title: 'No label' }], ['amend', { boardId: open.boardId }]]) {
+          const listing = storeListing();
+          const document = readFileSync(boardFile, 'utf8');
+          const r = await rawRequest(port, 'POST', '/api/board', {
+            headers: writeHeaders(SECRET), body: JSON.stringify({ ...target, blocks: noLabelBlocks(widget, option) }),
+          });
+          assert.equal(r.status, 400, `${what} on a ${how} is a 400`);
+          assert.match(JSON.parse(r.body).error, NO_LABEL, `${what} on a ${how}: the refusal names the option and its question`);
+          assert.deepEqual(storeListing(), listing, `${what} on a ${how} stores no board`);
+          assert.equal(readFileSync(boardFile, 'utf8'), document, `${what} on a ${how} leaves the open round as it was`);
+        }
+      }
+    });
+  }
+
+  await check('a blank compare side label and a text question\'s unlabelled options are accepted', async () => {
+    const posted = await postBoard(port, SECRET, {
+      title: 'Blank where allowed',
+      blocks: [
+        { kind: 'compare', left: { label: ' ', block: { kind: 'html', html: '<p>a</p>' } }, right: { block: { kind: 'html', html: '<p>b</p>' } } },
+        { kind: 'question', prompt: 'Why?', widget: 'text', options: BLANK_LABEL_OPTIONS.map(([, option]) => option) },
+      ],
+    });
+    const [compare, question] = readBoard(posted.boardId, home).blocks;
+    assert.deepEqual([compare.left.label, compare.right.label], [' ', ''], 'the sides keep the labels they were sent');
+    assert.equal(question.widget, 'text');
   });
 
   await check('a refused reference names the boundary and the ways across it, and says nothing whatever about what is out there', async () => {
