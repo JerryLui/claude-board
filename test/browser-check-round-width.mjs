@@ -1011,6 +1011,24 @@ async function runRows({ column, at, evidence, scrollbar, pageBoard, round }) {
     assert.deepEqual(wrong, []);
   });
 
+  for (const { width, size } of [{ width: 375, size: 44 }, { width: NARROW, size: 28 }]) {
+    await row(`at a ${width}px window, a rank row's up and down buttons are ${size}px both ways and the row holds its content`, async note => {
+      const page = await round({ width, height: HEIGHT });
+      try {
+        const m = await page.evalPage(`({
+          buttons: [].slice.call(document.querySelectorAll('.round-current .rank-move')).map(function (b) {
+            var r = b.getBoundingClientRect();
+            return [r.width, r.height];
+          }),
+          spill: [].slice.call(document.querySelectorAll('.round-current .rank-list li')).map(function (li) { return li.scrollWidth - li.clientWidth; }),
+        })`);
+        note(`buttons ${JSON.stringify(m.buttons)}; spill ${JSON.stringify(m.spill)}`);
+        assert.deepEqual(m.buttons, Array(4).fill([size, size]));
+        assert.deepEqual(m.spill, [0, 0]);
+      } finally { await page.close(); }
+    });
+  }
+
   await row(`a page board's stage frame fills a ${PAGE_BOARD_VIEWPORT.width}x${PAGE_BOARD_VIEWPORT.height} window exactly`, async note => {
     const page = await pageBoard();
     try {

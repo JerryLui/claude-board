@@ -2853,6 +2853,8 @@ check('the rank widget renders options in the stored order when there is a prior
   const markup = renderedMarkup(renderBoardPage(board));
   const order = [...markup.matchAll(/data-choice="([^"]+)"/g)].map(m => m[1]);
   assert.deepEqual(order, ['C', 'A', 'B']);
+  assert.equal(parseHTML(markup).querySelectorAll('.rank-move:not([disabled])').length, 0, 'a sent rank takes no move');
+  assert.equal(parseHTML(markup).querySelectorAll('.rank-move').length, 6);
 });
 
 // --- a sent round, on its own page ---------------------------------------
@@ -4086,8 +4088,8 @@ check('every ui.mjs listener that mutates answer/comment state or submits guards
   // route, differing only in `action`) rather than inline in a click listener --
   // the listeners that reach it must still be as inert in readonly as the ones
   // that write selections/notes/deferred directly.
-  const mutators = bodies.filter(b => /selections\[|notes\[|deferred\[|pendingComments\.push|fetch\(|submitBoard\(/.test(b));
-  assert.ok(mutators.length >= 9, `expected at least 9 mutating/submitting listeners, found ${mutators.length}`);
+  const mutators = bodies.filter(b => /selections\[|notes\[|deferred\[|pendingComments\.push|fetch\(|submitBoard\(|settleRank\(|moveRankRow\(/.test(b));
+  assert.ok(mutators.length >= 10, `expected at least 10 mutating/submitting listeners, found ${mutators.length}`);
   for (const b of mutators) {
     assert.ok(/\breadonly\b/.test(b), `listener mutates state without checking readonly:\n${b}`);
   }
@@ -10903,7 +10905,7 @@ check('a question that takes several picks says so in plain words under its prom
     return line ? line.textContent : null;
   };
   assert.equal(picks('multi'), 'Pick as many as apply.');
-  assert.equal(picks('rank'), 'Drag them into order, most important first.');
+  assert.equal(picks('rank'), 'Drag or use the arrows to put them in order, most important first.');
   assert.equal(picks('single'), null);
   assert.equal(picks('text'), null);
 });

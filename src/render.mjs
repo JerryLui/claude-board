@@ -651,11 +651,15 @@ function renderTextWidget(block, answer, historical) {
   return `<textarea class="answer-textarea" data-answer-for="${escAttr(block.id)}" rows="8" placeholder="Write your answer…"${historical ? ' disabled' : ''}>${escHtml(value)}</textarea>${imageTray(`answer:${block.id}`, historical, false)}`;
 }
 
-/** Drag-to-rank: every option, in the stored order if there is a prior answer, else
- * options order. The answer is the ordered array of option labels; the drag gesture
- * itself lives in src/ui.mjs and is not asserted by the node checks (that check
- * "is not automated and should not pretend to
- * be"), but the markup and data shape here are. */
+function rankMoveButton(direction, label, disabled) {
+  const points = direction === 'up' ? '6 15 12 9 18 15' : '6 9 12 15 18 9';
+  return `<button type="button" class="rank-move" data-move="${direction}" aria-label="${escAttr(`Move ${label} ${direction}`)}"${disabled ? ' disabled' : ''}><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="${points}"/></svg></button>`;
+}
+
+/** Ranking: every option, in the stored order if there is a prior answer, else
+ * options order. The answer is the ordered array of option labels; the moves (the
+ * up and down buttons, and the drag, whose gesture no node check drives) live in
+ * src/ui.mjs. */
 function renderRankWidget(block, answer, historical) {
   const hasOrder = answer && Array.isArray(answer.choice) && answer.choice.length;
   const order = hasOrder ? answer.choice : block.options.map(o => o.label);
@@ -666,6 +670,7 @@ function renderRankWidget(block, answer, historical) {
       <span class="rank-index">${i + 1}</span>
       <span class="rank-grip" aria-hidden="true"><svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg></span>
       ${renderOptionBody(opt)}
+      <span class="rank-moves">${rankMoveButton('up', label, historical || i === 0)}${rankMoveButton('down', label, historical || i === order.length - 1)}</span>
     </li>`;
   }).join('');
   return `<ul class="rank-list" data-question-id="${escAttr(block.id)}">${items}</ul>`;
@@ -1049,7 +1054,7 @@ function renderQuestionBlock(block, board, commentsByBlock, historical) {
  * already says. */
 const PICKS_LINE = {
   multi: 'Pick as many as apply.',
-  rank: 'Drag them into order, most important first.',
+  rank: 'Drag or use the arrows to put them in order, most important first.',
 };
 
 function answerChip(status) {

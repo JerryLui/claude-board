@@ -358,6 +358,13 @@ agent misreports an unanswerable question as "the reviewer left it blank". A
 `single`/`multi`/`rank`/`choose-between-rendered-variants` question with zero options is a 400 for
 the same reason; `text` needs none.
 
+**An option with no label is a 400**: on every widget but `text`, each option is an object whose
+`label` is a string with more in it than whitespace. A missing, empty or whitespace-only label, one
+that is not a string, or an option that is not an object (a bare string, `null`) refuses the post or
+amend, which stores nothing, with `option 2 of question 1 has no label`: the option's place in its
+question and the question's among the post's questions, both from 1. `text` draws no options, so any
+it carries go unchecked, and a `compare` side's `label` may be blank.
+
 **`choose-between-rendered-variants`** is the one widget whose options are not `{ preview }`
 strings: each option's `block` is a real content block of any kind, normalized the same way a
 `compare` side's own `block` is — same `normalizeBlock`/`resolveBlockId` path, the same shared id
