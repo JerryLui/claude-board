@@ -1681,9 +1681,11 @@ body.comment-mode .blocks { cursor: crosshair; }
    Never hidden, on any page: the pager is how a page board's reader reaches the
    question round and how a question round's reader gets back to the artifact, so
    unlike the send bar it survives body.page-board, body.sent-page and
-   body.readonly (an archive's rounds are pages too). Above the send bar's own
-   z-index, since on an ordinary round it sits in the bar's otherwise empty
-   left/centre -- the bar's contents are right-aligned. */
+   body.readonly (an archive's rounds are pages too). The dock is above the send
+   bar's own z-index, since on an ordinary round it sits in the bar's otherwise
+   empty left/centre, or under the buttons the bar lifts clear of it. The chevrons
+   are below it: a round shorter than the window leaves the bar at mid-height,
+   where a chevron would otherwise sit on the edge of Send. */
 /* The dock is the fixed, centred box, not the pill inside it: the caption sits
    above the numerals and shares their centre line, and stacking both in one
    fixed column is what holds that with no measured offset between them.
@@ -1736,25 +1738,25 @@ body.readonly:not(.page-board) .board-shell {
    title of any length costs one line and never reflows the dock. */
 .round-pager-caption { max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   font-size: 11.5px; font-weight: 600; color: var(--muted); pointer-events: none; }
-.round-pager { display: flex; align-items: center; gap: 2px; max-width: 100%;
-  overflow-x: auto; background: var(--panel-2); border: 1px solid var(--hairline);
-  border-radius: var(--r-pill); padding: 4px; box-shadow: var(--shadow-2); }
+.round-pager { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; width: max-content; max-width: 100%;
+  max-height: 40vh; overflow-y: auto; background: var(--panel-2); border: 1px solid var(--hairline);
+  border-radius: 20px; padding: 4px; box-shadow: var(--shadow-2); }
 /* "Rounds" said once, over the row, instead of on every entry. */
 .round-pager-lede { flex: none; padding: 5px 10px 5px 12px; font-size: 10px; font-weight: 700;
   letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
-.round-page { background: none; border: none; border-radius: var(--r-pill); padding: 5px 11px;
+.round-page, .round-gap { background: none; border: none; border-radius: var(--r-pill); padding: 5px 11px;
   font: inherit; font-size: 12px; font-weight: 600; color: var(--muted); cursor: pointer;
   min-width: 30px; text-align: center; white-space: nowrap;
   transition: color var(--dur) var(--ease); }
-.round-page:hover { color: var(--ink); }
+.round-page:hover, .round-gap:hover { color: var(--ink); }
 .round-page-current { background: var(--panel); color: var(--ink); box-shadow: var(--shadow-1); }
 /* the dot on the round that still owes an answer. Its hue is the one place
    "waiting on you" is not one colour across both themes -- see '--owed-dot'
    (ADR.md entry 66) for which each takes and why. */
 .round-page-owed::after { content: ''; display: inline-block; width: 6px; height: 6px; margin-left: 6px;
   border-radius: 50%; background: var(--owed-dot); vertical-align: middle; }
-.round-flip { position: fixed; z-index: 40; top: 50%; transform: translateY(-50%);
-  width: 32px; height: 64px; display: flex; align-items: center; justify-content: center;
+.round-flip { position: fixed; z-index: 19; top: 50%; transform: translateY(-50%);
+  width: var(--round-flip-w); height: 64px; display: flex; align-items: center; justify-content: center;
   background: var(--panel-2); color: var(--ink-2); border: 1px solid var(--hairline);
   font: inherit; font-size: 20px; line-height: 1; cursor: pointer; box-shadow: var(--shadow-2);
   transition: color var(--dur) var(--ease), border-color var(--dur) var(--ease); }
@@ -1767,6 +1769,20 @@ body.readonly:not(.page-board) .board-shell {
 .round-flip:disabled { opacity: 0.25; cursor: default; }
 .round-flip-prev { left: 0; border-left: none; border-radius: 0 var(--r-md) var(--r-md) 0; }
 .round-flip-next { right: 0; border-right: none; border-radius: var(--r-md) 0 0 var(--r-md); }
+:root { --round-flip-w: 32px; }
+/* Where the dock reaches across to Send or Discuss (liftSendBar, src/ui.mjs),
+   the bar holds them above it, by the expression the Tray clears the dock with. */
+.send-bar.lifted { padding-bottom: calc(var(--space-4) + var(--round-pager-dock-h, 84px) + var(--space-3)); }
+/* A phone-width row: 44px targets, no gap between them, so eight fit a 390px
+   window. Send and Discuss fill the bar there, so they stop short of the
+   chevrons, which keep their place over the bar. */
+@media (width <= 560px) {
+  .round-pager-dock { max-width: calc(100vw - 2 * var(--space-2)); }
+  .round-pager { justify-content: center; gap: 0; border-radius: 27px; }
+  .round-page, .round-gap { min-width: 44px; height: 44px; padding: 0 var(--space-1); }
+  .round-flip { z-index: 40; }
+  .send-bar { padding-inline: calc(var(--round-flip-w) - var(--space-4) + var(--space-1)); }
+}
 .btn-send { background: var(--accent); color: var(--accent-ink); border: 1px solid transparent; border-radius: var(--r-md);
   padding: 11px 24px; font: inherit; font-size: 13.5px; font-weight: 650; box-shadow: var(--shadow-2);
   transition: filter var(--dur) var(--ease), transform var(--dur) var(--ease); }
