@@ -8319,6 +8319,21 @@ check('a handoff expires strictly, not on the boundary', () => {
   assert.equal(store.consume(b.token), null, 'dead at exactly the deadline, not one tick after');
 });
 
+check('a handoff lives as long as its own mint says, and is redeemed on the origin it was minted for alone', () => {
+  let now = 0;
+  const store = createHandoffStore({ ttlMs: 1000, now: () => now });
+  const own = store.mint('/', { ttlMs: 600_000, origin: 'away' });
+  const plain = store.mint('/');
+  now = 599_999;
+  assert.equal(store.consume(plain.token), null, 'the store\'s own lifetime still ends the rest');
+  assert.equal(store.consume(own.token, 'away')?.target, '/');
+  for (const [minted, asked] of [['away', 'loopback'], ['away', undefined], ['loopback', 'away'], [undefined, 'away']]) {
+    const { token } = store.mint('/', { origin: minted });
+    assert.equal(store.consume(token, asked), null, `minted for ${minted}, asked on ${asked}`);
+    assert.equal(store.consume(token, minted), null, 'and the asking spent it');
+  }
+});
+
 check('minting prunes expired handoffs, so a hammered route cannot grow the map', () => {
   let now = 0;
   const store = createHandoffStore({ ttlMs: 100, now: () => now });

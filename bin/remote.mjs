@@ -8,7 +8,7 @@
 // only mints a handoff on the remote Mac, over SSH, and opens URLs under the forwarded port.
 //
 //   node bin/remote.mjs login [boardId]    authorize this Mac's browser for the remote Mac's
-//                                          board (once a month: the cookie lives 30 days)
+//                                          board (once: the cookie lives 400 days past its last use)
 //   node bin/remote.mjs open <url|boardId> open one of the remote Mac's boards here
 //
 // Environment:
@@ -218,7 +218,7 @@ async function login(boardId) {
   // The token lives about 30 seconds from the moment the remote Mac minted it, so it is opened
   // at once. The redirect it answers with is relative, so it lands on localhost too.
   openUrl(localUrl(printed, localPort));
-  console.error(`claude-board: opening the remote Mac's board at http://localhost:${localPort}/. The cookie lasts 30 days; run login again when a tab says it is not authorized.`);
+  console.error(`claude-board: opening the remote Mac's board at http://localhost:${localPort}/. The cookie lasts 400 days past its last use; run login again when a tab says it is not authorized.`);
 }
 
 async function open(target) {

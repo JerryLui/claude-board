@@ -150,6 +150,10 @@ export function recoveryCommand(port = Number(process.env.CLAUDE_BOARD_PORT) || 
   return port === DEFAULT_PORT ? cmd : `CLAUDE_BOARD_PORT=${port} ${cmd}`;
 }
 
+/** The origin kinds a handoff is minted for: this Mac's own loopback names, or the one
+ * configured away name (src/away.mjs). */
+export const HANDOFF_ORIGIN = { loopback: 'loopback', away: 'away' };
+
 /** The live handoffs of ONE daemon instance. Created per request handler rather than at
  * module level, so two servers in one process (as the checks spin up) never hand each
  * other's tokens out.
@@ -157,7 +161,7 @@ export function recoveryCommand(port = Number(process.env.CLAUDE_BOARD_PORT) || 
  * `now` and `mintToken` are injected for the checks: a store whose clock and randomness
  * are arguments can be tested for expiry and collision without sleeping or hoping. */
 export function createHandoffStore({ ttlMs = null, now = Date.now, mintToken = () => randomBytes(32).toString('hex') } = {}) {
-  const live = new Map(); // token -> { target, expiresAt }
+  const live = new Map(); // token -> { target, origin, expiresAt }
 
   function prune() {
     const t = now();
@@ -167,33 +171,36 @@ export function createHandoffStore({ ttlMs = null, now = Date.now, mintToken = (
   }
 
   return {
-    /** Mint a handoff for `target` (a path from handoffTarget, never caller text). */
-    mint(target) {
+    /** Mint a handoff for `target` (a path from handoffTarget, never caller text), redeemable
+     * only on `origin` (`HANDOFF_ORIGIN`) and for `ttlMs`, the store's own when absent. */
+    mint(target, { ttlMs: mintTtlMs = null, origin = HANDOFF_ORIGIN.loopback } = {}) {
       // Bounded by construction: every mint drops everything already expired, and a
-      // handoff lives for seconds, so a process that hammers this route cannot grow the
+      // handoff lives for minutes at most, so a process that hammers this route cannot grow the
       // map past the number of mints it manages inside one TTL. The sign-in store has no
       // TTL, so none of that holds there (src/signin-link.mjs).
       prune();
       const token = mintToken();
-      const expiresAt = now() + (ttlMs ?? handoffTtlMs());
-      live.set(token, { target, expiresAt });
+      const expiresAt = now() + (mintTtlMs ?? ttlMs ?? handoffTtlMs());
+      live.set(token, { target, origin, expiresAt });
       return { token, expiresAt };
     },
 
-    /** Redeem `token` exactly once, or return null.
+    /** Redeem `token` on `origin` exactly once, or return null.
      *
      * The delete happens BEFORE the expiry test and before anything is returned, which
      * is what makes "single use" hold against a replay racing the real browser: node is
      * single-threaded, so between the `get` and the `delete` no other request can run,
      * and the second caller finds nothing whatever the first one goes on to do.
      *
-     * Expired, already-used and never-existed are one outcome on purpose. Three
-     * distinguishable answers would tell a `ps` poller that it found a real token and
-     * merely arrived late, which is exactly the signal worth denying it. */
-    consume(token) {
+     * Expired, already-used, minted for the other origin (which spends it) and never-existed
+     * are one outcome on purpose. Distinguishable answers would tell a `ps` poller that it
+     * found a real token and merely arrived late, which is exactly the signal worth denying
+     * it. */
+    consume(token, origin = HANDOFF_ORIGIN.loopback) {
       const entry = live.get(token);
       if (!entry) return null;
       live.delete(token);
+      if (entry.origin !== origin) return null;
       if (entry.expiresAt <= now()) return null;
       return entry;
     },
