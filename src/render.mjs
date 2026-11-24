@@ -2772,6 +2772,13 @@ export function stageCarriesMermaid(html) {
  *    carrying `id="mermaid"` becomes `window.mermaid` for free, and so does half
  *    a truncated download, so the served surface is detected by API shape and
  *    never by truthiness.
+ *  - The engine appends an empty `.mermaidTooltip` to the body, absolutely
+ *    positioned with no `top` or `left`, so it lands 6px past the content and is
+ *    measured only while the document overflows: the frame flips between two
+ *    heights for good. The rule parks it at the start; the engine's own inline
+ *    `top` and `left` place a tooltip that is shown. The script adds it, because
+ *    stageOwnSource (src/round-export.mjs) reads a stage's lent library as these
+ *    two tags and nothing else.
  *  - The inbound check is `ev.source === window.parent`, not an origin
  *    comparison: a stage cannot know the parent's origin in advance (any port,
  *    or `file://`), and no script in any window can make `event.source` equal a
@@ -2818,7 +2825,10 @@ export function stageMermaidPrelude() {
   var CB = 'cb-stage', pending = {}, seq = 0, config = {}, timer = null, ticks = 0;
   var RESEND_MS = 150, RESEND_TICKS = 80;
   function shaped(m) { return !!m && typeof m.run === 'function' && typeof m.initialize === 'function'; }
-  if (shaped(window.mermaid)) return;
+  if (shaped(window.mermaid)) {
+    document.head.insertAdjacentHTML('beforeend', '<style>.mermaidTooltip{top:0;left:0}</style>');
+    return;
+  }
   function post(msg) {
     try { msg.cb = CB; window.parent.postMessage(msg, '*'); return true; } catch (e) { return false; }
   }

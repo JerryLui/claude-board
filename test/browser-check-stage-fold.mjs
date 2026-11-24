@@ -30,7 +30,11 @@
 // board writes, so the "320 until the first report, under 320 only after two
 // matching reports" rule is read off the real sequence.
 //
-// After the fold rows, the default ink: a mock that sets no colour, on its own
+// After the fold rows, the still rows, under classic scrollbars and again under
+// the Mac's own setting: the box of a settled stage that draws a diagram does not
+// move on its own, and the diagram's tooltip still shows under its node.
+//
+// After those, the default ink: a mock that sets no colour, on its own
 // two boards (an ordinary one, for the stage and the Lens, and a page board),
 // each loaded three times, under an emulated dark OS, under the Dark setting and
 // under a light OS. Its text, link, input and button have to read 4.5:1 or
@@ -56,7 +60,7 @@ const CAP = 600;
 const OPEN_CAP = 30000;
 const BORDER = 2; // the frame's 1px border, top and bottom, inside its height
 
-const RUN_DEADLINE_MS = 300000;
+const RUN_DEADLINE_MS = 420000;
 guardRun('browser-check-stage-fold', { deadlineMs: RUN_DEADLINE_MS });
 
 const near = (a, b, tol = 1) => Math.abs(a - b) <= tol;
@@ -102,6 +106,11 @@ const MOCKS = {
     + '<a id="toc" href="#target">Jump to target</a></nav>'
     + '<main id="pane" style="flex:1;overflow-y:auto"><div style="height:1200px"></div>'
     + '<h2 id="target">Target</h2><div style="height:400px"></div></main></div>',
+};
+const DIAGRAM = '<h3>Diagram</h3><pre class="mermaid">graph LR; A-->B; B-->C; click A callback "The first node"</pre><p>After the diagram.</p>';
+const STILL = {
+  mermaid: name => `<html><body data-mock="${name}">${DIAGRAM}</body></html>`,
+  mermaiddoc: name => `<!doctype html><html><body data-mock="${name}">${DIAGRAM}</body></html>`,
 };
 const CTX = ['linkfit', 'linktall', 'short', 'tall', 'wide', 'vh'];
 const TOP = ['linkfit', 'linktall', 'shell', 'linkunder', 'linkend', 'short', 'tiny', 'tall', 'wide', 'widevh', 'vh', 'huge'];
@@ -313,6 +322,7 @@ async function main() {
       const cookie = sessionToken(daemon.secret);
       const { sp, stages } = await openBoard(send, onEvent, boardUrl, cookie);
       await runRows({ send, sp, stages });
+      await runStillRows({ send, onEvent, daemonPort, secret: daemon.secret, bars: 'classic scrollbars' });
       await runInkRows({
         send,
         open: async (body, opts) => {
@@ -321,8 +331,60 @@ async function main() {
         },
       });
     });
+    await withChrome({ tag: 'cb-stage-still' }, ({ send, onEvent }) =>
+      runStillRows({ send, onEvent, daemonPort, secret: daemon.secret, bars: 'default scrollbars' }));
   } finally {
     await daemon.stop();
+  }
+}
+
+async function runStillRows({ send, onEvent, daemonPort, secret, bars }) {
+  for (const [kind, html] of Object.entries(STILL)) {
+    const name = `${kind}-still`;
+    const posted = await postJson(`http://127.0.0.1:${daemonPort}/api/board`, {
+      title: 'still stage', blocks: [
+        { kind: 'markdown', text: 'Before.' }, { kind: 'html', html: html(name) }, { kind: 'markdown', text: 'After.' },
+      ],
+    }, secret);
+    const url = `http://127.0.0.1:${daemonPort}${new URL(posted.url).pathname}`;
+    const { sp, stages, targetId } = await openBoard(send, onEvent, url, sessionToken(secret), { names: [name] });
+    const inFrame = expr => evalIn(send, stages.get(name), expr);
+    const until = async (expr, what) => {
+      const deadline = Date.now() + 10000;
+      while (!(await inFrame(expr))) {
+        if (Date.now() >= deadline) throw new Error(`${what}: not within 10s`);
+        await sleep(100);
+      }
+    };
+
+    await row(`Still (${bars}): the ${kind} mock's box does not move once it has settled`, async note => {
+      await until(`!!document.querySelector('.mermaid svg g.node')`, 'the diagram is drawn');
+      assert.equal(await inFrame(`document.querySelectorAll('.mermaidTooltip').length`), 1, 'setup: the library drew no tooltip');
+      await sleep(1500);
+      const r = await sp('Runtime.evaluate', { returnByValue: true, awaitPromise: true, expression: `new Promise(function (done) {
+        var f = window.__cbFrame(${JSON.stringify(name)}), seen = [], frames = 0, from = performance.now();
+        (function read() {
+          var h = f.getBoundingClientRect().height;
+          frames++;
+          if (seen[seen.length - 1] !== h) seen.push(h);
+          if (performance.now() - from < 2000) requestAnimationFrame(read); else done({ seen: seen, frames: frames });
+        })();
+      })` });
+      const { seen, frames } = r.result.value;
+      note(`${seen.length - 1} changes over ${frames} frames, ${seen.slice(0, 4).join(' -> ')}px`);
+      assert.ok(seen.length <= 2, `the box moved on its own ${seen.length - 1} times: ${seen.slice(0, 6).join(' -> ')}`);
+    });
+
+    await row(`Still (${bars}): the ${kind} mock's tooltip shows under its node`, async note => {
+      await inFrame(`document.querySelector('.mermaid g.node[title]').dispatchEvent(new MouseEvent('mouseover', { bubbles: true })); true`);
+      await until(`Number(getComputedStyle(document.querySelector('.mermaidTooltip')).opacity) > 0.8`, 'the tooltip is shown');
+      const at = await inFrame(`({ tip: window.__cbFP.rect('.mermaidTooltip'), node: window.__cbFP.rect('.mermaid g.node[title]'), text: document.querySelector('.mermaidTooltip').textContent })`);
+      note(`tooltip at ${at.tip.left}, ${at.tip.top}; node ${at.node.left} to ${at.node.left + at.node.w}, bottom ${at.node.bottom}`);
+      assert.equal(at.text, 'The first node');
+      assert.ok(near(at.tip.top, at.node.bottom), `the tooltip is at ${at.tip.top}, its node ends at ${at.node.bottom}`);
+      assert.ok(near(at.tip.left, at.node.left + at.node.w / 2), `the tooltip starts at ${at.tip.left}, its node's middle is ${at.node.left + at.node.w / 2}`);
+    });
+    await send('Target.closeTarget', { targetId });
   }
 }
 
