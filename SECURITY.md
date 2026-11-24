@@ -64,7 +64,7 @@ on or off.
 | --- | --- |
 | A signed-in browser, on this Mac or away | Reads every board and the missions list, answers any open round, a Fire or merge yes included ("What the cookie may write" below) |
 | A device on your Tailscale network that opened no link | Refused; the sign-in page for a link it holds, and the mermaid engine's public bytes, are all it can fetch |
-| A program on this Mac without the token | Refused, by the local address and through the forwarder alike, save the open routes below, which a loopback name through the forwarder does not reach |
+| A program on this Mac without the secret | Refused, by the local address and through the forwarder alike, save the open routes below, which a loopback name through the forwarder does not reach |
 | A program holding the secret, through the forwarder | Refused like any other: the secret header is ignored there, so nothing away posts a board, mints a link or reads a file for a caller. It can derive the cookie, as it can here |
 | Another website's page, in any signed-in browser | Refused, save that a tapped link to a board opens it ("A web page you happen to be visiting" below) |
 | A device naming a loopback host through the forwarder | 403 on every route, the open ones included |
@@ -81,14 +81,14 @@ reads as off. A reinstall and an uninstall both leave it.
 the local address it is spent and signs in nobody. A `GET` of it answers a page with one button and
 spends nothing, because a chat's link preview fetches it before you do; the button's `POST` spends
 it, and is taken only with an `Origin` of the away name itself. The page runs no script and cannot
-be framed. A link is tied to the token it was made under, so changing the token voids it.
+be framed. A link is tied to the secret it was made under, so changing the secret voids it.
 
 **What `on` and `off` check.** `on` publishes only when Tailscale runs, when the name you typed is
 the name Tailscale gives this Mac, when Funnel is off and when the forwarder serves nothing else on port 443, and it
 takes everything back down if the forwarder does not come up whole. `off` removes the file first,
 so the daemon refuses the name even where the forwarder cannot be reached, and leaves alone a
 handler that is not this board's. Neither signs a browser out: a browser signed in before `off` is signed
-in again after the next `on`. Changing the token is what signs browsers out, all of them.
+in again after the next `on`. Changing the secret is what signs browsers out, all of them.
 
 What this accepts is under [Not defended, by design](#not-defended-by-design).
 
@@ -814,7 +814,7 @@ boards, which is the same statement as "the store is owner-only" above.
 
 - Every device on your Tailscale login may connect and, once signed in, read everything and answer
   everything, a merge or Fire yes included. No device has lesser powers, and none is removed on its
-  own: changing the token cuts off a lost phone, and signs out every other browser with it.
+  own: changing the secret cuts off a lost phone, and signs out every other browser with it.
 - Whoever holds an unlocked signed-in device can merge.
 - Each cookie has one value on both origins and goes to any other http server on the same host, for
   as long as the browser is used ("Any other HTTP server on your machine" above).
@@ -824,7 +824,7 @@ boards, which is the same statement as "the store is owner-only" above.
 - A link's page is shown to whoever holds the link for its 10 minutes, and the first to press its
   button is the one signed in. The link is printed in the terminal that made it.
 - `off` does not void a link already made: it works again if `on` follows inside its 10 minutes.
-  Changing the token or restarting the daemon voids it.
+  Changing the secret or restarting the daemon voids it.
 - A program running as you can read the secret, turn away on itself and sign any device in: it is
   inside the boundary above.
 - The first HTTPS certificate publishes this Mac's and your network's name for good, in the public
