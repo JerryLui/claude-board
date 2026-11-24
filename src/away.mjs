@@ -56,19 +56,21 @@ export function isAwayHost(hostHeader, host = readAwayHost()) {
   return named === host || named === `${host}:443`;
 }
 
-/** Why the setting cannot be written over what is at its path, or null. */
+/** Why the setting cannot be written over what is at its path, and whether `removeAway` could
+ * take that away, or null. */
 export function awayFileObstacle() {
   try {
-    return lstatSync(awayPath()).isFile() ? null : `${awayPath()} is not a plain file`;
+    const stat = lstatSync(awayPath());
+    return stat.isFile() ? null : { problem: `${awayPath()} is not a plain file`, removable: !stat.isDirectory() };
   } catch (err) {
-    return err.code === 'ENOENT' ? null : `${awayPath()} could not be read (${err.code || err.message})`;
+    return err.code === 'ENOENT' ? null : { problem: `${awayPath()} could not be read (${err.code || err.message})`, removable: false };
   }
 }
 
 /** Turns away on for `host`. A rename never follows a link at either name, and the file is
  * 0600 from its first byte whatever the umask. */
 export function writeAwayHost(host) {
-  const obstacle = isAwayName(host) ? awayFileObstacle() : 'the name is not a lowercase Tailscale name';
+  const obstacle = isAwayName(host) ? awayFileObstacle()?.problem : 'the name is not a lowercase Tailscale name';
   if (obstacle) throw new Error(obstacle);
   const temp = `${awayPath()}.${randomBytes(8).toString('hex')}.tmp`;
   try {

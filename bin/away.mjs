@@ -113,7 +113,7 @@ const refuse = (...lines) => die(`claude-board away: ${lines[0]}`, ...lines.slic
 async function on(name) {
   requireSecret('away');
   const obstacle = awayFileObstacle();
-  if (obstacle) refuse(`${obstacle}.`, `Next: ${command('off')} removes it, then run this again.`);
+  if (obstacle) refuse(`${obstacle.problem}.`, `Next: ${obstacle.removable ? `${command('off')} removes it` : 'remove it by hand'}, then run this again.`);
 
   const status = await tailscaleJson(['status']);
   if (status.problem) refuse(status.problem, 'Next: start Tailscale and sign in, then run this again.');

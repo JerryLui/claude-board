@@ -187,6 +187,15 @@ async function main() {
     assert.ok(!existsSync(awayFile) && readFileSync(elsewhere, 'utf8') === 'untouched\n');
   });
 
+  await check('a directory where the setting goes, which off cannot remove, is refused by on as one to remove by hand', async () => {
+    reset();
+    mkdirSync(awayFile);
+    const r = await away(['on', 'board']);
+    assert.deepEqual([r.code, r.stdout], [1, '']);
+    assert.match(r.stderr, /is not a plain file\.\nNext: remove it by hand, then run this again\./);
+    assert.deepEqual(asked(), []);
+  });
+
   await check('off refuses the name at once, then takes the forwarder down; run again it has nothing to do', async () => {
     reset();
     await away(['on', 'board']);
