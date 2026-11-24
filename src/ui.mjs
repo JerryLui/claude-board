@@ -45,7 +45,7 @@ import {
   findPendingCommentForAnchor, removePendingComment, videoSecond, videoTimeSuffix,
 } from './anchor.mjs';
 import {
-  roundPageLabel, roundNumberLabel, isPageRound, roundHasCommentable,
+  roundPageLabel, roundNumberLabel, foldRounds, PAGER_GAP_LABEL, isPageRound, roundHasCommentable,
   questionBlocks, roundIsAwaited,
   roundIsAwaitedOpen, roundIsCurrentlyAwaited, roundCountdownText, pageBoardPillMeta,
   roundDeadlineMoves,
@@ -315,6 +315,8 @@ export const ui = `
   // screen, and nothing would catch it.
   var roundNumberLabel = ${roundNumberLabel.toString()};
   var roundPageLabel = ${roundPageLabel.toString()};
+  var foldRounds = ${foldRounds.toString()};
+  var PAGER_GAP_LABEL = ${JSON.stringify(PAGER_GAP_LABEL)};
   var isPageRound = ${isPageRound.toString()};
   // ADR 98: whether the round on screen has anything the comment-mode toggle
   // could ever anchor to -- spliced the same way, so refreshPager's own
@@ -5967,7 +5969,7 @@ export const ui = `
    * these buttons' disabled state anyway). */
   function refreshPager() {
     var rounds = board.rounds || [];
-    var nav = document.querySelector('nav#round-pager');
+    var nav = pagerNav();
     if (nav) {
       rounds.forEach(function (r) {
         var btn = nav.querySelector('.round-page[data-round="' + r.n + '"]');
@@ -6054,6 +6056,109 @@ export const ui = `
     if (!submitInFlight) setSendBarEnabled(currentPageSendable());
 
     refreshAwaitDisplay();
+    fitPager();
+  }
+
+  var pagerOpen = false;
+
+  function pagerNav() {
+    return document.querySelector('nav#round-pager');
+  }
+
+  function pagerEntry(nav, n) {
+    return nav.querySelector('.round-page[data-round="' + n + '"]');
+  }
+
+  function showPagerItems(nav, items) {
+    qsa('.round-gap', nav).forEach(function (gap) { gap.replaceWith(); });
+    qsa('.round-page', nav).forEach(function (btn) {
+      var at = items.indexOf(parseInt(btn.getAttribute('data-round'), 10));
+      if (at === -1) { btn.setAttribute('hidden', ''); return; }
+      btn.removeAttribute('hidden');
+      if (items[at - 1] !== 'gap') return;
+      var gap = document.createElement('button');
+      gap.setAttribute('type', 'button');
+      gap.className = 'round-gap';
+      gap.textContent = '…';
+      gap.setAttribute('title', PAGER_GAP_LABEL);
+      gap.setAttribute('aria-label', PAGER_GAP_LABEL);
+      nav.insertBefore(gap, btn);
+    });
+  }
+
+  /** The row wraps rather than overflows, so it fits while its last entry is on
+   * its first one's line. */
+  function pagerOnOneLine(nav) {
+    var shown = qsa('.round-page', nav).filter(function (btn) { return !btn.hasAttribute('hidden'); });
+    return shown.length < 2 || !(shown[shown.length - 1].offsetTop > shown[0].offsetTop);
+  }
+
+  /** Fold the pager to what its row can hold, measured on the page as it is now:
+   * every number while they fit, or while the reviewer has them open. */
+  function fitPager() {
+    var nav = pagerNav();
+    if (!nav) return;
+    var active = document.activeElement;
+    var focused = active && active.closest && active.closest('nav#round-pager') ? active : null;
+    var narrow = !!(window.matchMedia && window.matchMedia('(max-width: 560px)').matches);
+    var lede = nav.querySelector('.round-pager-lede');
+    if (lede && narrow) lede.setAttribute('hidden', '');
+    else if (lede) lede.removeAttribute('hidden');
+
+    var rounds = board.rounds || [];
+    var numbers = rounds.map(function (r) { return r.n; });
+    var fold = {
+      rounds: numbers,
+      current: currentRound,
+      owed: rounds.filter(roundOwesAnswer).map(function (r) { return r.n; }),
+      narrow: narrow,
+      oneGap: false,
+    };
+    showPagerItems(nav, numbers);
+    if (pagerOnOneLine(nav)) pagerOpen = false;
+    else if (!pagerOpen) {
+      showPagerItems(nav, foldRounds(fold));
+      if (narrow && !pagerOnOneLine(nav)) {
+        fold.oneGap = true;
+        showPagerItems(nav, foldRounds(fold));
+      }
+    }
+
+    var current = pagerEntry(nav, currentRound);
+    if (focused && (!focused.parentElement || focused.hasAttribute('hidden'))) {
+      var heir = (focused.classList.contains('round-gap') && nav.querySelector('.round-gap')) || current;
+      if (heir) heir.focus({ preventScroll: true });
+    }
+    if (current) {
+      var row = nav.getBoundingClientRect();
+      var box = current.getBoundingClientRect();
+      if (box.top < row.top) nav.scrollTop -= row.top - box.top;
+      else if (box.bottom > row.bottom) nav.scrollTop += box.bottom - row.bottom;
+    }
+    liftSendBar();
+  }
+
+  function openPager() {
+    var nav = pagerNav();
+    var revealed = qsa('.round-page', nav).filter(function (btn) { return btn.hasAttribute('hidden'); })[0];
+    pagerOpen = true;
+    fitPager();
+    if (revealed) revealed.focus({ preventScroll: true });
+  }
+
+  /** Where the dock reaches across to Send or Discuss, the bar holds them above it.
+   * Sideways only, which lifting them does not change. */
+  function liftSendBar() {
+    var dock = document.querySelector('div.round-pager-dock');
+    if (readonly || !sendBar || !dock) return;
+    var reach = dock.getBoundingClientRect();
+    var lifted = qsa('.btn-discuss, .btn-send', sendBar).some(function (btn) {
+      var box = btn.getBoundingClientRect();
+      return box.width > 0 && box.left < reach.right && reach.left < box.right;
+    });
+    if (lifted === sendBar.classList.contains('lifted')) return;
+    sendBar.classList.toggle('lifted', lifted);
+    setupSendBarDock();
   }
 
   /** Flip to round 'n'. The one writer of currentRound.
@@ -6266,8 +6371,11 @@ export const ui = `
     var ro = new ResizeObserver(function () {
       write(dock.getBoundingClientRect().height);
       reportStageBand();
+      liftSendBar();
+      if (sendBar && sendBar.classList.contains('lifted')) setupSendBarDock();
     });
     ro.observe(dock);
+    if (sendBar) qsa('.btn-discuss, .btn-send', sendBar).forEach(function (btn) { ro.observe(btn); });
   }
 
   setupSendBarDock();
@@ -6327,15 +6435,20 @@ export const ui = `
   var roundNextBtn = document.querySelector('button#round-next');
   if (roundPrevBtn) roundPrevBtn.addEventListener('click', function () { stepRound(-1); });
   if (roundNextBtn) roundNextBtn.addEventListener('click', function () { stepRound(1); });
-  var roundPagerNav = document.querySelector('nav#round-pager');
+  var roundPagerNav = pagerNav();
   if (roundPagerNav) {
     roundPagerNav.addEventListener('click', function (ev) {
-      var btn = ev.target && ev.target.closest ? ev.target.closest('.round-page') : null;
+      if (!ev.target || !ev.target.closest) return;
+      if (ev.target.closest('.round-gap')) { openPager(); return; }
+      var btn = ev.target.closest('.round-page');
       if (!btn) return;
+      pagerOpen = false;
       var n = parseInt(btn.getAttribute('data-round'), 10);
       if (isFinite(n)) goToRound(n);
     });
   }
+  window.addEventListener('resize', fitPager);
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(fitPager);
 
   /** Go to the round that still needs an answer -- now a page flip, not a
    * scroll (ADR.md entry 42). Inert exactly when that page is already the one

@@ -48,7 +48,7 @@ import { buildSteps, stepsToPath, pathToSteps, resolveSteps, videoIdentity, vide
 import { grammarFor, Prism } from './vendor/prism/index.mjs';
 import { MERMAID_ASSET } from './vendor/mermaid/index.mjs';
 import {
-  roundPageLabel, isPageRound, roundHasCommentable,
+  roundPageLabel, foldRounds, PAGER_GAP_LABEL, isPageRound, roundHasCommentable,
   roundIsAwaitedOpen, pageBoardPillMeta,
   ANSWER_CHIP_LABEL,
 } from './badge.mjs';
@@ -3473,6 +3473,10 @@ function roundOwesAnswer(board, round) {
   return board.blocks.some(b => b.round === round.n && b.kind === 'question');
 }
 
+/** More entries than the pager's 560px dock can ever hold on one line: each is at
+ * least 30px wide and 2px from the next (src/styles.mjs), beside the row's label. */
+const PAGER_MOST_ENTRIES = 15;
+
 /** The board's pages, named, at the bottom of the page (ADR.md entry 42). Three
  * always-present controls, never two alternatives (criterion 26): the two edge
  * chevrons step one round, the pill in the middle names every round and jumps
@@ -3487,22 +3491,37 @@ function roundOwesAnswer(board, round) {
  * chevrons nested inside would be pinned to the pill's box instead of the
  * viewport's edges.
  *
+ * Every entry is in the markup, and one the fold hides carries `hidden`: whether
+ * the row fits is the client's measurement (fitPager, src/ui.mjs), so first paint
+ * folds only a board that can fit no window. Any other paints every number, on as
+ * many lines as they take.
+ *
  * "Owes an answer" is a round that is not yet sent AND actually asks something:
  * the same rule the index badge counts by, so a page-board
  * round -- open forever, since nothing sends it -- is never dotted as though
  * the reviewer were holding it up. */
 function roundPagerMarkup(board, currentN) {
   const rounds = board.rounds || [];
-  const pages = rounds.map(r => {
+  const numbers = rounds.map(r => r.n);
+  const owed = rounds.filter(r => roundOwesAnswer(board, r)).map(r => r.n);
+  const items = rounds.length > PAGER_MOST_ENTRIES
+    ? foldRounds({ rounds: numbers, current: currentN, owed, narrow: false, oneGap: false })
+    : numbers;
+  const entry = r => {
     const classes = ['round-page'];
     if (r.n === currentN) classes.push('round-page-current');
-    if (roundOwesAnswer(board, r)) classes.push('round-page-owed');
+    if (owed.includes(r.n)) classes.push('round-page-owed');
     // Bare numeral on the face; the round's full NAME is its accessible name and
     // its hover title, so neither a screen reader nor a mouse loses what the
     // caption below only ever says about the current round. See roundNumberLabel
     // (src/badge.mjs) for why a name stopped being printed on the face at all.
     const full = roundPageLabel(r.n, r.title || '');
-    return `<button type="button" class="${classes.join(' ')}" data-round="${r.n}" title="${escAttr(full)}" aria-label="${escAttr(full)}"${r.n === currentN ? ' aria-current="page"' : ''}>${r.n}</button>`;
+    return `<button type="button" class="${classes.join(' ')}" data-round="${r.n}" title="${escAttr(full)}" aria-label="${escAttr(full)}"${r.n === currentN ? ' aria-current="page"' : ''}${items.includes(r.n) ? '' : ' hidden'}>${r.n}</button>`;
+  };
+  const gap = `<button type="button" class="round-gap" title="${PAGER_GAP_LABEL}" aria-label="${PAGER_GAP_LABEL}">…</button>`;
+  const pages = rounds.map(r => {
+    const at = items.indexOf(r.n);
+    return (at > 0 && items[at - 1] === 'gap' ? gap : '') + entry(r);
   }).join('');
   const first = rounds.length ? rounds[0].n : 1;
   const last = rounds.length ? rounds[rounds.length - 1].n : 1;
