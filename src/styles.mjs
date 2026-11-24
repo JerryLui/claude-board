@@ -379,7 +379,7 @@ ${tokenBlock(':root[data-theme="light"]', LIGHT, 'light')}
   /* How far a scroll-to-anchor has to clear the sticky .board-head. Measured in
      Chrome: the header is 81.4px at ordinary widths, so 88px leaves a small gap
      -- but BELOW the 560px breakpoint .board-head becomes a column and grows to
-     115.4px, and a hardcoded 88 then parks the target 27px BEHIND the header it
+     116.4px, and a hardcoded 88 then parks the target 28px BEHIND the header it
      was supposed to clear. One token, overridden in that same media query, so
      the two can never disagree again. Every scroll-margin-top on the page reads
      it: .round, whose top the pager scrolls to on every page flip, and
@@ -389,7 +389,7 @@ ${tokenBlock(':root[data-theme="light"]', LIGHT, 'light')}
 
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
-html { scroll-behavior: smooth; }
+html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 body {
   min-height: 100vh;
   background: var(--bg);
@@ -1777,6 +1777,7 @@ body.readonly:not(.page-board) .board-shell {
    window. Send and Discuss fill the bar there, so they stop short of the
    chevrons, which keep their place over the bar. */
 @media (width <= 560px) {
+  :root { --round-flip-w: 44px; }
   .round-pager-dock { max-width: calc(100vw - 2 * var(--space-2)); }
   .round-pager { justify-content: center; gap: 0; border-radius: 27px; }
   .round-page, .round-gap { min-width: 44px; height: 44px; padding: 0 var(--space-1); }
@@ -2882,23 +2883,130 @@ body:not(.page-board) .blocks .comment-list, body:not(.page-board) .blocks .comm
 
 /* --- responsive: the board is a laptop surface first, but it has to survive a
    phone-width window without a horizontal scrollbar or a two-column squeeze --- */
+/* Clear of a phone's notch and home indicator ('viewport-fit=cover'); every
+   inset is 0 elsewhere. The dock's is padding, so its measured height carries
+   it to the bars and the Tray that clear the dock. */
+body { padding-left: env(safe-area-inset-left, 0px); padding-right: env(safe-area-inset-right, 0px); }
+body.page-board .board-head { left: env(safe-area-inset-left, 0px); right: env(safe-area-inset-right, 0px); }
+.round-flip-prev { left: env(safe-area-inset-left, 0px); }
+.round-flip-next { right: env(safe-area-inset-right, 0px); }
+.round-pager-dock { padding-bottom: env(safe-area-inset-bottom, 0px); }
+.send-bar:not(.lifted) { padding-bottom: calc(var(--space-4) + env(safe-area-inset-bottom, 0px)); }
+.back-to-top { right: calc(var(--space-5) + env(safe-area-inset-right, 0px)); bottom: calc(var(--space-5) + env(safe-area-inset-bottom, 0px)); }
 @media (max-width: 860px) {
   .question-block { grid-template-columns: minmax(0, 1fr); }
   .compare-grid { grid-template-columns: 1fr; }
 }
 @media (max-width: 560px) {
-  /* the header stacks here and grows from 81.4px to 115.4px (measured in
+  /* the header stacks here and grows from 81.4px to 116.4px (measured in
      Chrome), so every scroll-to-anchor target has to clear that much more --
      see --head-clear's own comment in :root */
   :root { --head-clear: 124px; }
   .board-shell { padding-left: var(--space-4); padding-right: var(--space-4); }
-  .board-head { flex-direction: column; align-items: flex-start; gap: var(--space-2); }
-  .send-bar { flex-wrap: wrap; }
+  .board-head { flex-direction: column; align-items: flex-start; gap: var(--space-1); }
+  .board-head, body.page-board .board-head { padding-top: var(--space-2); padding-bottom: var(--space-2); }
+  .board-head-title, .board-head-actions { width: 100%; }
+  body.page-board .board-head-ident, body:not(.page-board) .board-head-ident { flex: 1; max-width: none; }
+  .board-head h1, .board-head .meta { overflow: hidden; text-overflow: ellipsis; }
+  .back-to-index, body.page-board .back-to-index { width: 44px; height: 44px; }
+  body.page-board .back-to-index svg { width: 30px; height: 30px; }
+  .round-label { border-radius: var(--r-md); }
+  .mode-toggle, .round-download { min-height: 44px; }
+  .mode-toggle-icon { min-width: 44px; justify-content: center; }
+  .board-head-actions { gap: var(--space-2); }
+  body.page-board .head-download { gap: 0; min-width: 44px; justify-content: center; font-size: 0; }
+  body.page-board .board-head { gap: var(--space-1); padding-left: var(--space-4); padding-right: var(--space-4); }
+  .board-head-actions .round-meta { margin-left: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+
+  .send-bar { flex-wrap: wrap; padding-top: var(--space-2); }
+  .round-countdown.visible { display: none; }
   .send-status { width: 100%; margin-bottom: var(--space-2); }
-  .btn-send, .btn-discuss { flex: 1; }
-  .search-form { flex-wrap: wrap; }
+  .send-status:empty { display: none; }
+  .btn-send, .btn-discuss { flex: 1; min-height: 44px; white-space: nowrap; }
+  .questions-left-pill, .back-to-top { min-height: 44px; }
+  .notice { width: max-content; max-width: calc(100vw - 2 * var(--space-4)); white-space: normal; }
+  .notice-x { flex: none; width: 44px; height: 44px; margin: -11px -14px -11px 0; }
+
+  .block { overflow-wrap: break-word; }
+  .card-head { flex-wrap: wrap; }
+  .card-head > .card-status { align-self: center; }
+  .card-title, .question-prompt, .opt-main, .opt-label, .variant-label, .compare-label { overflow-wrap: anywhere; }
+  .opt-main { max-width: 100%; }
+  .compare-grid, .options-variants { grid-template-columns: minmax(0, 1fr); }
+  .compare-side, .variant-card { min-width: 0; padding-left: var(--space-3); padding-right: var(--space-3); }
+  .md-content th, .md-content td { overflow-wrap: normal; }
+  .comment-btn, .stage-fold-toggle, .fold-toggle, .card-details > summary, .btn-defer { min-height: 44px; }
+  .fold-toggle { margin-top: 0; }
+  .card-details { margin-top: var(--space-1); }
+  .card-details > summary { min-width: 44px; }
+  .btn-defer { min-width: 44px; padding: 0 14px; }
+  .pull-out { width: 44px; height: 44px; }
+  .pull-out-note { right: 60px; max-width: calc(100% - 76px); min-height: 44px; }
+  .stage-scrolls .pull-out-note { right: calc(60px + var(--stage-scrollbar-w, 0px)); }
+  .answer-textarea, .note-field textarea, .comment-form input[type=text], .search-input,
+  .mission-comment-text, .pomodoro-field input[type="number"], .pomodoro-field select { font-size: 16px; }
+  .comment-form input[type=text], .comment-form button { min-height: 44px; min-width: 44px; }
+  .comment-delete { top: 0; right: 0; width: 44px; height: 44px; }
+  .comment-item.comment-pending { min-height: 44px; padding-right: 48px; }
+  .thumb-row .thumb-remove { top: 0; right: 0; width: 44px; height: 44px; min-height: 0; padding: 13px; background-clip: content-box; }
   .rank-list li { gap: var(--space-2); padding-left: 10px; padding-right: 10px; }
   .rank-move { width: 44px; height: 44px; }
+
+  .page-comments { width: calc(100vw - 2 * var(--space-2)); }
+  .page-send-bar { gap: var(--space-2); }
+  .page-comment-hint { flex-basis: 100%; }
+  .diagram-lens, .stage-lens, body.page-board .html-stage { height: 100dvh; max-height: 100dvh; }
+  .lens-bar { flex-wrap: wrap; padding: var(--space-1) var(--space-2); padding-top: max(var(--space-1), env(safe-area-inset-top)); }
+  .diagram-lens .lens-title, body:not(.comment-mode) .lens-hint { display: none; }
+  .lens-pct { margin-right: auto; }
+  .lens-btn { min-width: 44px; min-height: 44px; }
+  .stage-lens-body { padding: var(--space-2); padding-bottom: max(var(--space-2), env(safe-area-inset-bottom)); }
+
+  body.home-page .board-head { position: relative; }
+  body.home-page .board-head h1 { position: absolute; width: 1px; height: 1px; clip-path: inset(50%); }
+  body.home-page .board-head-ident { flex: none; }
+  .view-tabs { flex: 1; margin-left: 0; }
+  .view-tab { flex: 1; justify-content: center; min-height: 44px; }
+  body.home-page .board-head-actions { flex-wrap: wrap; justify-content: flex-end; }
+  .pomodoro-widget, .pomodoro-settings { position: static; }
+  .pomodoro-widget { margin-right: auto; }
+  .pomodoro-switch { position: relative; width: 44px; height: 44px; padding: 0 4px; background: none; border-color: transparent; }
+  .pomodoro-switch::before { content: ""; position: absolute; inset: 10px 1px; border: 1px solid var(--hairline);
+    border-radius: var(--r-pill); background: var(--panel-2); }
+  .pomodoro-switch[aria-checked="true"] { background: none; border-color: transparent; }
+  .pomodoro-switch[aria-checked="true"]::before { border-color: var(--accent); background: var(--accent-soft); }
+  .pomodoro-switch-knob { position: relative; }
+  .pomodoro-ctl-group { height: 46px; }
+  .pomodoro-ctl { width: 44px; }
+  .pomodoro-settings-summary { width: 44px; height: 44px; }
+  .pomodoro-settings-form { left: 0; right: 0; }
+  .pomodoro-field, .pomodoro-btn { min-height: 44px; }
+  .pomodoro-field { font-size: 14px; }
+  .pomodoro-field-check { justify-content: space-between; }
+  .pomodoro-field input[type="checkbox"] { width: 20px; height: 20px; }
+  .pomodoro-field input[type="number"] { width: 96px; height: 44px; }
+  .pomodoro-field select { max-width: 60%; height: 44px; }
+
+  .search-form { flex-wrap: nowrap; }
+  .search-input, .search-btn { height: 44px; }
+  .thread-item { position: relative; height: auto; min-height: 44px; flex-wrap: wrap; row-gap: 2px; padding: 9px 14px 9px 34px; }
+  .thread-item > :first-child { position: absolute; left: 14px; top: 17px; }
+  .thread-title { flex: 1 0 100%; }
+  .thread-rounds { width: auto; }
+  .thread-updated { width: auto; margin-left: auto; }
+  .mission-card { --mc-btn: 44px; }
+  .mission-card { padding-top: 5px; }
+  .mission-text > .mission-title:first-child { margin-top: 8px; }
+  .mission-ident { min-height: 34px; align-items: center; }
+  .mission-ident + .mission-title { margin-top: 0; }
+  .mission-stop { top: 0; right: 0; width: 44px; height: 44px; border-radius: 8px; background: none; }
+  .mission-card:has(> .mission-stop) .mission-text > :is(.mission-ident, .mission-title:first-child) { padding-right: 34px; }
+  .mission-more { margin-top: 0; }
+  .mission-more > summary { display: inline-flex; align-items: center; min-height: 44px; }
+  .mission-foot { gap: var(--space-2); }
+  .mission-pr, .mission-btn { min-height: 44px; min-width: 44px; padding-left: 14px; padding-right: 14px; justify-content: center; }
+  .mission-foot .mission-btn { padding: 0 16px; }
+  .mission-confirm .mission-btns { flex-wrap: wrap; }
   /* The condense is suppressed below this
      breakpoint rather than taught a second, column-aware shape. '--pill-half'
      is measured as one SINGLE-ROW sum (brand + columnGap + actions,

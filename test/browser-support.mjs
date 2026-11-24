@@ -14,6 +14,7 @@
 // that changed only how a broken run ends (a timeout on a DevTools reply, a SIGKILL
 // after a Chrome that will not quit) took the stricter copy.
 
+import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import {
   mkdtempSync, rmSync, readFileSync, writeFileSync, copyFileSync, existsSync, mkdirSync, chmodSync,
@@ -442,6 +443,85 @@ export async function measureTab(send, onEvent, url, cookie, opts) {
   const tab = await openTab(send, onEvent, url, cookie, opts);
   await tab.close();
   return tab.measured;
+}
+
+/** `openTab` on a 390x844 touch screen, the phone every board page and home view answers on. */
+export function openPhone(send, onEvent, url, cookie, { theme = 'dark', expr = '1' } = {}) {
+  const size = { width: 390, height: 844 };
+  return openTab(send, onEvent, url, cookie, {
+    ...size, theme, expr,
+    prepare: async sp => {
+      await sp('Emulation.setDeviceMetricsOverride', { ...size, deviceScaleFactor: 2, mobile: true });
+      await sp('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 });
+    },
+  });
+}
+
+/** What a finger trips on in the phone tab `tab` as it stands: every visible control under
+ * 44px either way or past the window's edge, every field whose text is under the 16px iOS
+ * zooms in on, what spills out of the window in no scroller of its own, and every control
+ * of the round (a tall one, taller than the room between the bars, aside) that the header,
+ * the send bar or the round switcher still covers once scrolled to the middle. `saw` is
+ * which of the `expected` selectors it measured. Two kinds of target are exempt, WCAG
+ * 2.5.8's own exceptions: a link inside a sentence (its size is the line's), and a node of
+ * a drawing (its size is the drawing's; the lens enlarges it). A mission card's link
+ * counts as the card its box covers, a checkbox as its label. */
+export async function phoneFaults(tab, expected = []) {
+  await tab.quiet();
+  return tab.evalPage(`(function (expected) {
+    var root = document.documentElement, width = 390;
+    root.style.scrollBehavior = 'auto';
+    function visible(el) { return el.getClientRects().length > 0 && el.checkVisibility({ checkVisibilityCSS: true }) && !el.closest('svg'); }
+    function name(el) {
+      var cls = typeof el.className === 'string' ? el.className.trim().split(/\\s+/).filter(Boolean).join('.') : '';
+      return el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + (cls ? '.' + cls : '') + ' "' + (el.getAttribute('aria-label') || el.textContent || el.getAttribute('placeholder') || '').trim().replace(/\\s+/g, ' ').slice(0, 30) + '"';
+    }
+    function scrolls(el) {
+      for (var p = el.parentElement; p && p !== document.body; p = p.parentElement) if (getComputedStyle(p).overflowX !== 'visible') return true;
+      return false;
+    }
+    var controls = [].slice.call(document.querySelectorAll('a[href], button, input:not([type=hidden]), select, textarea, summary, [role=button], [role=radio], [role=checkbox], [role=switch], [tabindex="0"]'))
+      .filter(function (el) { return visible(el) && !el.matches('.md-content a, .question-prompt a, .opt-desc a, .comment-item a'); });
+    var modal = document.querySelector('dialog[open]');
+    if (modal) controls = controls.filter(function (el) { return modal.contains(el); });
+    var out = { count: controls.length, small: [], zooms: [], spill: [], covered: [],
+      saw: expected.filter(function (sel) { return controls.some(function (el) { return el.matches(sel); }); }),
+      scrollW: root.scrollWidth, innerW: innerWidth };
+    controls.forEach(function (el) {
+      var box = (el.matches('.mission-link') && el.closest('.mission-card')) || (el.matches('input[type=checkbox]') && el.closest('label')) || el;
+      var r = box.getBoundingClientRect();
+      if (r.width < 43.95 || r.height < 43.95) out.small.push(name(el) + ' ' + r.width.toFixed(1) + 'x' + r.height.toFixed(1));
+      if (el.matches('input:not([type=checkbox]), select, textarea') && parseFloat(getComputedStyle(el).fontSize) < 16) out.zooms.push(name(el) + ' ' + getComputedStyle(el).fontSize);
+    });
+    [].slice.call(document.querySelectorAll('body *')).forEach(function (el) {
+      if (!visible(el)) return;
+      var r = el.getBoundingClientRect();
+      if (r.width > 1 && (r.right > width + 0.5 || r.left < -0.5) && !scrolls(el)) out.spill.push(name(el) + ' ' + Math.round(r.left) + ' to ' + Math.round(r.right));
+    });
+    if (!modal) controls.filter(function (el) { return el.closest('.round-current'); }).forEach(function (el) {
+      el.scrollIntoView({ block: 'center' });
+      var r = el.getBoundingClientRect();
+      if (r.height > 400) return;
+      var chrome = null;
+      for (var i = 0; i <= 4 && !chrome; i++) for (var j = 0; j <= 4 && !chrome; j++) {
+        var hit = document.elementFromPoint(r.left + 1 + (r.width - 2) * i / 4, r.top + 1 + (r.height - 2) * j / 4);
+        chrome = hit && !hit.closest('.round-current') && hit.closest('.send-bar, .board-head, .round-pager-dock');
+      }
+      if (chrome) out.covered.push(name(el) + ' under ' + chrome.className);
+    });
+    scrollTo(0, 0);
+    return out;
+  })(${JSON.stringify(expected)})`);
+}
+
+/** Every fault `phoneFaults` can find is absent, and every `expected` control was measured. */
+export function assertPhone(faults, expected) {
+  assert.deepEqual([...expected].filter(sel => !faults.saw.includes(sel)), [], 'setup: these controls are on the page');
+  assert.deepEqual([faults.scrollW, faults.innerW], [390, 390], 'the page scrolls sideways');
+  assert.deepEqual(faults.small, [], 'controls under 44px');
+  assert.deepEqual(faults.spill, [], 'past the window, in no scroller');
+  assert.deepEqual(faults.zooms, [], 'fields under 16px');
+  assert.deepEqual(faults.covered, [], 'controls a bar covers');
 }
 
 /** One real left click at the point `at` (`{ x, y }`) of `tab`'s window: the
