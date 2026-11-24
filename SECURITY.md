@@ -80,8 +80,8 @@ be framed. A link is tied to the token it was made under, so changing the token 
 **What `on` and `off` check.** `on` publishes only when Tailscale runs, when the name you typed is
 the name Tailscale gives this Mac, when Funnel is off and when the forwarder serves nothing else on port 443, and it
 takes everything back down if the forwarder does not come up whole. `off` removes the file first,
-so the daemon refuses the name even where the forwarder cannot be reached, and leaves a handler that
-is not this board's alone. Neither signs a browser out: a browser signed in before `off` is signed
+so the daemon refuses the name even where the forwarder cannot be reached, and leaves alone a
+handler that is not this board's. Neither signs a browser out: a browser signed in before `off` is signed
 in again after the next `on`. Changing the token is what signs browsers out, all of them.
 
 What this accepts is under [Not defended, by design](#not-defended-by-design).
@@ -796,7 +796,7 @@ with the three shared files beside it (mermaid joined ui/styles, ADR 70); the ga
 the daemon, not on the archive. Anything that can read that directory can read those
 boards, which is the same statement as "the store is owner-only" above.
 
-**Your own devices, while away is on.** Chosen, each against a narrower option (ADR 158, 159):
+**Your own devices, while away is on.** Accepted (ADR 158, 159):
 
 - Every device on your Tailscale login may connect and, once signed in, read everything and answer
   everything, a merge or Fire yes included. No device has lesser powers, and none is removed on its
