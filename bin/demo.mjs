@@ -76,7 +76,7 @@ const payload = {
 };
 
 /** POST a JSON body and resolve the parsed response, or reject with a tagged error.
- * Same shape as bin/authorize.mjs's postJson. */
+ * Same shape as src/mint-handoff.mjs's postJson. */
 function postJson(urlStr, body) {
   return new Promise((resolve, reject) => {
     const u = new URL(urlStr);
