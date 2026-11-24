@@ -2669,3 +2669,17 @@ Traps that have bitten once. A second bite moves the entry up into the section i
   (2026-11-16). So "nothing fetched" proves nothing about a `file:` address: read the element's
   own `load` or `error`, and the page's `securitypolicyviolation` events, whose `blockedURI` for
   a `file:` address is the bare word `file`.
+- **Node drops headers past its count limit, silently on older releases.** 2026-11-24: 1100 short
+  headers ahead of `x-forwarded-for` read it as undefined on 22.23.1 and 24.18.0 and answered 431 on
+  26.13.1. A security row that depends on a header being seen runs on an older Node too, and
+  `startServer` sets `maxHeadersCount = 0`.
+- **Mermaid's empty tooltip is 6px of content past the end of the document.** 2026-11-24: its
+  `div.mermaidTooltip` (absolute, opacity 0, no `top`) counts in `scrollHeight` only while the
+  document overflows, so a stage's frame flipped between two heights forever. The prelude pins it to
+  the top. A headless Chrome with overlay bars does not show such a loop; classic bars do
+  (`withChrome({ classicScrollbars: true })`), and so does WebKit.
+- **A stage's lent library is exactly two tags.** `stageOwnSource` (`src/round-export.mjs`) reads it
+  as two to give a mock its own file back, so anything else the prelude adds goes in its script.
+- **A WKWebView probe sees the login page and hides.** A window never ordered in runs no animation
+  frames (`orderBack` at x:-20000 does), and the cookie only lands in
+  `WKWebsiteDataStore.nonPersistent()`; `-AppleShowScrollBars` on its command line sets the bars.
