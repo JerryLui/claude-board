@@ -6,7 +6,12 @@
 //   POST /api/handoff   (secret required, like every other write)  -> { token }
 //   GET  /auth/<token>  consumes it, sets the cookie, 302s to a CLEAN url
 //
-// The token is process-local state with a seconds-long TTL and exactly one use. That is
+// That is the loopback half. On the away origin (src/away.mjs) the link travels through
+// chats, whose previews fetch it, so the GET there answers a page with one button and
+// spends nothing, and the button's same-origin POST /auth/<token> consumes the token.
+//
+// The token is process-local state with a short TTL (seconds, or ten minutes for an away
+// link) and exactly one use. That is
 // the opposite of the session cookie it hands out (src/secret.mjs `sessionToken`), which
 // is derived from the secret precisely so it survives a daemon restart — and the
 // contrast is deliberate. A handoff that survived a restart would be a long-lived
@@ -31,6 +36,10 @@ import { fileURLToPath } from 'node:url';
  * nothing to aim at. Overridable for the checks, which need to watch one expire without
  * sleeping for half a minute. */
 export const DEFAULT_HANDOFF_TTL_MS = 30_000;
+
+/** An away link is carried to another device by hand, so it lives longer than a handoff the
+ * browser on this Mac is already opening. */
+export const AWAY_LINK_TTL_MS = 10 * 60 * 1000;
 
 export function handoffTtlMs() {
   const v = Number(process.env.CLAUDE_BOARD_HANDOFF_TTL_MS);
@@ -145,9 +154,22 @@ export function shellQuote(s) {
  * inside the clone, which is the fix this whole route exists to point at. Every other
  * caller keeps the absolute form, because it is read by something that already holds a
  * terminal on this machine — pasting it works from any cwd, which is the point there. */
-export function recoveryCommand(port = Number(process.env.CLAUDE_BOARD_PORT) || DEFAULT_PORT, { absolute = true } = {}) {
-  const cmd = `node ${absolute ? shellQuote(path.join(repoRoot(), 'bin', 'authorize.mjs')) : 'bin/authorize.mjs'}`;
-  return port === DEFAULT_PORT ? cmd : `CLAUDE_BOARD_PORT=${port} ${cmd}`;
+export function recoveryCommand(port = envPort(), { absolute = true } = {}) {
+  return withPort(`node ${absolute ? shellQuote(path.join(repoRoot(), 'bin', 'authorize.mjs')) : 'bin/authorize.mjs'}`, port);
+}
+
+/** A `bin/away.mjs` command line. Always relative: an away refusal names one to a caller the
+ * gate could not verify. */
+export function awayCommand(args, port = envPort()) {
+  return withPort(`node bin/away.mjs ${args}`, port);
+}
+
+function envPort() {
+  return Number(process.env.CLAUDE_BOARD_PORT) || DEFAULT_PORT;
+}
+
+function withPort(command, port) {
+  return port === DEFAULT_PORT ? command : `CLAUDE_BOARD_PORT=${port} ${command}`;
 }
 
 /** The origin kinds a handoff is minted for: this Mac's own loopback names, or the one
@@ -161,7 +183,7 @@ export const HANDOFF_ORIGIN = { loopback: 'loopback', away: 'away' };
  * `now` and `mintToken` are injected for the checks: a store whose clock and randomness
  * are arguments can be tested for expiry and collision without sleeping or hoping. */
 export function createHandoffStore({ ttlMs = null, now = Date.now, mintToken = () => randomBytes(32).toString('hex') } = {}) {
-  const live = new Map(); // token -> { target, origin, expiresAt }
+  const live = new Map(); // token -> { target, origin, session, expiresAt }
 
   function prune() {
     const t = now();
@@ -172,8 +194,10 @@ export function createHandoffStore({ ttlMs = null, now = Date.now, mintToken = (
 
   return {
     /** Mint a handoff for `target` (a path from handoffTarget, never caller text), redeemable
-     * only on `origin` (`HANDOFF_ORIGIN`) and for `ttlMs`, the store's own when absent. */
-    mint(target, { ttlMs: mintTtlMs = null, origin = HANDOFF_ORIGIN.loopback } = {}) {
+     * only on `origin` (`HANDOFF_ORIGIN`) and for `ttlMs`, the store's own when absent.
+     * `session`, when given, is the sign-in the caller meant to hand out: the redeemer holds
+     * the entry to it, so a link minted before the secret changed signs nobody in after. */
+    mint(target, { ttlMs: mintTtlMs = null, origin = HANDOFF_ORIGIN.loopback, session = null } = {}) {
       // Bounded by construction: every mint drops everything already expired, and a
       // handoff lives for minutes at most, so a process that hammers this route cannot grow the
       // map past the number of mints it manages inside one TTL. The sign-in store has no
@@ -181,7 +205,7 @@ export function createHandoffStore({ ttlMs = null, now = Date.now, mintToken = (
       prune();
       const token = mintToken();
       const expiresAt = now() + (mintTtlMs ?? ttlMs ?? handoffTtlMs());
-      live.set(token, { target, origin, expiresAt });
+      live.set(token, { target, origin, session, expiresAt });
       return { token, expiresAt };
     },
 
@@ -202,6 +226,18 @@ export function createHandoffStore({ ttlMs = null, now = Date.now, mintToken = (
       live.delete(token);
       if (entry.origin !== origin) return null;
       if (entry.expiresAt <= now()) return null;
+      return entry;
+    },
+
+    /** The entry `consume` would redeem, left live. Shown to the wrong origin it is spent, as
+     * `consume` spends it. */
+    peek(token, origin) {
+      const entry = live.get(token);
+      if (!entry) return null;
+      if (entry.origin !== origin || entry.expiresAt <= now()) {
+        live.delete(token);
+        return null;
+      }
       return entry;
     },
 

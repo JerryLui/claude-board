@@ -3769,8 +3769,45 @@ ${roundPagerMarkup(board, initialRoundInView)}
  * absolute path or username either, for the same reason. Self-contained (inline style
  * only, no script, no network) so it renders under the same locked-down CSP every board
  * page carries. */
-export function renderRefusalPage(recoveryCommand) {
-  // The seven tokens this page actually uses, emitted inline from the real palettes
+export function renderRefusalPage(recoveryCommand, { away = false } = {}) {
+  if (away) {
+    return standalonePage({
+      title: 'claude-board — this device is not signed in',
+      body: `  <h1>This device is not signed in</h1>
+  <p>Open a fresh sign-in link from your Mac. A link works once, for 10 minutes. Run this in
+  the claude-board folder there and open what it prints on this device:</p>
+  <pre><code>${escHtml(recoveryCommand)}</code></pre>`,
+    });
+  }
+  return standalonePage({
+    title: 'claude-board — this browser is not authorized',
+    body: `  <h1>This browser is not authorized</h1>
+  <p>claude-board serves boards only to a browser it has handed a credential to. This
+  one is holding none — a cleared cookie jar, a different browser, or a fresh profile.</p>
+  <p>Run this to authorize it. It opens a tab and nothing else changes: no reinstall, no
+  restart, and your boards are untouched.</p>
+  <pre><code>${escHtml(recoveryCommand)}</code></pre>
+  <p class="muted">Add <code>--print</code> to get a link to paste into some other
+  browser instead of opening your default one.</p>`,
+  });
+}
+
+export const SIGN_IN_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
+
+/** What an away link opens on. The form names no address, so it posts to the page's own and
+ * the token is nowhere in the markup. */
+export function renderSignInPage() {
+  return standalonePage({
+    title: 'claude-board — sign in',
+    csp: SIGN_IN_CSP,
+    body: `  <h1>Sign in to claude-board</h1>
+  <p>This device will be able to read and answer your boards.</p>
+  <form method="post"><button>Sign this device in</button></form>`,
+  });
+}
+
+function standalonePage({ title, body, csp = CSP }) {
+  // The tokens these pages actually use, emitted inline from the real palettes
   // rather than hand-copied out of them. Self-containment (see above) rules out a
   // link to src/styles.mjs's stylesheet, but it does not rule out reading the same
   // data at render time -- and that is the difference between a page that cannot
@@ -3781,15 +3818,15 @@ export function renderRefusalPage(recoveryCommand) {
   // did not match. The stage keeps its literal because it renders on a surface the
   // page's tokens deliberately never reach; this page renders on the page's own
   // background, so it has no such excuse.
-  const tokens = ['--bg', '--ink', '--ink-2', '--panel-2', '--hairline-2', '--code-ink', '--muted'];
+  const tokens = ['--bg', '--ink', '--ink-2', '--panel-2', '--hairline-2', '--code-ink', '--muted', '--accent', '--accent-ink'];
   const block = (palette) => tokens.map(t => `    ${t}: ${palette[t]};`).join('\n');
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="${escAttr(CSP)}">
-<title>claude-board — this browser is not authorized</title>
+<meta http-equiv="Content-Security-Policy" content="${escAttr(csp)}">
+<title>${escHtml(title)}</title>
 ${faviconLink}
 <style>
   /* The board's saved theme is unreachable here -- it lives in localStorage,
@@ -3816,18 +3853,12 @@ ${block(palettes.light).replace(/^/gm, '  ')}
   pre { background: var(--panel-2); border: 1px solid var(--hairline-2); border-radius: 6px; padding: .85rem 1rem; overflow-x: auto; user-select: all; }
   code { font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--code-ink); }
   .muted { color: var(--muted); font-size: .9rem; }
+  button { min-height: 48px; padding: 0 1.5rem; border: 0; border-radius: 6px; background: var(--accent); color: var(--accent-ink); font: inherit; font-weight: 600; cursor: pointer; }
 </style>
 </head>
 <body>
 <main>
-  <h1>This browser is not authorized</h1>
-  <p>claude-board serves boards only to a browser it has handed a credential to. This
-  one is holding none — a cleared cookie jar, a different browser, or a fresh profile.</p>
-  <p>Run this to authorize it. It opens a tab and nothing else changes: no reinstall, no
-  restart, and your boards are untouched.</p>
-  <pre><code>${escHtml(recoveryCommand)}</code></pre>
-  <p class="muted">Add <code>--print</code> to get a link to paste into some other
-  browser instead of opening your default one.</p>
+${body}
 </main>
 </body>
 </html>

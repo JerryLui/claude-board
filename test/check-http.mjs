@@ -3127,6 +3127,156 @@ async function main() {
     }
   });
 
+  const BUTTON = { ...BROWSER_NAV, origin: AWAY_ORIGIN, 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', 'content-type': 'application/x-www-form-urlencoded' };
+  const mintAway = async (to = port, body = {}) => JSON.parse((await rawRequest(to, 'POST', '/api/handoff', {
+    headers: writeHeaders(SECRET), body: JSON.stringify({ away: true, ...body }),
+  })).body);
+  const openLink = (token, headers = BROWSER_NAV, to = port) => rawRequest(to, 'GET', `/auth/${token}`, { host: AWAY, headers });
+  const pressButton = (token, headers = BUTTON, to = port) => rawRequest(to, 'POST', `/auth/${token}`, { host: AWAY, headers });
+  const AWAY_REFUSAL_COMMAND = 'node bin/away.mjs link';
+
+  await check('AWAY LINK: a link preview spends nothing, the button signs one browser in once and lands it on the board', async () => {
+    try {
+      awayOn();
+      const { token, origin } = await mintAway(port, { boardId });
+      assert.match(token, HANDOFF_TOKEN_RE);
+      assert.equal(origin, 'away');
+      for (const headers of [BROWSER_NAV, { 'user-agent': 'chat-preview' }, { ...BROWSER_NAV, 'sec-purpose': 'prefetch;prerender' }, { ...BROWSER_NAV, 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' }]) {
+        const page = await openLink(token, headers);
+        assert.deepEqual([page.status, renewed(page)], [200, []]);
+        assert.ok(!page.body.includes(token) && !page.body.includes(boardId), 'the page names neither the token nor where it leads');
+        assert.deepEqual([page.headers['cache-control'], page.headers['referrer-policy'], page.headers['x-frame-options'], page.headers['content-security-policy']],
+          ['no-store', 'strict-origin', 'DENY', "default-src 'none'; style-src 'unsafe-inline'; img-src data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"]);
+      }
+      const signedIn = await pressButton(token);
+      assert.deepEqual([signedIn.status, signedIn.headers.location, renewed(signedIn)], [303, `/b/${boardId}`, [fullCookie(ORIGINS[1])]]);
+      assert.equal((await rawRequest(port, 'GET', `/b/${boardId}`, { host: AWAY, headers: { ...BROWSER_NAV, cookie: COOKIE, 'sec-fetch-site': 'same-origin' } })).status, 200);
+
+      const unknown = await openLink('f'.repeat(64));
+      assert.ok(unknown.body.includes(AWAY_REFUSAL_COMMAND) && !unknown.body.includes('authorize'), 'an away refusal names the link command');
+      for (const spent of [await openLink(token), await pressButton(token), await pressButton('f'.repeat(64)), await pressButton('not-a-token')]) {
+        assert.deepEqual([spent.status, renewed(spent), spent.body], [401, [], unknown.body], 'spent, unknown and malformed are one answer');
+      }
+      const again = await pressButton(token, { ...BUTTON, cookie: COOKIE });
+      assert.deepEqual([again.status, again.headers.location, renewed(again)], [303, '/', []], 'a second tap in the browser the first one signed in is not told it holds nothing');
+    } finally {
+      awayOff();
+    }
+  });
+
+  await check('AWAY LINK: of two presses at once one browser is signed in', async () => {
+    try {
+      awayOn();
+      const { token } = await mintAway();
+      const statuses = (await Promise.all([pressButton(token), pressButton(token)])).map(r => [r.status, renewed(r).length]);
+      assert.deepEqual(statuses.sort(), [[303, 1], [401, 0]]);
+    } finally {
+      awayOff();
+    }
+  });
+
+  await check('AWAY LINK: it lasts ten minutes of the daemon\'s clock, whatever the handoff lifetime is', async () => {
+    const ttlHome = mkdtempSync(path.join(tmpdir(), 'claude-board-awayttl-'));
+    const realNow = Date.now;
+    let ahead = 0;
+    let ttlServer;
+    try {
+      awayOn();
+      Date.now = () => realNow() + ahead;
+      let ttlPort;
+      ({ server: ttlServer, port: ttlPort } = await startServer({ home: ttlHome, port: 0, secret: SECRET }));
+      const early = await mintAway(ttlPort);
+      const late = await mintAway(ttlPort);
+      ahead = 595_000;
+      assert.equal((await pressButton(early.token, BUTTON, ttlPort)).status, 303, 'five seconds before the end it still signs in');
+      ahead = 600_001;
+      assert.equal((await openLink(late.token, BROWSER_NAV, ttlPort)).status, 401);
+      assert.equal((await pressButton(late.token, BUTTON, ttlPort)).status, 401);
+    } finally {
+      Date.now = realNow;
+      if (ttlServer) ttlServer.close();
+      rmSync(ttlHome, { recursive: true, force: true });
+      awayOff();
+    }
+  });
+
+  await check('AWAY LINK: only the sign-in page\'s own button presses it: no other site, no request without an Origin, no other method', async () => {
+    try {
+      awayOn();
+      const { token } = await mintAway();
+      for (const [headers, status] of [
+        [{ ...BUTTON, origin: 'https://evil.example', 'sec-fetch-site': 'cross-site' }, 403],
+        [{ ...BUTTON, origin: 'https://other.example.ts.net', 'sec-fetch-site': 'same-site' }, 403],
+        [{ ...BUTTON, 'sec-fetch-site': 'cross-site' }, 403],
+        [{ ...BUTTON, 'sec-fetch-site': 'same-site' }, 403],
+        [{ ...BUTTON, 'sec-fetch-site': 'none' }, 403],
+        [{ ...BUTTON, origin: 'null' }, 403],
+        [{ ...BUTTON, origin: `http://${AWAY}` }, 403],
+        [{ ...BUTTON, origin: undefined }, 401],
+      ]) {
+        const given = Object.fromEntries(Object.entries(headers).filter(([, value]) => value !== undefined));
+        const r = await pressButton(token, given);
+        assert.deepEqual([r.status, renewed(r)], [status, []], JSON.stringify(given));
+      }
+      for (const method of ['HEAD', 'PUT', 'DELETE', 'PATCH', 'OPTIONS']) {
+        assert.equal((await rawRequest(port, method, `/auth/${token}`, { host: AWAY, headers: BUTTON })).status, 401, method);
+      }
+      for (const pathName of [`/auth/${token}/x`, '/auth', `/api/auth/${token}`, '/api/handoff', '/api/board']) {
+        assert.equal((await rawRequest(port, 'POST', pathName, { host: AWAY, headers: BUTTON })).status, 401, pathName);
+      }
+      assert.equal((await rawRequest(port, 'POST', `/auth/${token}`, { headers: { ...BUTTON, origin: base } })).status, 401, 'the Mac\'s own address has no button');
+      assert.equal((await pressButton(token)).status, 303, 'and none of it spent the link');
+    } finally {
+      awayOff();
+    }
+  });
+
+  await check('AWAY LINK: it signs nobody in on the Mac\'s own address, and asking there spends it', async () => {
+    try {
+      awayOn();
+      const { token } = await mintAway();
+      const here = await rawRequest(port, 'GET', `/auth/${token}`, { headers: BROWSER_NAV });
+      assert.deepEqual([here.status, renewed(here)], [401, []]);
+      assert.equal((await pressButton(token)).status, 401);
+    } finally {
+      awayOff();
+    }
+  });
+
+  await check('AWAY LINK: changing the secret ends a link nobody has opened yet, and a fresh one carries the new sign-in', async () => {
+    const CHANGED = 'b'.repeat(64);
+    try {
+      awayOn();
+      const { token } = await mintAway();
+      writeFileSync(SECRET_FILE, `${CHANGED}\n`);
+      const old = await pressButton(token);
+      assert.deepEqual([old.status, renewed(old)], [401, []]);
+      const fresh = JSON.parse((await rawRequest(port, 'POST', '/api/handoff', { headers: writeHeaders(CHANGED), body: '{"away":true}' })).body);
+      assert.equal(renewed(await pressButton(fresh.token))[0].split(';')[0], sessionCookieHeader(CHANGED));
+    } finally {
+      writeFileSync(SECRET_FILE, `${SECRET}\n`);
+      awayOff();
+    }
+  });
+
+  await check('AWAY LINK: with away off none is made and a made one signs in nowhere; only the secret on the Mac makes one', async () => {
+    try {
+      const refused = await rawRequest(port, 'POST', '/api/handoff', { headers: writeHeaders(SECRET), body: '{"away":true}' });
+      assert.deepEqual([refused.status, JSON.parse(refused.body)], [409, { error: 'away is off' }]);
+      awayOn();
+      const { token } = await mintAway();
+      awayOff();
+      assert.equal((await pressButton(token)).status, 403);
+      awayOn();
+      const asBrowser = await rawRequest(port, 'POST', '/api/handoff', { headers: { 'content-type': 'application/json', origin: base, cookie: COOKIE }, body: '{"away":true}' });
+      assert.equal(asBrowser.status, 401);
+      const plain = JSON.parse((await rawRequest(port, 'POST', '/api/handoff', { headers: writeHeaders(SECRET), body: '{}' })).body);
+      assert.equal(plain.origin, 'loopback');
+    } finally {
+      awayOff();
+    }
+  });
+
   await check('every board link an answer prints is on the origin it was asked on, whatever origin the board was posted on', async () => {
     const linked = await postBoard(port, SECRET, {
       title: 'Printed links', mission: 'PRINTED', blocks: [{ kind: 'question', prompt: 'Printedlinks?', widget: 'single', options: [{ label: 'Yes' }] }],

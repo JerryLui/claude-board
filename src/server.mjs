@@ -12,11 +12,14 @@
 //
 // Both credential gates are written as "everything, minus an explicit exception list",
 // never as an enumeration of the routes that need them: a route added later is gated by
-// default rather than by whoever adds it remembering. The exception list for (4) is
+// default rather than by whoever adds it remembering. The one exception to (3) is the
+// away sign-in button, `POST /auth/<token>` from the away origin itself (`isAwaySignIn`),
+// whose token is what it spends. The exception list for (4) is
 // `GET /api/health` (install.sh polls it with plain curl to decide whether the service
 // came up, and it reveals only a version string, an opaque daemon identity (DAEMON_ID)
 // and the process pid), `GET /auth/<token>`, which is the route that HANDS OUT the
-// credential and so cannot require it, `GET /signin/<token>`, which grants nothing
+// credential and so cannot require it (away it answers only the page whose button does),
+// `GET /signin/<token>`, which grants nothing
 // (src/signin-link.mjs), and the vendored mermaid file. `isOpenRoute` is the list.
 //
 // Gate 1 also decides the request's origin kind (`requestOrigin`), from the Host alone. A
@@ -63,10 +66,10 @@ import { createBrowserStreams } from './browser-stream.mjs';
 import { STREAM_WORKER_FILE, STREAM_WORKER_SOURCE } from './stream-worker.mjs';
 import { readSecret, secretPath, secretMatches, sessionToken, sessionCookieMatches, sessionCookie, SECRET_HEADER } from './secret.mjs';
 import { readAway, isAwayHost } from './away.mjs';
-import { createHandoffStore, handoffTarget, recoveryCommand, HANDOFF_TOKEN_RE, HANDOFF_ORIGIN, DEFAULT_PORT, DEFAULT_WAIT_TIMEOUT_MS, waitCeilingMs } from './handoff.mjs';
+import { createHandoffStore, handoffTarget, recoveryCommand, awayCommand, HANDOFF_TOKEN_RE, HANDOFF_ORIGIN, AWAY_LINK_TTL_MS, DEFAULT_PORT, DEFAULT_WAIT_TIMEOUT_MS, waitCeilingMs } from './handoff.mjs';
 import { createSigninStore, signinRefusal, startSignin, SIGNIN_STARTED_PAGE, SIGNIN_SPENT_PAGE } from './signin-link.mjs';
 import { createBoard, addRound, amendRound, abandonOpenRounds, roundOwnedBy, roundFolder, folderOfRound, handOverRounds, applySubmit, buildPacket, roundAnswers, dropResolved, resolveComments, questionBlocks, SUPPRESSED, ANSWERS_DELIVERED, roundContentDrifted } from './board.mjs';
-import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, renderRefusalPage, boardForClient, holdStages, holdAllStages, stageShas, CSP, INDEX_CSP } from './render.mjs';
+import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, renderRefusalPage, renderSignInPage, boardForClient, holdStages, holdAllStages, stageShas, CSP, INDEX_CSP, SIGN_IN_CSP } from './render.mjs';
 import { buildThreadIndex, renderIndexPage, renderMissionsPage, renderThreadRows, folderName } from './indexpage.mjs';
 // The one shape rule for "is this round a full-viewport page" (ADR.md entry 33),
 // imported rather than restated so the push path and the page path can never
@@ -754,15 +757,25 @@ function isCookieWrite(parts) {
  *    set on the same footing again, reaching less than either: see
  *    `BOARD_COOKIE_ACTIONS` above.
  *
- * Every non-GET goes through here, rather than an enumerated list of write routes: a
- * route added later is then gated by default instead of by remembering to add it. The
- * exceptions are `COOKIE_WRITES` above: `BOARD_COOKIE_ACTIONS`, `POMODORO_COOKIE_ACTIONS`,
+ * Every non-GET but `isAwaySignIn`'s goes through here, rather than an enumerated list of
+ * write routes: a route added later is then gated by default instead of by remembering to
+ * add it. The exceptions are `COOKIE_WRITES` above: `BOARD_COOKIE_ACTIONS`, `POMODORO_COOKIE_ACTIONS`,
  * `STORE_COOKIE_ACTIONS`, `MISSION_COOKIE_ACTIONS` and `SESSION_COOKIE_ACTIONS`. */
 function isAuthorizedWrite(req, parts, secret) {
   if (!secret) return false; // no secret on disk: refuse writes rather than fall open
   if (holdsSecret(req, secret)) return true;
   if (!isCookieWrite(parts)) return false;
   return sessionCookieMatches(req.headers.cookie, secret);
+}
+
+/** The one write that needs no credential: the button on an away sign-in page, whose token it
+ * spends. `Origin` has to be there, not merely not wrong: a browser always sends it on a
+ * POST, so its absence is never the page's own button. */
+function isAwaySignIn(req, parts) {
+  return req.method === 'POST'
+    && req.boardOrigin.away
+    && parts[0] === 'auth' && parts.length === 2
+    && req.headers.origin === req.boardOrigin.url;
 }
 
 /** The four GET routes that are reachable with no credential on a loopback host, and the
@@ -780,7 +793,8 @@ function isAuthorizedWrite(req, parts, secret) {
  *    pid is nothing a local process couldn't read off `lsof -i` already.
  *  - `/auth/<token>`: the route that hands a browser its credential. Requiring one here
  *    would be a bootstrap loop. It is protected by the token being single-use, unguessable
- *    and seconds-lived instead (src/handoff.mjs).
+ *    and short-lived instead (src/handoff.mjs). Away it answers a page and spends nothing;
+ *    the page's button is `isAwaySignIn`'s POST.
  *  - `/signin/<token>`: the link a person clicks in a browser that may hold nothing. It
  *    grants nothing either: its token starts one sign-in browser, once, and sets no
  *    cookie (src/signin-link.mjs).
@@ -825,8 +839,9 @@ function wantsHtmlRefusal(req, pathname) {
  * here, so a prompt would be an unanswerable dialog in front of the one page that
  * explains the actual fix. Basic auth was rejected for the same reason. */
 function sendCredentialRefusal(req, res, pathname) {
-  const relative = recoveryCommand(undefined, { absolute: false });
-  const command = req.boardOrigin.away ? relative : recoveryCommand();
+  const { away } = req.boardOrigin;
+  const relative = away ? awayCommand('link') : recoveryCommand(undefined, { absolute: false });
+  const command = away ? relative : recoveryCommand();
   if (wantsHtmlRefusal(req, pathname)) {
     // Always `relative`, as an away refusal's JSON is too: this page renders to
     // any TAB that lands on the read gate -- a cross-origin-shaped navigation is
@@ -835,7 +850,7 @@ function sendCredentialRefusal(req, res, pathname) {
     // `recover` field below, bin/mcp.mjs's own error text) it must not name the
     // reader's home directory or the account it belongs to. See recoveryCommand's own
     // comment for why the relative form is still actionable.
-    return sendHtml(res, 401, renderRefusalPage(relative), { 'cache-control': 'no-store' });
+    return sendHtml(res, 401, renderRefusalPage(relative, { away }), { 'cache-control': 'no-store' });
   }
   return sendJson(res, 401, { error: 'no claude-board credential', recover: command });
 }
@@ -1714,7 +1729,7 @@ function handleGetImage(res, id, name, home) {
   res.end(bytes);
 }
 
-/** POST /api/handoff -> { token, expiresAt }. Reached only with the SECRET (gate 3 does
+/** POST /api/handoff -> { token, expiresAt, ttlMs, origin }. Reached only with the SECRET (gate 3 does
  * not accept the session cookie for anything but submit), so a browser cannot mint
  * itself a second credential and neither can anything holding only a stolen cookie.
  *
@@ -1723,19 +1738,32 @@ function handleGetImage(res, id, name, home) {
  * daemon chose and an open redirect is impossible by construction rather than by
  * validation. The response carries the token only — the caller builds the URL from its
  * own base URL, because "whatever answered on the port" is not necessarily this daemon
- * (see bin/mcp.mjs `safeBoardUrl` for the same reasoning). */
-async function handleMintHandoff(req, res, handoffs) {
+ * (see bin/mcp.mjs `safeBoardUrl` for the same reasoning).
+ *
+ * `away: true` asks for a link to the away origin instead. The answer says which origin the
+ * token is for, so a caller asking a daemon from before away existed can tell. */
+async function handleMintHandoff(req, res, handoffs, secret) {
   let body;
   try {
     body = await readJsonBody(req);
   } catch (err) {
     return sendJson(res, err.status || 400, { error: err.status ? err.message : 'invalid JSON body' });
   }
-  const { token, expiresAt } = handoffs.mint(handoffTarget(body && body.boardId));
-  return sendJson(res, 200, { token, expiresAt, ttlMs: expiresAt - Date.now() });
+  const away = body?.away === true;
+  if (away) {
+    const { host, reason } = readAway();
+    if (!host) return sendJson(res, 409, { error: reason });
+  }
+  const origin = away ? HANDOFF_ORIGIN.away : HANDOFF_ORIGIN.loopback;
+  const { token, expiresAt } = handoffs.mint(
+    handoffTarget(body && body.boardId),
+    away ? { origin, ttlMs: AWAY_LINK_TTL_MS, session: sessionToken(secret) } : { origin },
+  );
+  return sendJson(res, 200, { token, expiresAt, ttlMs: expiresAt - Date.now(), origin });
 }
 
-/** GET /auth/:token — the whole point of the handoff: consume it, set the cookie, and
+/** GET /auth/:token, and POST away — the whole point of the handoff: consume it, set the
+ * cookie, and
  * redirect to a CLEAN url. What is left in the address bar after this carries no
  * credential, so reloading it, bookmarking it and opening the bookmark days later all
  * work (the cookie is long-lived and derived from the secret, so a daemon restart does
@@ -1749,11 +1777,22 @@ async function handleMintHandoff(req, res, handoffs) {
  * `Cache-Control: no-store` because a cached 302 would let a back-button navigation
  * "re-consume" a handoff from disk and land on a board it no longer authorizes;
  * `Referrer-Policy: no-referrer` so the token cannot ride out on a Referer from the
- * board page's own subresource loads. */
+ * board page's own subresource loads.
+ *
+ * Away, a GET answers the sign-in page and spends nothing: a chat's link preview or a
+ * prerender fetches a link nobody has tapped. The page's button POSTs back here. The page's
+ * policy is `strict-origin`: a Referer from it names the origin alone, and `no-referrer`
+ * would make the browser send the form's `Origin` as `null`, which gate 2 refuses. */
 function handleAuthHandoff(req, res, token, handoffs, secret, pathname) {
-  const origin = req.boardOrigin.away ? HANDOFF_ORIGIN.away : HANDOFF_ORIGIN.loopback;
-  const entry = HANDOFF_TOKEN_RE.test(token) ? handoffs.consume(token, origin) : null;
-  const cookie = entry ? sessionToken(secret) : null;
+  const { away } = req.boardOrigin;
+  const origin = away ? HANDOFF_ORIGIN.away : HANDOFF_ORIGIN.loopback;
+  const preview = away && req.method === 'GET';
+  const found = HANDOFF_TOKEN_RE.test(token)
+    ? (preview ? handoffs.peek(token, origin) : handoffs.consume(token, origin))
+    : null;
+  const cookie = found ? sessionToken(secret) : null;
+  const entry = found && (found.session === null || found.session === cookie) ? found : null;
+  const redirectStatus = req.method === 'POST' ? 303 : 302;
   if (!entry || !cookie) {
     // A spent token in the hands of a browser that ALREADY holds the cookie is not an
     // attack, it is the Back button — and three other routine things: a daemon reload
@@ -1763,14 +1802,21 @@ function handleAuthHandoff(req, res, token, handoffs, secret, pathname) {
     // browser it holds no credential, and naming a command that changes nothing for it,
     // is not. Send it where the token would have sent it.
     if (isAuthorizedRead(req, secret)) {
-      res.writeHead(302, { location: handoffTarget(null), 'cache-control': 'no-store', 'content-length': '0' });
+      res.writeHead(redirectStatus, { location: handoffTarget(null), 'cache-control': 'no-store', 'content-length': '0' });
       return res.end();
     }
     return sendCredentialRefusal(req, res, pathname);
   }
-  res.writeHead(302, {
+  if (preview) {
+    return sendHtml(res, 200, renderSignInPage(), {
+      'content-security-policy': SIGN_IN_CSP,
+      'referrer-policy': 'strict-origin',
+      'cache-control': 'no-store',
+    });
+  }
+  res.writeHead(redirectStatus, {
     location: entry.target,
-    'set-cookie': sessionCookie(cookie, { secure: req.boardOrigin.away }),
+    'set-cookie': sessionCookie(cookie, { secure: away }),
     'cache-control': 'no-store',
     'referrer-policy': 'no-referrer',
     'content-length': '0',
@@ -3924,7 +3970,8 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
       // it always did. 401 with no body: a caller that does not hold the credential
       // learns nothing about what is behind it — not whether the board exists, not
       // whether the body would have parsed.
-      if (req.method !== 'GET' && !isAuthorizedWrite(req, parts, secret)) {
+      const awaySignIn = isAwaySignIn(req, parts);
+      if (req.method !== 'GET' && !awaySignIn && !isAuthorizedWrite(req, parts, secret)) {
         refuseCredential(res);
         return;
       }
@@ -3939,7 +3986,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
         return sendCredentialRefusal(req, res, url.pathname);
       }
 
-      if (!open && renewsSession(req, parts, secret)) {
+      if (!open && !awaySignIn && renewsSession(req, parts, secret)) {
         res.setHeader('set-cookie', sessionCookie(sessionToken(secret), { secure: req.boardOrigin.away }));
       }
 
@@ -3947,12 +3994,12 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
         return sendJson(res, 200, { ok: true, version: PKG_VERSION, daemon: DAEMON_ID, pid: process.pid });
       }
 
-      if (req.method === 'GET' && parts[0] === 'auth' && parts.length === 2) {
+      if (awaySignIn || (req.method === 'GET' && parts[0] === 'auth' && parts.length === 2)) {
         return handleAuthHandoff(req, res, parts[1], handoffs, secret, url.pathname);
       }
 
       if (req.method === 'POST' && url.pathname === '/api/handoff') {
-        return await handleMintHandoff(req, res, handoffs);
+        return await handleMintHandoff(req, res, handoffs, secret);
       }
 
       if ((req.method === 'POST' && url.pathname === '/api/signin-link') || (req.method === 'GET' && parts[0] === 'signin' && parts.length === 2)) {

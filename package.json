@@ -21,6 +21,7 @@
   "scripts": {
     "check": "node test/run.mjs",
     "authorize": "node bin/authorize.mjs",
+    "away": "node bin/away.mjs",
     "remote": "node bin/remote.mjs",
     "demo": "node bin/demo.mjs"
   }

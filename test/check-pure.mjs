@@ -8332,6 +8332,10 @@ check('a handoff lives as long as its own mint says, and is redeemed on the orig
     assert.equal(store.consume(token, asked), null, `minted for ${minted}, asked on ${asked}`);
     assert.equal(store.consume(token, minted), null, 'and the asking spent it');
   }
+  const looked = store.mint('/', { origin: 'away' });
+  assert.equal(store.peek(looked.token, 'away')?.target, '/');
+  assert.equal(store.peek(looked.token, 'loopback'), null, 'a look on the wrong origin');
+  assert.equal(store.consume(looked.token, 'away'), null, 'spends it too');
 });
 
 check('minting prunes expired handoffs, so a hammered route cannot grow the map', () => {
