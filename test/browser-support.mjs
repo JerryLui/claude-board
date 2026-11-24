@@ -459,7 +459,8 @@ export function openPhone(send, onEvent, url, cookie, { theme = 'dark', expr = '
 
 /** What a finger trips on in the phone tab `tab` as it stands: every visible control under
  * 44px either way or past the window's edge, every field whose text is under the 16px iOS
- * zooms in on, what spills out of the window in no scroller of its own, and every control
+ * zooms in on, what spills out of the window in no scroller of its own (a box that only clips
+ * is no scroller; text it ends in an ellipsis is exempt, a control is not), and every control
  * of the round (a tall one, taller than the room between the bars, aside) that the header,
  * the send bar or the round switcher still covers once scrolled to the middle. `saw` is
  * which of the `expected` selectors it measured. Two kinds of target are exempt, WCAG
@@ -470,17 +471,26 @@ export async function phoneFaults(tab, expected = []) {
   await tab.quiet();
   return tab.evalPage(`(function (expected) {
     var root = document.documentElement, width = 390;
+    var CONTROLS = 'a[href], button, input:not([type=hidden]), select, textarea, summary, [role=button], [role=radio], [role=checkbox], [role=switch], [tabindex="0"]';
     root.style.scrollBehavior = 'auto';
     function visible(el) { return el.getClientRects().length > 0 && el.checkVisibility({ checkVisibilityCSS: true }) && !el.closest('svg'); }
     function name(el) {
       var cls = typeof el.className === 'string' ? el.className.trim().split(/\\s+/).filter(Boolean).join('.') : '';
       return el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + (cls ? '.' + cls : '') + ' "' + (el.getAttribute('aria-label') || el.textContent || el.getAttribute('placeholder') || '').trim().replace(/\\s+/g, ' ').slice(0, 30) + '"';
     }
-    function scrolls(el) {
-      for (var p = el.parentElement; p && p !== document.body; p = p.parentElement) if (getComputedStyle(p).overflowX !== 'visible') return true;
+    function contained(el) {
+      var control = el.closest(CONTROLS);
+      for (var p = el.parentElement; p && p !== document.body; p = p.parentElement) {
+        var style = getComputedStyle(p);
+        if (style.overflowX === 'auto' || style.overflowX === 'scroll') return true;
+        if (style.overflowX === 'visible') continue;
+        if (style.textOverflow === 'ellipsis' && !(control && p.contains(control))) return true;
+        var clip = p.getBoundingClientRect(), r = el.getBoundingClientRect();
+        if (r.right > clip.right + 0.5 || r.left < clip.left - 0.5) return false;
+      }
       return false;
     }
-    var controls = [].slice.call(document.querySelectorAll('a[href], button, input:not([type=hidden]), select, textarea, summary, [role=button], [role=radio], [role=checkbox], [role=switch], [tabindex="0"]'))
+    var controls = [].slice.call(document.querySelectorAll(CONTROLS))
       .filter(function (el) { return visible(el) && !el.matches('.md-content a, .question-prompt a, .opt-desc a, .comment-item a'); });
     var modal = document.querySelector('dialog[open]');
     if (modal) controls = controls.filter(function (el) { return modal.contains(el); });
@@ -496,7 +506,7 @@ export async function phoneFaults(tab, expected = []) {
     [].slice.call(document.querySelectorAll('body *')).forEach(function (el) {
       if (!visible(el)) return;
       var r = el.getBoundingClientRect();
-      if (r.width > 1 && (r.right > width + 0.5 || r.left < -0.5) && !scrolls(el)) out.spill.push(name(el) + ' ' + Math.round(r.left) + ' to ' + Math.round(r.right));
+      if (r.width > 1 && (r.right > width + 0.5 || r.left < -0.5) && !contained(el)) out.spill.push(name(el) + ' ' + Math.round(r.left) + ' to ' + Math.round(r.right));
     });
     if (!modal) controls.filter(function (el) { return el.closest('.round-current'); }).forEach(function (el) {
       el.scrollIntoView({ block: 'center' });
