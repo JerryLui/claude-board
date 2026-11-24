@@ -143,7 +143,7 @@ async function on(name) {
   const after = served.ok ? await serveNow() : null;
   if (!served.ok || after.problem || after.funnel.length || after.foreign.length
     || !after.ours.some(line => line.startsWith(`https://${host}/ `))) {
-    const undone = await undoServe();
+    const undone = await undo();
     die('claude-board away: Tailscale did not turn the forwarder on. It said:',
       served.ok ? after.problem ?? (served.said || '(nothing)') : served.said || '(nothing)',
       'HTTPS certificates have to be on for the tailnet (Tailscale\'s admin page, DNS).',
@@ -155,8 +155,7 @@ async function on(name) {
     writeAwayHost(host);
     if (readAwayHost() !== host) throw new Error(readAway().reason);
   } catch (err) {
-    try { removeAway(); } catch {}
-    const undone = await undoServe();
+    const undone = await undo();
     die(`claude-board away: the setting could not be written to ${awayPath()} (${err.message}).`,
       `Next: check that folder, then run ${command(`on ${name}`)} again.`,
       undone);
@@ -171,7 +170,18 @@ async function on(name) {
   ].join('\n'));
 }
 
-/** Takes the forwarder back down, and says how that went. */
+/** Turns away off and takes the forwarder back down, and says how that went. An earlier `on`'s
+ * setting goes too: what is published now is not known to be what it was set for. */
+async function undo() {
+  let setting = 'Away is off.';
+  try {
+    removeAway();
+  } catch (err) {
+    setting = `Away may still be on: ${awayPath()} could not be removed (${err.code || err.message}); remove it by hand.`;
+  }
+  return `${setting} ${await undoServe()}`;
+}
+
 async function undoServe() {
   const state = await serveNow();
   if (!state.problem && !state.ours.length) return 'Nothing is published.';
@@ -180,7 +190,7 @@ async function undoServe() {
     const now = await serveNow();
     if (!now.problem && !now.ours.length) return 'The forwarder is off again; nothing is published.';
   }
-  return `The forwarder may still be on: run \`tailscale ${SERVE_OFF.join(' ')}\`. The board refuses the name either way.`;
+  return `The forwarder may still be on: run \`tailscale ${SERVE_OFF.join(' ')}\`.`;
 }
 
 async function off() {

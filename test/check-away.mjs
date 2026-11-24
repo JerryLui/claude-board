@@ -145,12 +145,14 @@ async function main() {
       [{ serveSays: words, hangs: true }, words],
       [{ serveIsANoOp: true }, 'Tailscale did not turn the forwarder on'],
       [{ funnelAfter: true }, 'Tailscale did not turn the forwarder on'],
+      [{ funnelAfter: true, earlier: true }, 'Tailscale did not turn the forwarder on'],
     ]) {
       reset(state);
+      if (state.earlier) writeFileSync(awayFile, `${HOST}\n`, { mode: 0o600 });
       const r = await away(['on', 'board'], { CLAUDE_BOARD_TAILSCALE_TIMEOUT_MS: '4000' });
       assert.equal(r.code, 1);
       assert.ok(r.stderr.includes(says), r.stderr);
-      assert.match(r.stderr, /HTTPS certificates have to be on[\s\S]*Next: [\s\S]*Nothing is published|nothing is published/);
+      assert.match(r.stderr, /HTTPS certificates have to be on[\s\S]*Next: [\s\S]*Away is off\. .*[Nn]othing is published/);
       assert.ok(!existsSync(awayFile));
       assert.deepEqual(serveState(), {});
       assert.equal(await boardAnswers(), 403);
@@ -163,7 +165,7 @@ async function main() {
     try {
       const r = await away(['on', 'board']);
       assert.equal(r.code, 1);
-      assert.match(r.stderr, /could not be written[\s\S]*Next: [\s\S]*forwarder is off again/);
+      assert.match(r.stderr, /could not be written[\s\S]*Next: [\s\S]*Away is off\. The forwarder is off again/);
       assert.ok(asked().includes(SERVE_OFF));
       assert.deepEqual(serveState(), {});
     } finally {
