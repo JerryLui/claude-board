@@ -4096,19 +4096,50 @@ export const ui = `
     });
   });
 
-  // Native HTML5 drag and drop. The gesture itself can't be asserted without a
-  // browser; what matters for the node checks is that the answer ends up as the
-  // ordered array of option labels, read from DOM order on drop.
+  // Native HTML5 drag and drop, beside an up and a down button per row. The drag
+  // gesture itself can't be asserted without a browser; what matters for the node
+  // checks is that the answer ends up as the ordered array of option labels, read
+  // from DOM order after a drop or a press.
 
   function rankOrder(list) {
     return qsa('li', list).map(function (li) { return li.getAttribute('data-choice'); });
   }
 
   function renumberRankList(list) {
-    qsa('li', list).forEach(function (li, i) {
+    qsa('li', list).forEach(function (li, i, items) {
       var idx = li.querySelector('.rank-index');
       if (idx) idx.textContent = String(i + 1);
+      rankMoveBtn(li, 'up').disabled = i === 0;
+      rankMoveBtn(li, 'down').disabled = i === items.length - 1;
     });
+  }
+
+  function rankMoveBtn(li, direction) {
+    return li.querySelector('.rank-move[data-move="' + direction + '"]');
+  }
+
+  function settleRank(list) {
+    selections[list.getAttribute('data-question-id')] = rankOrder(list);
+    renumberRankList(list);
+    updateQuestionsLeftPill();
+    reportActivity(list);
+  }
+
+  // The neighbour is what moves past the pressed row: a row taken out of the
+  // document and put back loses the focus inside it.
+  function moveRankRow(list, li, direction) {
+    var items = qsa('li', list);
+    var i = items.indexOf(li);
+    if (direction === 'up') {
+      if (i === 0) return;
+      list.insertBefore(items[i - 1], items[i + 1] || null);
+    } else {
+      if (i === items.length - 1) return;
+      list.insertBefore(items[i + 1], li);
+    }
+    settleRank(list);
+    var pressed = rankMoveBtn(li, direction);
+    (pressed.disabled ? rankMoveBtn(li, direction === 'up' ? 'down' : 'up') : pressed).focus();
   }
 
   qsa('.rank-list', root).forEach(function (list) {
@@ -4128,10 +4159,17 @@ export const ui = `
       if (readonly || !dragging) return;
       dragging.classList.remove('dragging');
       dragging = null;
-      selections[qid] = rankOrder(list);
-      renumberRankList(list);
-      updateQuestionsLeftPill();
-      reportActivity(list);
+      settleRank(list);
+    });
+    qsa('.rank-move', list).forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        // Same guard, same Notice -- see the .choice-single wiring above.
+        if (readonly || commentMode) {
+          if (commentMode && !readonly) raiseLockedNotice();
+          return;
+        }
+        moveRankRow(list, btn.closest('li'), btn.getAttribute('data-move'));
+      });
     });
     list.addEventListener('dragover', function (ev) {
       if (readonly || !dragging) return;
@@ -4380,7 +4418,7 @@ export const ui = `
   // Everything in a round that is a control or a pin rather than what the round
   // said. The round's chip line goes too: the file's own head names the round.
   var EXPORT_DROP = '.round-chips, .round-end, .comment-btn, .comment-form, .comment-target, .pin-layer, '
-    + '.pull-out, .stage-fold, .fold-toggle, .btn-defer, .rank-grip, .question-picks, .note-head, '
+    + '.pull-out, .stage-fold, .fold-toggle, .btn-defer, .rank-grip, .rank-moves, .question-picks, .note-head, '
     + '.paste-hint, .thumb-remove, '
     + 'script, noscript, source, object, embed, base, meta';
   var nextExportDiagramId = 0;

@@ -1028,6 +1028,16 @@ body.readonly .round-download, body.readonly [data-lens="download"] { display: n
 .rank-list .rank-index { color: var(--accent); font-size: 11.5px; font-weight: 650; font-variant-numeric: tabular-nums;
   width: 20px; height: 20px; line-height: 20px; text-align: center; border-radius: var(--r-sm); background: var(--accent-soft); }
 .rank-list .rank-grip { color: var(--muted); display: inline-flex; }
+.rank-moves { flex: none; display: inline-flex; gap: var(--space-1); }
+.rank-move { width: 28px; height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--hairline-2); border-radius: var(--r-sm); background: var(--panel); color: var(--ink-2);
+  transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease); }
+.rank-move:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.rank-move:disabled { opacity: 0.4; }
+@media (max-width: 560px) {
+  .rank-list li { gap: var(--space-2); padding-left: 10px; padding-right: 10px; }
+  .rank-move { width: 44px; height: 44px; }
+}
 
 .note-field { width: 100%; }
 /* the note's label row carries Defer at its right end */

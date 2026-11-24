@@ -987,6 +987,8 @@ check('archive: the fold arrives folded in the page\'s own bytes, and its contro
     for (const li of rankItems) {
       assert.equal(li.hasAttribute('draggable'), false, 'a rank item in a read-only archive must lose native drag -- a <li> has no disabled state, so this is its lock');
     }
+    assert.deepEqual(document.querySelectorAll('.rank-move').map(b => b.disabled), [true, true, true, true],
+      'every up and down button is disabled, the two that are not at an end included');
   } finally { restore(); }
 });
 
