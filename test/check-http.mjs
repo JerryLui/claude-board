@@ -2901,14 +2901,14 @@ async function main() {
     }
   });
 
-  const AWAY_BUTTON = 'POST /auth/<token>';
+  const AWAY_BUTTON = /^POST \/auth\/(:token|<token>)$/;
   // Every route PROTOCOL.md documents, with each placeholder filled. A route nobody wrote
   // down yet is stood for by the last two: both gates refuse what they do not list. The away
   // sign-in button takes its own page's press with no credential (the AWAY LINK rows).
   const ROUTES = [...new Set(
     [...readFileSync(path.join(checkoutRoot, 'PROTOCOL.md'), 'utf8').matchAll(/^(GET|POST) +(\/\S*)/gm)]
       .map(([, method, route]) => `${method} ${route}`),
-  ), AWAY_BUTTON, 'GET /api/not-a-route', 'POST /api/not-a-route/x/y'].map(line => {
+  ), 'POST /auth/:token', 'GET /api/not-a-route', 'POST /api/not-a-route/x/y'].map(line => {
     const [method, route] = line.split(' ');
     const filled = route.replace(/\[.*$/, '').replace(/\?.*$/, '')
       .replace('/api/board/:id', `/api/board/${boardId}`)
@@ -2968,7 +2968,7 @@ async function main() {
         const headers = { 'content-type': 'application/json', [SECRET_HEADER]: SECRET };
         const bare = await rawRequest(port, method, pathName, { host: AWAY, headers, body: method === 'POST' ? '{}' : null });
         assert.equal(bare.status, 401, `${line}: the secret must be worth nothing away`);
-        const secretOnly = method === 'POST' ? line !== AWAY_BUTTON && !COOKIE_WRITE_ROUTES.has(line) : SECRET_READ_ROUTES.test(line);
+        const secretOnly = method === 'POST' ? !AWAY_BUTTON.test(line) && !COOKIE_WRITE_ROUTES.has(line) : SECRET_READ_ROUTES.test(line);
         if (!secretOnly) continue;
         const signedIn = await rawRequest(port, method, pathName, {
           host: AWAY,
