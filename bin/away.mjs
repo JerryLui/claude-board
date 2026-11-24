@@ -12,7 +12,7 @@
 import { spawn } from 'node:child_process';
 import { daemonPort } from '../src/secret.mjs';
 import { awayCommand, AWAY_LINK_TTL_MS, HANDOFF_ORIGIN, SAFE_BOARD_ID } from '../src/handoff.mjs';
-import { awayFileObstacle, awayPath, isAwayName, readAway, readAwayHost, removeAway, writeAwayHost } from '../src/away.mjs';
+import { awayFileObstacle, awayPath, isAwayName, readAway, removeAway, writeAwayHost } from '../src/away.mjs';
 import { die, mintHandoff, requireSecret } from '../src/mint-handoff.mjs';
 
 const PORT = daemonPort();
@@ -153,7 +153,8 @@ async function on(name) {
 
   try {
     writeAwayHost(host);
-    if (readAwayHost() !== host) throw new Error(readAway().reason);
+    const now = readAway();
+    if (now.host !== host) throw new Error(now.reason ?? 'it holds another name');
   } catch (err) {
     const undone = await undo();
     die(`claude-board away: the setting could not be written to ${awayPath()} (${err.message}).`,

@@ -46,11 +46,7 @@ export function readAway() {
   return { host: null, reason: `away is off: ${awayPath()} ${file.refusal ?? 'does not hold one lowercase Tailscale name'}` };
 }
 
-export function readAwayHost() {
-  return readAway().host;
-}
-
-export function isAwayHost(hostHeader, host = readAwayHost()) {
+export function isAwayHost(hostHeader, host) {
   if (!host || typeof hostHeader !== 'string') return false;
   const named = hostHeader.toLowerCase();
   return named === host || named === `${host}:443`;
