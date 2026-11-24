@@ -1,10 +1,11 @@
-// The node:http daemon: routes, the loopback Host check, a polling wait on
+// The node:http daemon: routes, the Host check, a polling wait on
 // /api/board/:id/wait, and the SSE push on /api/board/:id/events. See
 // PROTOCOL.md "HTTP surface" and "SSE events".
 //
 // Four gates, in this order:
 //
-//   1. Host is loopback, on every route          -> 403, no body
+//   1. Host is loopback or the one configured away name, on every route
+//                                                -> 403, no body
 //   2. non-GET is same-origin                    -> 403, no body
 //   3. a write holds a credential                -> 401, no body
 //   4. a read holds a credential                 -> 401, a page naming the fix
@@ -17,6 +18,11 @@
 // and the process pid), `GET /auth/<token>`, which is the route that HANDS OUT the
 // credential and so cannot require it, `GET /signin/<token>`, which grants nothing
 // (src/signin-link.mjs), and the vendored mermaid file. `isOpenRoute` is the list.
+//
+// Gate 1 also decides the request's origin kind (`requestOrigin`), from the Host alone. A
+// request on the away origin (src/away.mjs) has a signed-in browser's powers and no more:
+// its secret header is ignored, so only the cookie counts, and the open list is
+// `/auth/<token>` and the mermaid file.
 //
 // A credential is one of exactly two things (src/secret.mjs):
 //
@@ -55,8 +61,9 @@ import { decodeSubmitImages, boardImageNames, imageContentType, IMAGE_NAME } fro
 import { ASSET_NAME, MERMAID_ASSET_NAME, SHARED_ASSETS, assetContentType } from './assets.mjs';
 import { createBrowserStreams } from './browser-stream.mjs';
 import { STREAM_WORKER_FILE, STREAM_WORKER_SOURCE } from './stream-worker.mjs';
-import { readSecret, secretPath, secretMatches, sessionToken, sessionCookieMatches, SECRET_HEADER, SESSION_COOKIE, SESSION_MAX_AGE_S } from './secret.mjs';
-import { createHandoffStore, handoffTarget, recoveryCommand, HANDOFF_TOKEN_RE, DEFAULT_PORT, waitCeilingMs } from './handoff.mjs';
+import { readSecret, secretPath, secretMatches, sessionToken, sessionCookieMatches, sessionCookie, SECRET_HEADER } from './secret.mjs';
+import { readAway, isAwayHost } from './away.mjs';
+import { createHandoffStore, handoffTarget, recoveryCommand, HANDOFF_TOKEN_RE, HANDOFF_ORIGIN, DEFAULT_PORT, waitCeilingMs } from './handoff.mjs';
 import { createSigninStore, signinRefusal, startSignin, SIGNIN_STARTED_PAGE, SIGNIN_SPENT_PAGE } from './signin-link.mjs';
 import { createBoard, addRound, amendRound, abandonOpenRounds, roundOwnedBy, roundFolder, folderOfRound, handOverRounds, applySubmit, buildPacket, roundAnswers, dropResolved, resolveComments, questionBlocks, SUPPRESSED, ANSWERS_DELIVERED, roundContentDrifted } from './board.mjs';
 import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, renderRefusalPage, boardForClient, holdStages, holdAllStages, stageShas, CSP, INDEX_CSP } from './render.mjs';
@@ -481,6 +488,38 @@ export function isLoopbackHost(hostHeader) {
   return name === '127.0.0.1' || name === '::1' || name === 'localhost' || LOCALHOST_SUBDOMAIN.test(name);
 }
 
+/** The origin this request was made on, or `refused` with why its Host names neither. The
+ * Host alone decides it: the forwarder brings every away request in over loopback, and any
+ * `X-Forwarded-*` or `Tailscale-*` header is the caller's to write. */
+function requestOrigin(hostHeader) {
+  if (isLoopbackHost(hostHeader)) return { away: false, url: `http://${hostHeader}`, refused: null };
+  const { host, reason } = readAway();
+  if (isAwayHost(hostHeader, host)) return { away: true, url: `https://${host}`, refused: null };
+  return { away: false, url: null, refused: reason ?? 'not a loopback name and not the configured away name' };
+}
+
+/** Each refused Host once an hour, at most `REFUSED_HOSTS_PER_HOUR` of them, so a caller
+ * cannot grow the log at will. */
+const REFUSED_HOSTS_PER_HOUR = 20;
+const REFUSED_HOST_LOG_CHARS = 120;
+
+function createRefusedHostLog() {
+  let windowStart = 0;
+  const logged = new Set();
+  return (hostHeader, reason) => {
+    if (Date.now() - windowStart >= 3_600_000) {
+      windowStart = Date.now();
+      logged.clear();
+    }
+    const line = `${JSON.stringify(String(hostHeader ?? '').slice(0, REFUSED_HOST_LOG_CHARS))}: ${reason}`;
+    if (logged.has(line) || logged.size > REFUSED_HOSTS_PER_HOUR) return;
+    logged.add(line);
+    console.error(logged.size > REFUSED_HOSTS_PER_HOUR
+      ? 'claude-board: more hosts were refused; the rest of this hour\'s are not logged'
+      : `claude-board: refused host ${line}`);
+  };
+}
+
 /** True iff this non-GET request is same-origin. The loopback Host check alone does
  * NOT cover a page on any origin doing `fetch('http://127.0.0.1:7391/...')` — the
  * browser sets `Host: 127.0.0.1:7391` itself, so the Host check passes. What a browser
@@ -490,7 +529,7 @@ export function isLoopbackHost(hostHeader) {
  * local processes, which "Localhost, one human" boundary already trusts. */
 function isSameOriginWrite(req) {
   const origin = req.headers.origin;
-  if (origin && origin !== `http://${req.headers.host}`) return false;
+  if (origin && origin !== req.boardOrigin.url) return false;
   const site = req.headers['sec-fetch-site'];
   if (site && site !== 'same-origin') return false;
   return true;
@@ -509,14 +548,54 @@ function isSameOriginWrite(req) {
  * through the reviewer's browser. It does NOT stop the attack that motivated it: a local
  * process that harvested the cookie — cookies are not port-scoped,
  * so any other http server on this host receives it — sets whatever headers it likes and
- * is indistinguishable from the browser here. That exposure is bounded by the cookie's
- * lifetime and named in SECURITY.md; it is not closed by this function, and this comment
- * exists so nobody later reads the check and concludes that it is. */
-function isAuthorizedRead(req, secret) {
+ * is indistinguishable from the browser here. That exposure is named in SECURITY.md; it
+ * is not closed by this function, and this comment exists so nobody later reads the check
+ * and concludes that it is.
+ *
+ * `pageRoute` is the one relaxation: on `isPageRoute`'s pages a link tapped on another site
+ * opens the page. Every other cross-site read stays refused. */
+function isAuthorizedRead(req, secret, pageRoute = false) {
   if (!secret) return false;
-  if (secretMatches(req.headers[SECRET_HEADER], secret)) return true;
+  if (holdsSecret(req, secret)) return true;
   if (!sessionCookieMatches(req.headers.cookie, secret)) return false;
-  return isSameOriginRead(req);
+  return isSameOriginRead(req) || (pageRoute && isLinkTap(req));
+}
+
+function holdsSecret(req, secret) {
+  return !req.boardOrigin.away && secretMatches(req.headers[SECRET_HEADER], secret);
+}
+
+/** The pages a link on another site may open: their GETs write nothing and spend nothing. */
+function isPageRoute(url, parts) {
+  if (url.pathname === '/' || url.pathname === '/boards') return true;
+  return parts[0] === 'b' && parts.length === 2 && SAFE_BOARD_ID.test(parts[1]);
+}
+
+/** True iff this is a person following a link on another site in a top-level tab. The cookie
+ * is `SameSite=Lax` so that it arrives on such a tap; everything else it would arrive on
+ * (`same-site`: a sibling Tailscale name, another port on this host) is told apart here. */
+function isLinkTap(req) {
+  const h = req.headers;
+  return req.method === 'GET'
+    && h.origin === undefined
+    && (h['sec-fetch-site'] === 'cross-site' || h['sec-fetch-site'] === 'same-site')
+    && h['sec-fetch-mode'] === 'navigate'
+    && h['sec-fetch-dest'] === 'document'
+    && !isPrefetch(req);
+}
+
+/** True iff the cookie authorized this request and the answer should carry it again, which
+ * is what keeps a browser in use signed in. */
+function renewsSession(req, parts, secret) {
+  if (holdsSecret(req, secret) || !sessionCookieMatches(req.headers.cookie, secret)) return false;
+  if (!isSameOriginRead(req) || isPrefetch(req)) return false;
+  return !isEventStream(parts);
+}
+
+function isEventStream(parts) {
+  if (parts[0] !== 'api') return false;
+  if (parts.length === 2) return parts[1] === 'events' || parts[1] === 'stream';
+  return parts[1] === 'board' && parts.length === 4 && parts[3] === 'events';
 }
 
 /** Origin/Sec-Fetch-Site as they apply to a cookie-authenticated READ. Absence passes,
@@ -526,7 +605,7 @@ function isAuthorizedRead(req, secret) {
  * the caller this would be aimed at can set the header anyway. */
 function isSameOriginRead(req) {
   const origin = req.headers.origin;
-  if (origin && origin !== `http://${req.headers.host}`) return false;
+  if (origin && origin !== req.boardOrigin.url) return false;
   const site = req.headers['sec-fetch-site'];
   if (site && site !== 'same-origin' && site !== 'none') return false;
   return true;
@@ -683,12 +762,13 @@ function isCookieWrite(parts) {
  * `STORE_COOKIE_ACTIONS`, `MISSION_COOKIE_ACTIONS` and `SESSION_COOKIE_ACTIONS`. */
 function isAuthorizedWrite(req, parts, secret) {
   if (!secret) return false; // no secret on disk: refuse writes rather than fall open
-  if (secretMatches(req.headers[SECRET_HEADER], secret)) return true;
+  if (holdsSecret(req, secret)) return true;
   if (!isCookieWrite(parts)) return false;
   return sessionCookieMatches(req.headers.cookie, secret);
 }
 
-/** The four GET routes that are reachable with no credential, and the reason each is.
+/** The four GET routes that are reachable with no credential on a loopback host, and the
+ * reason each is. On the away origin only `/auth/<token>` and the mermaid engine are.
  *
  *  - `/api/health`: install.sh polls it with plain `curl` to decide whether the service
  *    actually came up, and gating it would make a fresh install report failure on a
@@ -709,10 +789,9 @@ function isAuthorizedWrite(req, parts, secret) {
  *  - `GET /b/mermaid-<hash>.js`, and NOTHING else under `/b/`: the vendored mermaid
  *    engine, for the one caller that structurally cannot hold the credential. A board
  *    page's html stage is sandboxed with no `allow-same-origin`, so it runs at an opaque
- *    origin and its subresource fetch arrives with no cookie at all (the session cookie is
- *    `SameSite=Strict` besides) — gated, the engine 401s and every diagram inside every
- *    posted artifact stays raw source. What the exception discloses is weaker than what
- *    `/api/health` already does: the bytes are a third-party library published under its
+ *    origin and its subresource fetch arrives with no cookie at all — gated, the engine
+ *    401s and every diagram inside every posted artifact stays raw source. What the
+ *    exception discloses is weaker than what `/api/health` already does: the bytes are a third-party library published under its
  *    own licence, byte-identical for every install of this version, and the name is a
  *    digest OF those public bytes, so a caller who can ask for it by name already had it.
  *    No board, no path, no store contents, and no user data is reachable through it. The
@@ -722,10 +801,11 @@ function isAuthorizedWrite(req, parts, secret) {
  *
  * Deliberately a closed list, not a prefix or a pattern: a route added later is gated
  * unless someone comes here and argues for it. */
-function isOpenRoute(pathname, parts) {
-  if (pathname === '/api/health') return true;
+function isOpenRoute(pathname, parts, away) {
   if (parts[0] === 'b' && parts.length === 2 && MERMAID_ASSET_NAME.test(parts[1])) return true;
-  return (parts[0] === 'auth' || parts[0] === 'signin') && parts.length === 2;
+  if (parts[0] === 'auth' && parts.length === 2) return true;
+  if (away) return false;
+  return pathname === '/api/health' || (parts[0] === 'signin' && parts.length === 2);
 }
 
 /** True iff the refusal should be an HTML page rather than a status and a JSON line.
@@ -747,7 +827,7 @@ function wantsHtmlRefusal(req, pathname) {
  * here, so a prompt would be an unanswerable dialog in front of the one page that
  * explains the actual fix. Basic auth was rejected for the same reason. */
 function sendCredentialRefusal(req, res, pathname) {
-  const command = recoveryCommand();
+  const command = recoveryCommand(undefined, { absolute: !req.boardOrigin.away });
   if (wantsHtmlRefusal(req, pathname)) {
     // The one caller of `recoveryCommand({ absolute: false })`: this page renders to
     // any TAB that lands on the read gate -- a cross-origin-shaped navigation is
@@ -846,6 +926,7 @@ function sendHtml(res, status, html, extraHeaders = null) {
     'content-type': 'text/html; charset=utf-8',
     'content-security-policy': CSP,
     'x-frame-options': 'DENY',
+    'cross-origin-opener-policy': 'same-origin',
     'referrer-policy': 'no-referrer',
     ...(extraHeaders || {}),
   });
@@ -858,7 +939,20 @@ function sendText(res, status, text) {
 }
 
 function boardUrl(req, id) {
-  return `http://${req.headers.host}/b/${id}`;
+  return `${req.boardOrigin.url}/b/${id}`;
+}
+
+/** A mission as this request's reader sees it: each linked board's stored `url`, which is the
+ * origin it was posted on, given on the reader's own. */
+function missionFor(req, view) {
+  return view.boards ? { ...view, boards: view.boards.map(b => ({ ...b, url: boardUrl(req, b.id) })) } : view;
+}
+
+/** A 401 with no body: a refused caller learns nothing, and a refused request renews no sign-in. */
+function refuseCredential(res) {
+  res.removeHeader('set-cookie');
+  res.writeHead(401);
+  res.end();
 }
 
 /** The board's URL and this daemon's own port, for a banner's click target -- built from
@@ -1530,9 +1624,9 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting, s
 }
 
 /** Serve the board page. Reached only by a caller that already presented a credential
- * (gate 4), so it hands out none of its own: no `Set-Cookie` here, and nothing about the
- * credential in the markup. That keeps the served page's bytes a pure function of the
- * board JSON, which is what makes the standalone `pages/*.html` archive byte-identical
+ * (gate 4), so it hands out none of its own: nothing about the credential is in the
+ * markup, and the `Set-Cookie` a renewing request gets is the gate's. That keeps the
+ * served page's bytes a pure function of the board JSON, which is what makes the standalone `pages/*.html` archive byte-identical
  * to what the daemon serves — and what makes an archived board openable from disk with
  * no daemon and no credential at all.
  *
@@ -1658,7 +1752,8 @@ async function handleMintHandoff(req, res, handoffs) {
  * `Referrer-Policy: no-referrer` so the token cannot ride out on a Referer from the
  * board page's own subresource loads. */
 function handleAuthHandoff(req, res, token, handoffs, secret, pathname) {
-  const entry = HANDOFF_TOKEN_RE.test(token) ? handoffs.consume(token) : null;
+  const origin = req.boardOrigin.away ? HANDOFF_ORIGIN.away : HANDOFF_ORIGIN.loopback;
+  const entry = HANDOFF_TOKEN_RE.test(token) ? handoffs.consume(token, origin) : null;
   const cookie = entry ? sessionToken(secret) : null;
   if (!entry || !cookie) {
     // A spent token in the hands of a browser that ALREADY holds the cookie is not an
@@ -1676,7 +1771,7 @@ function handleAuthHandoff(req, res, token, handoffs, secret, pathname) {
   }
   res.writeHead(302, {
     location: entry.target,
-    'set-cookie': `${SESSION_COOKIE}=${cookie}; Path=/; Max-Age=${SESSION_MAX_AGE_S}; HttpOnly; SameSite=Strict`,
+    'set-cookie': sessionCookie(cookie, { secure: req.boardOrigin.away }),
     'cache-control': 'no-store',
     'referrer-policy': 'no-referrer',
     'content-length': '0',
@@ -3385,7 +3480,7 @@ async function handleMission(req, res, parts, home, stream, cache, heldSecret, l
   try {
     assertMissionKey(key);
     if (req.method === 'GET' && tail.length === 0) {
-      return sendJson(res, 200, getMissionView(key, { home, listed }));
+      return sendJson(res, 200, missionFor(req, getMissionView(key, { home, listed })));
     }
     if (req.method !== 'POST') return sendText(res, 404, 'not found');
     if (tail.length === 1 && (tail[0] === 'facts' || tail[0] === 'recheck')) {
@@ -3403,13 +3498,12 @@ async function handleMission(req, res, parts, home, stream, cache, heldSecret, l
       return sendJson(res, err.status || 400, { error: err.status ? err.message : 'invalid JSON body' });
     }
     if (route === 'order' && body && body.kind === 'pm' && !heldSecret) {
-      res.writeHead(401);
-      res.end();
+      refuseCredential(res);
       return;
     }
     let answer;
     let status = 200;
-    if (route === 'upsert') answer = missionView(upsertMission(key, body, { home }), { home, listed });
+    if (route === 'upsert') answer = missionFor(req, missionView(upsertMission(key, body, { home }), { home, listed }));
     else if (route === 'launch') answer = launchMission(key, body, { home, listed });
     else if (route === 'join') {
       const before = boundBefore(key, home);
@@ -3618,7 +3712,7 @@ async function handleMissionFacts(req, res, key, route, home, stream, cache, lis
   }
   if (route === 'facts') recordPrFacts(key, body, { home });
   cache.drop();
-  const answer = getMissionView(key, { home, listed });
+  const answer = missionFor(req, getMissionView(key, { home, listed }));
   broadcastMissions(stream, key);
   return sendJson(res, 200, answer);
 }
@@ -3630,12 +3724,13 @@ function broadcastMissions(stream, key) {
   stream.broadcast('missions', { key, now: Date.now() });
 }
 
-/** The overview a request answers: the cached one, each tab round given its `url` off this
- * request's host (as `boardUrl` gives every board link it hands back, so it is built per
- * request and never cached), and the watcher's state and the spin-down flag read now. */
+/** The overview a request answers: the cached one, each tab round and each mission's linked
+ * board given its `url` off this request's origin (as `boardUrl` gives every board link it
+ * hands back, so it is built per request and never cached), and the watcher's state and the
+ * spin-down flag read now. */
 function overviewFor(req, overview, sessions, home) {
   const tabs = (overview.tabs || []).map(t => ({ ...t, rounds: t.rounds.map(r => ({ ...r, url: boardUrl(req, r.board) })) }));
-  return { ...overview, tabs, watcher: sessions.watcher(), spinDown: spinDownBrief(home) };
+  return { ...overview, missions: overview.missions.map(m => missionFor(req, m)), tabs, watcher: sessions.watcher(), spinDown: spinDownBrief(home) };
 }
 
 /** `GET /api/spin-down` answers the flag (src/spin-down.mjs); `POST /api/spin-down`
@@ -3782,6 +3877,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
   // boot-time reconciliation is startServer's job, exactly as it already was.
   const pomo = pomodoro || createPomodoro({ home });
   const handoffs = createHandoffStore();
+  const logRefusedHost = createRefusedHostLog();
   const signins = createSigninStore();
   // Re-read PER REQUEST, not once at startup. SECURITY.md,
   // PROTOCOL.md, CHANGELOG.md and src/secret.mjs all name rotating the secret as THE way
@@ -3809,7 +3905,9 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
   const requestHandler = async function requestHandler(req, res) {
     try {
       const secret = currentSecret();
-      if (!isLoopbackHost(req.headers.host)) {
+      req.boardOrigin = requestOrigin(req.headers.host);
+      if (req.boardOrigin.refused) {
+        logRefusedHost(req.headers.host, req.boardOrigin.refused);
         res.writeHead(403);
         res.end();
         return;
@@ -3828,8 +3926,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
       // learns nothing about what is behind it — not whether the board exists, not
       // whether the body would have parsed.
       if (req.method !== 'GET' && !isAuthorizedWrite(req, parts, secret)) {
-        res.writeHead(401);
-        res.end();
+        refuseCredential(res);
         return;
       }
 
@@ -3838,8 +3935,13 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
       // the write refusal this one carries a body, because the caller it most often
       // refuses is a human looking at a tab, not a program: see sendCredentialRefusal.
       // Without it any local process reads every board, source excerpts included.
-      if (req.method === 'GET' && !isOpenRoute(url.pathname, parts) && !isAuthorizedRead(req, secret)) {
+      const open = req.method === 'GET' && isOpenRoute(url.pathname, parts, req.boardOrigin.away);
+      if (req.method === 'GET' && !open && !isAuthorizedRead(req, secret, isPageRoute(url, parts))) {
         return sendCredentialRefusal(req, res, url.pathname);
+      }
+
+      if (!open && renewsSession(req, parts, secret)) {
+        res.setHeader('set-cookie', sessionCookie(sessionToken(secret), { secure: req.boardOrigin.away }));
       }
 
       if (req.method === 'GET' && url.pathname === '/api/health') {
@@ -4016,8 +4118,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
           // cookie-write allowlists above, so this reduces to "the secret only," with
           // no new list to maintain and no risk of a future action silently widening it.
           if (!isAuthorizedWrite(req, parts, secret)) {
-            res.writeHead(401);
-            res.end();
+            refuseCredential(res);
             return;
           }
           return await handleWait(req, res, boardId, url, home, sse, streamHub, waitingCache);
@@ -4032,8 +4133,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
           // comment on what it does and does not stop). Gate 4 above has already
           // required a read credential; this narrows it to the shim's.
           if (!isAuthorizedWrite(req, parts, secret)) {
-            res.writeHead(401);
-            res.end();
+            refuseCredential(res);
             return;
           }
           return handleReadBoard(req, res, boardId, home);
@@ -4092,8 +4192,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
       // with the secret only, as one mission is below.
       if (req.method === 'GET' && url.pathname === '/api/binding') {
         if (!isAuthorizedWrite(req, parts, secret)) {
-          res.writeHead(401);
-          res.end();
+          refuseCredential(res);
           return;
         }
         return handleBinding(res, url, bindings, sessions.listed(), home);
@@ -4117,11 +4216,10 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
         // narrowed to the secret as `read` is above: `isAuthorizedWrite` with no mission
         // action on a cookie list.
         if (req.method === 'GET' && !isAuthorizedWrite(req, parts, secret)) {
-          res.writeHead(401);
-          res.end();
+          refuseCredential(res);
           return;
         }
-        return await handleMission(req, res, parts, home, streamHub, missionsCache, secretMatches(req.headers[SECRET_HEADER], secret), sessions.listed(), { req, sse, stranded, stream: streamHub, waiting: waitingCache });
+        return await handleMission(req, res, parts, home, streamHub, missionsCache, holdsSecret(req, secret), sessions.listed(), { req, sse, stranded, stream: streamHub, waiting: waitingCache });
       }
 
       return sendText(res, 404, 'not found');

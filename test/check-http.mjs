@@ -4,7 +4,7 @@
 // the loopback Host refusal. No browser, no real network beyond 127.0.0.1.
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync, unlinkSync, statSync, realpathSync, chmodSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync, unlinkSync, statSync, realpathSync, chmodSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
@@ -21,7 +21,8 @@ import { DEFAULT_AWAIT_TIMEOUT_MS, STRANDED_BANNER, ANSWERS_DELIVERED, MAX_SUBMI
 // the roots a refusal names are the ones the daemon has in force right now, read from
 // the product's own parser rather than restated here.
 import { MAX_REF_BYTES, MAX_HTML_BYTES, resolveRefRoots } from '../src/resolve.mjs';
-import { readBoard, writeBoard } from '../src/store.mjs';
+import { readBoard, readMission, writeBoard } from '../src/store.mjs';
+import { STREAM_WORKER_FILE } from '../src/stream-worker.mjs';
 import { MAX_SUBMIT_BYTES } from '../src/post-limit.mjs';
 // Used only to ARRANGE fixture states the HTTP surface itself has no fast way to reach
 // (a nonzero cycle, a timer already mid-break) -- every ASSERTION below still goes
@@ -2466,9 +2467,10 @@ async function main() {
     // The index sorts live-first then newest, so a board posted through a CSRF hole is
     // deterministically the top row, with an attacker-chosen cwd as its label -- one
     // clickjacked click from loading a board whose html stage runs at this origin.
-    for (const pathName of ['/', `/b/${boardId}`]) {
+    for (const pathName of ['/', '/boards', `/b/${boardId}`]) {
       const r = await fetch(`${base}${pathName}`);
       assert.equal(r.headers.get('x-frame-options'), 'DENY', `${pathName} must not be framable`);
+      assert.equal(r.headers.get('cross-origin-opener-policy'), 'same-origin', `a page that opens ${pathName} must not keep a handle on it`);
       const csp = r.headers.get('content-security-policy');
       assert.ok(csp, `${pathName} must carry a CSP`);
       assert.ok(csp.includes("frame-ancestors 'none'"), 'the CSP must forbid framing too');
@@ -2478,7 +2480,7 @@ async function main() {
       // form, so it gets 'self' -- 'none' there is not "stricter", it is a dead search
       // box (the browser refuses the submit outright). See render.mjs INDEX_CSP.
       assert.ok(
-        csp.includes(pathName === '/' ? "form-action 'self'" : "form-action 'none'"),
+        csp.includes(pathName.startsWith('/b/') ? "form-action 'none'" : "form-action 'self'"),
         `${pathName} carries the wrong form-action: ${csp}`,
       );
       // ...and still allow what the page genuinely needs, or the whole UI is dead:
@@ -2669,26 +2671,17 @@ async function main() {
 
     const setCookie = [].concat(redeemed.headers['set-cookie'] || []).join('; ');
     assert.match(setCookie, new RegExp(`${SESSION_COOKIE}=[0-9a-f]{64}`), 'the browser is handed the session cookie');
-    assert.match(setCookie, /HttpOnly/, 'page script must not be able to read it');
-    assert.match(setCookie, /SameSite=Strict/, 'no other origin may cause it to be sent');
-    assert.match(setCookie, /Path=\//, 'it covers every read route, not one board');
-    assert.doesNotMatch(setCookie, /Domain=/i, 'host-only: no Domain attribute, so no sibling host can claim it');
-    // Both halves, because they pull against each other and only one of them used to be
-    // pinned. Long enough that bookmark-days-later works; SHORT enough that
-    // the exposure — cookies are not port-scoped, so any other
-    // loopback server the reviewer visits receives this value — expires while expiring it
-    // is still worth something. An unbounded upper end is how this sat at 400 days.
-    const maxAge = Number((setCookie.match(/Max-Age=(\d+)/) || [])[1]);
-    assert.ok(maxAge > 7 * 24 * 3600, `the cookie must outlive the browser session (Max-Age=${maxAge}s) — a bookmark opened days later still has to work`);
-    assert.ok(maxAge <= 90 * 24 * 3600, `the cookie must not be effectively permanent (Max-Age=${maxAge}s) — it reaches every other server on this host`);
+    const cookie = setCookie.split(';')[0];
+    assert.equal(setCookie, `${cookie}; Path=/; Max-Age=34560000; HttpOnly; SameSite=Lax`,
+      'host-only, unreadable to page script, 400 days, sent on a link tapped elsewhere, and not Secure on the plain-http loopback origin');
 
     // The cookie alone, with no handoff and no secret, is
     // what makes reloading and bookmarking work.
-    const cookie = setCookie.split(';')[0];
     const reload = await rawRequest(port, 'GET', `/b/${boardId}`, { headers: { ...BROWSER_NAV, cookie } });
     assert.equal(reload.status, 200, 'the authorized browser renders the board');
     assert.ok(reload.body.includes('id="board-data"'));
-    assert.equal(reload.headers['set-cookie'], undefined, 'the board page hands out no credential of its own — its bytes stay a pure function of the board JSON');
+    assert.deepEqual(reload.headers['set-cookie'], [setCookie], 'and a visit renews the sign-in it was made with');
+    assert.ok(!reload.body.includes(cookie.split('=')[1]), 'the markup holds no credential: its bytes stay a pure function of the board JSON');
 
     // Single-use. The replay is what a process that read the URL out of
     // `ps` would attempt, and it gains nothing.
@@ -2739,6 +2732,362 @@ async function main() {
       body: '{}',
     });
     assert.equal(asBrowser.status, 401, 'the session cookie is accepted on submit and nowhere else — least of all on the route that mints credentials');
+  });
+
+  // --- the away origin (src/away.mjs) -------------------------------------------
+
+  const AWAY = 'board.example.ts.net';
+  const AWAY_ORIGIN = `https://${AWAY}`;
+  const AWAY_FILE = path.join(path.dirname(SECRET_FILE), 'away');
+  const COOKIE = sessionCookieHeader(SECRET);
+  const awayOff = () => rmSync(AWAY_FILE, { recursive: true, force: true });
+  const awayOn = (text = `${AWAY}\n`, mode = 0o600) => {
+    awayOff();
+    writeFileSync(AWAY_FILE, text);
+    chmodSync(AWAY_FILE, mode);
+  };
+  const ORIGINS = [
+    { name: 'loopback', host: `127.0.0.1:${port}`, url: `http://127.0.0.1:${port}`, attributes: '' },
+    { name: 'away', host: AWAY, url: AWAY_ORIGIN, attributes: '; Secure' },
+  ];
+  const renewed = r => [].concat(r.headers['set-cookie'] || []);
+  const fullCookie = origin => `${COOKIE}; Path=/; Max-Age=34560000; HttpOnly; SameSite=Lax${origin.attributes}`;
+
+  await check('AWAY: the one configured name is answered, and every other host is refused as before it', async () => {
+    const get = host => rawRequest(port, 'GET', '/boards', { host, headers: { cookie: COOKIE } });
+    try {
+      awayOff();
+      assert.equal((await get(AWAY)).status, 403, 'no setting, no away host');
+
+      awayOn();
+      for (const host of [AWAY, `${AWAY}:443`, AWAY.toUpperCase(), `127.0.0.1:${port}`, `board.localhost:${port}`]) {
+        assert.equal((await get(host)).status, 200, `Host "${host}" is this Mac's own or the configured name`);
+      }
+      for (const host of [
+        'other.example.ts.net', 'attacker.test', `evil.${AWAY}`, `x${AWAY}`, `${AWAY}.evil.example`, `${AWAY}.`, 'example.ts.net',
+        `${AWAY}:80`, `${AWAY}:8443`, `${AWAY}:0443`, `${AWAY}:`, `${AWAY}:443@evil.example`, `${AWAY}@127.0.0.1`, `${AWAY}:443:443`, '100.64.0.1',
+      ]) {
+        const r = await get(host);
+        assert.equal(r.status, 403, `Host "${host}" is not the configured name`);
+        assert.equal(r.body, '');
+      }
+    } finally {
+      awayOff();
+    }
+  });
+
+  await check('AWAY: a setting that is not one well-formed name in an owner-only plain file leaves away off, loopback as it was, and is logged', async () => {
+    const ownHome = mkdtempSync(path.join(tmpdir(), 'claude-board-awayfile-'));
+    const { server: own, port: ownPort } = await startServer({ home: ownHome, port: 0, secret: SECRET });
+    const get = host => rawRequest(ownPort, 'GET', '/boards', { host, headers: { cookie: COOKIE } });
+    const refused = async what => {
+      assert.equal((await get(AWAY)).status, 403, `${what}: away must be off`);
+      assert.equal((await get(`127.0.0.1:${ownPort}`)).status, 200, `${what}: the Mac's own address must not notice`);
+    };
+    const said = [];
+    const realError = console.error;
+    console.error = (...args) => said.push(args.join(' '));
+    try {
+      for (const mode of [0o640, 0o604, 0o620, 0o602, 0o644, 0o000]) {
+        awayOn(`${AWAY}\n`, mode);
+        await refused(`mode ${mode.toString(8)}`);
+      }
+      assert.ok(said.some(line => line.includes(AWAY) && line.includes('mode 640')), `the log says which mode refused it: ${said.join('\n')}`);
+      // Each holds or names the host asked for, so a reader any looser than "exactly this
+      // name" turns one of them on.
+      for (const text of ['', '\n', `${AWAY.toUpperCase()}\n`, ` ${AWAY}\n`, `${AWAY} \n`, `${AWAY}\n\n`, `${AWAY}\nother.example.ts.net\n`,
+        `${AWAY}:443\n`, `https://${AWAY}\n`, `${AWAY}.\n`, `*.example.ts.net\n`, `${AWAY}${'\n'.repeat(300)}`]) {
+        awayOn(text);
+        await refused(JSON.stringify(text));
+      }
+      assert.ok(said.some(line => line.includes('does not hold one lowercase Tailscale name')), 'the log says a malformed setting is malformed');
+      for (const name of ['attacker.test', 'ts.net', 'example.ts.net', '-a.example.ts.net', 'a..example.ts.net', 'board.example.ts.net.attacker.test']) {
+        awayOn(`${name}\n`);
+        assert.equal((await get(name)).status, 403, `"${name}" is not a name this Mac can be forwarded under`);
+      }
+      awayOff();
+      mkdirSync(AWAY_FILE);
+      await refused('a directory');
+      awayOff();
+      const real = path.join(home, 'away-elsewhere');
+      writeFileSync(real, `${AWAY}\n`, { mode: 0o600 });
+      symlinkSync(real, AWAY_FILE);
+      await refused('a symlink');
+    } finally {
+      console.error = realError;
+      awayOff();
+      own.close();
+      rmSync(ownHome, { recursive: true, force: true });
+    }
+  });
+
+  await check('AWAY: a refused host is logged once with its reason, quoted and cut short, and no caller can grow the log at will', async () => {
+    const logHome = mkdtempSync(path.join(tmpdir(), 'claude-board-hostlog-'));
+    const said = [];
+    const realError = console.error;
+    let own, ownPort;
+    try {
+      ({ server: own, port: ownPort } = await startServer({ home: logHome, port: 0, secret: SECRET }));
+      console.error = (...args) => said.push(args.join(' '));
+      const get = host => rawRequest(ownPort, 'GET', '/', { host });
+      await get('attacker.test');
+      await get('attacker.test');
+      awayOn();
+      await get(`evil"${'x'.repeat(400)}`);
+      assert.deepEqual(said, [
+        'claude-board: refused host "attacker.test": away is off',
+        `claude-board: refused host "evil\\"${'x'.repeat(115)}": not a loopback name and not the configured away name`,
+      ]);
+      for (let i = 0; i < 60; i++) await get(`h${i}.test`);
+      assert.equal(said.length, 21, 'twenty hosts an hour, and one line saying the rest are not logged');
+      assert.match(said.at(-1), /not logged/);
+    } finally {
+      console.error = realError;
+      awayOff();
+      if (own) own.close();
+      rmSync(logHome, { recursive: true, force: true });
+    }
+  });
+
+  // Every route PROTOCOL.md documents, with each placeholder filled. A route nobody wrote
+  // down yet is stood for by the last two: both gates refuse what they do not list.
+  const ROUTES = [...new Set(
+    [...readFileSync(path.join(checkoutRoot, 'PROTOCOL.md'), 'utf8').matchAll(/^(GET|POST) +(\/\S*)/gm)]
+      .map(([, method, route]) => `${method} ${route}`),
+  ), 'GET /api/not-a-route', 'POST /api/not-a-route/x/y'].map(line => {
+    const [method, route] = line.split(' ');
+    const filled = route.replace(/\[.*$/, '').replace(/\?.*$/, '')
+      .replace('/api/board/:id', `/api/board/${boardId}`)
+      .replace('worker-<hash>.js', STREAM_WORKER_FILE)
+      .replace('<asset>', SCRIPT_ASSET).replace(':boardId', boardId).replace('<name>', `${'0'.repeat(64)}.png`)
+      .replace(/:token|<token>/, 'f'.repeat(64)).replace(':key', 'WALK').replace(/:o?id/g, 'x');
+    return { method, pathName: filled, line };
+  });
+  const COOKIE_WRITE_ROUTES = new Set([
+    ...['submit', 'attended', 'activity'].map(a => `POST /api/board/:id/${a}`),
+    ...['ensure', 'pause', 'resume', 'reset', 'settings', 'preview', 'notifyTest', 'forward', 'restart'].map(a => `POST /api/pomodoro/${a}`),
+    ...['watch', 'unwatch', 'beat'].map(a => `POST /api/stream/:id/${a}`),
+    ...['order', 'recheck'].map(a => `POST /api/mission/:key/${a}`),
+    'POST /api/session/:id/order', 'POST /api/store/prune',
+  ]);
+  const SECRET_READ_ROUTES = /^GET \/api\/(board\/:id\/(wait|read)|binding|mission\/:key)\b/;
+  const OPEN_ON_LOOPBACK = /^GET \/(api\/health|signin\/)/;
+
+  await check('AWAY: a caller holding nothing is refused on every route, by the local address and the away name alike', async () => {
+    assert.ok(ROUTES.length > 50, `the walk must read the documented routes, got ${ROUTES.length}`);
+    try {
+      awayOn();
+      for (const { method, pathName, line } of ROUTES) {
+        for (const origin of ORIGINS) {
+          const open = origin.name === 'loopback' && OPEN_ON_LOOPBACK.test(line);
+          const r = await rawRequest(port, method, pathName, { host: origin.host, headers: { 'content-type': 'application/json' } });
+          if (open) assert.notEqual(r.status, 401, `${line} stays open on loopback`);
+          else assert.equal(r.status, 401, `${line} on ${origin.name} with no credential answered ${r.status}`);
+          assert.deepEqual(renewed(r), [], `${line} on ${origin.name} signs nobody in`);
+        }
+      }
+      const api = await rawRequest(port, 'GET', '/api/search?q=x', { host: AWAY });
+      assert.ok(!api.body.includes(repoRoot()), 'the refusal names no path on this Mac to a device that holds nothing');
+    } finally {
+      awayOff();
+    }
+  });
+
+  await check('AWAY: only the mermaid engine is served with no cookie; its neighbours under /b/ are not', async () => {
+    try {
+      awayOn();
+      const engine = await rawRequest(port, 'GET', `/b/${MERMAID_ASSET}`, { host: AWAY });
+      assert.equal(engine.status, 200, 'a sandboxed stage holds no cookie on any origin');
+      assert.match(engine.headers['content-type'] || '', /javascript/);
+      for (const name of [SCRIPT_ASSET, STYLE_ASSET, boardId, `${boardId}/${MERMAID_ASSET}`, `${MERMAID_ASSET}/x`, 'mermaid-0123456789ABCDEF.js', 'mermaid-0123456789abcdef.css']) {
+        assert.equal((await rawRequest(port, 'GET', `/b/${name}`, { host: AWAY })).status, 401, `/b/${name} needs the cookie`);
+      }
+    } finally {
+      awayOff();
+    }
+  });
+
+  await check('AWAY: the secret header is ignored, so every route that takes the secret alone refuses an away caller, with a cookie or without', async () => {
+    try {
+      awayOn();
+      for (const { method, pathName, line } of ROUTES) {
+        const headers = { 'content-type': 'application/json', [SECRET_HEADER]: SECRET };
+        const bare = await rawRequest(port, method, pathName, { host: AWAY, headers, body: method === 'POST' ? '{}' : null });
+        assert.equal(bare.status, 401, `${line}: the secret must be worth nothing away`);
+        const secretOnly = method === 'POST' ? !COOKIE_WRITE_ROUTES.has(line) : SECRET_READ_ROUTES.test(line);
+        if (!secretOnly) continue;
+        const signedIn = await rawRequest(port, method, pathName, {
+          host: AWAY,
+          headers: { ...headers, cookie: COOKIE, origin: AWAY_ORIGIN, 'sec-fetch-site': 'same-origin' },
+          body: method === 'POST' ? '{}' : null,
+        });
+        assert.equal(signedIn.status, 401, `${line}: a signed-in browser has no such power, and neither has an away device`);
+        assert.deepEqual(renewed(signedIn), [], `${line}: a refused request renews nothing`);
+      }
+      const pm = await rawRequest(port, 'POST', '/api/mission/WALK/order', {
+        host: AWAY, headers: { 'content-type': 'application/json', [SECRET_HEADER]: SECRET, cookie: COOKIE }, body: JSON.stringify({ kind: 'pm', text: 'x' }),
+      });
+      assert.equal(pm.status, 401, 'a pm order wants the secret, which is worth nothing away');
+    } finally {
+      awayOff();
+    }
+  });
+
+  await check('AWAY: a signed-in device reads the pages and answers a round, and its answer is the one the waiting agent gets', async () => {
+    try {
+      awayOn();
+      for (const pathName of ['/', '/boards', `/b/${boardId}`]) {
+        const page = await rawRequest(port, 'GET', pathName, { host: AWAY, headers: { ...BROWSER_NAV, cookie: COOKIE, 'sec-fetch-site': 'none' } });
+        assert.equal(page.status, 200, pathName);
+        assert.ok(!page.body.includes(`127.0.0.1:${port}`), `${pathName} prints no address the device cannot reach`);
+      }
+      const asked = await postBoard(port, SECRET, { title: 'Away', blocks: [{ kind: 'question', prompt: 'Merge?', widget: 'single', options: [{ label: 'Yes' }] }] });
+      const qid = readBoard(asked.boardId, home).blocks[0].id;
+      const send = headers => rawRequest(port, 'POST', `/api/board/${asked.boardId}/submit`, {
+        host: AWAY, headers: { 'content-type': 'application/json', cookie: COOKIE, ...headers },
+        body: JSON.stringify({ round: 1, action: 'send', answers: [{ id: qid, status: 'answered', choice: 'Yes', note: '' }], comments: [] }),
+      });
+      for (const headers of [
+        { origin: `http://${AWAY}` }, { origin: 'null' }, { origin: `http://127.0.0.1:${port}` }, { origin: 'https://other.example.ts.net' }, { origin: `${AWAY_ORIGIN}:8443` },
+        { 'sec-fetch-site': 'cross-site' }, { 'sec-fetch-site': 'same-site' },
+      ]) {
+        assert.equal((await send(headers)).status, 403, `a write from another origin: ${JSON.stringify(headers)}`);
+      }
+      assert.equal(readBoard(asked.boardId, home).rounds[0].status, 'open', 'no refused write touched the round');
+      assert.equal((await send({ origin: AWAY_ORIGIN, 'sec-fetch-site': 'same-origin' })).status, 200);
+      const packet = await (await fetch(`${base}/api/board/${asked.boardId}/wait?round=1`)).json();
+      assert.deepEqual([packet.status, packet.answers[0].choice, packet.url], ['submitted', 'Yes', `${base}/b/${asked.boardId}`],
+        'the agent, on the Mac, gets the answer and a link that works there');
+    } finally {
+      awayOff();
+    }
+  });
+
+  await check('a link tapped on another site opens a page and nothing else, renewing no sign-in, on the Mac and away', async () => {
+    const TAP = { ...BROWSER_NAV, cookie: COOKIE, 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', 'sec-fetch-user': '?1' };
+    const before = snapshotTree(home);
+    try {
+      awayOn();
+      for (const origin of ORIGINS) {
+        const get = (pathName, headers) => rawRequest(port, 'GET', pathName, { host: origin.host, headers });
+        for (const site of ['cross-site', 'same-site']) {
+          for (const pathName of ['/', '/boards', `/b/${boardId}`]) {
+            const r = await get(pathName, { ...TAP, 'sec-fetch-site': site });
+            assert.equal(r.status, 200, `${origin.name}: a ${site} tap opens ${pathName}`);
+            assert.deepEqual(renewed(r), [], `${origin.name}: another site's link renews no sign-in`);
+          }
+        }
+        for (const pathName of ['/api/missions', '/api/waiting', '/api/search?q=x', '/api/events', '/api/stream', `/api/board/${boardId}/events`,
+          `/b/${SCRIPT_ASSET}`, `/b/${boardId}/${'0'.repeat(64)}.png`, `/auth/${'f'.repeat(64)}`]) {
+          assert.equal((await get(pathName, TAP)).status, 401, `${origin.name}: a tap reads no ${pathName}`);
+        }
+        for (const [what, headers] of Object.entries({
+          'an iframe': { 'sec-fetch-dest': 'iframe' }, 'an embed': { 'sec-fetch-dest': 'embed' }, 'an image': { 'sec-fetch-dest': 'image', 'sec-fetch-mode': 'no-cors' },
+          'a fetch': { 'sec-fetch-dest': 'empty', 'sec-fetch-mode': 'cors' }, 'a half-named navigation': { 'sec-fetch-dest': undefined },
+          'a prefetch': { 'sec-purpose': 'prefetch' }, 'a prerender': { 'sec-purpose': 'prefetch;prerender' }, 'an old prefetch': { purpose: 'prefetch' },
+          'a foreign origin': { origin: 'https://evil.example' }, 'a null origin': { origin: 'null' },
+          'no cookie': { cookie: undefined },
+        })) {
+          const sent = Object.fromEntries(Object.entries({ ...TAP, ...headers }).filter(([, v]) => v !== undefined));
+          const r = await get(`/b/${boardId}`, sent);
+          assert.equal(r.status, 401, `${origin.name}: ${what} is no tap`);
+          assert.ok(!r.body.includes('id="board-data"'));
+        }
+        const nullRead = await get('/api/missions', { cookie: COOKIE, origin: 'null' });
+        assert.equal(nullRead.status, 401, `${origin.name}: an opaque origin reads nothing`);
+      }
+      awayOff();
+      const after = snapshotTree(home);
+      for (const [rel, file] of before) assert.equal(after.get(rel)?.sha, file.sha, `opening a page writes nothing: ${rel}`);
+      assert.equal(after.size, before.size);
+    } finally {
+      awayOff();
+    }
+  });
+
+  await check('a request the cookie authorized renews the sign-in for 400 days, with the origin\'s own attributes, and nothing else does', async () => {
+    try {
+      awayOn();
+      for (const origin of ORIGINS) {
+        const ask = (method, pathName, headers, body = null) => rawRequest(port, method, pathName, { host: origin.host, headers, body });
+        for (const pathName of ['/', `/b/${boardId}`, '/api/waiting']) {
+          assert.deepEqual(renewed(await ask('GET', pathName, { cookie: COOKIE })), [fullCookie(origin)], `${origin.name} ${pathName}`);
+        }
+        const write = await ask('POST', '/api/mission/NONE/recheck', { 'content-type': 'application/json', cookie: COOKIE, origin: origin.url, 'sec-fetch-site': 'same-origin' }, '{}');
+        assert.deepEqual(renewed(write), [fullCookie(origin)], `${origin.name}: a write in use renews it too`);
+
+        assert.deepEqual(renewed(await ask('GET', '/', { cookie: COOKIE, 'sec-fetch-site': 'same-origin', 'sec-purpose': 'prefetch' })), [], 'a prefetch is not use');
+        assert.deepEqual(renewed(await ask('GET', `/b/${MERMAID_ASSET}`, { cookie: COOKIE })), [], 'an open route asks for no sign-in and renews none');
+        for (const pathName of [`/api/board/${boardId}/events`, '/api/events', '/api/stream']) {
+          const headers = await new Promise((resolve, reject) => {
+            const req = http.request({ host: '127.0.0.1', port, path: pathName, headers: { host: origin.host, cookie: COOKIE } }, res => {
+              resolve(res.headers);
+              req.destroy();
+            });
+            req.on('error', reject);
+            req.end();
+          });
+          assert.match(headers['content-type'], /event-stream/, `${origin.name} ${pathName} opens`);
+          assert.equal(headers['set-cookie'], undefined, `${origin.name} ${pathName}: a stream renews nothing`);
+        }
+      }
+      const bySecret = await rawRequest(port, 'GET', '/', { headers: { [SECRET_HEADER]: SECRET, cookie: COOKIE } });
+      assert.deepEqual(renewed(bySecret), [], 'the secret\'s holder is not a browser');
+    } finally {
+      awayOff();
+    }
+  });
+
+  await check('changing the secret signs every browser out, on the Mac and away, at the next request', async () => {
+    try {
+      awayOn();
+      writeFileSync(SECRET_FILE, `${'b'.repeat(64)}\n`);
+      for (const origin of ORIGINS) {
+        const r = await rawRequest(port, 'GET', '/', { host: origin.host, headers: { cookie: COOKIE } });
+        assert.equal(r.status, 401, `${origin.name}: the old cookie matches nothing`);
+        assert.deepEqual(renewed(r), [], `${origin.name}: and is not renewed`);
+      }
+    } finally {
+      writeFileSync(SECRET_FILE, `${SECRET}\n`);
+      awayOff();
+    }
+  });
+
+  await check('a handoff minted on the Mac signs in no away device, and asking spends it', async () => {
+    try {
+      awayOn();
+      const { token } = JSON.parse((await rawRequest(port, 'POST', '/api/handoff', { headers: writeHeaders(SECRET), body: '{}' })).body);
+      const away = await rawRequest(port, 'GET', `/auth/${token}`, { host: AWAY, headers: BROWSER_NAV });
+      assert.deepEqual([away.status, renewed(away)], [401, []]);
+      assert.equal((await rawRequest(port, 'GET', `/auth/${token}`, { headers: BROWSER_NAV })).status, 401, 'a token shown to the wrong origin is gone');
+    } finally {
+      awayOff();
+    }
+  });
+
+  await check('every board link an answer prints is on the origin it was asked on, whatever origin the board was posted on', async () => {
+    const linked = await postBoard(port, SECRET, {
+      title: 'Printed links', mission: 'PRINTED', blocks: [{ kind: 'question', prompt: 'Printedlinks?', widget: 'single', options: [{ label: 'Yes' }] }],
+    });
+    const stored = readMission('PRINTED', home).boards;
+    assert.equal(stored[0].url, `${base}/b/${linked.boardId}`);
+    try {
+      awayOn();
+      for (const origin of [...ORIGINS, { host: `localhost:${port}`, url: `http://localhost:${port}` }]) {
+        const get = async pathName => JSON.parse((await rawRequest(port, 'GET', pathName, { host: origin.host, headers: { cookie: COOKIE } })).body);
+        const want = `${origin.url}/b/${linked.boardId}`;
+        assert.equal((await get('/api/search?q=Printedlinks')).results.find(r => r.boardId === linked.boardId).url, want);
+        assert.equal((await get('/api/waiting')).waiting.find(r => r.boardId === linked.boardId).url, want);
+        assert.deepEqual((await get('/api/missions')).missions.find(m => m.key === 'PRINTED').boards.map(b => b.url), [want]);
+        const recheck = await rawRequest(port, 'POST', '/api/mission/PRINTED/recheck', {
+          host: origin.host, headers: { 'content-type': 'application/json', cookie: COOKIE, origin: origin.url }, body: '{}',
+        });
+        assert.deepEqual(JSON.parse(recheck.body).boards.map(b => b.url), [want]);
+      }
+      assert.deepEqual(readMission('PRINTED', home).boards, stored, 'the stored link is untouched');
+    } finally {
+      awayOff();
+    }
   });
 
   await check('SEC: the secret alone writes, and a process holding neither credential can neither read a board nor forge an answer on it', async () => {
