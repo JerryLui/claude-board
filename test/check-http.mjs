@@ -3449,6 +3449,15 @@ async function main() {
     const linked = await postBoard(port, SECRET, {
       title: 'Printed links', mission: 'PRINTED', blocks: [{ kind: 'question', prompt: 'Printedlinks?', widget: 'single', options: [{ label: 'Yes' }] }],
     });
+    const asker = { pid: process.pid, procStart: '2026-01-01T00:00:00Z' };
+    const tabbed = await postBoard(port, SECRET, {
+      title: 'Printed tab links', session: asker, blocks: [{ kind: 'question', prompt: 'Printed in a tab?', widget: 'single', options: [{ label: 'Yes' }] }],
+    });
+    const listSessions = async sessions => {
+      const r = await rawRequest(port, 'POST', '/api/sessions', { headers: writeHeaders(SECRET), body: JSON.stringify({ intervalMs: 30_000, sessions }) });
+      assert.equal(r.status, 200, r.body);
+    };
+    await listSessions([{ id: 'printed-tab', ...asker, kind: 'interactive', jobId: null, cwd: home, login: null, name: null, status: 'idle', reason: null }]);
     const stored = readMission('PRINTED', home).boards;
     assert.equal(stored[0].url, `${base}/b/${linked.boardId}`);
     try {
@@ -3458,14 +3467,22 @@ async function main() {
         const want = `${origin.url}/b/${linked.boardId}`;
         assert.equal((await get('/api/search?q=Printedlinks')).results.find(r => r.boardId === linked.boardId).url, want);
         assert.equal((await get('/api/waiting')).waiting.find(r => r.boardId === linked.boardId).url, want);
-        assert.deepEqual((await get('/api/missions')).missions.find(m => m.key === 'PRINTED').boards.map(b => b.url), [want]);
+        const overview = await get('/api/missions');
+        assert.deepEqual(overview.missions.find(m => m.key === 'PRINTED').boards.map(b => b.url), [want]);
+        assert.deepEqual(overview.tabs.find(t => t.id === 'printed-tab').rounds, [{ board: tabbed.boardId, round: 1, url: `${origin.url}/b/${tabbed.boardId}` }]);
         const recheck = await rawRequest(port, 'POST', '/api/mission/PRINTED/recheck', {
           host: origin.host, headers: { 'content-type': 'application/json', cookie: COOKIE, origin: origin.url }, body: '{}',
         });
         assert.deepEqual(JSON.parse(recheck.body).boards.map(b => b.url), [want]);
+        if (origin.host === AWAY) continue;
+        for (const [method, body] of [['GET', null], ['POST', '{"title":"Printed"}']]) {
+          const bySecret = await rawRequest(port, method, '/api/mission/PRINTED', { host: origin.host, headers: writeHeaders(SECRET), body });
+          assert.deepEqual(JSON.parse(bySecret.body).boards.map(b => b.url), [want], `${method} /api/mission/PRINTED`);
+        }
       }
       assert.deepEqual(readMission('PRINTED', home).boards, stored, 'the stored link is untouched');
     } finally {
+      await listSessions([]);
       awayOff();
     }
   });
