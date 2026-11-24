@@ -1019,7 +1019,7 @@ Set-Cookie: cb_tap=<HMAC-SHA256(secret, "claude-board/tap/v1")>;
 
 Host-only (no `Domain`), `HttpOnly`, and **not** a session cookie: a bookmarked
 board opened days later has to work. Each value is the same on every origin. `cb_session` is the
-sign-in, and "the cookie" everywhere in this file; `cb_tap` opens a board page and does nothing else.
+sign-in, and "the cookie" everywhere in this file; `cb_tap` opens a board page and nothing else.
 
 **It lasts while it is used** (ADR 159): `Max-Age` is 400 days, and every request
 `cb_session` authorizes answers with both `Set-Cookie` lines again, so a browser holding only the
@@ -1033,7 +1033,11 @@ another site's requests before that. `cb_tap` travels on a link followed from an
 accepted on `GET /b/:boardId` alone, never as a write credential and on no other route: no `Origin`,
 no `Sec-Purpose` or `Purpose` naming prefetch, and when any of `Sec-Fetch-Site`, `-Mode`, `-Dest` or
 `-User` is present, `Sec-Fetch-Mode: navigate` and `Sec-Fetch-Dest: document`, whatever the site.
-`/`, `/boards`, the assets and images under `/b/` and everything under `/api/` refuse it.
+`/`, `/boards`, the assets and images under `/b/` and everything under `/api/` refuse it. The 401 of
+`/` or `/boards` to a request of that shape carrying a valid `cb_tap`, that accepts `text/html` and
+whose `Sec-Fetch-Site` is neither `same-origin` nor `none` (absent included), is a page of its own: it
+says the browser is signed in and gives the address, without its query, to type. Every other refusal
+is the same with or without `cb_tap`.
 
 `Secure` on the away name alone. It is left off on loopback, and not because it would be ignored there: Chrome treats `http://127.0.0.1` as a
 potentially-trustworthy origin and *does* return `Secure` cookies to it. It is omitted because on
@@ -1164,7 +1168,9 @@ password prompt in front of the page that explains the actual fix, and there is 
 type.
 
 A **browser navigation** (a path outside `/api/` whose `Accept` includes `text/html`) gets an HTML
-page naming the recovery command verbatim, away the one that makes a fresh link. Everything else — `/api/*`, the SSE stream, curl, the
+page naming the recovery command verbatim, away the one that makes a fresh link; a signed-in browser
+another page sent to `/` or `/boards` gets the one naming the address to type ("What another site can
+start"). Everything else — `/api/*`, the SSE stream, curl, the
 shim — gets `{ error, recover }` as JSON and no markup. Neither reveals anything about the store:
 the same page is served whether or not the board exists.
 

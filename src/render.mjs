@@ -3802,6 +3802,19 @@ export function renderRefusalPage(recoveryCommand, { away = false } = {}) {
   });
 }
 
+/** What a list answers a signed-in browser another page sent there. The address is text and the
+ * page holds nothing to press: a double click baited on that other page would land its second
+ * click here, and a link would carry it into the list, whose cards answer in one click. */
+export function renderListFromElsewherePage(address) {
+  return standalonePage({
+    title: 'claude-board — you are signed in here',
+    body: `  <h1>You are signed in here</h1>
+  <p>Another page sent you here, so the list stays closed. Type this address in the address
+  bar, or use your bookmark.</p>
+  <pre style="white-space: pre-wrap; overflow-wrap: anywhere"><code>${escHtml(address)}</code></pre>`,
+  });
+}
+
 export const SIGN_IN_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
 
 /** What an away link opens on. The form names no address, so it posts to the page's own and

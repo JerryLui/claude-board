@@ -71,7 +71,7 @@ import { readAway, isAwayHost } from './away.mjs';
 import { createHandoffStore, handoffTarget, recoveryCommand, awayCommand, HANDOFF_TOKEN_RE, HANDOFF_ORIGIN, AWAY_LINK_TTL_MS, DEFAULT_PORT, DEFAULT_WAIT_TIMEOUT_MS, waitCeilingMs } from './handoff.mjs';
 import { createSigninStore, signinRefusal, startSignin, SIGNIN_STARTED_PAGE, SIGNIN_SPENT_PAGE } from './signin-link.mjs';
 import { createBoard, addRound, amendRound, abandonOpenRounds, roundOwnedBy, roundFolder, folderOfRound, handOverRounds, applySubmit, buildPacket, roundAnswers, dropResolved, resolveComments, questionBlocks, SUPPRESSED, ANSWERS_DELIVERED, roundContentDrifted } from './board.mjs';
-import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, renderRefusalPage, renderSignInPage, boardForClient, holdStages, holdAllStages, stageShas, CSP, INDEX_CSP, SIGN_IN_CSP } from './render.mjs';
+import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, renderRefusalPage, renderListFromElsewherePage, renderSignInPage, boardForClient, holdStages, holdAllStages, stageShas, CSP, INDEX_CSP, SIGN_IN_CSP } from './render.mjs';
 import { buildThreadIndex, renderIndexPage, renderMissionsPage, renderThreadRows, folderName } from './indexpage.mjs';
 // The one shape rule for "is this round a full-viewport page" (ADR.md entry 33),
 // imported rather than restated so the push path and the page path can never
@@ -604,6 +604,18 @@ function isLinkTap(req) {
   return !told || (h['sec-fetch-mode'] === 'navigate' && h['sec-fetch-dest'] === 'document');
 }
 
+function isListPage(pathname) {
+  return pathname === '/' || pathname === '/boards';
+}
+
+/** True iff a signed-in browser followed another page's link to a list. The list stays closed;
+ * only the refusal's words turn on this. The tap cookie alone on a typed address or the board's
+ * own link is a browser whose session cookie is gone, and typing the address would not help it. */
+function isListTapFromElsewhere(req, pathname, secret) {
+  if (!isListPage(pathname) || !tapCookieMatches(req.headers.cookie, secret) || !isLinkTap(req)) return false;
+  return !['same-origin', 'none'].includes(req.headers['sec-fetch-site']);
+}
+
 /** True iff the session cookie authorized this request and the answer should carry both
  * cookies again, which is what keeps a browser in use signed in. The tap cookie renews nothing. */
 function renewsSession(req, parts, secret) {
@@ -857,11 +869,14 @@ function wantsHtmlRefusal(req, pathname) {
  * is what makes a browser throw up a username/password prompt — and there is no password
  * here, so a prompt would be an unanswerable dialog in front of the one page that
  * explains the actual fix. Basic auth was rejected for the same reason. */
-function sendCredentialRefusal(req, res, pathname) {
+function sendCredentialRefusal(req, res, pathname, secret) {
   const { away } = req.boardOrigin;
   const relative = away ? awayCommand('link') : recoveryCommand(undefined, { absolute: false });
   const command = away ? relative : recoveryCommand();
   if (wantsHtmlRefusal(req, pathname)) {
+    if (isListTapFromElsewhere(req, pathname, secret)) {
+      return sendHtml(res, 401, renderListFromElsewherePage(req.boardOrigin.url + pathname), { 'cache-control': 'no-store' });
+    }
     // Always `relative`, as an away refusal's JSON is too: this page renders to
     // any TAB that lands on the read gate -- a cross-origin-shaped navigation is
     // exactly the caller this gate cannot tell apart from a legitimate one -- so unlike
@@ -1824,7 +1839,7 @@ function handleAuthHandoff(req, res, token, handoffs, secret, pathname) {
       res.writeHead(redirectStatus, { location: handoffTarget(null), 'cache-control': 'no-store', 'content-length': '0' });
       return res.end();
     }
-    return sendCredentialRefusal(req, res, pathname);
+    return sendCredentialRefusal(req, res, pathname, secret);
   }
   if (preview) {
     return sendHtml(res, 200, renderSignInPage(), {
@@ -4021,7 +4036,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
       // Without it any local process reads every board, source excerpts included.
       const open = req.method === 'GET' && isOpenRoute(url.pathname, parts, req.boardOrigin.away);
       if (req.method === 'GET' && !open && !isAuthorizedRead(req, secret, isBoardPage(parts))) {
-        return sendCredentialRefusal(req, res, url.pathname);
+        return sendCredentialRefusal(req, res, url.pathname, secret);
       }
 
       if (!open && !awaySignIn && renewsSession(req, parts, secret)) {
@@ -4047,7 +4062,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
       // The two home views under one top bar: Missions at `/`, the board's home page,
       // and the boards list at `/boards`. A `/?q=` link from before the split names a
       // filter on the boards list, so it lands there with its query.
-      if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/boards')) {
+      if (req.method === 'GET' && isListPage(url.pathname)) {
         if (url.pathname === '/' && url.searchParams.has('q')) {
           const target = `/boards?q=${encodeURIComponent(url.searchParams.get('q'))}`;
           res.writeHead(302, { location: target, 'cache-control': 'no-store', 'content-length': '0' });

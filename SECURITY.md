@@ -114,6 +114,11 @@ reads nothing: the board opens in its own tab, its pages send `Cross-Origin-Open
 same-origin` and refuse to be framed, the id is 128 random bits, and that `GET` writes nothing. Once
 open, the page's own requests are the board's, and carry the session cookie.
 
+The tap cookie also decides what a refused list says. A link followed to `/` or `/boards` from another
+site, or in a browser that sends no `Sec-Fetch-Site`, still answers 401, with a page saying the browser
+is signed in and the address to type. That page has no link, button or script, so the second click of
+a double click baited on another page lands on nothing.
+
 None of that rests on `Sec-Fetch-*`, which a browser may leave off a request to `http://127.0.0.1`:
 in one that does, the session cookie still stays off another site's link. What `SameSite` does not tell apart is
 another site on the same host: to a browser every port on `127.0.0.1` is one site. `Sec-Fetch-Site:
@@ -415,7 +420,8 @@ nothing else beside it. **The cookie has a caveat worth reading
 before you rely on it — see "Any other HTTP server on your machine" under [Known and
 unclosed](#known-and-unclosed).** Nothing you can bookmark carries a credential. If a
 browser ends up holding nothing — cleared cookies, a second profile, a different browser —
-the refusal page names one command that fixes it: `node bin/authorize.mjs` from your clone.
+the refusal page names one command that fixes it: `node bin/authorize.mjs` from your clone. A
+signed-in browser another page sent to a list is told to type the address instead.
 
 #### The sign-in link
 

@@ -31,7 +31,7 @@ import { MAX_SUBMIT_BYTES } from '../src/post-limit.mjs';
 // bottom of this file.
 import { createPomodoro, readDoc as readPomodoroDoc, writeDoc as writePomodoroDoc, pomodoroDay } from '../src/pomodoro.mjs';
 import { cueNames, NO_CUE } from '../src/cues.mjs';
-import { renderBoardPage } from '../src/render.mjs';
+import { renderBoardPage, CSP } from '../src/render.mjs';
 import { assetsNamedBy, MERMAID_ASSET, SCRIPT_ASSET, STYLE_ASSET } from '../src/assets.mjs';
 import { isPageRound, ROUND_OPEN_UNAWAITED_TITLE, PILL_READONLY_TITLE } from '../src/badge.mjs';
 import { StandInEvent } from './dom-stand-in.mjs';
@@ -3207,6 +3207,58 @@ async function main() {
       }
       const asSecret = await rawRequest(port, 'GET', '/', { headers: { [SECRET_HEADER]: tapToken(SECRET) } });
       assert.equal(asSecret.status, 401, 'nor the secret');
+    } finally {
+      awayOff();
+    }
+  });
+
+  await check('a signed-in browser another page sent to a list is told to type the address, on a page with nothing to press', async () => {
+    const sentFromElsewhere = [TAPS['a browser that sends no Sec-Fetch header'], TAPS['a tap on another site'], TAPS['a tap on a same-site page']];
+    const lists = { '/': '/', '/boards': '/boards', '/?q=%3Cb%3Ex': '/', '/boards?q=x': '/boards' };
+    const NEW_TITLE = 'You are signed in here';
+    try {
+      awayOn();
+      for (const origin of ORIGINS) {
+        const get = (pathName, headers) => rawRequest(port, 'GET', pathName, { host: origin.host, headers: { ...BROWSER_NAV, cookie: TAP_ONLY, ...headers } });
+        const presentPage = (await get('/', { cookie: '' })).body;
+        assert.match(presentPage, origin.name === 'away' ? /<h1>This device is not signed in<\/h1>/ : /<h1>This browser is not authorized<\/h1>/);
+        const staysPresent = async (what, pathName, headers) => {
+          const r = await get(pathName, headers);
+          assert.deepEqual([r.status, r.body, renewed(r)], [401, presentPage, []], `${origin.name}: ${what}`);
+        };
+        for (const [pathName, shown] of Object.entries(lists)) {
+          for (const headers of sentFromElsewhere) {
+            for (const cookie of [TAP_ONLY, ...(headers['sec-fetch-site'] ? [`${COOKIE}; ${TAP_ONLY}`] : [])]) {
+              const what = `${origin.name} ${pathName} ${JSON.stringify(headers)}`;
+              const r = await get(pathName, { ...headers, cookie });
+              assert.equal(r.status, 401, what);
+              const body = r.body.slice(r.body.indexOf('<body>'));
+              assert.equal(body.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim(),
+                `${NEW_TITLE} Another page sent you here, so the list stays closed. Type this address in the address bar, or use your bookmark. ${origin.url}${shown}`, what);
+              assert.doesNotMatch(body, /href|<(?:a|script|form|button|input|iframe)\b/i, what);
+              assert.match(r.body, /<title>claude-board — you are signed in here<\/title>/);
+              assert.deepEqual([r.headers['cache-control'], r.headers['x-frame-options'], r.headers['content-security-policy']], ['no-store', 'DENY', CSP], what);
+              assert.deepEqual(renewed(r), [], `${what} signs nobody in`);
+            }
+          }
+          const flipped = tapToken(SECRET).replace(/.$/, c => (c === '0' ? '1' : '0'));
+          for (const cookie of ['', `${TAP_COOKIE}=${flipped}`, `${TAP_COOKIE}=${tapToken('b'.repeat(64))}`, `${TAP_COOKIE}=${sessionToken(SECRET)}`, `${SESSION_COOKIE}=${tapToken(SECRET)}`]) {
+            for (const headers of sentFromElsewhere) await staysPresent(`the cookie ${JSON.stringify(cookie)} on ${pathName}`, pathName, { ...headers, cookie });
+          }
+          for (const how of ['a typed address', 'the board\'s own link']) await staysPresent(`${how} with the session cookie gone`, pathName, TAPS[how]);
+          for (const headers of [{ 'sec-fetch-dest': 'iframe' }, { 'sec-fetch-mode': 'cors' }, { 'sec-purpose': 'prefetch' }, { origin: 'https://evil.example' }]) {
+            await staysPresent(`${JSON.stringify(headers)} on ${pathName}`, pathName, { ...TAPS['a tap on another site'], ...headers });
+          }
+        }
+        for (const pathName of [`/b/${STYLE_ASSET}`, '/boards/', '/nothing']) await staysPresent(pathName, pathName, TAPS['a tap on another site']);
+        await staysPresent('a framed board', `/b/${boardId}`, { ...TAPS['a tap on another site'], 'sec-fetch-dest': 'iframe' });
+        for (const [pathName, headers] of [['/api/missions', {}], ['/', { accept: '*/*' }]]) {
+          const json = await get(pathName, { ...TAPS['a tap on another site'], ...headers });
+          const refused = await get(pathName, { ...headers, cookie: '' });
+          assert.equal(json.status, 401);
+          assert.deepEqual([JSON.parse(json.body).error, json.body], ['no claude-board credential', refused.body], `${origin.name}: ${pathName}`);
+        }
+      }
     } finally {
       awayOff();
     }
