@@ -578,6 +578,11 @@ async function main() {
   // SECOND run leaves this exact byte string alone.
   const secretAfterFirst = existsSync(secretFile) ? readFileSync(secretFile, 'utf8') : null;
 
+  const awayFile = path.join(path.dirname(secretFile), 'away');
+  const awayAfterFirst = existsSync(awayFile);
+  writeFileSync(awayFile, 'board.example.ts.net\n', { mode: 0o600 });
+  const awayBefore = statSync(awayFile);
+
   const second = runInstall();
   await check('second run exits 0 (idempotent)', async () => {
     if (second.status !== 0) {
@@ -613,6 +618,13 @@ async function main() {
     // -- and these differ, which on a real machine means every shim already running
     // holds a stale credential and every `ask` in flight starts failing with 401.)
     assert.equal(secretAfterSecond, secretAfterFirst, 'a reinstall must leave an existing secret byte-for-byte alone');
+  });
+
+  await check('install never writes the away setting, and a reinstall leaves one alone', async () => {
+    assert.equal(awayAfterFirst, false);
+    const after = statSync(awayFile);
+    assert.equal(readFileSync(awayFile, 'utf8'), 'board.example.ts.net\n');
+    assert.deepEqual([after.ino, after.mtimeMs, after.mode], [awayBefore.ino, awayBefore.mtimeMs, awayBefore.mode]);
   });
 
   await check('exactly one plist is written', async () => {
@@ -2912,6 +2924,9 @@ http.createServer((req, res) => {
       assert.ok(existsSync(p), `setup sanity: install.sh must have written ${record}`);
       assert.ok(uninstallResult.stdout.includes(p), `must name the ${record} record it left in place`);
     }
+    assert.ok(existsSync(awayFile), 'the away setting stays as the secret does');
+    assert.ok(uninstallResult.stdout.includes(awayFile), 'and is named');
+    assert.ok(uninstallResult.stdout.includes('tailscale serve --https=443 off'), 'with how to turn off the forwarder that outlives the board');
   });
 
   await check('uninstall prints through the same checklist vocabulary as install, and the keep-list still prints in full', async () => {
