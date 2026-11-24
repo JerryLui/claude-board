@@ -2983,7 +2983,7 @@ async function main() {
         }
         for (const [what, headers] of Object.entries({
           'an iframe': { 'sec-fetch-dest': 'iframe' }, 'an embed': { 'sec-fetch-dest': 'embed' }, 'an image': { 'sec-fetch-dest': 'image', 'sec-fetch-mode': 'no-cors' },
-          'a fetch': { 'sec-fetch-dest': 'empty', 'sec-fetch-mode': 'cors' }, 'a half-named navigation': { 'sec-fetch-dest': undefined },
+          'a fetch': { 'sec-fetch-dest': 'empty', 'sec-fetch-mode': 'cors' }, 'a navigation to no document': { 'sec-fetch-dest': undefined }, 'a document nobody navigated to': { 'sec-fetch-mode': 'cors' },
           'a prefetch': { 'sec-purpose': 'prefetch' }, 'a prerender': { 'sec-purpose': 'prefetch;prerender' }, 'an old prefetch': { purpose: 'prefetch' },
           'a foreign origin': { origin: 'https://evil.example' }, 'a null origin': { origin: 'null' },
           'no cookie': { cookie: undefined },

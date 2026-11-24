@@ -216,7 +216,7 @@ export async function evalIn(send, sessionId, expression, { awaitPromise = false
 export async function setSessionCookie(sp, cookie) {
   await sp('Network.enable');
   await sp('Network.setCookie', {
-    name: SESSION_COOKIE, value: cookie, domain: '127.0.0.1', path: '/', httpOnly: true, sameSite: 'Strict',
+    name: SESSION_COOKIE, value: cookie, domain: '127.0.0.1', path: '/', httpOnly: true, sameSite: 'Lax',
   });
 }
 
