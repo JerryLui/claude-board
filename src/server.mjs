@@ -827,16 +827,17 @@ function wantsHtmlRefusal(req, pathname) {
  * here, so a prompt would be an unanswerable dialog in front of the one page that
  * explains the actual fix. Basic auth was rejected for the same reason. */
 function sendCredentialRefusal(req, res, pathname) {
-  const command = recoveryCommand(undefined, { absolute: !req.boardOrigin.away });
+  const relative = recoveryCommand(undefined, { absolute: false });
+  const command = req.boardOrigin.away ? relative : recoveryCommand();
   if (wantsHtmlRefusal(req, pathname)) {
-    // The one caller of `recoveryCommand({ absolute: false })`: this page renders to
+    // Always `relative`, as an away refusal's JSON is too: this page renders to
     // any TAB that lands on the read gate -- a cross-origin-shaped navigation is
     // exactly the caller this gate cannot tell apart from a legitimate one -- so unlike
     // `command` above (read by something that already holds a terminal here: the JSON
     // `recover` field below, bin/mcp.mjs's own error text) it must not name the
     // reader's home directory or the account it belongs to. See recoveryCommand's own
     // comment for why the relative form is still actionable.
-    return sendHtml(res, 401, renderRefusalPage(recoveryCommand(undefined, { absolute: false })), { 'cache-control': 'no-store' });
+    return sendHtml(res, 401, renderRefusalPage(relative), { 'cache-control': 'no-store' });
   }
   return sendJson(res, 401, { error: 'no claude-board credential', recover: command });
 }
