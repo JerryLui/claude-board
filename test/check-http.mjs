@@ -2895,15 +2895,34 @@ async function main() {
       // Each holds or names the host asked for, so a reader any looser than "exactly this
       // name" turns one of them on.
       for (const text of ['', '\n', `${AWAY.toUpperCase()}\n`, ` ${AWAY}\n`, `${AWAY} \n`, `${AWAY}\n\n`, `${AWAY}\nother.example.ts.net\n`,
-        `${AWAY}:443\n`, `https://${AWAY}\n`, `${AWAY}.\n`, `*.example.ts.net\n`, `${AWAY}${'\n'.repeat(300)}`]) {
+        `${AWAY}:443\n`, `https://${AWAY}\n`, `${AWAY}.\n`, `*.example.ts.net\n`]) {
         awayOn(text);
         await refused(JSON.stringify(text));
       }
       assert.ok(said.some(line => line.includes('does not hold one lowercase Tailscale name')), 'the log says a malformed setting is malformed');
+      awayOn('a'.repeat(257));
+      await refused('a file over the size of one name');
+      assert.ok(said.some(line => line.endsWith('is too long to be one host name')), `the log says an oversized setting is too long: ${said.join('\n')}`);
       for (const name of ['attacker.test', 'ts.net', 'example.ts.net', '-a.example.ts.net', 'a..example.ts.net', 'board.example.ts.net.attacker.test']) {
         awayOn(`${name}\n`);
         assert.equal((await get(name)).status, 403, `"${name}" is not a name this Mac can be forwarded under`);
       }
+      awayOff();
+      await execFileAsync('mkfifo', ['-m', '600', AWAY_FILE]);
+      // A daemon that blocks opening the fifo blocks this process with it, so a writer in
+      // another process is what lets go of it, and its mark is what says that was needed.
+      const waited = path.join(ownHome, 'waited');
+      const writer = spawn(process.execPath, ['-e', `setTimeout(() => {
+        fs.writeFileSync(${JSON.stringify(waited)}, '');
+        fs.openSync(${JSON.stringify(AWAY_FILE)}, 'w');
+      }, 10_000)`], { stdio: 'ignore' });
+      try {
+        await refused('a fifo');
+      } finally {
+        writer.kill('SIGKILL');
+      }
+      assert.ok(!existsSync(waited), 'the daemon never waits for a writer');
+      assert.ok(said.some(line => line.endsWith('is not a plain file')), 'the log says a fifo is no plain file');
       awayOff();
       mkdirSync(AWAY_FILE);
       await refused('a directory');
