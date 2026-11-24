@@ -2933,9 +2933,11 @@ async function main() {
       await get('attacker.test');
       awayOn();
       await get(`evil"${'x'.repeat(400)}`);
+      await get('evil\u009b31m\u0080\u009f\u00a1');
       assert.deepEqual(said, [
         'claude-board: refused host "attacker.test": away is off',
         `claude-board: refused host "evil\\"${'x'.repeat(115)}": not a loopback name and not the configured away name`,
+        'claude-board: refused host "evil\\u009b31m\\u0080\\u009f\u00a1": not a loopback name and not the configured away name',
       ]);
       for (let i = 0; i < 60; i++) await get(`h${i}.test`);
       assert.equal(said.length, 21, 'twenty hosts an hour, and one line saying the rest are not logged');

@@ -516,6 +516,11 @@ function requestOrigin(headers) {
 const REFUSED_HOSTS_PER_HOUR = 20;
 const REFUSED_HOST_LOG_CHARS = 120;
 
+// JSON.stringify escapes no control character past U+001F, and a terminal reads U+009B as ESC [.
+function quoted(text) {
+  return JSON.stringify(text).replace(/[\u007f-\u009f]/g, c => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
+}
+
 function createRefusedHostLog() {
   let windowStart = 0;
   const logged = new Set();
@@ -524,7 +529,7 @@ function createRefusedHostLog() {
       windowStart = Date.now();
       logged.clear();
     }
-    const line = `${JSON.stringify(String(hostHeader ?? '').slice(0, REFUSED_HOST_LOG_CHARS))}: ${reason}`;
+    const line = `${quoted(String(hostHeader ?? '').slice(0, REFUSED_HOST_LOG_CHARS))}: ${reason}`;
     if (logged.has(line) || logged.size > REFUSED_HOSTS_PER_HOUR) return;
     logged.add(line);
     console.error(logged.size > REFUSED_HOSTS_PER_HOUR
