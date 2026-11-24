@@ -2865,7 +2865,7 @@ async function main() {
       }
       assert.ok(said.includes(`claude-board: refused host "127.0.0.1:${ownPort}": a loopback name through a forwarder`), said.join('\n'));
 
-      // Past about 1000 headers node 22 and 24 drop the rest by default, so the forwarder's go
+      // Past about 1000 headers older node releases drop the rest by default, so the forwarder's go
       // last here, as a sorting forwarder writes them after a device's own.
       const padded = (method, pathName, headers) => new Promise((resolve, reject) => {
         const lines = [
