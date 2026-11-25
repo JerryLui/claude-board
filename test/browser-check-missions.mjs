@@ -38,7 +38,7 @@ import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { sessionToken } from '../src/secret.mjs';
 import { deadPid, runMain, skipFile, sleep } from './support.mjs';
-import { assertPhone, CHROME, getJson, guardRun, measureTab, openPhone, openTab, phoneFaults, postJson, row, startScratchDaemon, withChrome } from './browser-support.mjs';
+import { assertPhone, CHROME, clickAt, getJson, guardRun, measureTab, openPhone, openTab, phoneFaults, postJson, row, startScratchDaemon, withChrome } from './browser-support.mjs';
 
 if (!existsSync(CHROME)) skipFile('browser-check-missions', `browser-check-missions: no Chrome at ${CHROME} (set CLAUDE_BOARD_CHROME_BIN to override)`);
 
@@ -1163,7 +1163,7 @@ async function main() {
         }));
       }
 
-      await row('at 390 ⋯ on Missions holds Comment, the theme control and Settings, the timer\'s settings opening from it under ⋯ with the focus, by touch and by keyboard', note => onPhone('/', 'dark', async tab => {
+      await row('at 390 ⋯ on Missions holds Comment, the theme control and Settings, the timer\'s settings opening from it under ⋯ with the focus, by touch and by keyboard, and ⋯ and the settings never open together', note => onPhone('/', 'dark', async tab => {
         await tab.evalPage(`document.querySelector('button.corner-more-btn').click()`);
         const opened = await tab.evalPage(HOME_MENU_EXPR);
         note(`items: ${opened.items.map(i => `${i.role} "${i.name}"${i.disabled ? ' (off)' : ''}`).join(', ')}`);
@@ -1185,6 +1185,15 @@ async function main() {
         assert.ok(settings.panel.x >= 0 && settings.panel.r <= 390 && settings.panel.y >= settings.moreB && settings.panel.b <= 844, 'the panel lies in the window, under ⋯');
         assert.equal(settings.focusInPanel, true, 'the panel takes the focus');
         await hold(tab, note, 'settings from ⋯', ['.pomodoro-field select', '.pomodoro-field input', '.pomodoro-btn']);
+
+        await clickAt(tab, await tab.evalPage(`(function () { var r = document.querySelector('button.corner-more-btn').getBoundingClientRect();
+          return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`));
+        await tab.quiet();
+        const swapped = await tab.evalPage(HOME_MENU_EXPR);
+        assert.deepEqual([swapped.open, swapped.panel.shown], [true, false], '⋯ over the open panel opens its menu and closes the panel');
+        await tab.evalPage(`document.querySelector('.corner-menu [data-proxy^="summary"]').click()`);
+        await tab.quiet();
+        assert.deepEqual(await tab.evalPage(`(function (m) { return [m.open, m.panel.shown]; })(${HOME_MENU_EXPR})`), [false, true], 'Settings opens the panel again');
 
         await tab.evalPage(`document.querySelector('form#pomodoro-settings-form input').focus()`);
         await pressKey(tab, 'Escape');

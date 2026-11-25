@@ -15,7 +15,7 @@ import path from 'node:path';
 import { faviconLink, markSvg } from './styles.mjs';
 import { STYLE_ASSET } from './assets.mjs';
 import { themeBootScript, themeToggle } from './theme.mjs';
-import { commentModeToggle, cornerMenu, cornerItem, COMMENT_ICON } from './render.mjs';
+import { BLANK_ICON, commentAndThemeItems, commentModeToggle, cornerMenu, cornerItem } from './render.mjs';
 import { trackDocWidth, wireCornerMenu, HOME_STORAGE_KEY } from './ui.mjs';
 import { roundIsAwaited } from './badge.mjs';
 // formatCountdown only -- src/pomodoro.mjs's document shape, HTTP surface and
@@ -1722,12 +1722,13 @@ function onStorePruneClick() {
 // closest() finding the panel above it, and is left alone (closing on the
 // summary's own click would fight the native <details> toggle and make the panel
 // impossible to open). So is one in the phone header's ⋯ menu, whose Settings
-// item opens the panel by clicking that summary. Nothing here calls stopPropagation.
+// item opens the panel by clicking that summary; ⋯ itself is outside, so opening
+// the menu closes the panel. Nothing here calls stopPropagation.
 function onDocumentClickClosePomodoroSettings(ev) {
   var panel = document.querySelector('details#pomodoro-settings');
   if (!panel || !panel.open) return;
   var t = ev.target;
-  if (t && t.closest && (t.closest('details#pomodoro-settings') || t.closest('.corner-more'))) return;
+  if (t && t.closest && (t.closest('details#pomodoro-settings') || t.closest('.corner-menu'))) return;
   closePomodoroSettings();
 }
 
@@ -1769,10 +1770,13 @@ function openPomodoroSettingsFromFragment() {
 // At 560px wide and under the bar is hidden and its gear opens from the ⋯ menu
 // (src/styles.mjs), so the panel takes the focus as it opens, and Escape or its
 // closing hands it back to ⋯.
+function pomodoroSettingsInMenu(panel) {
+  var summary = panel && panel.querySelector('summary');
+  return !!summary && typeof getComputedStyle === 'function' && getComputedStyle(summary).visibility === 'hidden';
+}
 function onPomodoroSettingsToggle() {
   var panel = document.querySelector('details#pomodoro-settings');
-  var summary = panel && panel.querySelector('summary');
-  if (!summary || typeof getComputedStyle !== 'function' || getComputedStyle(summary).visibility !== 'hidden') return;
+  if (!pomodoroSettingsInMenu(panel)) return;
   var more = document.querySelector('button.corner-more-btn');
   if (panel.open) {
     var first = panel.querySelector('form input, form select, form button');
@@ -1782,9 +1786,7 @@ function onPomodoroSettingsToggle() {
   }
 }
 function onPomodoroSettingsKeydown(ev) {
-  if (ev.key !== 'Escape') return;
-  var summary = ev.currentTarget.querySelector('summary');
-  if (!summary || typeof getComputedStyle !== 'function' || getComputedStyle(summary).visibility !== 'hidden') return;
+  if (ev.key !== 'Escape' || !pomodoroSettingsInMenu(ev.currentTarget)) return;
   ev.preventDefault();
   closePomodoroSettings();
 }
@@ -2286,8 +2288,7 @@ export function renderTopBar({ active, waitingCount = 0, pomodoroEnabled = true,
       ${themeToggle()}
     </div>
     ${cornerMenu([
-      cornerItem({ label: 'Comment', icon: COMMENT_ICON, proxy: 'button#comment-mode-toggle', checkbox: true }),
-      cornerItem({ label: 'Theme', proxy: 'button#theme-toggle', mirror: true, keepOpen: true, icon: BLANK_ICON }),
+      ...commentAndThemeItems(),
       null,
       cornerItem({ label: 'Start pomodoro', proxy: 'button#pomodoro-toggle', mirror: true, icon: MENU_TOMATO_ICON }),
       cornerItem({ label: 'Settings', proxy: 'summary.pomodoro-settings-summary', mirror: true, icon: BLANK_ICON }),
@@ -2295,7 +2296,6 @@ export function renderTopBar({ active, waitingCount = 0, pomodoroEnabled = true,
   </header>`;
 }
 
-const BLANK_ICON = '<svg aria-hidden="true"></svg>';
 const MENU_TOMATO_ICON = TOMATO_ICON.replace(' role="img" aria-label="Pomodoro"><title>Pomodoro</title>', ' aria-hidden="true">');
 
 /** A home view's page: the top bar over `body`, in the board page's own shell

@@ -210,6 +210,15 @@ export function cornerItem({ label, icon = '', proxy = null, checkbox = false, m
   return `<button type="button" role="${role}" class="corner-item${copy != null ? ' corner-id' : ''}"${attrs}>${icon}<span class="corner-item-label">${escHtml(label)}</span>${value ? ' ' + value : ''}</button>`;
 }
 
+export const BLANK_ICON = '<svg aria-hidden="true"></svg>';
+
+export function commentAndThemeItems() {
+  return [
+    cornerItem({ label: 'Comment', icon: COMMENT_ICON, proxy: 'button#comment-mode-toggle', checkbox: true }),
+    cornerItem({ label: 'Theme', proxy: 'button#theme-toggle', mirror: true, keepOpen: true, icon: BLANK_ICON }),
+  ];
+}
+
 /** The ⋯ button and its menu, which float in the top right corner at 560px
  * wide and under while the header scrolls away (src/styles.mjs), the header's
  * mark, '.back-to-index', floating in the left one. `items` is markup, each a
@@ -3772,8 +3781,7 @@ ${faviconLink}
       <span class="round-meta" id="round-meta" title="${escAttr(roundMeta.title)}">${escHtml(roundMeta.text)}</span>
     </div>
     ${cornerMenu([
-      cornerItem({ label: 'Comment', icon: COMMENT_ICON, proxy: 'button#comment-mode-toggle', checkbox: true }),
-      cornerItem({ label: 'Theme', proxy: 'button#theme-toggle', mirror: true, keepOpen: true, icon: '<svg aria-hidden="true"></svg>' }),
+      ...commentAndThemeItems(),
       MENU_DOWNLOAD_BUTTON,
       null,
       cornerItem({ label: 'Board', copy: board.id }),
