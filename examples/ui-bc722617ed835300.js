@@ -2190,7 +2190,7 @@
 };
   trackDocWidth();
 
-  var wireCornerMenu = function wireCornerMenu() {
+  var wireCornerMenu = function wireCornerMenu(onOpen) {
   var btn = document.querySelector('button.corner-more-btn');
   var menu = document.querySelector('div.corner-menu');
   if (!btn || !menu) return;
@@ -2221,6 +2221,7 @@
   }
   function setOpen(open, focus) {
     if (open) sync();
+    if (open && onOpen) onOpen();
     menu.hidden = !open;
     btn.setAttribute('aria-expanded', open ? 'true' : 'false');
     if (open && focus) {
