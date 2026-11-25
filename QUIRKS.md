@@ -623,6 +623,12 @@ Once driving it, each of these silently produces a wrong measurement rather than
   empty area anchors nothing and reads like a dead gesture. Probe several points.
 - A pointer capture taken between a dispatched `mousePressed`/`mouseReleased` pair
   retargets the resulting `click` — see `setPointerCapture` above.
+- **`Input.dispatchTouchEvent` lifts one finger by `touchEnd` naming that finger**, not
+  by a `touchMove` that leaves it out: the omitted finger stays down and the next move
+  pinches again. `touchEnd` with an empty list lifts every finger.
+- **An inline `style.transform` reads back rounded to six significant digits**, so a
+  view parsed from it matches the page's own numbers only to that precision
+  (`test/browser-check-mermaid-stage.mjs`'s touch rows compare within it).
 - `/json/new` rejects a plain `GET` with a 200 response carrying an error STRING, so
   `resp.json()` fails pointing nowhere near the cause. Use `{ method: 'PUT' }`.
 - A race that only exists "while the render is in flight" needs the render to take

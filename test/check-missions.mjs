@@ -19,11 +19,13 @@ import {
 import { createMissionsCache, MISSIONS_CACHE_MS } from '../src/missions-cache.mjs';
 import { createBindingIndex } from '../src/bindings.mjs';
 import { processStartUtc } from '../src/proc-start.mjs';
-import { check, deadPid, openSseClient, rawRequest, runMain, secretFetch, secretHome, sessionCookieHeader, waitFor, writeHeaders } from './support.mjs';
+import { check, deadPid, openSseClient, pageHarness, rawRequest, runMain, secretFetch, secretHome, sessionCookieHeader, waitFor, writeHeaders } from './support.mjs';
+import { StandInEvent } from './dom-stand-in.mjs';
 
 const { home, secret: SECRET } = secretHome('claude-board-missions-');
 const fetch = secretFetch(SECRET);
 process.env.CLAUDE_BOARD_STRANDED_GRACE_MS ??= String(24 * 60 * 60 * 1000);
+const { loadIndexAgainstDaemon } = await pageHarness();
 
 let server, port, base;
 const children = new Set();
@@ -117,6 +119,36 @@ function seedBoard(dir, boardId, now, rounds) {
 
 const minutes = n => n * 60 * 1000;
 const iso = ms => new Date(ms).toISOString();
+
+async function liveMission(key, fields = {}) {
+  assert.equal((await post(`/api/mission/${key}`, { title: key, phase: 'direct', state: 'working', ...fields })).status, 200);
+  assert.equal((await post(`/api/mission/${key}/session`, { pid: process.pid, id: `sess-${key}` })).status, 200);
+}
+
+async function openMissionsTab() {
+  const page = await rawRequest(port, 'GET', '/', { headers: { [SECRET_HEADER]: SECRET } });
+  assert.equal(page.status, 200);
+  const tab = loadIndexAgainstDaemon(port, { secret: SECRET, html: page.body });
+  await tab.settle();
+  return tab;
+}
+
+async function tabClick(tab, el) {
+  el.dispatchEvent(new StandInEvent('click'));
+  await tab.settle();
+}
+
+const cardFor = (doc, key) => doc.querySelectorAll('article.mission-card').find(c => c.getAttribute('data-mission-key') === key) || null;
+
+async function openNote(key, text) {
+  const tab = await openMissionsTab();
+  await tabClick(tab, tab.document.querySelector('button#comment-mode-toggle'));
+  await tabClick(tab, cardFor(tab.document, key).querySelector('b.mission-title'));
+  const box = cardFor(tab.document, key).querySelector('textarea.mission-comment-text');
+  box.value = text;
+  box.dispatchEvent(new StandInEvent('input'));
+  return { tab, box };
+}
 
 async function main() {
   ({ server, port } = await startServer({ home, port: 0 }));
@@ -1791,6 +1823,75 @@ async function main() {
     const total = Object.values(r.body.counts).reduce((a, b) => a + b, 0);
     const tabsNeedingYou = r.body.tabs.filter(t => t.state === 'needs-you').length;
     assert.equal(total, r.body.missions.length + tabsNeedingYou, 'every listed mission is counted in one column, and a tab only in Needs you');
+  });
+
+  await check('Cmd+Enter in a mission card\'s comment box sends the comment, as Send to session does', async () => {
+    await liveMission('KEY_CMD_ENTER');
+    const { tab, box } = await openNote('KEY_CMD_ENTER', 'Ship it');
+    try {
+      box.dispatchEvent(new StandInEvent('keydown', { key: 'Enter', metaKey: true }));
+      await tab.settle();
+      assert.deepEqual(readMission('KEY_CMD_ENTER', home).orders.map(o => [o.kind, o.text]), [['comment', 'Ship it']]);
+      assert.equal(cardFor(tab.document, 'KEY_CMD_ENTER').querySelector('textarea'), null, 'the note closes once sent');
+    } finally {
+      tab.restoreFetch();
+    }
+  });
+
+  await check('Ctrl+Enter in a mission card\'s comment box sends the comment, as Send to session does', async () => {
+    await liveMission('KEY_CTRL_ENTER');
+    const { tab, box } = await openNote('KEY_CTRL_ENTER', 'Ship it');
+    try {
+      box.dispatchEvent(new StandInEvent('keydown', { key: 'Enter', ctrlKey: true }));
+      await tab.settle();
+      assert.deepEqual(readMission('KEY_CTRL_ENTER', home).orders.map(o => [o.kind, o.text]), [['comment', 'Ship it']]);
+      assert.equal(cardFor(tab.document, 'KEY_CTRL_ENTER').querySelector('textarea'), null, 'the note closes once sent');
+    } finally {
+      tab.restoreFetch();
+    }
+  });
+
+  await check('plain Enter in the comment box sends nothing and is left to the browser\'s own newline', async () => {
+    await liveMission('KEY_PLAIN_ENTER');
+    const { tab, box } = await openNote('KEY_PLAIN_ENTER', 'Half a thought');
+    try {
+      const ev = new StandInEvent('keydown', { key: 'Enter' });
+      box.dispatchEvent(ev);
+      await tab.settle();
+      assert.equal(ev.defaultPrevented, false);
+      assert.deepEqual(readMission('KEY_PLAIN_ENTER', home).orders, []);
+      assert.equal(cardFor(tab.document, 'KEY_PLAIN_ENTER').querySelector('textarea.mission-comment-text').value, 'Half a thought');
+    } finally {
+      tab.restoreFetch();
+    }
+  });
+
+  await check('Cmd+Enter in an empty comment box sends nothing', async () => {
+    await liveMission('KEY_EMPTY_ENTER');
+    const { tab, box } = await openNote('KEY_EMPTY_ENTER', '');
+    try {
+      box.dispatchEvent(new StandInEvent('keydown', { key: 'Enter', metaKey: true }));
+      await tab.settle();
+      assert.deepEqual(readMission('KEY_EMPTY_ENTER', home).orders, []);
+      assert.ok(cardFor(tab.document, 'KEY_EMPTY_ENTER').querySelector('textarea.mission-comment-text'), 'the note stays open');
+    } finally {
+      tab.restoreFetch();
+    }
+  });
+
+  await check('Cmd+Enter on a busy comment box (its own send in flight) sends nothing more', async () => {
+    await liveMission('KEY_BUSY_ENTER');
+    const { tab, box } = await openNote('KEY_BUSY_ENTER', 'Once only');
+    try {
+      cardFor(tab.document, 'KEY_BUSY_ENTER').querySelector('button.mission-comment-send').dispatchEvent(new StandInEvent('click'));
+      assert.equal(cardFor(tab.document, 'KEY_BUSY_ENTER').querySelector('button.mission-comment-send').getAttribute('disabled'), '', 'Send is disabled while its request is out');
+      box.dispatchEvent(new StandInEvent('keydown', { key: 'Enter', metaKey: true }));
+      await tab.settle();
+      assert.deepEqual(readMission('KEY_BUSY_ENTER', home).orders.map(o => [o.kind, o.text]), [['comment', 'Once only']]);
+      assert.equal(cardFor(tab.document, 'KEY_BUSY_ENTER').querySelector('textarea'), null, 'the note closes once the one send lands');
+    } finally {
+      tab.restoreFetch();
+    }
   });
 }
 

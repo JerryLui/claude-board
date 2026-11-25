@@ -777,6 +777,12 @@ agent-supplied and `ask` requires one on every call, so a five-round thread rend
 stubs that named nothing, and the clipping also swallowed the owed dot, which sits past the
 truncated text. Naming one round well beat naming five badly.
 
+**Why a count on a phone.** At 390px the chevrons, 44px on a 16px margin, sat over the card text
+on both sides, the caption printed over the text above the pill, and the numerals with the
+arrows fitted six entries before wrapping. Moving the arrows into the pill and folding waiting
+rounds behind "…" still wrapped past about six entries; a count, `11 / 14`, is one line at any
+board length down to 320px, and the numbers are one press away on the count.
+
 ### Entry 45 — an awaited page board, declared by the caller
 
 Both flagless alternatives were worse. Waiting on every page board strands `/visualize` mid-turn; a

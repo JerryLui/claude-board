@@ -45,7 +45,7 @@ import {
   findPendingCommentForAnchor, removePendingComment, videoSecond, videoTimeSuffix,
 } from './anchor.mjs';
 import {
-  roundPageLabel, roundNumberLabel, foldRounds, PAGER_GAP_LABEL, isPageRound, roundHasCommentable,
+  roundPageLabel, roundNumberLabel, foldRounds, PAGER_GAP_LABEL, roundCountLabel, roundCountName, isPageRound, roundHasCommentable,
   questionBlocks, roundIsAwaited,
   roundIsAwaitedOpen, roundIsCurrentlyAwaited, roundCountdownText, pageBoardPillMeta,
   roundDeadlineMoves,
@@ -419,6 +419,8 @@ export const ui = `
   var roundPageLabel = ${roundPageLabel.toString()};
   var foldRounds = ${foldRounds.toString()};
   var PAGER_GAP_LABEL = ${JSON.stringify(PAGER_GAP_LABEL)};
+  var roundCountLabel = ${roundCountLabel.toString()};
+  var roundCountName = ${roundCountName.toString()};
   var isPageRound = ${isPageRound.toString()};
   // ADR 98: whether the round on screen has anything the comment-mode toggle
   // could ever anchor to -- spliced the same way, so refreshPager's own
@@ -3012,8 +3014,11 @@ export const ui = `
       lensApply();
     }, { passive: false });
 
+    var lastPressTouch = false;
     stage.addEventListener('dblclick', function (ev) {
-      if (!lens.open) return;
+      // A touch double-tap is zoomed on its second pointerup, below; the
+      // dblclick a browser may add after it would zoom a second time.
+      if (!lens.open || lastPressTouch) return;
       var r = lensStageRect();
       lensView = lensZoomAt(lensView, ev.clientX - r.left, ev.clientY - r.top, 2, LENS_MIN_SCALE, LENS_MAX_SCALE);
       lensApply();
@@ -3047,13 +3052,54 @@ export const ui = `
     // Invisible to a structural check, so test/check-mermaid-anchor.mjs
     // dispatches exactly that sequence.
     var drag = null;
+    var touches = {};
+    var pinch = null;
+    var lastTap = null;
+    function touchPoints() {
+      return Object.keys(touches).map(function (k) { return touches[k]; });
+    }
+    function pinchOf(pts) {
+      return { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2,
+        d: Math.max(1, Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y)) };
+    }
+    function startDrag(id, x, y) {
+      drag = { ox: x, oy: y, x: x, y: y, id: id, captured: false };
+    }
+    function zoomAtClient(x, y, factor) {
+      var r = lensStageRect();
+      lensView = lensZoomAt(lensView, x - r.left, y - r.top, factor, LENS_MIN_SCALE, LENS_MAX_SCALE);
+    }
     stage.addEventListener('pointerdown', function (ev) {
       if (!lens.open || ev.button) return;
-      drag = { ox: ev.clientX, oy: ev.clientY, x: ev.clientX, y: ev.clientY, id: ev.pointerId, captured: false };
+      lastPressTouch = ev.pointerType === 'touch';
+      if (lastPressTouch && ev.isPrimary) { touches = {}; pinch = null; }
+      if (lastPressTouch) touches[ev.pointerId] = { id: ev.pointerId, x: ev.clientX, y: ev.clientY };
+      var pts = touchPoints();
+      if (lastPressTouch && pts.length >= 2) {
+        pinch = pinchOf(pts);
+        drag = null;
+        lastTap = null;
+        lensDragMoved = true;
+        stage.classList.add('lens-dragging');
+        return;
+      }
+      startDrag(ev.pointerId, ev.clientX, ev.clientY);
       lensDragMoved = false;
     });
     stage.addEventListener('pointermove', function (ev) {
-      if (!drag) return;
+      if (touches[ev.pointerId]) {
+        touches[ev.pointerId].x = ev.clientX;
+        touches[ev.pointerId].y = ev.clientY;
+      }
+      if (pinch) {
+        var next = pinchOf(touchPoints());
+        zoomAtClient(pinch.x, pinch.y, next.d / pinch.d);
+        lensView = { x: lensView.x + next.x - pinch.x, y: lensView.y + next.y - pinch.y, s: lensView.s };
+        pinch = next;
+        lensApply();
+        return;
+      }
+      if (!drag || ev.pointerId !== drag.id) return;
       // A few pixels of jitter between press and release is a click, not a pan:
       // only past that does this become a drag at all -- suppressing the comment
       // gesture below, taking the pointer capture, and showing the grabbing
@@ -3072,7 +3118,25 @@ export const ui = `
       lensApply();
     });
     ['pointerup', 'pointercancel'].forEach(function (type) {
-      stage.addEventListener(type, function () {
+      stage.addEventListener(type, function (ev) {
+        var wasTouch = !!touches[ev.pointerId];
+        delete touches[ev.pointerId];
+        var rest = touchPoints();
+        if (pinch) {
+          if (rest.length >= 2) { pinch = pinchOf(rest); return; }
+          pinch = null;
+          if (rest.length === 1) { startDrag(rest[0].id, rest[0].x, rest[0].y); return; }
+        }
+        if (wasTouch && type === 'pointerup' && !lensDragMoved && lens.open) {
+          var now = Date.now();
+          if (lastTap && now - lastTap.t < 400 && Math.abs(ev.clientX - lastTap.x) < 24 && Math.abs(ev.clientY - lastTap.y) < 24) {
+            zoomAtClient(ev.clientX, ev.clientY, 2);
+            lensApply();
+            lastTap = null;
+          } else {
+            lastTap = { t: now, x: ev.clientX, y: ev.clientY };
+          }
+        }
         drag = null;
         stage.classList.remove('lens-dragging');
       });
@@ -6160,6 +6224,18 @@ export const ui = `
     // is a control the reviewer has to find again at round 2.
     if (prev) prev.disabled = currentRound <= first;
     if (next) next.disabled = currentRound >= last;
+    var pillPrev = document.querySelector('button#round-pill-prev');
+    var pillNext = document.querySelector('button#round-pill-next');
+    var pillCount = document.querySelector('button#round-pill-count');
+    if (pillPrev) pillPrev.disabled = currentRound <= first;
+    if (pillNext) pillNext.disabled = currentRound >= last;
+    if (pillCount) {
+      var waits = rounds.some(function (r) { return r.n !== currentRound && roundOwesAnswer(r); });
+      pillCount.textContent = roundCountLabel(currentRound, rounds.length);
+      pillCount.setAttribute('aria-label', roundCountName(currentRound, rounds.length, waits));
+      pillCount.classList.toggle('round-pill-count-owed', waits);
+      pillCount.disabled = false;
+    }
 
     // The layout follows the PAGE, not the board (entry 42: "a page-board round
     // is one page, filling the viewport; a question round is another"). This is
@@ -6258,21 +6334,14 @@ export const ui = `
 
     var rounds = board.rounds || [];
     var numbers = rounds.map(function (r) { return r.n; });
-    var fold = {
-      rounds: numbers,
-      current: currentRound,
-      owed: rounds.filter(roundOwesAnswer).map(function (r) { return r.n; }),
-      narrow: narrow,
-      oneGap: false,
-    };
     showPagerItems(nav, numbers);
-    if (pagerOnOneLine(nav)) pagerOpen = false;
+    if (narrow || pagerOnOneLine(nav)) pagerOpen = false;
     else if (!pagerOpen) {
-      showPagerItems(nav, foldRounds(fold));
-      if (narrow && !pagerOnOneLine(nav)) {
-        fold.oneGap = true;
-        showPagerItems(nav, foldRounds(fold));
-      }
+      showPagerItems(nav, foldRounds({
+        rounds: numbers,
+        current: currentRound,
+        owed: rounds.filter(roundOwesAnswer).map(function (r) { return r.n; }),
+      }));
     }
 
     var current = pagerEntry(nav, currentRound);
@@ -6287,6 +6356,23 @@ export const ui = `
       else if (box.bottom > row.bottom) nav.scrollTop += box.bottom - row.bottom;
     }
     liftSendBar();
+  }
+
+  function setPillListOpen(open) {
+    var dock = document.querySelector('div.round-pager-dock');
+    var count = document.querySelector('button#round-pill-count');
+    if (!dock || !count) return;
+    dock.classList.toggle('round-pager-open', open);
+    count.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (!open) return;
+    fitPager();
+    var current = pagerEntry(pagerNav(), currentRound);
+    if (current) current.focus({ preventScroll: true });
+  }
+
+  function pillListOpen() {
+    var dock = document.querySelector('div.round-pager-dock');
+    return !!dock && dock.classList.contains('round-pager-open');
   }
 
   function openPager() {
@@ -6602,8 +6688,28 @@ export const ui = `
       var btn = ev.target.closest('.round-page');
       if (!btn) return;
       pagerOpen = false;
+      var picked = pillListOpen();
+      setPillListOpen(false);
       var n = parseInt(btn.getAttribute('data-round'), 10);
       if (isFinite(n)) goToRound(n);
+      if (picked) roundPillCountBtn.focus({ preventScroll: true });
+    });
+  }
+  var roundPillPrevBtn = document.querySelector('button#round-pill-prev');
+  var roundPillNextBtn = document.querySelector('button#round-pill-next');
+  var roundPillCountBtn = document.querySelector('button#round-pill-count');
+  if (roundPillPrevBtn) roundPillPrevBtn.addEventListener('click', function () { stepRound(-1); });
+  if (roundPillNextBtn) roundPillNextBtn.addEventListener('click', function () { stepRound(1); });
+  if (roundPillCountBtn) {
+    roundPillCountBtn.addEventListener('click', function () { setPillListOpen(!pillListOpen()); });
+    document.addEventListener('click', function (ev) {
+      if (!pillListOpen() || (ev.target && ev.target.closest && ev.target.closest('.round-pager-dock'))) return;
+      setPillListOpen(false);
+    });
+    document.addEventListener('keydown', function (ev) {
+      if (ev.key !== 'Escape' || !pillListOpen()) return;
+      setPillListOpen(false);
+      roundPillCountBtn.focus({ preventScroll: true });
     });
   }
   window.addEventListener('resize', fitPager);
@@ -6944,6 +7050,7 @@ export const ui = `
       if (sendStatus) {
         sendStatus.textContent = action === 'discuss' ? 'Handed over to chat.' : 'Sent.';
       }
+      moveOnAfter(round);
       // Deliberately NOT re-enabled here: the round is out.
     }).catch(function (err) {
       submitInFlight = false;
@@ -6967,6 +7074,50 @@ export const ui = `
     var round = roundEntry(sent.round);
     if (round && round.status === 'sent') return;
     applySubmittedPush(sent);
+  }
+
+  var MOVE_ON_MS = 1000;
+
+  /** ADR 160: where the page goes once the PM's own Send or Discuss of round 'sent'
+   * went out. The oldest other round still waiting, or holding what its own Send
+   * would post, takes the page; with none, the page goes where the Home mark goes,
+   * unless a queued comment is still only in this tab. */
+  function moveOnAfter(sent) {
+    if (readonly) return;
+    setTimeout(function () {
+      if (currentRound !== sent) return;
+      var now = Date.now();
+      var next = null;
+      (board.rounds || []).forEach(function (r) {
+        if (next !== null || r.n === sent || r.status === 'sent') return;
+        if (roundOwesAnswer(r) || roundIsCurrentlyAwaited(r, now) || commentsSentFrom(r.n).length) next = r.n;
+      });
+      if (next !== null) {
+        if (sendStatus) sendStatus.textContent = '';
+        goToRound(next);
+        sayInSendBar(next, roundNumberLabel(next) + ' still waits');
+        return;
+      }
+      if (pendingComments.length) return;
+      var home = document.querySelector('a.back-to-index');
+      location.href = (home && home.getAttribute('href')) || '/';
+    }, MOVE_ON_MS);
+  }
+
+  function sayInSendBar(n, text) {
+    var section = roundSectionEl(n);
+    var bar = section && isPageRound(blocksOfRound(n)) ? section.querySelector('.page-send-bar') : null;
+    if (!bar) {
+      if (sendStatus) sendStatus.textContent = text;
+      return;
+    }
+    var say = bar.querySelector('.send-status');
+    if (!say) {
+      say = document.createElement('span');
+      say.className = 'send-status';
+      bar.insertBefore(say, bar.firstChild);
+    }
+    say.textContent = text;
   }
 
   if (sendBtn) {
@@ -7061,7 +7212,7 @@ export const ui = `
    * left over stays queued, exactly the AC 12 promise ("comments already left
    * stay on screen and ride the thread's next packet") for a comment on some
    * OTHER round that has not gone out yet either. */
-  function submitPageRound(roundN, action) {
+  function submitPageRound(roundN, action, pressed) {
     if (readonly) return;
     var round = roundEntry(roundN);
     // Not sent, the same question openRoundNumber and the daemon's own submit guard
@@ -7074,7 +7225,7 @@ export const ui = `
     if (afterImageReads('page:' + roundN, function () {
       delete heldPageWayOut[roundN];
       setPageWayOutHeld(roundN, action, false);
-      submitPageRound(roundN, action);
+      submitPageRound(roundN, action, pressed);
     })) {
       heldPageWayOut[roundN] = action;
       setPageWayOutHeld(roundN, action, true);
@@ -7114,6 +7265,9 @@ export const ui = `
       applyOwnSend(result);
       refreshPins(document);
       clearPendingMark();
+      if (!pressed) return;
+      sayInSendBar(roundN, action === 'discuss' ? 'Handed over to chat.' : 'Sent.');
+      moveOnAfter(roundN);
     }).catch(function () {
       // Nothing went out -- hand the controls back so the reviewer can retry,
       // the same recovery submitBoard's own catch performs. Except on a panel
@@ -7138,13 +7292,13 @@ export const ui = `
     var sendBtn3 = ev.target.closest('.page-send-btn');
     if (sendBtn3) {
       var n1 = parseInt(sendBtn3.getAttribute('data-round'), 10);
-      if (isFinite(n1)) submitPageRound(n1, 'send');
+      if (isFinite(n1)) submitPageRound(n1, 'send', true);
       return;
     }
     var discussBtn3 = ev.target.closest('.page-discuss-btn');
     if (discussBtn3) {
       var n2 = parseInt(discussBtn3.getAttribute('data-round'), 10);
-      if (isFinite(n2)) submitPageRound(n2, 'discuss');
+      if (isFinite(n2)) submitPageRound(n2, 'discuss', true);
     }
   });
 

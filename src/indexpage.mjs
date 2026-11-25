@@ -650,6 +650,19 @@ function focusStop(key) {
   stop.focus();
 }
 
+function missionsSendComment(key, cardEl) {
+  var box = cardEl.querySelector('textarea.mission-comment-text');
+  var text = box ? String(box.value || '') : '';
+  if (!text.trim()) { if (box && box.focus) box.focus(); return; }
+  missionsUi.drafts[key] = text;
+  missionsOrder(key, { kind: 'comment', text: text }, 'Could not send the comment').then(function (ok) {
+    if (!ok) return;
+    delete missionsUi.commenting[key];
+    delete missionsUi.drafts[key];
+    paintMissions();
+  });
+}
+
 function onMissionsClick(ev) {
   var t = ev.target;
   if (!t || !t.closest) return;
@@ -694,16 +707,7 @@ function onMissionsClick(ev) {
     return;
   }
   if (t.closest('button.mission-comment-send')) {
-    var box = cardEl.querySelector('textarea.mission-comment-text');
-    var text = box ? String(box.value || '') : '';
-    if (!text.trim()) { if (box && box.focus) box.focus(); return; }
-    missionsUi.drafts[key] = text;
-    missionsOrder(key, { kind: 'comment', text: text }, 'Could not send the comment').then(function (ok) {
-      if (!ok) return;
-      delete missionsUi.commenting[key];
-      delete missionsUi.drafts[key];
-      paintMissions();
-    });
+    missionsSendComment(key, cardEl);
     return;
   }
   // The card opens its board through its title's link, whose box covers the card under
@@ -760,10 +764,16 @@ function onMissionsInput(ev) {
 
 function onMissionsKeydown(ev) {
   var t = ev.target;
-  if (!ev || ev.key !== 'Escape' || !t || !t.closest) return;
+  if (!ev || !t || !t.closest) return;
   var cardEl = t.closest('article.mission-card');
   if (!cardEl) return;
   var key = cardEl.getAttribute('data-mission-key');
+  if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey) && t.closest('textarea.mission-comment-text')) {
+    ev.preventDefault();
+    missionsSendComment(key, cardEl);
+    return;
+  }
+  if (ev.key !== 'Escape') return;
   if (missionsUi.commenting[key] && t.closest('div.mission-comment')) {
     delete missionsUi.commenting[key];
     delete missionsUi.drafts[key];
