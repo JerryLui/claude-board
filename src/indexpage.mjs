@@ -1722,13 +1722,16 @@ function onStorePruneClick() {
 // closest() finding the panel above it, and is left alone (closing on the
 // summary's own click would fight the native <details> toggle and make the panel
 // impossible to open). So is one in the phone header's ⋯ menu, whose Settings
-// item opens the panel by clicking that summary; ⋯ itself is outside, so opening
-// the menu closes the panel. Nothing here calls stopPropagation.
+// item opens the panel by clicking that summary. Nothing here calls stopPropagation.
+function onCornerMenuOpen() {
+  var panel = document.querySelector('details#pomodoro-settings');
+  if (panel && panel.open) closePomodoroSettings();
+}
 function onDocumentClickClosePomodoroSettings(ev) {
   var panel = document.querySelector('details#pomodoro-settings');
   if (!panel || !panel.open) return;
   var t = ev.target;
-  if (t && t.closest && (t.closest('details#pomodoro-settings') || t.closest('.corner-menu'))) return;
+  if (t && t.closest && (t.closest('details#pomodoro-settings') || t.closest('.corner-more'))) return;
   closePomodoroSettings();
 }
 
@@ -1924,7 +1927,7 @@ function initIndexStream() {
 initIndexStream();
 ` + '\nvar TAB_KEY_PREFIX = ' + JSON.stringify(TAB_KEY_PREFIX) + ';\n' + missionsParts.toString() + '\n' + missionsScript
   + '\n' + trackDocWidth.toString() + '\ntrackDocWidth();\n'
-  + '\nvar wireCornerMenu = ' + wireCornerMenu.toString() + ';\nwireCornerMenu();\n'
+  + '\nvar wireCornerMenu = ' + wireCornerMenu.toString() + ';\nwireCornerMenu(onCornerMenuOpen);\n'
   + '\nvar HOME_STORAGE_KEY = ' + JSON.stringify(HOME_STORAGE_KEY) + ';\n' + rememberHomeView.toString() + '\nrememberHomeView();\n';
 
 /** Remembers the overview this page is, Missions or Boards, under HOME_STORAGE_KEY

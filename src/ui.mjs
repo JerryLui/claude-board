@@ -153,13 +153,14 @@ export function trackDocWidth() {
 }
 
 /** Wires the phone header's ⋯ menu (src/render.mjs's cornerMenu): ⋯ opens and
- * closes it, Arrow keys, Home and End move through its items as Tab does,
- * Escape and a press outside close it, and focus leaving it closes it. An item
+ * closes it, calling `onOpen`, if given, each time it opens, by press or by key.
+ * Arrow keys, Home and End move through its items as Tab does, Escape and a
+ * press outside close it, and focus leaving it closes it. An item
  * with 'data-proxy' clicks the control it names and shows only while that
  * control is displayed, mirroring its state; one with 'data-copy' copies its
  * text. Spliced by '.toString()' into the board page's client script and
  * callable the same way from the home views'. */
-export function wireCornerMenu() {
+export function wireCornerMenu(onOpen) {
   var btn = document.querySelector('button.corner-more-btn');
   var menu = document.querySelector('div.corner-menu');
   if (!btn || !menu) return;
@@ -190,6 +191,7 @@ export function wireCornerMenu() {
   }
   function setOpen(open, focus) {
     if (open) sync();
+    if (open && onOpen) onOpen();
     menu.hidden = !open;
     btn.setAttribute('aria-expanded', open ? 'true' : 'false');
     if (open && focus) {

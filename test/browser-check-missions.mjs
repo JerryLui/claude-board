@@ -1176,6 +1176,13 @@ async function main() {
         await tab.evalPage(`document.querySelector('.corner-menu [data-proxy^="summary"]').click()`);
         await tab.quiet();
         assert.deepEqual(await tab.evalPage(`(function (m) { return [m.open, m.panel.shown]; })(${HOME_MENU_EXPR})`), [false, true], 'Settings opens the panel again');
+        await tab.evalPage(`document.querySelector('button.corner-more-btn').focus()`);
+        await pressKey(tab, 'ArrowDown');
+        await tab.quiet();
+        const keyed = await tab.evalPage(HOME_MENU_EXPR);
+        assert.deepEqual([keyed.open, keyed.panel.shown], [true, false], 'ArrowDown on ⋯ over the open panel opens its menu and closes the panel');
+        await tab.evalPage(`document.querySelector('.corner-menu [data-proxy^="summary"]').click()`);
+        await tab.quiet();
 
         await tab.evalPage(`document.querySelector('form#pomodoro-settings-form input').focus()`);
         await pressKey(tab, 'Escape');
