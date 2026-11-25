@@ -6,7 +6,8 @@
 // menu holding Comment, the theme control, Download round and the board's and thread's
 // ids, by keyboard as by touch. No countdown shows anywhere else, and nothing fixed lies
 // over a card save the two buttons, the round pill, the send bar, Back to top and notices;
-// a read-only page has no home button. A full-page round pads
+// a read-only page has no home button; a link to an anchor inside a stage lands its target
+// just under the two buttons. A full-page round pads
 // its mock under the two buttons, and they leave while the mock's own full-size view is
 // open. At 1280 the header, its condensing pill and the round caption are as before.
 //
@@ -19,11 +20,11 @@
 //   node test/browser-check-phone-header.mjs
 
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { sessionToken } from '../src/secret.mjs';
 import { repoRoot, runMain, sleep } from './support.mjs';
-import { evalIn, guardRun, openPhone, openTab, postJson, requireChrome, row, startScratchDaemon, withChrome } from './browser-support.mjs';
+import { clickAt, evalIn, guardRun, openPhone, openTab, postJson, requireChrome, row, startScratchDaemon, withChrome } from './browser-support.mjs';
 
 guardRun('browser-check-phone-header', { deadlineMs: 180000 });
 
@@ -33,6 +34,8 @@ const MOCK = readFileSync(path.join(repoRoot, 'test', 'fixtures', 'lens-mock.htm
 const PARA = 'A paragraph long enough to wrap over several lines of a phone, so the round runs well past one screen. ';
 const QUESTION = { kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] };
 const COUNTDOWN = /^\d+m left$/;
+const LINK_MOCK = '<p><a id="toc" href="#target" style="display:inline-block;padding:12px">To the target</a></p>'
+  + '<div style="height:360px"></div><h2 id="target" style="margin:0">Target</h2><div style="height:60px"></div>';
 const KEYS = { Enter: [13, 36, '\r'], Tab: [9, 48, '\t'], Escape: [27, 53, '\u001b'] };
 
 /** Presses `key` on whatever has the tab's focus, as a Mac keyboard does (QUIRKS.md "A
@@ -137,6 +140,7 @@ const OVER_CARDS_ALLOWED = ['back-to-index', 'corner-more-btn', 'round-pager-doc
 async function keep(tab, name) {
   const dir = process.env.CLAUDE_BOARD_PHONE_HEADER_KEEP;
   if (!dir) return;
+  mkdirSync(dir, { recursive: true });
   const { data } = await tab.sp('Page.captureScreenshot', { format: 'png' });
   writeFileSync(path.join(dir, `${name}.png`), Buffer.from(data, 'base64'));
 }
@@ -176,6 +180,8 @@ async function main() {
     const roundUrl = urlOf(round);
     const page = await post({ title: TITLE, wait: true, blocks: [{ id: 'h1', kind: 'html', html: MOCK }] });
     const pageUrl = urlOf(page);
+    const linked = await post({ title: TITLE, blocks: [{ kind: 'html', html: LINK_MOCK }, ...Array(6).fill({ kind: 'markdown', text: PARA.repeat(6) })] });
+    const linkedUrl = urlOf(linked);
 
     await withChrome({ tag: 'cb-phone-header' }, async ({ send, onEvent }) => {
       const cookie = sessionToken(daemon.secret);
@@ -243,6 +249,49 @@ async function main() {
           await tab.evalPage(`document.body.classList.add('readonly')`);
           const m = await tab.evalPage(TOP_EXPR);
           assert.deepEqual([m.home.shown, m.more.shown], [false, true]);
+        } finally {
+          await tab.close();
+        }
+      });
+
+      await row('at 390 by 844 a link to an anchor inside a stage scrolls the board so its target lands just under the corner buttons', async note => {
+        const tab = await openPhone(send, onEvent, linkedUrl, cookie);
+        try {
+          await tab.sp('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true });
+          let frame = null;
+          for (let n = 0; n < 40 && !frame; n++) {
+            const { targetInfos } = await send('Target.getTargets');
+            for (const t of targetInfos.filter(t => t.type === 'iframe')) {
+              const { sessionId } = await send('Target.attachToTarget', { targetId: t.targetId, flatten: true });
+              if (await evalIn(send, sessionId, `!!document.getElementById('toc')`)) frame = sessionId;
+            }
+            if (!frame) await sleep(100);
+          }
+          assert.ok(frame, 'setup: the stage holds the link');
+          await tab.until(`document.querySelector('.round-current iframe.html-stage').getBoundingClientRect().height >= 430`, 'the stage fitting its content');
+          await tab.quiet();
+          const where = async () => {
+            const box = await tab.evalPage(`(function () {
+              var f = document.querySelector('.round-current iframe.html-stage'), r = f.getBoundingClientRect();
+              var corners = [document.querySelector('a.back-to-index'), document.querySelector('button.corner-more-btn')].map(function (el) { return el.getBoundingClientRect().bottom; });
+              return { top: r.top + f.clientTop, scrollY: scrollY, room: document.documentElement.scrollHeight - innerHeight, corners: Math.max.apply(null, corners) };
+            })()`);
+            const inFrame = JSON.parse(await evalIn(send, frame, `JSON.stringify({ target: document.getElementById('target').getBoundingClientRect().top, toc: document.getElementById('toc').getBoundingClientRect() })`));
+            return { ...box, target: box.top + inFrame.target, toc: { x: inFrame.toc.left + inFrame.toc.width / 2, y: box.top + inFrame.toc.top + inFrame.toc.height / 2 } };
+          };
+          const before = await where();
+          assert.ok(before.room > before.target, `setup: the board can scroll the target to the top (${JSON.stringify(before)})`);
+          await clickAt(tab, before.toc);
+          let after = before;
+          for (let n = 0, still = 0; n < 60 && still < 4; n++) {
+            await sleep(100);
+            const now = await where();
+            still = now.scrollY === after.scrollY && now.scrollY !== before.scrollY ? still + 1 : 0;
+            after = now;
+          }
+          note(`the target at ${Math.round(before.target)}px, then ${Math.round(after.target)}px after the board scrolled ${before.scrollY} -> ${after.scrollY}; the corner buttons end at ${Math.round(after.corners)}px`);
+          assert.ok(after.scrollY > before.scrollY, 'the board scrolled to the target');
+          assert.ok(after.target >= after.corners && after.target <= after.corners + 16, `the target lands just under the corner buttons, not at ${Math.round(after.target)}px`);
         } finally {
           await tab.close();
         }

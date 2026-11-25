@@ -1738,7 +1738,7 @@ export const ui = `
 
   /** The page's own clearance under its sticky header: '--head-clear', the
    * token every scroll-to on this page lands by. Read off the root's computed
-   * style, since the narrow layout raises it; with no computed style to read,
+   * style, since the phone header lowers it; with no computed style to read,
    * the token's own default. */
   function headClear() {
     var clear = NaN;

@@ -377,13 +377,12 @@ ${tokenBlock(':root[data-theme="light"]', LIGHT, 'light')}
   --ease: cubic-bezier(0.16, 1, 0.3, 1);
 
   /* How far a scroll-to-anchor has to clear the sticky .board-head. Measured in
-     Chrome: the header is 81.4px at ordinary widths, so 88px leaves a small gap
-     -- but BELOW the 560px breakpoint .board-head becomes a column and grows to
-     116.4px, and a hardcoded 88 then parks the target 28px BEHIND the header it
-     was supposed to clear. One token, overridden in that same media query, so
-     the two can never disagree again. Every scroll-margin-top on the page reads
-     it: .round, whose top the pager scrolls to on every page flip, and
-     .question-block, whose top the questions-left pill scrolls to. */
+     Chrome: the header is 81.4px at ordinary widths, so 88px leaves a small gap.
+     At 560px and under the header scrolls away and only the 44px corner buttons
+     stay, so the phone header's block lowers it to 64px. Every scroll-margin-top
+     on the page reads it (.round, whose top the pager scrolls to on every page
+     flip, and .question-block, whose top the questions-left pill scrolls to),
+     and so do src/ui.mjs's scrolls, off the root. */
   --head-clear: 88px;
 }
 
@@ -2911,25 +2910,8 @@ body.page-board .board-head { margin-left: env(safe-area-inset-left, 0px); margi
   .compare-grid { grid-template-columns: 1fr; }
 }
 @media (max-width: 560px) {
-  /* the header stacks here and grows from 81.4px to 116.4px (measured in
-     Chrome), so every scroll-to-anchor target has to clear that much more --
-     see --head-clear's own comment in :root */
-  :root { --head-clear: 124px; }
   .board-shell { padding-left: var(--space-4); padding-right: var(--space-4); }
-  .board-head { flex-direction: column; align-items: flex-start; gap: var(--space-1); }
-  .board-head, body.page-board .board-head { padding-top: var(--space-2); padding-bottom: var(--space-2); }
-  .board-head-title, .board-head-actions { width: 100%; }
-  body.page-board .board-head-ident, body:not(.page-board) .board-head-ident { flex: 1; max-width: none; }
-  .board-head h1, .board-head .meta { overflow: hidden; text-overflow: ellipsis; }
-  .back-to-index, body.page-board .back-to-index { width: 44px; height: 44px; }
-  body.page-board .back-to-index svg { width: 30px; height: 30px; }
   .round-label { border-radius: var(--r-md); }
-  .mode-toggle, .round-download { min-height: 44px; }
-  .mode-toggle-icon { min-width: 44px; justify-content: center; }
-  .board-head-actions { gap: var(--space-2); }
-  body.page-board .head-download { gap: 0; min-width: 44px; justify-content: center; font-size: 0; }
-  body.page-board .board-head { gap: var(--space-1); padding-left: var(--space-4); padding-right: var(--space-4); }
-  .board-head-actions .round-meta { margin-left: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
   .send-bar { flex-wrap: wrap; padding-top: var(--space-2); }
   .round-countdown.visible { display: none; }
@@ -2975,10 +2957,6 @@ body.page-board .board-head { margin-left: env(safe-area-inset-left, 0px); margi
   .lens-btn { min-width: 44px; min-height: 44px; }
   .stage-lens-body { padding: var(--space-2); padding-bottom: max(var(--space-2), env(safe-area-inset-bottom)); }
 
-  body.home-page .board-head h1 { position: absolute; width: 1px; height: 1px; clip-path: inset(50%); }
-  body.home-page .board-head-ident { flex: none; }
-  .view-tabs { flex: 1; margin-left: 0; }
-  .view-tab { flex: 1; justify-content: center; min-height: 44px; }
   .pomodoro-widget, .pomodoro-settings { position: static; }
   .pomodoro-widget { margin-right: auto; }
   .pomodoro-switch { position: relative; width: 44px; height: 44px; padding: 0 4px; background: none; border-color: transparent; }
@@ -3017,32 +2995,13 @@ body.page-board .board-head { margin-left: env(safe-area-inset-left, 0px); margi
   .mission-pr, .mission-btn { min-height: 44px; min-width: 44px; padding-left: 14px; padding-right: 14px; justify-content: center; }
   .mission-foot .mission-btn { padding: 0 16px; }
   .mission-confirm .mission-btns { flex-wrap: wrap; }
-  /* The condense is suppressed below this
-     breakpoint rather than taught a second, column-aware shape. '--pill-half'
-     is measured as one SINGLE-ROW sum (brand + columnGap + actions,
-     src/ui.mjs's measurePillHalf) and describes nothing once the rule two
-     lines up turns '.board-head' into two stacked rows: the fixed-height band
-     it draws no longer matches either row, with the mark sitting above it and
-     the state label below it, neither one inside it. A pill that does not
-     fit its own contents is worse than no pill, and nothing about AC 7 requires one
-     at every viewport -- the header just stays exactly as it always has
-     below this breakpoint, at every scroll offset.
-     '!important' is load-bearing: refreshDocumentScrollChrome (src/ui.mjs)
-     writes '--stage-p' as an INLINE style on <body>, which outranks a plain
-     stylesheet rule regardless of specificity -- only '!important' on the
-     stylesheet side can still win, and every rule this ticket added reads
-     '--stage-p' rather than testing 'stage-scrolled' directly, so pinning the
-     ONE variable neutralises all of them at once with no second override to
-     keep in sync. AC 8 is untouched by this: it was never about whether the
-     header condenses, only about whether condensing (whenever it happens)
-     moves anything -- and below this breakpoint it now simply never
-     happens.
-     'body', not 'body:not(.page-board)': a page board reaches the pill by the
-     same arithmetic off the same single-row '--pill-half', and the
-     'flex-direction: column' rule above is not scoped away from it either, so
-     it breaks here in exactly the way an ordinary board did. The first pass
-     scoped this rule to ordinary boards only because its ticket was about
-     them, not because a page board was found to survive. */
+  /* The condense is suppressed below this breakpoint: '--pill-half' is measured
+     as one single-row header (src/ui.mjs's measurePillHalf), and here the header
+     scrolls away instead. '!important' is load-bearing: refreshDocumentScrollChrome
+     (src/ui.mjs) writes '--stage-p' as an INLINE style on <body>, which outranks
+     a plain stylesheet rule, and every condense rule reads '--stage-p', so
+     pinning the one variable switches all of them off. 'body', not
+     'body:not(.page-board)': a page board's pill is the same arithmetic. */
   body { --stage-p: 0 !important; }
 }
 
@@ -3053,7 +3012,7 @@ body.page-board .board-head { margin-left: env(safe-area-inset-left, 0px); margi
    wider. --- */
 .head-round, .corner-more { display: none; }
 @media (max-width: 560px) {
-  body:not(.home-page) { --head-clear: 64px; }
+  :root { --head-clear: 64px; }
   /* a flip lands on the page's top, its title and state line in view */
   body:not(.home-page) .round { scroll-margin-top: 100vh; }
   body:not(.page-board) .board-head { position: static; }
@@ -3080,8 +3039,7 @@ body.page-board .board-head { margin-left: env(safe-area-inset-left, 0px); margi
   .head-round-state { flex: none; }
   .head-round-state::before { content: "·"; padding: 0 5px; }
   .head-round-state:empty { display: none; }
-  body:not(.home-page) .board-head-actions { position: absolute; top: 0; right: 0; width: 1px; height: 1px;
-    overflow: hidden; clip-path: inset(50%); visibility: hidden; }
+  .board-head-actions { position: absolute; top: 0; right: 0; width: 1px; height: 1px; overflow: hidden; visibility: hidden; }
   body:not(.home-page) .round-chips { display: none; }
   body:not(.home-page):not(.page-board) .readonly-banner { margin-top: var(--space-2); margin-right: 44px; }
 
@@ -3116,8 +3074,10 @@ body.page-board .board-head { margin-left: env(safe-area-inset-left, 0px); margi
   body.home-page .board-head { display: block; margin-bottom: var(--space-3);
     padding: calc(8px + env(safe-area-inset-top, 0px)) 44px var(--space-2); }
   body.home-page .board-head-title { gap: 0; }
-  body.home-page .board-head-actions { position: absolute; top: 0; right: 0; width: 1px; height: 1px;
-    overflow: hidden; visibility: hidden; }
+  body.home-page .board-head h1 { position: absolute; width: 1px; height: 1px; clip-path: inset(50%); }
+  body.home-page .board-head-ident { flex: none; }
+  .view-tabs { flex: 1; margin-left: 0; }
+  .view-tab { flex: 1; justify-content: center; min-height: 44px; }
   body.home-page .pomodoro-settings[open] .pomodoro-settings-form {
     position: fixed; z-index: 41; top: 60px; left: 8px; right: 8px; margin: env(safe-area-inset-top, 0px) 0 0;
     max-height: calc(100dvh - 68px - env(safe-area-inset-top, 0px)); overflow-y: auto; overscroll-behavior: contain;
