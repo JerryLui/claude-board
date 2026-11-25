@@ -3006,11 +3006,9 @@ export const ui = `
       // Non-passive on purpose: without preventDefault the page behind the
       // dialog scrolls instead of the diagram zooming.
       if (ev.preventDefault) ev.preventDefault();
-      var r = lensStageRect();
       // A trackpad pinch arrives as a wheel event with ctrlKey set, an order of
       // magnitude coarser per notch than an ordinary scroll.
-      var factor = Math.pow(2, -ev.deltaY * (ev.ctrlKey ? 0.01 : 0.0022));
-      lensView = lensZoomAt(lensView, ev.clientX - r.left, ev.clientY - r.top, factor, LENS_MIN_SCALE, LENS_MAX_SCALE);
+      zoomAtClient(ev.clientX, ev.clientY, Math.pow(2, -ev.deltaY * (ev.ctrlKey ? 0.01 : 0.0022)));
       lensApply();
     }, { passive: false });
 
@@ -3019,8 +3017,7 @@ export const ui = `
       // A touch double-tap is zoomed on its second pointerup, below; the
       // dblclick a browser may add after it would zoom a second time.
       if (!lens.open || lastPressTouch) return;
-      var r = lensStageRect();
-      lensView = lensZoomAt(lensView, ev.clientX - r.left, ev.clientY - r.top, 2, LENS_MIN_SCALE, LENS_MAX_SCALE);
+      zoomAtClient(ev.clientX, ev.clientY, 2);
       lensApply();
     });
 
@@ -6225,17 +6222,12 @@ export const ui = `
     var rns = rounds.map(function (r) { return r.n; });
     var first = rns.length ? rns[0] : 1;
     var last = rns.length ? rns[rns.length - 1] : 1;
-    var prev = document.querySelector('button#round-prev');
-    var next = document.querySelector('button#round-next');
     // Disabled at the ends, never hidden: a control that disappears at round 1
     // is a control the reviewer has to find again at round 2.
-    if (prev) prev.disabled = currentRound <= first;
-    if (next) next.disabled = currentRound >= last;
-    var pillPrev = document.querySelector('button#round-pill-prev');
-    var pillNext = document.querySelector('button#round-pill-next');
+    qsa('button[data-step]').forEach(function (btn) {
+      btn.disabled = Number(btn.getAttribute('data-step')) < 0 ? currentRound <= first : currentRound >= last;
+    });
     var pillCount = document.querySelector('button#round-pill-count');
-    if (pillPrev) pillPrev.disabled = currentRound <= first;
-    if (pillNext) pillNext.disabled = currentRound >= last;
     if (pillCount) {
       pillCount.textContent = roundCountLabel(currentRound, rounds.length);
       pillCount.disabled = false;
@@ -6679,10 +6671,9 @@ export const ui = `
   // delegated at the <nav> rather than per entry, so an entry created later by
   // refreshPager (a round arriving over SSE) is live the moment it exists,
   // with no second wiring pass and no chance of a double-registered listener.
-  var roundPrevBtn = document.querySelector('button#round-prev');
-  var roundNextBtn = document.querySelector('button#round-next');
-  if (roundPrevBtn) roundPrevBtn.addEventListener('click', function () { stepRound(-1); });
-  if (roundNextBtn) roundNextBtn.addEventListener('click', function () { stepRound(1); });
+  qsa('button[data-step]').forEach(function (btn) {
+    btn.addEventListener('click', function () { stepRound(Number(btn.getAttribute('data-step'))); });
+  });
   var roundPagerNav = pagerNav();
   if (roundPagerNav) {
     roundPagerNav.addEventListener('click', function (ev) {
@@ -6698,11 +6689,7 @@ export const ui = `
       if (picked) roundPillCountBtn.focus({ preventScroll: true });
     });
   }
-  var roundPillPrevBtn = document.querySelector('button#round-pill-prev');
-  var roundPillNextBtn = document.querySelector('button#round-pill-next');
   var roundPillCountBtn = document.querySelector('button#round-pill-count');
-  if (roundPillPrevBtn) roundPillPrevBtn.addEventListener('click', function () { stepRound(-1); });
-  if (roundPillNextBtn) roundPillNextBtn.addEventListener('click', function () { stepRound(1); });
   if (roundPillCountBtn) {
     roundPillCountBtn.addEventListener('click', function () { setPillListOpen(!pillListOpen()); });
     document.addEventListener('click', function (ev) {
@@ -7051,7 +7038,7 @@ export const ui = `
       refreshPins(document);
       clearPendingMark();
       if (sendStatus) {
-        sendStatus.textContent = action === 'discuss' ? 'Handed over to chat.' : 'Sent.';
+        sendStatus.textContent = sentText(action);
       }
       moveOnAfter(round);
       // Deliberately NOT re-enabled here: the round is out.
@@ -7103,6 +7090,10 @@ export const ui = `
       var home = document.querySelector('a.back-to-index');
       location.href = (home && home.getAttribute('href')) || '/';
     }, MOVE_ON_MS);
+  }
+
+  function sentText(action) {
+    return action === 'discuss' ? 'Handed over to chat.' : 'Sent.';
   }
 
   /** ADR 160's waiting round, asked by move-on and the pill's dot alike. */
@@ -7281,7 +7272,7 @@ export const ui = `
       refreshPins(document);
       clearPendingMark();
       if (!pressed) return;
-      sayInSendBar(roundN, action === 'discuss' ? 'Handed over to chat.' : 'Sent.');
+      sayInSendBar(roundN, sentText(action));
       moveOnAfter(roundN);
     }).catch(function () {
       // Nothing went out -- hand the controls back so the reviewer can retry,
