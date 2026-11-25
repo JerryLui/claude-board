@@ -1930,7 +1930,8 @@ export function filterThreads(threads, query) {
  * from a round still waiting on the PM. Fire carries what a click submits; Merge is a
  * link to the brief at its merge question, and the summary shows whole beside it. Stop
  * is offered while a session is live and no stop is already on its way. The whole card
- * opens its board, the round waiting on the PM where there is one.
+ * opens its board, the round waiting on the PM where there is one. Each of `hangs` is a
+ * line naming the hung agent, its clock time and how it was recovered.
  *
  * A tab (`tabs`, a session the watcher reports that no mission launched; ADR 131) is a
  * card of its own in its state's column, after the missions: tagged "tab", its login and
@@ -1958,6 +1959,7 @@ function missionsParts(overview, ui) {
   // A PR's state is the view's, from GitHub at its head commit; 'checking' (no fact yet)
   // takes the open ring, and one closed without merging the struck one.
   var PR_MARKS = { green: '✓', merged: '✓', red: '✕', open: '○', draft: '○', closed: '⊘' };
+  var HANG_OUTCOMES = { resumed: 'resumed', replaced: 'replaced by a fresh agent', reported: 'left for the PM' };
   var STOP_ICON = '<svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="1.8"/><line x1="4.7" y1="4.7" x2="15.3" y2="15.3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
   var data = overview || {};
   var missions = Array.isArray(data.missions) ? data.missions : [];
@@ -1974,6 +1976,12 @@ function missionsParts(overview, ui) {
     var hours = Math.floor(minutes / 60);
     if (hours < 24) return hours + ' h';
     return Math.floor(hours / 24) + ' d';
+  }
+
+  function clock(iso) {
+    var at = new Date(iso);
+    if (!isFinite(at.getTime())) return '';
+    return ('0' + at.getHours()).slice(-2) + ':' + ('0' + at.getMinutes()).slice(-2);
   }
 
   // A queued mission and a parked one wait, each tagged as such on its card.
@@ -2097,6 +2105,13 @@ function missionsParts(overview, ui) {
       var since = age(m.rejoin.since);
       out += '<p class="mission-fact" data-rejoin title="' + esc('Since ' + m.rejoin.since) + '">Session needs /mission again, '
         + esc(since === 'now' || !since ? 'just now' : 'for ' + since) + '</p>';
+    }
+    // Each hung call the session's agent watch recovered, at its local clock time, the
+    // whole time in its tooltip.
+    var hangs = Array.isArray(m.hangs) ? m.hangs : [];
+    for (var h = 0; h < hangs.length; h++) {
+      out += '<p class="mission-fact" data-hang title="' + esc('Hung at ' + hangs[h].at) + '">Hung: ' + esc(hangs[h].agent)
+        + ' at ' + esc(clock(hangs[h].at)) + ', ' + esc(HANG_OUTCOMES[hangs[h].outcome] || hangs[h].outcome) + '</p>';
     }
     // The title, summary, waiting on and next each stop at a few lines, and this one fold
     // shows them whole. It is hidden on screen while nothing is cut (missionsMarkFits).

@@ -1841,6 +1841,9 @@ Mission = {
   orders: [ { id, kind, text?, at, by, relayedAt?, ackedAt?, resentAt? } ],
                              // kind: 'stop' | 'comment' (by: 'card') | 'pm' (by: 'master-chief')
   queue?: { phase, prompt, login?, at },
+  hangs?: [ { agent, at, outcome } ],              // hung calls the session's agent watch recovered:
+                                                   // agent at most 80 characters, at a UTC ISO time,
+                                                   // outcome 'resumed' | 'replaced' | 'reported'; at most 20
   history: [ { at, phase, state } ],               // one entry per phase or state change
   createdAt, updatedAt, releasedAt?, retiredAt?,
 }
@@ -1918,8 +1921,11 @@ POST /api/mission/:key              { ...fields } -> View
 ```
 
 The write sets only `title cwd phase state summary waitingOn next prs handoff fire queue
-retiredAt`, each typed and capped as above; any other field, a wrong type or a value over its cap
-is a 400 that writes nothing. `null` clears an optional field and is a 400 on `title`, `phase`,
+retiredAt hangs`, each typed and capped as above; any other field, a wrong type or a value over its cap
+is a 400 that writes nothing. A `prs` or `hangs` write replaces the whole list: the writer reads,
+appends and writes, keeping the newest 20 `hangs` itself, and a view reads `hangs` as `[]` where
+none was written. The card shows each hang as a line, `Hung: <agent> at 17:53, resumed`
+(`replaced by a fresh agent`, `left for the PM`), the time the board's local clock. `null` clears an optional field and is a 400 on `title`, `phase`,
 `state` or `prs`. A mission that does not exist is created (phase `grill`, state `waiting`, titled
 by its key, until the body says otherwise). A phase or state change appends to `history`, and
 turning `released` stamps `releasedAt`. `state: 'landed'`, the name before ADR 130, is still
