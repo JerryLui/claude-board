@@ -76,16 +76,24 @@ const MAX_PATH_CHARS = 4096;
 const MAX_URL_CHARS = 2048;
 const MAX_TEXT_BYTES = 4096;
 const MAX_PRS = 50;
-/** A hang the session's agent watch recovered: which agent, when, and how. */
-export const HANG_OUTCOMES = ['resumed', 'replaced', 'reported'];
+/** How the session's agent watch recovered a hang, each with the words its card line reads. */
+export const HANG_OUTCOMES = { resumed: 'resumed', replaced: 'replaced by a fresh agent', reported: 'left for the PM' };
 const MAX_HANGS = 20;
 const MAX_HANG_AGENT_CHARS = 80;
-const UTC_ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
+const UTC_ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
 const MAX_HISTORY = 200;
 const MAX_ORDERS = 200;
 const MAX_BOARDS = 200;
 
 const iso = ms => new Date(ms).toISOString();
+
+/** A UTC ISO-8601 time to the second, milliseconds allowed, naming a date that exists:
+ * `toISOString` writes the same date and time back, to the millisecond. */
+export function isUtcIso(value) {
+  if (typeof value !== 'string' || !UTC_ISO.test(value)) return false;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) && iso(ms) === value.replace(/(?:\.(\d+))?Z$/, (_, fraction = '') => `.${(fraction + '000').slice(0, 3)}Z`);
+}
 
 function refuse(message, status = 400) {
   return Object.assign(new Error(message), { status });
@@ -187,10 +195,17 @@ function validateHang(hang, i) {
   assertOnly(hang, ['agent', 'at', 'outcome'], what);
   str(hang.agent, `${what}.agent`, MAX_HANG_AGENT_CHARS);
   if (!hang.agent.trim()) throw refuse(`${what}.agent must not be empty`);
-  if (typeof hang.at !== 'string' || !UTC_ISO.test(hang.at) || !Number.isFinite(Date.parse(hang.at))) {
-    throw refuse(`${what}.at must be an ISO-8601 UTC timestamp`);
+  if (!isUtcIso(hang.at)) throw refuse(`${what}.at must be an ISO-8601 UTC timestamp`);
+  return { agent: hang.agent, at: hang.at, outcome: oneOf(hang.outcome, Object.keys(HANG_OUTCOMES), `${what}.outcome`) };
+}
+
+function wellFormedHang(hang) {
+  try {
+    validateHang(hang, 0);
+    return true;
+  } catch {
+    return false;
   }
-  return { agent: hang.agent, at: hang.at, outcome: oneOf(hang.outcome, HANG_OUTCOMES, `${what}.outcome`) };
 }
 
 /** One validator per writable field; each answers the value to store, or throws a 400.
@@ -560,7 +575,7 @@ export function deriveState(m, { home = boardHome(), now = Date.now(), isAlive =
 }
 
 /** The record as a reader gets it: every stored field, `prs` with each PR's facts
- * (`prsOf`), `hangs` as `[]` where none was written, plus `view` (the derived state), `asking` (it reads needs-you by a session's
+ * (`prsOf`), `hangs` holding only its well-formed entries, `[]` where none was written, plus `view` (the derived state), `asking` (it reads needs-you by a session's
  * newest round, one no hand-over reopened, `owedRounds`), `waiting` (the round its card
  * opens, `{ board, round, postedAt }` by id, number and posting time, `waitingOf`, else null), `retired` (its `retiredAt` parses), `gone`
  * (`goneOf`), `live` (a session holds the mission, `hasLiveSession`), `listedAt` (the time
@@ -577,7 +592,7 @@ export function missionView(m, { home = boardHome(), now = Date.now(), isAlive =
   return {
     ...m,
     prs: prsOf(m),
-    hangs: Array.isArray(m.hangs) ? m.hangs : [],
+    hangs: Array.isArray(m.hangs) ? m.hangs.filter(wellFormedHang) : [],
     view,
     asking: view === 'needs-you' && linked.some(entry => owedRounds(entry).some(round => !round.reopenedAt)),
     waiting: waiting && { board: waiting.entry.board.id, round: waiting.round.n, postedAt: waiting.round.postedAt },

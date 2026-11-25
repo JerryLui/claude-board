@@ -354,7 +354,11 @@ a Live one has a Stop. _Avoid_: alive, running, active, open.
 
 **Stalled**: of a Mission, that its session's process is gone, no process bound its launch
 within five minutes, or it has been working and silent fifteen minutes: no heartbeat, and no session
-watcher snapshot listing it. A silent session whose process lives is Stalled and still Live. _Avoid_: dead, hung, crashed, stale.
+watcher snapshot listing it. A silent session whose process lives is Stalled and still Live. _Avoid_: dead, hung (a Hung call is one call), crashed, stale.
+
+**Hung call**: one tool call of a session's background agent left open past its bound, which
+the session's agent watch recovered and wrote to its Mission's `hangs`; the card reads it as a
+`Hung:` line. Defined in claude-config's glossary (`~/.claude/CONTEXT.md`). _Avoid_: stall, stuck call.
 
 **Queued**: of a Mission, that its launch waits for a slot, past ten sessions working or fourteen
 alive, a mission the PM's own tab holds counting toward neither; shown under waiting with its tag, launched by the Master Chief when one frees. _Avoid_:

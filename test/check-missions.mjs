@@ -1447,7 +1447,7 @@ async function main() {
     assert.deepEqual(readMission('HANGS', home).hangs, twenty, 'the write replaced the list it held');
   });
 
-  await check('hangs is refused with a 400 that writes nothing: not an array, over 20 entries, a bad outcome, a bad at, an agent empty or over 80 characters, an unknown key in an entry', async () => {
+  await check('hangs is refused with a 400 that writes nothing: not an array, over 20 entries, a bad outcome, an at not a UTC time to the millisecond or naming no real date, an agent empty or over 80 characters, an unknown key in an entry', async () => {
     const hang = { agent: 'Build the card', at: '2026-11-24T17:53:00Z', outcome: 'resumed' };
     assert.equal((await post('/api/mission/HANGS_REFUSED', { title: 'Hangs refused', hangs: [hang] })).status, 200);
     for (const hangs of [
@@ -1455,6 +1455,7 @@ async function main() {
       Array.from({ length: 21 }, () => hang),
       [{ ...hang, outcome: 'retried' }],
       [{ ...hang, at: 'yesterday' }], [{ ...hang, at: '2026-11-24T17:53:00+01:00' }], [{ ...hang, at: '2026-11-24' }],
+      [{ ...hang, at: '2026-11-24T17:53:00.1234567890Z' }], [{ ...hang, at: '2026-13-01T00:00:00Z' }], [{ ...hang, at: '2026-02-30T10:00:00Z' }],
       [{ ...hang, agent: 'a'.repeat(81) }], [{ ...hang, agent: ' ' }], [{ ...hang, agent: 7 }],
       [{ ...hang, call: 'sleep 900' }],
       ['Build the card'],

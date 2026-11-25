@@ -28,7 +28,7 @@
 // start time, so it never inherits a round or revives a card.
 
 import { randomBytes } from 'node:crypto';
-import { CARD_ORDER_KINDS, roundWantsAnswer, sameStart, sessionsMovedOn } from './missions.mjs';
+import { CARD_ORDER_KINDS, isUtcIso, roundWantsAnswer, sameStart, sessionsMovedOn } from './missions.mjs';
 import { questionBlocks } from './badge.mjs';
 import { folderName } from './indexpage.mjs';
 
@@ -60,9 +60,6 @@ const SESSION_FIELDS = ['id', 'pid', 'procStart', 'kind', 'jobId', 'cwd', 'login
 export const SAFE_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const SAFE_JOB_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
-/** A process start as the watcher reads it: UTC, to the second, milliseconds allowed. */
-const UTC_ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
-
 const iso = ms => new Date(ms).toISOString();
 
 /** One listed session in one process: a `/clear` (a new id) or a resume (a new process) is
@@ -79,10 +76,6 @@ function isObject(value) {
 
 function validPid(value) {
   return Number.isInteger(value) && value > 0;
-}
-
-function validProcStart(value) {
-  return typeof value === 'string' && UTC_ISO.test(value) && Number.isFinite(Date.parse(value));
 }
 
 // --- validation -----------------------------------------------------------------------
@@ -105,7 +98,7 @@ function validateEntry(entry, i) {
   const processId = entry.pid ?? null;
   const procStart = entry.procStart ?? null;
   if (processId !== null && !validPid(processId)) throw refuse(`${what}.pid must be a positive integer or null`);
-  if (procStart !== null && !validProcStart(procStart)) throw refuse(`${what}.procStart must be a UTC ISO-8601 timestamp or null`);
+  if (procStart !== null && !isUtcIso(procStart)) throw refuse(`${what}.procStart must be a UTC ISO-8601 timestamp or null`);
   if ((processId === null) !== (procStart === null)) throw refuse(`${what}.pid and procStart are both set or both null`);
   if (!SESSION_KINDS.includes(entry.kind)) throw refuse(`${what}.kind must be one of ${SESSION_KINDS.join(', ')}`);
   if (!SESSION_STATUSES.includes(entry.status)) throw refuse(`${what}.status must be one of ${SESSION_STATUSES.join(', ')}`);
@@ -160,7 +153,7 @@ export function validateSessionRef(value) {
     if (k !== 'pid' && k !== 'procStart') throw refuse('session has an unknown field');
   }
   if (!validPid(value.pid)) throw refuse('session.pid must be a positive integer');
-  if (!validProcStart(value.procStart)) throw refuse('session.procStart must be a UTC ISO-8601 timestamp');
+  if (!isUtcIso(value.procStart)) throw refuse('session.procStart must be a UTC ISO-8601 timestamp');
   return { pid: value.pid, procStart: value.procStart };
 }
 
