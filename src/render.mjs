@@ -48,7 +48,7 @@ import { buildSteps, stepsToPath, pathToSteps, resolveSteps, videoIdentity, vide
 import { grammarFor, Prism } from './vendor/prism/index.mjs';
 import { MERMAID_ASSET } from './vendor/mermaid/index.mjs';
 import {
-  roundPageLabel, foldRounds, PAGER_GAP_LABEL, isPageRound, roundHasCommentable,
+  roundPageLabel, foldRounds, PAGER_GAP_LABEL, roundCountLabel, roundCountName, isPageRound, roundHasCommentable,
   roundIsAwaitedOpen, pageBoardPillMeta,
   ANSWER_CHIP_LABEL,
 } from './badge.mjs';
@@ -3499,6 +3499,8 @@ const PAGER_MOST_ENTRIES = 15;
  * correct -- current round, disabled ends, the dot on the round still owing an
  * answer -- so a board that opens on its newest round shows the right page with
  * no flash and no client script; src/ui.mjs's goToRound then owns all three.
+ * At 560px wide or less `.round-pill` stands in for the chevrons and the caption:
+ * its own arrows around this round's count, the count opening the numbers.
  *
  * The chevrons are siblings of the pill rather than children of it, because
  * '.round-pager' carries a `transform` to centre itself and a transformed
@@ -3520,7 +3522,7 @@ function roundPagerMarkup(board, currentN) {
   const numbers = rounds.map(r => r.n);
   const owed = rounds.filter(r => roundOwesAnswer(board, r)).map(r => r.n);
   const items = rounds.length > PAGER_MOST_ENTRIES
-    ? foldRounds({ rounds: numbers, current: currentN, owed, narrow: false, oneGap: false })
+    ? foldRounds({ rounds: numbers, current: currentN, owed })
     : numbers;
   const entry = r => {
     const classes = ['round-page'];
@@ -3541,6 +3543,7 @@ function roundPagerMarkup(board, currentN) {
   const first = rounds.length ? rounds[0].n : 1;
   const last = rounds.length ? rounds[rounds.length - 1].n : 1;
   const current = rounds.find(r => r.n === currentN);
+  const waits = owed.some(n => n !== currentN);
   // The dock, not the pill, is the fixed and centred box: the caption has to sit
   // above the numerals and share their centre line, and stacking them inside one
   // fixed column is what keeps that true with no measured offset between them.
@@ -3552,6 +3555,11 @@ function roundPagerMarkup(board, currentN) {
   <div class="round-pager-dock">
     <div class="round-pager-caption" id="round-pager-caption">${escHtml(roundPageLabel(currentN, (current && current.title) || ''))}</div>
     <nav class="round-pager" id="round-pager" aria-label="Rounds"><span class="round-pager-lede" aria-hidden="true">Rounds</span>${pages}</nav>
+    <div class="round-pill">
+      <button type="button" class="round-pill-step" id="round-pill-prev" aria-label="Previous round" title="Previous round"${currentN <= first ? ' disabled' : ''}>‹</button>
+      <button type="button" class="round-pill-count${waits ? ' round-pill-count-owed' : ''}" id="round-pill-count" aria-controls="round-pager" aria-expanded="false" aria-label="${escAttr(roundCountName(currentN, rounds.length, waits))}">${roundCountLabel(currentN, rounds.length)}</button>
+      <button type="button" class="round-pill-step" id="round-pill-next" aria-label="Next round" title="Next round"${currentN >= last ? ' disabled' : ''}>›</button>
+    </div>
   </div>`;
 }
 

@@ -1613,16 +1613,29 @@ body.readonly:not(.page-board) .board-shell {
 /* Where the dock reaches across to Send or Discuss (liftSendBar, src/ui.mjs),
    the bar holds them above it, by the expression the Tray clears the dock with. */
 .send-bar.lifted { padding-bottom: calc(var(--space-4) + var(--round-pager-dock-h, 84px) + var(--space-3)); }
-/* A phone-width row: 44px targets, no gap between them, so eight fit a 390px
-   window. Send and Discuss fill the bar there, so they stop short of the
-   chevrons, which keep their place over the bar. */
+/* --- the phone pill (ADR.md entry 42, amended for phones): at 560px or less the
+   dock is one row, the arrows around this round's count, and the numbers open
+   above it from the count. The edge chevrons and the caption give way to it. */
+.round-pill { display: none; }
 @media (width <= 560px) {
-  :root { --round-flip-w: 44px; }
+  .round-flip, .round-pager-caption { display: none; }
   .round-pager-dock { max-width: calc(100vw - 2 * var(--space-2)); }
-  .round-pager { justify-content: center; gap: 0; border-radius: 27px; }
+  .round-pager-dock:not(.round-pager-open) .round-pager { display: none; }
+  .round-pager { position: absolute; bottom: calc(100% + var(--space-2)); left: 50%; transform: translateX(-50%);
+    width: max-content; max-width: calc(100vw - 2 * var(--space-4)); justify-content: center; gap: 0; border-radius: 27px; }
   .round-page, .round-gap { min-width: 44px; height: 44px; padding: 0 var(--space-1); }
-  .round-flip { z-index: 40; }
-  .send-bar { padding-inline: calc(var(--round-flip-w) - var(--space-4) + var(--space-1)); }
+  .round-pill { display: flex; align-items: center; white-space: nowrap; padding: 4px; background: var(--panel-2);
+    border: 1px solid var(--hairline); border-radius: var(--r-pill); box-shadow: var(--shadow-2); }
+  .round-pill-step, .round-pill-count { flex: none; min-width: 44px; height: 44px; display: flex; align-items: center; justify-content: center;
+    background: none; border: none; border-radius: var(--r-pill); font: inherit; color: var(--ink-2); cursor: pointer;
+    touch-action: manipulation; transition: color var(--dur) var(--ease); }
+  .round-pill-step { font-size: 20px; line-height: 1; }
+  .round-pill-step:disabled { opacity: 0.25; cursor: default; }
+  .round-pill-count { position: relative; padding: 0 var(--space-3); font-size: 13px; font-weight: 600; color: var(--ink);
+    font-variant-numeric: tabular-nums; }
+  .round-pill-count-owed::after { content: ''; position: absolute; top: 7px; right: 5px; width: 7px; height: 7px;
+    border-radius: 50%; background: var(--owed-dot); }
+  .round-pager-open .round-pill-count { background: var(--panel); box-shadow: var(--shadow-1); }
 }
 .btn-send { background: var(--accent); color: var(--accent-ink); border: 1px solid transparent; border-radius: var(--r-md);
   padding: 11px 24px; font: inherit; font-size: 13.5px; font-weight: 650; box-shadow: var(--shadow-2);
