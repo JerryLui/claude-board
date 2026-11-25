@@ -645,8 +645,8 @@ check('criterion 26: DISABLED is not hidden -- no rule in the stylesheet takes a
         else if (text[i] === '}' && --depth === 0) {
           const selector = text.slice(head, open).trim();
           const body = text.slice(open + 1, i);
-          if (selector.startsWith('@media')) walk(body, [...media, selector]);
-          else if (!selector.startsWith('@')) rules.push({ selector, body, media });
+          if (!selector.startsWith('@')) rules.push({ selector, body, media });
+          else if (!/^@(-webkit-)?(keyframes|font-face)\b/.test(selector)) walk(body, [...media, selector]);
           head = i + 1;
         }
       }
@@ -664,6 +664,8 @@ check('criterion 26: DISABLED is not hidden -- no rule in the stylesheet takes a
   assert.ok(rules.some(r => r.media.includes(PHONE_BLOCK) && PHONE_SWAP.has(r.selector)), 'setup failure: the phone swap is not in the stylesheet');
   assert.deepEqual(hiders(`${PHONE_BLOCK} { .round-pill-step:disabled { display: none; } .round-flip:disabled { opacity: 0; } }`),
     ['".round-pill-step:disabled" sets display: none', '".round-flip:disabled" sets opacity: 0'], 'a state hide inside the phone block is still one');
+  assert.deepEqual(hiders('@supports (display: grid) { @container (width > 1px) { @layer base { .round-flip:disabled { visibility: hidden; } } } }'),
+    ['".round-flip:disabled" sets visibility: hidden'], 'a hide inside @supports, @container or @layer is still one');
   assert.deepEqual(hiders('.round-flip, .round-pager-caption { display: none; }'),
     ['".round-flip, .round-pager-caption" sets display: none'], 'the swap outside the phone block is still a hide');
 
