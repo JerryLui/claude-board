@@ -6831,6 +6831,7 @@ export const ui = `
       if (sendStatus) {
         sendStatus.textContent = action === 'discuss' ? 'Handed over to chat.' : 'Sent.';
       }
+      moveOnAfter(round);
       // Deliberately NOT re-enabled here: the round is out.
     }).catch(function (err) {
       submitInFlight = false;
@@ -6854,6 +6855,50 @@ export const ui = `
     var round = roundEntry(sent.round);
     if (round && round.status === 'sent') return;
     applySubmittedPush(sent);
+  }
+
+  var MOVE_ON_MS = 1000;
+
+  /** ADR 160: where the page goes once the PM's own Send or Discuss of round 'sent'
+   * went out. The oldest other round still waiting, or holding what its own Send
+   * would post, takes the page; with none, the page goes where the Home mark goes,
+   * unless a queued comment is still only in this tab. */
+  function moveOnAfter(sent) {
+    if (readonly) return;
+    setTimeout(function () {
+      if (currentRound !== sent) return;
+      var now = Date.now();
+      var next = null;
+      (board.rounds || []).forEach(function (r) {
+        if (next !== null || r.n === sent || r.status === 'sent') return;
+        if (roundOwesAnswer(r) || roundIsCurrentlyAwaited(r, now) || commentsSentFrom(r.n).length) next = r.n;
+      });
+      if (next !== null) {
+        if (sendStatus) sendStatus.textContent = '';
+        goToRound(next);
+        sayInSendBar(next, roundNumberLabel(next) + ' still waits');
+        return;
+      }
+      if (pendingComments.length) return;
+      var home = document.querySelector('a.back-to-index');
+      location.href = (home && home.getAttribute('href')) || '/';
+    }, MOVE_ON_MS);
+  }
+
+  function sayInSendBar(n, text) {
+    var section = roundSectionEl(n);
+    var bar = section && isPageRound(blocksOfRound(n)) ? section.querySelector('.page-send-bar') : null;
+    if (!bar) {
+      if (sendStatus) sendStatus.textContent = text;
+      return;
+    }
+    var say = bar.querySelector('.send-status');
+    if (!say) {
+      say = document.createElement('span');
+      say.className = 'send-status';
+      bar.insertBefore(say, bar.firstChild);
+    }
+    say.textContent = text;
   }
 
   if (sendBtn) {
@@ -6948,7 +6993,7 @@ export const ui = `
    * left over stays queued, exactly the AC 12 promise ("comments already left
    * stay on screen and ride the thread's next packet") for a comment on some
    * OTHER round that has not gone out yet either. */
-  function submitPageRound(roundN, action) {
+  function submitPageRound(roundN, action, pressed) {
     if (readonly) return;
     var round = roundEntry(roundN);
     // Not sent, the same question openRoundNumber and the daemon's own submit guard
@@ -6961,7 +7006,7 @@ export const ui = `
     if (afterImageReads('page:' + roundN, function () {
       delete heldPageWayOut[roundN];
       setPageWayOutHeld(roundN, action, false);
-      submitPageRound(roundN, action);
+      submitPageRound(roundN, action, pressed);
     })) {
       heldPageWayOut[roundN] = action;
       setPageWayOutHeld(roundN, action, true);
@@ -7001,6 +7046,9 @@ export const ui = `
       applyOwnSend(result);
       refreshPins(document);
       clearPendingMark();
+      if (!pressed) return;
+      sayInSendBar(roundN, action === 'discuss' ? 'Handed over to chat.' : 'Sent.');
+      moveOnAfter(roundN);
     }).catch(function () {
       // Nothing went out -- hand the controls back so the reviewer can retry,
       // the same recovery submitBoard's own catch performs. Except on a panel
@@ -7025,13 +7073,13 @@ export const ui = `
     var sendBtn3 = ev.target.closest('.page-send-btn');
     if (sendBtn3) {
       var n1 = parseInt(sendBtn3.getAttribute('data-round'), 10);
-      if (isFinite(n1)) submitPageRound(n1, 'send');
+      if (isFinite(n1)) submitPageRound(n1, 'send', true);
       return;
     }
     var discussBtn3 = ev.target.closest('.page-discuss-btn');
     if (discussBtn3) {
       var n2 = parseInt(discussBtn3.getAttribute('data-round'), 10);
-      if (isFinite(n2)) submitPageRound(n2, 'discuss');
+      if (isFinite(n2)) submitPageRound(n2, 'discuss', true);
     }
   });
 
