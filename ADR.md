@@ -37,7 +37,7 @@ link where it is worth reading.
 | 35 | [An undelivered comment rides the thread's next packet](.agents/adr/0035-undelivered-comment-rides-the-thread-s-next-packet.md) | 2026-08-07 | narrowed by 45 and 46; widened by 107 |
 | 36 | [An upgrade widens a carried-forward root record back to the current defaults](.agents/adr/0036-upgrade-widens-a-carried-forward-root-record-back.md) | 2026-08-07 | accepted |
 | 38 | [`/file/` is deleted; the board is the only way to see a rendered page](.agents/adr/0038-file-is-deleted-the-board-is-the-only.md) | 2026-08-07 | accepted |
-| 40 | [A board header condenses into a centred pill on reading](.agents/adr/0040-board-header-condenses-into-a-centred-pill.md) | 2026-08-07 | narrowed by 59, 89; amended by 152 |
+| 40 | [A board header condenses into a centred pill on reading](.agents/adr/0040-board-header-condenses-into-a-centred-pill.md) | 2026-08-07 | narrowed by 59, 89; amended by 152; amended 2026-11-25 for phones |
 | 42 | [Rounds are the board's pages, flipped left and right](.agents/adr/0042-rounds-are-the-board-s-pages-flipped-left.md) | 2026-08-07 | accepted |
 | 44 | ["A page board is never sent" is a browser rule, not a daemon rule](.agents/adr/0044-page-board-is-never-sent-is-a-browser.md) | 2026-08-07 | narrowed by 45 |
 | 45 | [A page board may be awaited, and the caller declares it](.agents/adr/0045-page-board-may-be-awaited-and-the-caller.md) | 2026-08-07 | narrows 35 and 44; completed by 50 |
@@ -48,7 +48,7 @@ link where it is worth reading.
 | 56 | [The launcher may compose a notification body, behind a filter](.agents/adr/0056-launcher-may-compose-a-notification-body-behind-a.md) | 2026-08-09 | narrows 19; widened by 128 |
 | 57 | [The banner opens the board it names](.agents/adr/0057-banner-opens-the-board-it-names.md) | 2026-08-09 | narrows 72; narrowed by 75; narrowed by 93 |
 | 58 | [One notifier for a round, and it is the daemon's](.agents/adr/0058-one-notifier-for-a-round-and-it-is.md) | 2026-08-09 | widens 55; narrowed by 73 |
-| 59 | [The board clears its own chrome band, the artifact does not](.agents/adr/0059-board-clears-its-own-chrome-band-the-artifact.md) | 2026-08-09 | narrows 40 |
+| 59 | [The board clears its own chrome band, the artifact does not](.agents/adr/0059-board-clears-its-own-chrome-band-the-artifact.md) | 2026-08-09 | narrows 40; amended 2026-11-25 for phones |
 | 62 | [Third-party rendering code is vendored, not depended on](.agents/adr/0062-third-party-rendering-code-is-vendored-not-depended.md) | 2026-08-09 | accepted |
 | 63 | [Code renders highlighted, six-hue, with the file's own line numbers](.agents/adr/0063-code-renders-highlighted-six-hue-with-the-file.md) | 2026-08-09 | narrowed by 64 |
 | 64 | [A diff row suppresses syntax colour](.agents/adr/0064-diff-row-suppresses-syntax-colour.md) | 2026-08-09 | narrows 63 |
@@ -136,7 +136,7 @@ link where it is worth reading.
 | 149 | [Ten background sessions work at once, fourteen alive; the PM's tab holds no slot](.agents/adr/0149-ten-background-sessions-work-the-pms-tab-holds-no-slot.md) | 2026-11-09 | amends 129, 148 |
 | 150 | [One board per mission, each round its session's](.agents/adr/0150-one-board-per-mission-each-round-its-sessions.md) | 2026-11-11 | amends 69, 131, 134, 141; amended by 151 |
 | 151 | [A hand-over reopens the last session's unanswered rounds in place](.agents/adr/0151-a-hand-over-reopens-the-last-sessions-unanswered-rounds-in-place.md) | 2026-11-15 | amends 150; relates to 69, 114, 145, 146; amended by 153, 155 |
-| 152 | [The top strip takes clicks on its controls only, holds Download round on a full-page round, and leaves for a mock's full-size view](.agents/adr/0152-the-top-strip-takes-clicks-on-its-controls-only-and-leaves-for-a-mocks-full-size-view.md) | 2026-11-15 | amends 40; relates to 33, 59, 120 |
+| 152 | [The top strip takes clicks on its controls only, holds Download round on a full-page round, and leaves for a mock's full-size view](.agents/adr/0152-the-top-strip-takes-clicks-on-its-controls-only-and-leaves-for-a-mocks-full-size-view.md) | 2026-11-15 | amends 40; relates to 33, 59, 120; amended 2026-11-25 for phones |
 | 153 | [A session that left its mission hands its unanswered rounds to the next join](.agents/adr/0153-a-session-that-left-its-mission-hands-its-unanswered-rounds-to-the-next-join.md) | 2026-11-16 | amends 151; relates to 150 |
 | 154 | [A saved mock is the page's own file and runs its scripts; a round's file stays script-free](.agents/adr/0154-a-saved-mock-is-the-pages-own-file-and-runs-its-scripts.md) | 2026-11-16 | relates to 22, 32, 78, 95, 108, 120, 122, 152 |
 | 155 | [A reopened round holds its mission's card at needs you behind a later round](.agents/adr/0155-a-reopened-round-holds-its-missions-card-at-needs-you-behind-a-later-round.md) | 2026-11-16 | amends 134, 151; relates to 150 |

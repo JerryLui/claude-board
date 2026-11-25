@@ -782,7 +782,7 @@ check('the comment-mode toggle wears the exact same glyph as the whole-block com
     'the toggle and the whole-block comment button must share the exact same glyph -- one source (COMMENT_ICON), not two spellings of "comment"');
 });
 
-check('ADR.md entry 42: no #round-badge/.round-badge element renders anywhere, on an ordinary board or a page board, and the pager dock names the round instead', () => {
+check('ADR.md entry 42: no #round-badge/.round-badge element renders anywhere, on an ordinary board or a page board, the pager dock names the round instead, and the header only in its phone state line', () => {
   const ordinary = createBoard({ title: 'AC 12 ordinary', blocks: [{ kind: 'markdown', text: '# hi' }] });
   addRound(ordinary, { blocks: [{ kind: 'markdown', text: '# second round' }] });
   const ordinaryHtml = renderBoardPage(ordinary);
@@ -803,10 +803,17 @@ check('ADR.md entry 42: no #round-badge/.round-badge element renders anywhere, o
   // AC 12's second half: the pager dock, not the header, is where a round is
   // still named -- confirmed here rather than assumed, so this check would
   // fail if that naming vanished too rather than just moving.
+  // The one exception is the phone header's state line (ADR.md entry 40), drawn
+  // at 560px and under only, where the header scrolls away with the page.
   const headerMatch = ordinaryHtml.match(/<header class="board-head">[\s\S]*?<\/header>/);
   assert.ok(headerMatch, 'setup failure: no <header class="board-head"> found');
-  assert.doesNotMatch(headerMatch[0], /round\s*\d/i,
+  const phoneLine = /<div class="head-round">[\s\S]*?<\/div>/;
+  assert.match(headerMatch[0], phoneLine, 'setup failure: no phone state line found');
+  assert.doesNotMatch(headerMatch[0].replace(phoneLine, ''), /round\s*\d/i,
     'the header itself must name no round by number, at rest (AC 12)');
+  const doc = parseHTML(ordinaryHtml);
+  assert.equal(resolveComputedProperty(styles, doc.querySelector('.head-round'), true, 'display'), 'none',
+    'and the state line that does is drawn on a phone only');
   const captionMatch = ordinaryHtml.match(/<div class="round-pager-caption"[^>]*>([^<]*)<\/div>/);
   assert.ok(captionMatch, 'setup failure: no .round-pager-caption rendered');
   assert.match(captionMatch[1], /round\s*\d/i,

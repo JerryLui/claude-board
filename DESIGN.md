@@ -754,6 +754,14 @@ reader's own finger, which is the feedback the instant flip used to get from the
 percentage inset interpolates where an intrinsic width does not, which is why the pill's half-width
 is a measurement of the surviving controls rather than a fact about the content.
 
+**Why a phone's header scrolls away (amended 2026-11-25).** Below 560px the header stacked into two
+rows and a round-title box, so the first card started about 175px down an 844px screen. **Rejected:
+a slim fixed one-row bar** (mark, a clipped title, ⋯), which kept the round named while scrolling and
+put nothing over the content; the PM chose the page text that scrolls away, with only home and ⋯
+floating, for the screen it gives back. **Rejected: the countdown on the send bar, and Comment as a
+third floating button**: the deadline is read at the page's top, and Comment lives in ⋯ with theme,
+Download round and the ids.
+
 ### Entry 42 — rounds are the board's pages
 
 **What broke.** Rounds stacked vertically down one board, which survives a round of three short

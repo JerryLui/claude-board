@@ -25,7 +25,7 @@
 // a long comment list; its question round's file is
 // paginated under print media and nothing that must stay whole sits across a page's edge.
 // The top strip's Download round is read over a scrolled artifact, where it stays drawn
-// and takes its click, in a window too narrow for the header to condense, on a third
+// and takes its click, and in a phone-wide window the ⋯ menu's, on a third
 // board whose one artifact round was never sent, and in the board's
 // archive opened from disk, which shows none. Over an awaited artifact scrolled under
 // the condensed bar, light and dark, it is its icon alone between Comment and Theme. Layout, a real download and a file: page, none of which the DOM
@@ -430,17 +430,23 @@ const ONE_EXPR = `(function () {
 // The top strip's Download round on a full-page round: whether it is drawn, inside the
 // window, and what a click at its middle lands on, with whether the artifact has
 // scrolled under the header.
-const STRIP_EXPR = `(function () {
-  var btn = document.querySelector('header.board-head .board-head-actions .head-download');
+const STRIP_EXPR = stripExpr('header.board-head .board-head-actions .head-download');
+/** STRIP_EXPR for the Download round `selector` picks: the phone header's ⋯ menu holds
+ * the one a window of 560px and under draws. */
+function stripExpr(selector) {
+  return `(function () {
+  var btn = document.querySelector(${JSON.stringify(selector)});
   if (!btn) return { present: false };
   var r = btn.getBoundingClientRect();
   var cs = getComputedStyle(btn);
   var hit = document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2);
-  return { hit: !!(hit && hit.closest('.head-download')),
+  return { hit: !!(hit && hit.closest(${JSON.stringify(selector)})),
     drawn: r.width > 0 && r.height > 0 && cs.visibility === 'visible' && cs.opacity === '1',
     inWindow: r.top >= 0 && r.left >= 0 && r.bottom <= window.innerHeight && r.right <= window.innerWidth,
     scrolled: document.body.classList.contains('stage-scrolled') };
 })()`;
+}
+const MENU_DOWNLOAD_EXPR = stripExpr('.corner-menu .round-download');
 // The strip's drawn buttons, left to right, with Download round's and Theme's boxes,
 // Download round's title, and whether a click at its middle lands on it.
 const BAR_EXPR = `(function () {
@@ -1046,17 +1052,18 @@ async function main() {
         assert.equal(afterAsk, atEnd);
       });
 
-      // Back on the artifact round, in a window too narrow for the header to condense.
+      // Back on the artifact round, in a phone-wide window, where Download round is in the ⋯ menu.
       await tallTab.evalPage(`document.querySelector('.round-page[data-round="1"]').click()`);
       await tallTab.until(`document.body.classList.contains('page-board') && document.querySelector('.round[data-round="1"]').classList.contains('round-current')`, 'the flip back to the artifact round');
       await tallTab.sp('Emulation.setDeviceMetricsOverride', { width: 560, height: 800, deviceScaleFactor: 1, mobile: false });
       await tallTab.quiet();
-      const narrowAtRest = await tallTab.evalPage(STRIP_EXPR);
+      await tallTab.evalPage(`document.querySelector('button.corner-more-btn').click()`);
+      const narrowAtRest = await tallTab.evalPage(MENU_DOWNLOAD_EXPR);
       await evalIn(send, await artifactSession(send, 'Tall mock'), 'window.scrollTo(0, 200)');
       await tallTab.until(`document.body.classList.contains('stage-scrolled')`, 'the artifact scrolling');
-      const narrowScrolled = await tallTab.evalPage(STRIP_EXPR);
+      const narrowScrolled = await tallTab.evalPage(MENU_DOWNLOAD_EXPR);
       await tallTab.close();
-      await row('in a narrow window the strip\'s Download round is drawn inside the window and takes a click, at rest and over a scrolled artifact', () => {
+      await row('in a phone-wide window the ⋯ menu\'s Download round is drawn inside the window and takes a click, at rest and over a scrolled artifact', () => {
         assert.deepEqual(narrowAtRest, { hit: true, drawn: true, inWindow: true, scrolled: false });
         assert.deepEqual(narrowScrolled, { hit: true, drawn: true, inWindow: true, scrolled: true });
       });
@@ -1139,14 +1146,11 @@ async function main() {
           shot = path.join(process.env.CLAUDE_BOARD_DOWNLOAD_KEEP, `condensed-bar-${theme}.png`);
           writeFileSync(shot, Buffer.from((await iconTab.sp('Page.captureScreenshot', { format: 'png', clip })).data, 'base64'));
         }
-        await iconTab.sp('Emulation.setDeviceMetricsOverride', { width: 560, height: 800, deviceScaleFactor: 1, mobile: false });
-        await iconTab.quiet();
-        const narrow = await iconTab.evalPage(BAR_EXPR);
         await iconTab.close();
-        bars[theme] = { atRest, condensed, narrow, shot };
+        bars[theme] = { atRest, condensed, shot };
       }
       {
-        const { atRest, condensed, narrow } = bars.light;
+        const { atRest, condensed } = bars.light;
         const shots = Object.values(bars).map(b => b.shot).filter(Boolean);
         await row('over a scrolled full-page mock the condensed bar draws Download round as its icon alone, between Comment and Theme, named "Download round"', note => {
           note(`at rest ${atRest.order.join(', ')}, Download ${atRest.download.w}x${atRest.download.h}; condensed ${condensed.order.join(', ')}, Download ${condensed.download.w}x${condensed.download.h}, Theme ${condensed.theme.w}x${condensed.theme.h}${shots.length ? `; ${shots.join(', ')}` : ''}`);
@@ -1156,11 +1160,6 @@ async function main() {
           assert.deepEqual(condensed.order, ['Comment', 'Download', 'Theme']);
           assert.deepEqual(condensed.download, condensed.theme, 'the box of the icon-only Theme beside it');
           assert.deepEqual({ name: condensed.name, title: condensed.title, hit: condensed.hit }, { name: 'Download round', title: 'Download round', hit: true });
-        });
-        await row('in a window too narrow for the header to condense, a scrolled mock\'s Download round keeps its label, before Theme', () => {
-          assert.equal(narrow.scrolled, true, 'setup: still scrolled');
-          assert.deepEqual(narrow.order, ['Comment', 'Download', 'Theme']);
-          assert.ok(narrow.download.w > narrow.theme.w + 40);
         });
       }
 

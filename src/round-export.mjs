@@ -22,8 +22,8 @@ const DOWNLOAD_ICON = '<svg viewBox="0 0 24 24" width="13" height="13" fill="non
 
 /** Download round's markup, with `extraClass` after its own class where a
  * second place draws it. */
-function downloadButton(extraClass, title) {
-  return `<button type="button" class="round-download${extraClass ? ' ' + extraClass : ''}" title="${title}">${DOWNLOAD_ICON}Download round</button>`;
+function downloadButton(extraClass, title, attrs = '') {
+  return `<button type="button"${attrs} class="round-download${extraClass ? ' ' + extraClass : ''}" title="${title}">${DOWNLOAD_ICON}Download round</button>`;
 }
 
 /** The ghost control at the right end of a question round's chip line, sent or
@@ -36,6 +36,10 @@ export const ROUND_DOWNLOAD_BUTTON = downloadButton('', 'Save this round as one 
  * as its icon alone, its label's text sized away but still its name, so its title says
  * the same. */
 export const HEAD_DOWNLOAD_BUTTON = downloadButton('head-download', 'Download round');
+
+/** The same control as an item of the phone header's ⋯ menu, for the round in
+ * view; it stays open so a note on what it saved shows under it. */
+export const MENU_DOWNLOAD_BUTTON = downloadButton('corner-item', 'Download round', ' role="menuitem" data-keep-open');
 
 /** One decisions-table row per question of the round, in board order:
  * `{ question, pick, note }`, all plain text. `questions` is the round's question

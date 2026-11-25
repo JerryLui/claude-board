@@ -40,7 +40,7 @@
 import { palettes, faviconLink, markSvg } from './styles.mjs';
 import { SCRIPT_ASSET, STYLE_ASSET } from './assets.mjs';
 import { STATUS_TONES } from './card-status.mjs';
-import { ROUND_DOWNLOAD_BUTTON, HEAD_DOWNLOAD_BUTTON, STAGE_MARGIN_RESET } from './round-export.mjs';
+import { ROUND_DOWNLOAD_BUTTON, HEAD_DOWNLOAD_BUTTON, MENU_DOWNLOAD_BUTTON, STAGE_MARGIN_RESET } from './round-export.mjs';
 import { MAX_IMAGE_BYTES, megabytes } from './post-limit.mjs';
 import { themeBootScript, themeToggle } from './theme.mjs';
 import { resolveComments, stripDaemonOnly } from './board.mjs';
@@ -193,6 +193,31 @@ const PULL_OUT_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="non
 export function commentModeToggle({ inert = false } = {}) {
   const off = inert ? ' disabled title="Nothing here is waiting on a comment"' : '';
   return `<button type="button" id="comment-mode-toggle" class="mode-toggle" aria-pressed="false"${off}>${COMMENT_ICON}<span class="mode-toggle-label">Comment</span></button>`;
+}
+
+const MORE_ICON = '<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>';
+
+/** One item of the phone header's ⋯ menu (cornerMenu). `proxy` is a
+ * tag-qualified selector of a control elsewhere on the page: the item clicks it,
+ * shows only while it is displayed, and with `checkbox` mirrors its
+ * aria-pressed, with `mirror` its name and glyph. `copy` copies that text and
+ * shows it beside `label`. `keepOpen` leaves the menu open after it. */
+export function cornerItem({ label, icon = '', proxy = null, checkbox = false, mirror = false, copy = null, keepOpen = false }) {
+  const role = checkbox ? 'menuitemcheckbox" aria-checked="false' : 'menuitem';
+  const attrs = (proxy ? ` data-proxy="${escAttr(proxy)}"` : '') + (mirror ? ' data-mirror' : '')
+    + (copy != null ? ` data-copy="${escAttr(copy)}"` : '') + (keepOpen || copy != null ? ' data-keep-open' : '');
+  const value = copy != null ? `<span class="corner-id-value">${escHtml(copy)}</span>` : '';
+  return `<button type="button" role="${role}" class="corner-item${copy != null ? ' corner-id' : ''}"${attrs}>${icon}<span class="corner-item-label">${escHtml(label)}</span>${value ? ' ' + value : ''}</button>`;
+}
+
+/** The ⋯ button and its menu, which float in the top right corner at 560px
+ * wide and under while the header scrolls away (src/styles.mjs), the header's
+ * mark, '.back-to-index', floating in the left one. `items` is markup, each a
+ * cornerItem or another role="menuitem" button; null draws a separator.
+ * src/ui.mjs's wireCornerMenu wires it. */
+export function cornerMenu(items) {
+  const body = items.map(item => item == null ? '<div class="corner-sep" role="separator"></div>' : item).join('');
+  return `<div class="corner-more"><button type="button" class="corner-more-btn" aria-haspopup="menu" aria-expanded="false" aria-controls="corner-menu" aria-label="More" title="More">${MORE_ICON}</button><div class="corner-menu" id="corner-menu" role="menu" aria-label="More" hidden>${body}</div></div>`;
 }
 
 /** The Pull-out (ADR.md entry 120): the one way into the lens, for a stage
@@ -3729,6 +3754,7 @@ ${faviconLink}
       <div class="board-head-ident">
         <h1>${escHtml(board.title || 'Untitled board')}</h1>
         <div class="meta">${escHtml(board.thread)} · ${escHtml(board.id)}</div>
+        <div class="head-round"><span class="head-round-label">${escHtml(roundPageLabel(initialRoundInView, (initialRound && initialRound.title) || ''))}</span><span class="head-round-state">${escHtml(roundMeta.text)}</span></div>
       </div>
     </div>
     <div class="board-head-actions">
@@ -3737,6 +3763,14 @@ ${faviconLink}
       ${themeToggle()}
       <span class="round-meta" id="round-meta" title="${escAttr(roundMeta.title)}">${escHtml(roundMeta.text)}</span>
     </div>
+    ${cornerMenu([
+      cornerItem({ label: 'Comment', icon: COMMENT_ICON, proxy: 'button#comment-mode-toggle', checkbox: true }),
+      cornerItem({ label: 'Theme', proxy: 'button#theme-toggle', mirror: true, keepOpen: true, icon: '<svg aria-hidden="true"></svg>' }),
+      MENU_DOWNLOAD_BUTTON,
+      null,
+      cornerItem({ label: 'Board', copy: board.id }),
+      cornerItem({ label: 'Thread', copy: board.thread }),
+    ])}
   </header>
   <div class="blocks" id="blocks">
     ${roundsHtml}

@@ -720,8 +720,8 @@ const phoneBody = () => ({
     { kind: 'question', prompt: 'In order', widget: 'rank', options: [{ label: LONG }, { label: UNBROKEN }, { label: 'Last' }] },
   ],
 });
-const CHROME_CONTROLS = ['.back-to-index', '#theme-toggle', '.round-flip', '.round-page', '#send-btn', '#discuss-btn'];
-const AT_REST = [...CHROME_CONTROLS, '#comment-mode-toggle', '.round-download', '.fold-toggle', 'summary', '.card-choice', '.choice-multi',
+const CHROME_CONTROLS = ['.back-to-index', '.corner-more-btn', '.round-flip', '.round-page', '#send-btn', '#discuss-btn'];
+const AT_REST = [...CHROME_CONTROLS, '.fold-toggle', 'summary', '.card-choice', '.choice-multi',
   '.variant-card', '.rank-move', '.answer-textarea', '.note-field textarea', '.btn-defer', '.comment-btn', '.pull-out', '.stage-fold-toggle', '.questions-left-pill'];
 const PRESS_ALL = sel => `[].slice.call(document.querySelectorAll(${JSON.stringify(sel)})).forEach(function (el) { el.click(); })`;
 
@@ -780,7 +780,7 @@ async function phoneRows({ send, onEvent, cookie, home, origin, boardUrl }) {
     })()`);
     await tab.until(`document.querySelector('.thumb-remove') && document.querySelector('.comment-delete')`, 'the thumbnail and the pending comment');
     await tab.evalPage(`document.querySelector('.card-choice').click()`);
-    await hold(tab, note, 'comment mode', ['.comment-form input', '.comment-form button', '.comment-delete', '.thumb-remove', '.notice-x', '.mode-toggle.active']);
+    await hold(tab, note, 'comment mode', ['.comment-form input', '.comment-form button', '.comment-delete', '.thumb-remove', '.notice-x']);
   }));
 
   for (const [what, opener, controls] of [
@@ -796,8 +796,8 @@ async function phoneRows({ send, onEvent, cookie, home, origin, boardUrl }) {
   }
 
   await row('on a phone a page board keeps each of its controls at least 44px and on the screen, its comment panel open', onPhone(pageUrl, 'dark', async (tab, note) => {
-    await tab.evalPage(`document.querySelector('.page-comments .comment-form').classList.add('open')`);
-    await hold(tab, note, 'page board', ['.back-to-index', '#theme-toggle', '#comment-mode-toggle', '.head-download', '.round-flip', '.round-page', '.page-send-btn', '.page-discuss-btn', '.comment-form input']);
+    await tab.evalPage(`document.querySelector('.page-comments .comment-form').classList.add('open'); document.querySelector('button.corner-more-btn').click()`);
+    await hold(tab, note, 'page board', ['.back-to-index', '.corner-more-btn', '.corner-item[data-proxy="button#comment-mode-toggle"]', '.corner-menu .round-download', '.corner-id', '.round-flip', '.round-page', '.page-send-btn', '.page-discuss-btn', '.comment-form input']);
   }));
 
   await row('on a phone a round of a 19-round board keeps each control at least 44px and Send and Discuss uncovered, the switcher folded and open', onPhone(`${origin}/b/${many.id}`, 'dark', async (tab, note) => {
@@ -812,7 +812,7 @@ async function phoneRows({ send, onEvent, cookie, home, origin, boardUrl }) {
       }
     }
     await tab.evalPage(`document.querySelector('.round-page[data-round="3"]').click()`);
-    await hold(tab, note, 'a sent round', ['.round-page', '.round-flip', '.card-choice', '.round-download']);
+    await hold(tab, note, 'a sent round', ['.round-page', '.round-flip', '.card-choice', '.corner-more-btn']);
   }));
 }
 

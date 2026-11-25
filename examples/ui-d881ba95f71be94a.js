@@ -448,12 +448,15 @@
    * new read-only affordance is one edit, not two that drift apart silently. */
   function staysLive(el) {
     return !!(el.classList && (el.classList.contains('pull-out') || el.classList.contains('fold-toggle')))
-      || isStageFoldToggle(el);
+      || isStageFoldToggle(el) || isCornerControl(el);
   }
   // A line of its own rather than a third term above, so a sibling control
   // joining the carve-out does not have to rewrite this one.
   function isStageFoldToggle(el) {
     return !!(el.classList && el.classList.contains('stage-fold-toggle'));
+  }
+  function isCornerControl(el) {
+    return !!(el.classList && (el.classList.contains('corner-more-btn') || el.classList.contains('corner-id')));
   }
 
   // Read-only mode is enforced at the element level, not just by guarding the
@@ -2182,6 +2185,102 @@
   }
 };
   trackDocWidth();
+
+  var wireCornerMenu = function wireCornerMenu() {
+  var btn = document.querySelector('button.corner-more-btn');
+  var menu = document.querySelector('div.corner-menu');
+  if (!btn || !menu) return;
+  function displayed(el) {
+    return typeof getComputedStyle !== 'function' || getComputedStyle(el).display !== 'none';
+  }
+  function items() {
+    return [].slice.call(menu.querySelectorAll('.corner-item')).filter(function (el) {
+      return !el.hidden && !el.disabled && displayed(el);
+    });
+  }
+  function sync() {
+    [].slice.call(menu.querySelectorAll('.corner-item[data-proxy]')).forEach(function (item) {
+      var target = document.querySelector(item.getAttribute('data-proxy'));
+      item.hidden = !target || !displayed(target);
+      if (!target) return;
+      item.disabled = !!target.disabled;
+      if (item.getAttribute('role') === 'menuitemcheckbox') {
+        item.setAttribute('aria-checked', target.getAttribute('aria-pressed') === 'true' ? 'true' : 'false');
+      }
+      if (item.hasAttribute('data-mirror')) {
+        var label = item.querySelector('.corner-item-label');
+        if (label) label.textContent = target.getAttribute('aria-label') || target.textContent;
+        var from = target.querySelector('svg'), to = item.querySelector('svg');
+        if (from && to) to.replaceWith(from.cloneNode(true));
+      }
+    });
+  }
+  function setOpen(open, focus) {
+    if (open) sync();
+    menu.hidden = !open;
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open && focus) {
+      var list = items();
+      var to = focus === 'last' ? list[list.length - 1] : list[0];
+      if (to) to.focus();
+    } else if (!open && focus) btn.focus();
+  }
+  function copied(item) {
+    var label = item.querySelector('.corner-item-label');
+    if (!label) return;
+    var was = label.getAttribute('data-label') || label.textContent;
+    label.setAttribute('data-label', was);
+    label.textContent = 'Copied';
+    setTimeout(function () { label.textContent = was; }, 1200);
+  }
+  function copy(text, item) {
+    var clip = typeof navigator !== 'undefined' && navigator.clipboard;
+    if (clip && clip.writeText) { clip.writeText(text).then(function () { copied(item); }, function () {}); return; }
+    var field = document.createElement('textarea');
+    field.value = text;
+    field.setAttribute('readonly', '');
+    field.style.position = 'fixed';
+    field.style.opacity = '0';
+    document.body.appendChild(field);
+    field.select();
+    try { if (document.execCommand('copy')) copied(item); } catch (e) { /* the id stays readable in the item */ }
+    field.remove();
+    item.focus();
+  }
+  btn.addEventListener('click', function () { setOpen(menu.hidden, menu.hidden ? 'first' : null); });
+  btn.addEventListener('keydown', function (ev) {
+    if (ev.key !== 'ArrowDown' && ev.key !== 'ArrowUp') return;
+    ev.preventDefault();
+    setOpen(true, ev.key === 'ArrowUp' ? 'last' : 'first');
+  });
+  menu.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); setOpen(false, true); return; }
+    var list = items();
+    var at = list.indexOf(document.activeElement);
+    var to = ev.key === 'ArrowDown' ? at + 1 : ev.key === 'ArrowUp' ? at - 1 : ev.key === 'Home' ? 0 : ev.key === 'End' ? list.length - 1 : null;
+    if (to == null || !list.length) return;
+    ev.preventDefault();
+    list[(to + list.length) % list.length].focus();
+  });
+  menu.addEventListener('click', function (ev) {
+    var item = ev.target && ev.target.closest ? ev.target.closest('.corner-item') : null;
+    if (!item || item.disabled) return;
+    var proxy = item.getAttribute('data-proxy');
+    var target = proxy && document.querySelector(proxy);
+    if (target) { target.click(); sync(); }
+    if (item.hasAttribute('data-copy')) copy(item.getAttribute('data-copy'), item);
+    if (!item.hasAttribute('data-keep-open')) setOpen(false, true);
+  });
+  menu.parentElement.addEventListener('focusout', function (ev) {
+    var next = ev.relatedTarget;
+    if (!menu.hidden && next && next.closest && !next.closest('.corner-more')) setOpen(false, null);
+  });
+  document.addEventListener('pointerdown', function (ev) {
+    if (menu.hidden || (ev.target && ev.target.closest && ev.target.closest('.corner-more'))) return;
+    setOpen(false, null);
+  });
+};
+  wireCornerMenu();
 
   /** How wide a scrollbar is inside a stage's frame, written to
    * '--stage-scrollbar-w' for the Pull-out, which moves in by it on a stage
@@ -4972,7 +5071,7 @@
   document.addEventListener('click', function (ev) {
     var btn = ev.target && ev.target.closest && ev.target.closest('button.round-download');
     if (!btn || readonly || btn.disabled) return;
-    var section = btn.classList.contains('head-download') ? document.querySelector('.round.round-current') : btn.closest('.round');
+    var section = btn.closest('.round') || document.querySelector('.round.round-current');
     if (!section) return;
     saveBehind(btn, downloadRound(section));
   });
@@ -6112,6 +6211,11 @@
       var m = pageBoardPillMeta(roundEntry(currentRound), now, fullpage, !readonly && currentPageSendable());
       meta.textContent = m.text;
       meta.title = m.title;
+      var lineLabel = document.querySelector('span.head-round-label');
+      var lineState = document.querySelector('span.head-round-state');
+      var cur = roundEntry(currentRound);
+      if (lineLabel) lineLabel.textContent = roundPageLabel(currentRound, (cur && cur.title) || '');
+      if (lineState) lineState.textContent = m.text;
     }
     var cd = document.querySelector('span#round-countdown');
     if (cd) {

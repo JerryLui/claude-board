@@ -838,7 +838,7 @@ next page. Set `enabled` over `POST /api/pomodoro/settings` and open a new tab.
 ### The header checks read stylesheet text, so phone rules and safe-area insets have one shape
 
 `check-header-condense` takes everything from the sheet's first `@media (max-width: 560px)` to its
-end as the narrow block, so phone rules go in that one block, last. The pinned fixed chrome is
+end as the narrow block, so phone rules go in it or in a later 560px block after it (the phone header's own sits last). The pinned fixed chrome is
 matched by the text of its `left`, `right` and `bottom`, so a `env(safe-area-inset-*)` goes in as
 margin or padding, never into those. `check-round-pager` refuses a rule that hides a round-page
 class: hide an entry with the `hidden` attribute. And a `flex-wrap` row in a `left: 50%` fixed box

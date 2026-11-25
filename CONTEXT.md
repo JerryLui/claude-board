@@ -180,7 +180,15 @@ the pager dock and comment rail at the bottom. _Avoid_: clearance, safe area, gu
 **Top strip**: the header as a reader meets it, the strip across the top of every board page
 holding the title and the controls; scrolled, it condenses to the Pill. It takes clicks on its
 title and controls alone, a click on its empty part reaching the page under it, and it leaves
-while a mock drawn full page shows its own full-size view. _Avoid_: toolbar, nav, top bar.
+while a mock drawn full page shows its own full-size view. On a phone (560px wide and under) it
+is the Phone header instead. _Avoid_: toolbar, nav, top bar.
+
+**Phone header**: the top strip at 560px wide and under: the title and the State line as page text
+that scrolls away, with the mark and a ⋯ button floating in the top corners, ⋯ holding the strip's
+controls and the board's ids. _Avoid_: mobile nav, hamburger.
+
+**State line**: the line under a phone header's title naming the round in view and its state, the
+deadline while it is awaited. _Avoid_: subtitle, round badge.
 
 **Pill**: the header once it condenses while scrolling — the mark, the comment toggle, Download
 round's icon on a Page board, the theme control and the state label, in that order, on a
