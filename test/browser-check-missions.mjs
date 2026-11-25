@@ -38,7 +38,10 @@ import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { sessionToken } from '../src/secret.mjs';
 import { deadPid, runMain, skipFile, sleep } from './support.mjs';
-import { assertPhone, CHROME, clickAt, getJson, guardRun, measureTab, openPhone, openTab, phoneFaults, postJson, row, startScratchDaemon, withChrome } from './browser-support.mjs';
+import {
+  assertPhone, CHROME, clickAt, FIXED_TOP_EXPR, getJson, guardRun, measureTab, openPhone, openTab, phoneFaults, postJson, pressKey, row,
+  startScratchDaemon, withChrome,
+} from './browser-support.mjs';
 
 if (!existsSync(CHROME)) skipFile('browser-check-missions', `browser-check-missions: no Chrome at ${CHROME} (set CLAUDE_BOARD_CHROME_BIN to override)`);
 
@@ -242,22 +245,6 @@ async function readUntil(tab, expr) {
   return value;
 }
 
-// Each key as a Mac keyboard sends it: its DOM key code, the Mac's own key code and its
-// character. A key code with no character, on a key the page leaves to the browser as it
-// does Escape, opens chrome://help in front of the tab (QUIRKS.md "A synthetic key with no
-// character opens chrome://help").
-const KEYS = { Enter: [13, 36, '\r'], Tab: [9, 48, '\t'], Escape: [27, 53, '\u001b'] };
-
-/** Presses `key` ('Enter', 'Tab' or 'Escape') on whatever has the tab's focus, as a keyboard does.
- * Enter is its key-down alone: the page may already be navigating away by its key-up. */
-async function pressKey(tab, key) {
-  const [code, mac, text] = KEYS[key];
-  const down = { key, code: key, windowsVirtualKeyCode: code, nativeVirtualKeyCode: mac, text, unmodifiedText: text };
-  if (key === 'Enter') { await tab.sp('Input.dispatchKeyEvent', { type: 'keyDown', ...down }); return; }
-  await tab.sp('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...down });
-  await tab.sp('Input.dispatchKeyEvent', { type: 'keyUp', ...down });
-}
-
 /** The stop orders `key`'s card has sent from this tab, once every request the press
  * started, and the repaint after it, has landed (openTab's `quiet`). */
 async function ordersSent(tab, key) {
@@ -286,12 +273,7 @@ const HOME_TOP_EXPR = `(function () {
     homeHref: document.querySelector('a.back-to-index').getAttribute('href'),
     more: box(document.querySelector('button.corner-more-btn')),
     barControls: ['div#pomodoro-widget', 'button#comment-mode-toggle', 'button#theme-toggle'].map(drawn),
-    fixedTop: [].slice.call(document.querySelectorAll('body *')).filter(function (el) {
-      var cs = getComputedStyle(el);
-      if (cs.position !== 'fixed' && cs.position !== 'sticky') return false;
-      var r = el.getBoundingClientRect();
-      return r.top < 60 && r.height > 0 && r.width > 0 && el.checkVisibility({ checkVisibilityCSS: true });
-    }).map(function (el) { return el.className; }),
+    fixedTop: ${FIXED_TOP_EXPR},
   };
 })()`;
 

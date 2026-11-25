@@ -24,7 +24,9 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { sessionToken } from '../src/secret.mjs';
 import { repoRoot, runMain, sleep } from './support.mjs';
-import { clickAt, copyArchive, evalIn, guardRun, openPhone, openTab, postJson, requireChrome, row, startScratchDaemon, withChrome } from './browser-support.mjs';
+import {
+  clickAt, copyArchive, evalIn, FIXED_TOP_EXPR, guardRun, openPhone, openTab, postJson, pressKey, requireChrome, row, startScratchDaemon, withChrome,
+} from './browser-support.mjs';
 
 guardRun('browser-check-phone-header', { deadlineMs: 180000 });
 
@@ -36,28 +38,6 @@ const QUESTION = { kind: 'question', prompt: 'Ship it?', widget: 'single', optio
 const COUNTDOWN = /^\d+m left$/;
 const LINK_MOCK = '<p><a id="toc" href="#target" style="display:inline-block;padding:12px">To the target</a></p>'
   + '<div style="height:360px"></div><h2 id="target" style="margin:0">Target</h2><div style="height:60px"></div>';
-const KEYS = { Enter: [13, 36, '\r'], Tab: [9, 48, '\t'], Escape: [27, 53, '\u001b'] };
-
-/** Presses `key` on whatever has the tab's focus, as a Mac keyboard does (QUIRKS.md "A
- * synthetic key with no character opens chrome://help"). */
-async function pressKey(tab, key) {
-  const [code, mac, text] = KEYS[key];
-  const down = { key, code: key, windowsVirtualKeyCode: code, nativeVirtualKeyCode: mac, text, unmodifiedText: text };
-  await tab.sp('Input.dispatchKeyEvent', { type: key === 'Enter' ? 'keyDown' : 'rawKeyDown', ...down });
-  await tab.sp('Input.dispatchKeyEvent', { type: 'keyUp', ...down });
-  await sleep(50);
-}
-
-/** Presses an arrow, Home or End key, which carries no character: no native key code, so
- * Chrome opens nothing in front (QUIRKS.md "A synthetic key with no character opens
- * chrome://help"). */
-async function pressNavKey(tab, key) {
-  const down = { key, code: key, windowsVirtualKeyCode: { ArrowDown: 40, ArrowUp: 38, Home: 36, End: 35 }[key] };
-  await tab.sp('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...down });
-  await tab.sp('Input.dispatchKeyEvent', { type: 'keyUp', ...down });
-  await sleep(50);
-}
-
 /** Stands in for the clipboard, the page's one way out to the system: what the
  * clipboard API is given, or with `api` false no API and what `execCommand('copy')`
  * finds selected, lands in `window.__copied`. */
@@ -71,18 +51,6 @@ const CLIPBOARD_STAND_IN = api => `(function () {
     return true;
   };
 })()`;
-
-/** A touch screen `width` by `height`, as openPhone opens 390 by 844. */
-function openTouch(send, onEvent, url, cookie, { width, height, prepare = null }) {
-  return openTab(send, onEvent, url, cookie, {
-    width, height, theme: 'dark', expr: '1',
-    prepare: async (sp, sessionId) => {
-      await sp('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 2, mobile: true });
-      await sp('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 });
-      if (prepare) await prepare(sp, sessionId);
-    },
-  });
-}
 
 /** What the top of the page draws: the header, its title and state line, the two corner
  * buttons, the first card, and every element on screen whose own text is a countdown. */
@@ -103,12 +71,7 @@ const TOP_EXPR = `(function () {
     var r = el.getBoundingClientRect();
     return r.bottom > 0 && r.top < innerHeight && r.width > 0;
   }).map(function (el) { return el.className || el.tagName; });
-  var fixedTop = [].slice.call(document.querySelectorAll('body *')).filter(function (el) {
-    var cs = getComputedStyle(el);
-    if (cs.position !== 'fixed' && cs.position !== 'sticky') return false;
-    var r = el.getBoundingClientRect();
-    return r.top < 60 && r.height > 0 && r.width > 0 && el.checkVisibility({ checkVisibilityCSS: true });
-  }).map(function (el) { return el.className; });
+  var fixedTop = ${FIXED_TOP_EXPR};
   return {
     innerW: innerWidth, scrollW: document.documentElement.scrollWidth, scrollY: scrollY,
     head: box(document.querySelector('header.board-head')),
@@ -212,7 +175,7 @@ async function main() {
 
       for (const [what, open] of [
         ['390 by 844', () => openPhone(send, onEvent, roundUrl, cookie)],
-        ['320 by 640', () => openTouch(send, onEvent, roundUrl, cookie, { width: 320, height: 640 })],
+        ['320 by 640', () => openPhone(send, onEvent, roundUrl, cookie, { width: 320, height: 640 })],
       ]) {
         await row(`at ${what} the round page has no fixed header: the title and the round's state line scroll away, home and ⋯ float in the top corners, and no countdown shows but the state line's`, async note => {
           const tab = await open();
@@ -391,15 +354,15 @@ async function main() {
 
           const keyed = [];
           for (const key of ['End', 'Home', 'ArrowDown', 'ArrowUp']) {
-            await pressNavKey(tab, key);
+            await pressKey(tab, key);
             keyed.push((await tab.evalPage(MENU_EXPR)).focus);
           }
           const names = themed.items.map(i => i.name);
           assert.deepEqual(keyed, [names[4], names[0], names[1], names[0]], 'End, Home and the arrows move through the items');
 
           await tab.evalPage(CLIPBOARD_STAND_IN(true));
-          await pressNavKey(tab, 'End');
-          await pressNavKey(tab, 'ArrowUp');
+          await pressKey(tab, 'End');
+          await pressKey(tab, 'ArrowUp');
           await pressKey(tab, 'Enter');
           const copiedBoard = await tab.evalPage(MENU_EXPR);
           assert.equal(copiedBoard.items[3].name, `Copied ${round.boardId}`, 'Enter on the Board item says Copied');
@@ -408,7 +371,7 @@ async function main() {
           assert.equal((await tab.evalPage(MENU_EXPR)).items[3].name, `Board ${round.boardId}`, 'the label comes back');
 
           await tab.evalPage(CLIPBOARD_STAND_IN(false));
-          await pressNavKey(tab, 'ArrowDown');
+          await pressKey(tab, 'ArrowDown');
           await pressKey(tab, 'Enter');
           const copiedThread = await tab.evalPage(MENU_EXPR);
           const thread = await tab.evalPage(`JSON.parse(document.querySelector('script#board-data').textContent).thread`);

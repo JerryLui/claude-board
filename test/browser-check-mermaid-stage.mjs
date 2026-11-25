@@ -58,7 +58,7 @@ import { MERMAID_ASSET_NAME } from '../src/assets.mjs';
 import { parseMermaidDomId, MERMAID_NODE_SELECTOR } from '../src/anchor.mjs';
 import { check, repoRoot, runMain, sleep, withTimeout } from './support.mjs';
 import {
-  copyArchive, createWitnessProxy, evalIn, guardRun, isChromeInfra, openTab, postJson, requireChrome,
+  copyArchive, createWitnessProxy, evalIn, guardRun, isChromeInfra, openPhone, postJson, requireChrome,
   setSessionCookie, startScratchDaemon, withChrome,
 } from './browser-support.mjs';
 
@@ -230,13 +230,7 @@ async function touchLensChecks(daemonPort, secret, proxyPort) {
   }, secret);
   const url = `http://127.0.0.1:${daemonPort}${new URL(posted.url).pathname}`;
   await withFreshChrome(proxyPort, async ({ send, onEvent }) => {
-    const tab = await openTab(send, onEvent, url, sessionToken(secret), {
-      width: 390, height: 844, theme: 'dark', expr: '1',
-      prepare: async sp => {
-        await sp('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
-        await sp('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
-      },
-    });
+    const tab = await openPhone(send, onEvent, url, sessionToken(secret), { touchPoints: 5 });
     try {
       await tab.until(`document.querySelector('.mermaid-block .pull-out')`, 'the Pull-out');
       await tab.evalPage(`document.querySelector('.mermaid-block .pull-out').click()`);

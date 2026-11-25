@@ -24,6 +24,7 @@ import path from 'node:path';
 import http from 'node:http';
 import net from 'node:net';
 import { randomBytes } from 'node:crypto';
+import { abandonOpenRounds, addRound, applySubmit, createBoard } from '../src/board.mjs';
 import { SECRET_HEADER, SESSION_COOKIE } from '../src/secret.mjs';
 import { assetsNamedBy } from '../src/assets.mjs';
 import { check, freePort, repoRoot, sleep, withTimeout } from './support.mjs';
@@ -445,16 +446,57 @@ export async function measureTab(send, onEvent, url, cookie, opts) {
   return tab.measured;
 }
 
-/** `openTab` on a 390x844 touch screen, the phone every board page and home view answers on. */
-export function openPhone(send, onEvent, url, cookie, { theme = 'dark', expr = '1' } = {}) {
-  const size = { width: 390, height: 844 };
+/** `openTab` on a touch screen taking `touchPoints` fingers, 390x844 unless `width` and
+ * `height` say otherwise: the phone every board page and home view answers on. */
+export function openPhone(send, onEvent, url, cookie, { theme = 'dark', expr = '1', width = 390, height = 844, touchPoints = 1 } = {}) {
   return openTab(send, onEvent, url, cookie, {
-    ...size, theme, expr,
+    width, height, theme, expr,
     prepare: async sp => {
-      await sp('Emulation.setDeviceMetricsOverride', { ...size, deviceScaleFactor: 2, mobile: true });
-      await sp('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 });
+      await sp('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 2, mobile: true });
+      await sp('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: touchPoints });
     },
   });
+}
+
+/** A page expression: the class name of every fixed or sticky element drawn in the
+ * window's top 60px. */
+export const FIXED_TOP_EXPR = `[].slice.call(document.querySelectorAll('body *')).filter(function (el) {
+    var cs = getComputedStyle(el);
+    if (cs.position !== 'fixed' && cs.position !== 'sticky') return false;
+    var r = el.getBoundingClientRect();
+    return r.top < 60 && r.height > 0 && r.width > 0 && el.checkVisibility({ checkVisibilityCSS: true });
+  }).map(function (el) { return el.className; })`;
+
+// Each key as a Mac keyboard sends it: its DOM key code, then for a key with a character
+// the Mac's own key code and that character. A key code with no character, on a key the
+// page leaves to the browser as it does Escape, opens chrome://help in front of the tab,
+// so a key with none (an arrow, Home, End) sends no Mac key code either (QUIRKS.md "A
+// synthetic key with no character opens chrome://help").
+const KEYS = {
+  Enter: [13, 36, '\r'], Tab: [9, 48, '\t'], Escape: [27, 53, '\u001b'],
+  ArrowDown: [40], ArrowUp: [38], Home: [36], End: [35],
+};
+
+/** Presses `key` (a name in KEYS) on whatever has the tab `tab`'s focus, as a keyboard
+ * does. Enter is its key-down alone: the page may already be navigating away by its key-up. */
+export async function pressKey(tab, key) {
+  const [code, mac, text] = KEYS[key];
+  const down = { key, code: key, windowsVirtualKeyCode: code, ...(text ? { nativeVirtualKeyCode: mac, text, unmodifiedText: text } : {}) };
+  if (key === 'Enter') { await tab.sp('Input.dispatchKeyEvent', { type: 'keyDown', ...down }); return; }
+  await tab.sp('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...down });
+  await tab.sp('Input.dispatchKeyEvent', { type: 'keyUp', ...down });
+}
+
+/** A board of `count` question rounds titled `title`, each sent but those in `waiting`,
+ * left open: round `n` titled `roundTitle(n)`, holding `blocks(n)`. */
+export function manyRounds(count, { title, waiting = [], roundTitle, blocks }) {
+  const board = createBoard({ title, blocks: blocks(1) });
+  for (let n = 2; n <= count; n++) {
+    if (waiting.includes(n - 1)) abandonOpenRounds(board);
+    else applySubmit(board, { action: 'send', answers: [], comments: [] }, n - 1);
+    addRound(board, { title: roundTitle(n), blocks: blocks(n) });
+  }
+  return board;
 }
 
 /** What a finger trips on in the phone tab `tab` as it stands: every visible control under

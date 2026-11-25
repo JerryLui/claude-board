@@ -44,12 +44,11 @@
 // 100-zero probe set in that element's own computed font.
 
 import assert from 'node:assert/strict';
-import { abandonOpenRounds, addRound, applySubmit, createBoard } from '../src/board.mjs';
 import { sessionToken } from '../src/secret.mjs';
 import { writeBoard } from '../src/store.mjs';
 import { runMain, sleep, withTimeout } from './support.mjs';
 import {
-  assertPhone, clickAt, guardRun, openPhone, openTab, phoneFaults, postJson, requireChrome, row, setSessionCookie, startScratchDaemon, withChrome,
+  assertPhone, clickAt, guardRun, manyRounds, openPhone, openTab, phoneFaults, postJson, requireChrome, row, setSessionCookie, startScratchDaemon, withChrome,
 } from './browser-support.mjs';
 
 // The numbers this check holds the layout to, written out here rather than read
@@ -535,17 +534,11 @@ const SWITCHER_WINDOWS = [
 ];
 const SWITCHER_TITLE = 'A round title long enough to be cut short in the caption of a narrow window';
 
-function manyRounds(count, waiting = [15]) {
-  const question = { kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] };
-  const board = createBoard({ title: 'Many rounds', blocks: [question] });
-  for (let n = 2; n <= count; n++) {
-    if (waiting.includes(n - 1)) abandonOpenRounds(board);
-    else applySubmit(board, { action: 'send', answers: [], comments: [] }, n - 1);
-    const blocks = n === 15 ? [{ kind: 'markdown', text: LONG_READ }, ...Array(8).fill(question)] : [question];
-    addRound(board, { title: SWITCHER_TITLE, blocks });
-  }
-  return board;
-}
+const SWITCHER_QUESTION = { kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] };
+const switcherBoard = count => manyRounds(count, {
+  title: 'Many rounds', waiting: [15], roundTitle: () => SWITCHER_TITLE,
+  blocks: n => (n === 15 ? [{ kind: 'markdown', text: LONG_READ }, ...Array(8).fill(SWITCHER_QUESTION)] : [SWITCHER_QUESTION]),
+});
 
 const SWITCHER_EXPR = `(function () {
   function box(el) { var r = el.getBoundingClientRect(); return { x: r.left, y: r.top, r: r.right, b: r.bottom, w: r.width, h: r.height, text: el.textContent }; }
@@ -581,7 +574,7 @@ function cutOff(m) {
 }
 
 async function switcherRows({ send, onEvent, cookie, home, origin }) {
-  const boards = Object.fromEntries([5, 13, 19].map(count => [count, manyRounds(count)]));
+  const boards = Object.fromEntries([5, 13, 19].map(count => [count, switcherBoard(count)]));
   for (const board of Object.values(boards)) writeBoard(board, home);
   const open = (url, viewport) => openTab(send, onEvent, url, cookie, { ...viewport, expr: '1' });
   const openBoard = (count, viewport) => open(`${origin}/b/${boards[count].id}`, viewport);
@@ -688,7 +681,7 @@ const PRESS_ALL = sel => `[].slice.call(document.querySelectorAll(${JSON.stringi
 async function phoneRows({ send, onEvent, cookie, home, origin, boardUrl }) {
   const roundUrl = await boardUrl(phoneBody());
   const pageUrl = await boardUrl({ ...pageBody(), wait: true });
-  const many = manyRounds(19);
+  const many = switcherBoard(19);
   writeBoard(many, home);
   const onPhone = (url, theme, fn) => async note => {
     const tab = await openPhone(send, onEvent, url, cookie, { theme });

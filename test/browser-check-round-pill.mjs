@@ -21,13 +21,13 @@
 
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { abandonOpenRounds, addRound, applySubmit, createBoard } from '../src/board.mjs';
+import { addRound, applySubmit, createBoard } from '../src/board.mjs';
 import { renderBoardPage } from '../src/render.mjs';
 import { sessionToken } from '../src/secret.mjs';
 import { writeBoard, writePage } from '../src/store.mjs';
 import { runMain } from './support.mjs';
 import {
-  assertPhone, clickAt, copyArchive, guardRun, openTab, phoneFaults, requireChrome, row, startScratchDaemon, withChrome,
+  assertPhone, clickAt, copyArchive, guardRun, manyRounds, openPhone, openTab, phoneFaults, requireChrome, row, startScratchDaemon, withChrome,
 } from './browser-support.mjs';
 
 guardRun('browser-check-round-pill', { deadlineMs: 180000 });
@@ -37,15 +37,7 @@ const QUESTION = { kind: 'question', prompt: 'Ship it?', widget: 'single', optio
 const PHONES = [{ width: 390, height: 844 }, { width: 320, height: 640 }];
 const DESK = { width: 1280, height: 900 };
 
-function rounds(count, waiting = []) {
-  const board = createBoard({ title: TITLE, blocks: [QUESTION] });
-  for (let n = 2; n <= count; n++) {
-    if (waiting.includes(n - 1)) abandonOpenRounds(board);
-    else applySubmit(board, { action: 'send', answers: [], comments: [] }, n - 1);
-    addRound(board, { title: `Step ${n}`, blocks: [QUESTION] });
-  }
-  return board;
-}
+const rounds = (count, waiting = []) => manyRounds(count, { title: TITLE, waiting, roundTitle: n => `Step ${n}`, blocks: () => [QUESTION] });
 
 function pageThenQuestion() {
   const board = createBoard({ title: TITLE, blocks: [{ kind: 'html', html: '<div style="height:3000px">page</div>' }] });
@@ -92,13 +84,7 @@ async function main() {
 
     await withChrome({ tag: 'cb-round-pill' }, async ({ send, onEvent }) => {
       const cookie = sessionToken(daemon.secret);
-      const open = (url, { width, height }) => openTab(send, onEvent, url, cookie, {
-        width, height, theme: 'dark', expr: '1',
-        prepare: width > 560 ? null : async sp => {
-          await sp('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 2, mobile: true });
-          await sp('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 });
-        },
-      });
+      const open = (url, { width, height }) => (width > 560 ? openTab : openPhone)(send, onEvent, url, cookie, { width, height, theme: 'dark', expr: '1' });
       const look = async tab => { await tab.quiet(); return tab.evalPage(PILL_EXPR); };
       const press = async (tab, selector) => {
         const at = await tab.evalPage(`(function () { var r = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();
