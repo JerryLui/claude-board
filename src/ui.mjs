@@ -6084,6 +6084,7 @@ export const ui = `
     // title just after it -- both need to know whether the round on screen is
     // a page board's or an ordinary one's.
     var fullpage = isPageRound(blocksOfRound(currentRound));
+    var cur = roundEntry(currentRound);
     // ADR.md entry 46's half that outlives the first paint (src/render.mjs's own
     // 'pageUncommentable' is the render-time half): the comment-mode toggle has
     // to go on a page board that was never awaited AND on one whose wait dies
@@ -6091,7 +6092,7 @@ export const ui = `
     // lives here rather than in refreshPager (which calls this on every flip
     // anyway, so the class is correct on both routes).
     document.body.classList.toggle('page-uncommentable',
-      fullpage && !roundIsCurrentlyAwaited(roundEntry(currentRound), now));
+      fullpage && !roundIsCurrentlyAwaited(cur, now));
     var meta = document.querySelector('span#round-meta');
     if (meta) {
       // 'fullpage' is what tells pageBoardPillMeta which of PILL_READONLY_TITLE
@@ -6099,20 +6100,26 @@ export const ui = `
       // that function's own comment (src/badge.mjs): a page board's status
       // never leaves 'open' even once its wait dies, so the round object alone
       // cannot make this call.
-      var m = pageBoardPillMeta(roundEntry(currentRound), now, fullpage, !readonly && currentPageSendable());
+      var m = pageBoardPillMeta(cur, now, fullpage, !readonly && currentPageSendable());
       meta.textContent = m.text;
       meta.title = m.title;
       var lineLabel = document.querySelector('span.head-round-label');
       var lineState = document.querySelector('span.head-round-state');
-      var cur = roundEntry(currentRound);
       if (lineLabel) lineLabel.textContent = roundPageLabel(currentRound, (cur && cur.title) || '');
       if (lineState) lineState.textContent = m.text;
+    }
+    var pillCount = document.querySelector('button#round-pill-count');
+    if (pillCount) {
+      var rounds = board.rounds || [];
+      var waits = rounds.some(function (r) { return r.n !== currentRound && roundWaits(r, now); });
+      pillCount.setAttribute('aria-label', roundCountName(currentRound, rounds.length, waits));
+      pillCount.classList.toggle('round-pill-count-owed', waits);
     }
     var cd = document.querySelector('span#round-countdown');
     if (cd) {
       // The newest unsent page's wait, shown only on that page: Send answers the
       // page on screen, and an older page's wait is never the one an agent holds.
-      var text = currentRound === openRoundNumber() ? roundCountdownText(roundEntry(currentRound), now) : null;
+      var text = currentRound === openRoundNumber() ? roundCountdownText(cur, now) : null;
       cd.textContent = text || '';
       cd.title = text ? ROUND_COUNTDOWN_TITLE : '';
       cd.classList.toggle('visible', !!text);
@@ -6230,10 +6237,7 @@ export const ui = `
     if (pillPrev) pillPrev.disabled = currentRound <= first;
     if (pillNext) pillNext.disabled = currentRound >= last;
     if (pillCount) {
-      var waits = rounds.some(function (r) { return r.n !== currentRound && roundOwesAnswer(r); });
       pillCount.textContent = roundCountLabel(currentRound, rounds.length);
-      pillCount.setAttribute('aria-label', roundCountName(currentRound, rounds.length, waits));
-      pillCount.classList.toggle('round-pill-count-owed', waits);
       pillCount.disabled = false;
     }
 
@@ -7079,9 +7083,8 @@ export const ui = `
   var MOVE_ON_MS = 1000;
 
   /** ADR 160: where the page goes once the PM's own Send or Discuss of round 'sent'
-   * went out. The oldest other round still waiting, or holding what its own Send
-   * would post, takes the page; with none, the page goes where the Home mark goes,
-   * unless a queued comment is still only in this tab. */
+   * went out. The oldest other round that waits takes the page; with none, the page
+   * goes where the Home mark goes, unless a queued comment is still only in this tab. */
   function moveOnAfter(sent) {
     if (readonly) return;
     setTimeout(function () {
@@ -7089,8 +7092,7 @@ export const ui = `
       var now = Date.now();
       var next = null;
       (board.rounds || []).forEach(function (r) {
-        if (next !== null || r.n === sent || r.status === 'sent') return;
-        if (roundOwesAnswer(r) || roundIsCurrentlyAwaited(r, now) || commentsSentFrom(r.n).length) next = r.n;
+        if (next === null && r.n !== sent && roundWaits(r, now)) next = r.n;
       });
       if (next !== null) {
         if (sendStatus) sendStatus.textContent = '';
@@ -7102,6 +7104,20 @@ export const ui = `
       var home = document.querySelector('a.back-to-index');
       location.href = (home && home.getAttribute('href')) || '/';
     }, MOVE_ON_MS);
+  }
+
+  /** ADR 160's waiting round, asked by move-on and the pill's dot alike. */
+  function roundWaits(r, now) {
+    if (!r || r.status === 'sent') return false;
+    return roundOwesAnswer(r) || roundIsCurrentlyAwaited(r, now) || commentsSentFrom(r.n).length > 0 || holdsUnaddedComment(r.n);
+  }
+
+  function holdsUnaddedComment(n) {
+    return qsa('.comment-form', document).some(function (form) {
+      var id = form.getAttribute('data-block-id');
+      var input = form.querySelector('input[type=text]');
+      return roundOfBlockEl(id) === n && (!!(input && input.value.trim()) || !!draftImages['comment:' + id]);
+    });
   }
 
   function sayInSendBar(n, text) {

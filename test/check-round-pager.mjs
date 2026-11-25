@@ -892,27 +892,39 @@ check('a round arriving on a folded pager is on its face, and the round on scree
   });
 });
 
-check('the phone pill reads this round of the board\'s rounds between its arrows, dotted while another round waits, on load, on a step and when a round arrives', () => {
+check('the phone pill reads this round of the board\'s rounds between its arrows, dotted and named while another round waits, on load, on a step and when a round arrives', () => {
   const pill = document => {
     const count = document.querySelector('button#round-pill-count');
-    return count.textContent + (count.classList.contains('round-pill-count-owed') ? ' dot' : '');
+    return count.textContent + (count.classList.contains('round-pill-count-owed') ? ' dot' : '') + ' | ' + count.getAttribute('aria-label');
   };
   const board = longBoard(4);
   const { document, es } = loadBoardWithEventSource(renderBoardPage(board));
-  assert.equal(pill(document), '4 / 4', 'the round on screen is the only one waiting');
+  assert.equal(pill(document), '4 / 4 | Round 4 of 4. Show all rounds', 'the round on screen is the only one waiting');
   assert.equal(document.querySelector('button#round-pill-next').disabled, true, 'the last round\'s next arrow is disabled');
   click(document.querySelector('button#round-pill-prev'));
   assert.equal(currentPage(document), '3');
-  assert.equal(pill(document), '3 / 4 dot', 'round 4 still waits');
+  assert.equal(pill(document), '3 / 4 dot | Round 3 of 4, another round waits for an answer. Show all rounds', 'round 4 still waits');
+  assert.equal(document.querySelector('span.head-round-label').textContent, 'Round 3 · Step 3', 'the state line names the round stepped to');
   applySubmit(board, { action: 'send', answers: [], comments: [] }, 4);
   addRound(board, { title: 'Arrived', blocks: [Q] });
   es.dispatch('round', JSON.stringify({
     round: 5, mode: 'new-round', blockIds: [], html: renderRoundSection(board, 5, groupCommentsByBlock([])), board,
   }));
-  assert.equal(pill(document), '3 / 5 dot', 'an arriving round counts and waits');
+  assert.equal(pill(document), '3 / 5 dot | Round 3 of 5, another round waits for an answer. Show all rounds', 'an arriving round counts and waits');
   click(document.querySelector('button#round-pill-next'));
   click(document.querySelector('button#round-pill-next'));
-  assert.equal(pill(document), '5 / 5');
+  assert.equal(pill(document), '5 / 5 | Round 5 of 5. Show all rounds');
+});
+
+check('the phone pill dots an awaited page round that asks nothing, before the script runs and after (ADR 160)', () => {
+  const board = createBoard({ title: 'A mock, then a question', blocks: [{ kind: 'html', html: ARTIFACT }], wait: true });
+  addRound(board, { title: 'Any changes', blocks: [Q], wait: true });
+  const html = renderBoardPage(board);
+  for (const [when, document] of [['first paint', parseHTML(html)], ['script', loadBoard(html)]]) {
+    const count = document.querySelector('button#round-pill-count');
+    assert.equal(count.classList.contains('round-pill-count-owed'), true, when);
+    assert.equal(count.getAttribute('aria-label'), 'Round 2 of 2, another round waits for an answer. Show all rounds', when);
+  }
 });
 
 check('a press on the phone pill\'s count opens the round numbers, and a pick jumps there and closes them, on a live board and on a saved one', () => {
@@ -930,6 +942,9 @@ check('a press on the phone pill\'s count opens the round numbers, and a pick ju
     click(count);
     keydown(document, 'Escape');
     assert.equal(count.getAttribute('aria-expanded'), 'false', `${protocol} Escape closes it`);
+    click(count);
+    click(document.querySelector('.round-current'));
+    assert.deepEqual([count.getAttribute('aria-expanded'), dock.classList.contains('round-pager-open')], ['false', false], `${protocol} a press outside closes it`);
   }
 });
 

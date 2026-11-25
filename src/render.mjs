@@ -3568,7 +3568,7 @@ function roundPagerMarkup(board, currentN) {
   const first = rounds.length ? rounds[0].n : 1;
   const last = rounds.length ? rounds[rounds.length - 1].n : 1;
   const current = rounds.find(r => r.n === currentN);
-  const waits = owed.some(n => n !== currentN);
+  const waits = rounds.some(r => r.n !== currentN && (owed.includes(r.n) || roundIsAwaitedOpen(r)));
   // The dock, not the pill, is the fixed and centred box: the caption has to sit
   // above the numerals and share their centre line, and stacking them inside one
   // fixed column is what keeps that true with no measured offset between them.
