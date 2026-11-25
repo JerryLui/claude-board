@@ -27,7 +27,8 @@
 // The top strip's Download round is read over a scrolled artifact, where it stays drawn
 // and takes its click, and in a phone-wide window the ⋯ menu's, on a third
 // board whose one artifact round was never sent, and in the board's
-// archive opened from disk, which shows none. Over an awaited artifact scrolled under
+// archive opened from disk, which shows none. On a phone the ⋯ menu's Download round saves
+// the question round in view. Over an awaited artifact scrolled under
 // the condensed bar, light and dark, it is its icon alone between Comment and Theme. Layout, a real download and a file: page, none of which the DOM
 // stand-in has (test/check-round-download.mjs holds the markup).
 //
@@ -51,7 +52,9 @@ import { sessionToken } from '../src/secret.mjs';
 import { STAGE_MARGIN_RESET } from '../src/round-export.mjs';
 import { MERMAID_SOURCE } from '../src/vendor/mermaid/index.mjs';
 import { runMain, skipFile, withTimeout } from './support.mjs';
-import { CHROME, copyArchive, evalIn, guardRun, measureTab, openTab, postJson, row, scratchDir, startScratchDaemon, withChrome } from './browser-support.mjs';
+import {
+  CHROME, copyArchive, evalIn, guardRun, measureTab, openPhone, openTab, postJson, row, scratchDir, startScratchDaemon, withChrome,
+} from './browser-support.mjs';
 
 if (!existsSync(CHROME)) skipFile('browser-check-download', `browser-check-download: no Chrome at ${CHROME} (set CLAUDE_BOARD_CHROME_BIN to override)`);
 
@@ -872,6 +875,23 @@ async function main() {
           ['Order them', '1. Z, 2. X, 3. Y', ''],
           ['Park this?', 'Deferred', ''],
         ]);
+      });
+
+      const phone = await openPhone(send, onEvent, `${boardUrl}#round:1`, cookie);
+      let menuDownload;
+      try {
+        await phone.until(`document.querySelector('.round-current').getAttribute('data-round') === '1'`, 'round 1 in view');
+        menuDownload = await downloadFrom(send, onEvent, phone,
+          `document.querySelector('button.corner-more-btn').click(); document.querySelector('.corner-menu .round-download').click()`);
+      } finally {
+        await phone.close();
+      }
+      const fromMenu = await measureTab(send, onEvent, pathToFileURL(menuDownload.file).href, cookie,
+        { width: 1280, height: 900, theme: 'dark', expr: EXPORT_EXPR, prepare: offline });
+      await row('at 390 by 844 ⋯ › Download round saves the round in view, its head and decisions as a wide window saves them', note => {
+        note(`${menuDownload.files.join(', ')}: ${fromMenu.meta.join(' | ')}`);
+        assert.deepEqual(menuDownload.files, ['download-fixture-round-1.html']);
+        assert.deepEqual([fromMenu.title, fromMenu.meta, fromMenu.rows], [m.title, m.meta, m.rows]);
       });
 
       await row('each question keeps every option, the pick marked', () => {
