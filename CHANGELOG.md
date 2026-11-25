@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **A mission's card shows each hung call its session recovered**: a mission takes a `hangs` list,
+  each `{ agent, at, outcome }`, at most 20, written whole like `prs`. The card reads one line for each
+  of its newest three, `Hung: <agent>, 5 min ago, resumed` (or `replaced by a fresh agent`, `left for
+  the PM`), the whole time in its tooltip, and counts the older ones in one line. A mission with none
+  looks as before. Restart the daemon to take it.
 - **The board on a phone, and Send moves on (ADR 40, 42, 124, 160)**:
   - **Send and Discuss move on**, on every screen: once your Send or Discuss goes out, its status
     shows for a second, then the page flips to the next round on the board still waiting for you,
@@ -24,7 +29,6 @@
     pill are gone there; above 560px the pager is as before.
   - **Pinch to zoom a pulled-out diagram** on a touch screen, around your fingers; one finger pans,
     and a double-tap zooms as a double-click does.
-
 - **The board from your phone, a longer wait and a lasting sign-in (ADR 157, 158, 159)**: take it
   with `./install.sh`, which rebuilds the launcher. Running sessions pick it up when they restart.
   - **A round waits 50 minutes**, up from 40, restarted by each pick, note or comment as before.

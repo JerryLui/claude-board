@@ -48,7 +48,7 @@ export const ORDER_KINDS = ['stop', 'comment', 'pm'];
 export const CARD_ORDER_KINDS = ['stop', 'comment'];
 
 /** The fields `POST /api/mission/:key` may write; anything else in its body is a 400. */
-export const MISSION_FIELDS = ['title', 'cwd', 'phase', 'state', 'summary', 'waitingOn', 'next', 'prs', 'handoff', 'fire', 'queue', 'retiredAt'];
+export const MISSION_FIELDS = ['title', 'cwd', 'phase', 'state', 'summary', 'waitingOn', 'next', 'prs', 'handoff', 'fire', 'queue', 'retiredAt', 'hangs'];
 
 /** At most this many sessions work at once, and at most `MAX_ALIVE` are alive; past either,
  * a launch queues. A session waiting on the PM is alive but not working, and the PM's own
@@ -76,11 +76,24 @@ const MAX_PATH_CHARS = 4096;
 const MAX_URL_CHARS = 2048;
 const MAX_TEXT_BYTES = 4096;
 const MAX_PRS = 50;
+/** How the session's agent watch recovered a hang, each with the words its card line reads. */
+export const HANG_OUTCOMES = { resumed: 'resumed', replaced: 'replaced by a fresh agent', reported: 'left for the PM' };
+const MAX_HANGS = 20;
+const MAX_HANG_AGENT_CHARS = 80;
+const UTC_ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
 const MAX_HISTORY = 200;
 const MAX_ORDERS = 200;
 const MAX_BOARDS = 200;
 
 const iso = ms => new Date(ms).toISOString();
+
+/** A UTC ISO-8601 time to the second, milliseconds allowed, naming a date that exists:
+ * `toISOString` writes the same date and time back, to the millisecond. */
+export function isUtcIso(value) {
+  if (typeof value !== 'string' || !UTC_ISO.test(value)) return false;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) && iso(ms) === value.replace(/(?:\.(\d+))?Z$/, (_, fraction = '') => `.${(fraction + '000').slice(0, 3)}Z`);
+}
 
 function refuse(message, status = 400) {
   return Object.assign(new Error(message), { status });
@@ -176,6 +189,25 @@ function validatePrFact(fact, i, now) {
 
 const prKey = pr => `${pr.repo}#${pr.number}`;
 
+function validateHang(hang, i) {
+  const what = `hangs[${i}]`;
+  assertObject(hang, what);
+  assertOnly(hang, ['agent', 'at', 'outcome'], what);
+  str(hang.agent, `${what}.agent`, MAX_HANG_AGENT_CHARS);
+  if (!hang.agent.trim()) throw refuse(`${what}.agent must not be empty`);
+  if (!isUtcIso(hang.at)) throw refuse(`${what}.at must be an ISO-8601 UTC timestamp`);
+  return { agent: hang.agent, at: hang.at, outcome: oneOf(hang.outcome, Object.keys(HANG_OUTCOMES), `${what}.outcome`) };
+}
+
+function wellFormedHang(hang) {
+  try {
+    validateHang(hang, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** One validator per writable field; each answers the value to store, or throws a 400.
  * `null` clears an optional field and is refused on a required one. */
 const FIELD_RULES = {
@@ -214,6 +246,11 @@ const FIELD_RULES = {
     };
   },
   retiredAt: v => timestamp(v, 'retiredAt'),
+  hangs: v => {
+    if (!Array.isArray(v)) throw refuse('hangs must be an array');
+    if (v.length > MAX_HANGS) throw refuse(`hangs holds over ${MAX_HANGS} entries`);
+    return v.map(validateHang);
+  },
 };
 
 const REQUIRED_FIELDS = new Set(['title', 'phase', 'state', 'prs']);
@@ -538,7 +575,7 @@ export function deriveState(m, { home = boardHome(), now = Date.now(), isAlive =
 }
 
 /** The record as a reader gets it: every stored field, `prs` with each PR's facts
- * (`prsOf`), plus `view` (the derived state), `asking` (it reads needs-you by a session's
+ * (`prsOf`), `hangs` holding only its well-formed entries, `[]` where none was written, plus `view` (the derived state), `asking` (it reads needs-you by a session's
  * newest round, one no hand-over reopened, `owedRounds`), `waiting` (the round its card
  * opens, `{ board, round, postedAt }` by id, number and posting time, `waitingOf`, else null), `retired` (its `retiredAt` parses), `gone`
  * (`goneOf`), `live` (a session holds the mission, `hasLiveSession`), `listedAt` (the time
@@ -555,6 +592,7 @@ export function missionView(m, { home = boardHome(), now = Date.now(), isAlive =
   return {
     ...m,
     prs: prsOf(m),
+    hangs: Array.isArray(m.hangs) ? m.hangs.filter(wellFormedHang) : [],
     view,
     asking: view === 'needs-you' && linked.some(entry => owedRounds(entry).some(round => !round.reopenedAt)),
     waiting: waiting && { board: waiting.entry.board.id, round: waiting.round.n, postedAt: waiting.round.postedAt },

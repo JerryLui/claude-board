@@ -18,6 +18,7 @@ import { themeBootScript, themeToggle } from './theme.mjs';
 import { BLANK_ICON, commentAndThemeItems, commentModeToggle, cornerMenu, cornerItem } from './render.mjs';
 import { trackDocWidth, wireCornerMenu, HOME_STORAGE_KEY } from './ui.mjs';
 import { roundIsAwaited } from './badge.mjs';
+import { HANG_OUTCOMES } from './missions.mjs';
 // formatCountdown only -- src/pomodoro.mjs's document shape, HTTP surface and
 // clock are owned by other tickets and stay untouched here (this file consumes
 // the API, it does not extend it). Reused rather than reimplemented in
@@ -1925,7 +1926,7 @@ function initIndexStream() {
   es.addEventListener('missions', function () { patchMissions(); });
 }
 initIndexStream();
-` + '\nvar TAB_KEY_PREFIX = ' + JSON.stringify(TAB_KEY_PREFIX) + ';\n' + missionsParts.toString() + '\n' + missionsScript
+` + '\nvar TAB_KEY_PREFIX = ' + JSON.stringify(TAB_KEY_PREFIX) + ';\nvar HANG_OUTCOMES = ' + JSON.stringify(HANG_OUTCOMES) + ';\n' + missionsParts.toString() + '\n' + missionsScript
   + '\n' + trackDocWidth.toString() + '\ntrackDocWidth();\n'
   + '\nvar wireCornerMenu = ' + wireCornerMenu.toString() + ';\nwireCornerMenu(onCornerMenuOpen);\n'
   + '\nvar HOME_STORAGE_KEY = ' + JSON.stringify(HOME_STORAGE_KEY) + ';\n' + rememberHomeView.toString() + '\nrememberHomeView();\n';
@@ -1975,7 +1976,9 @@ export function filterThreads(threads, query) {
  * from a round still waiting on the PM. Fire carries what a click submits; Merge is a
  * link to the brief at its merge question, and the summary shows whole beside it. Stop
  * is offered while a session is live and no stop is already on its way. The whole card
- * opens its board, the round waiting on the PM where there is one.
+ * opens its board, the round waiting on the PM where there is one. Each of the newest few
+ * `hangs` is a line naming the hung agent, how long ago and how it was recovered; older
+ * ones are counted in one line.
  *
  * A tab (`tabs`, a session the watcher reports that no mission launched; ADR 131) is a
  * card of its own in its state's column, after the missions: tagged "tab", its login and
@@ -2000,6 +2003,8 @@ function missionsParts(overview, ui) {
   // A card's title past this many characters may be cut at its clamp, so the card
   // carries the fold that shows it whole.
   var FOLD_TITLE_CHARS = 30;
+  // A card lists this many of its newest hangs and counts the rest.
+  var SHOWN_HANGS = 3;
   // A PR's state is the view's, from GitHub at its head commit; 'checking' (no fact yet)
   // takes the open ring, and one closed without merging the struck one.
   var PR_MARKS = { green: '✓', merged: '✓', red: '✕', open: '○', draft: '○', closed: '⊘' };
@@ -2019,6 +2024,11 @@ function missionsParts(overview, ui) {
     var hours = Math.floor(minutes / 60);
     if (hours < 24) return hours + ' h';
     return Math.floor(hours / 24) + ' d';
+  }
+
+  function hangLine(hang) {
+    var ago = age(hang.at);
+    return 'Hung: ' + hang.agent + ', ' + (ago === 'now' ? 'just now' : ago + ' ago') + ', ' + HANG_OUTCOMES[hang.outcome];
   }
 
   // A queued mission and a parked one wait, each tagged as such on its card.
@@ -2143,6 +2153,16 @@ function missionsParts(overview, ui) {
       out += '<p class="mission-fact" data-rejoin title="' + esc('Since ' + m.rejoin.since) + '">Session needs /mission again, '
         + esc(since === 'now' || !since ? 'just now' : 'for ' + since) + '</p>';
     }
+    // The newest hung calls the session's agent watch recovered, each with its age and the
+    // whole time in its tooltip; the older ones are one count, their lines its tooltip.
+    var older = m.hangs.slice(0, Math.max(0, m.hangs.length - SHOWN_HANGS)).map(hangLine);
+    if (older.length) {
+      out += '<p class="mission-fact" data-hang-older title="' + esc(older.join('\n')) + '">'
+        + older.length + (older.length === 1 ? ' earlier hang' : ' earlier hangs') + '</p>';
+    }
+    m.hangs.slice(older.length).forEach(function (hang) {
+      out += '<p class="mission-fact" data-hang title="' + esc('Hung at ' + hang.at) + '">' + esc(hangLine(hang)) + '</p>';
+    });
     // The title, summary, waiting on and next each stop at a few lines, and this one fold
     // shows them whole. It is hidden on screen while nothing is cut (missionsMarkFits).
     out += moreFold(key, m.summary || m.waitingOn || m.next || String(title).length > FOLD_TITLE_CHARS);
