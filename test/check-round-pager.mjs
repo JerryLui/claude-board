@@ -623,24 +623,49 @@ check('criterion 26: DISABLED is not hidden -- no rule in the stylesheet takes a
   // selector matched a rule that selected nothing) -- asserting that a class of
   // rule does NOT exist is exactly what a text scan is good for, and here it is
   // the only mechanism available.
-  const stripped = styles.replace(/\/\*[\s\S]*?\*\//g, '');
-  const rules = [...stripped.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map(m => ({ selector: m[1].trim(), body: m[2] }));
-  assert.ok(rules.length > 100, 'setup failure: the stylesheet did not parse into rules');
-
-  const CONTROL = /\.round-flip|\.round-pager|\.round-page/;
+  //
+  // One swap is no state: at 560px or less the phone pill stands in for the edge
+  // chevrons, the caption and the closed list of numbers (ADR.md entry 42,
+  // amended for phones), so exactly those rules, in that block, may hide them.
+  const PHONE_BLOCK = '@media (width <= 560px)';
+  const PHONE_SWAP = new Set(['.round-flip, .round-pager-caption', '.round-pager-dock:not(.round-pager-open) .round-pager']);
+  const CONTROL = /\.round-flip|\.round-pager|\.round-page|\.round-pill-/;
   const HIDING = [
     [/display\s*:\s*none/, 'display: none'],
     [/visibility\s*:\s*hidden/, 'visibility: hidden'],
     [/content-visibility\s*:\s*hidden/, 'content-visibility: hidden'],
     [/opacity\s*:\s*0(?![.\d])/, 'opacity: 0'],
   ];
-  for (const rule of rules) {
-    if (!CONTROL.test(rule.selector)) continue;
-    for (const [pattern, what] of HIDING) {
-      assert.ok(!pattern.test(rule.body),
-        `"${rule.selector}" sets ${what}, which takes a round control off the page. Both controls are always present (criterion 26): the ends are DISABLED, never hidden, and a page board / a sent page / an archive all keep the pager, since it is the only way off the page they are on.`);
-    }
-  }
+  const rulesOf = css => {
+    const rules = [];
+    (function walk(text, media) {
+      let depth = 0, head = 0, open = 0;
+      for (let i = 0; i < text.length; i++) {
+        if (text[i] === '{' && depth++ === 0) open = i;
+        else if (text[i] === '}' && --depth === 0) {
+          const selector = text.slice(head, open).trim();
+          const body = text.slice(open + 1, i);
+          if (selector.startsWith('@media')) walk(body, [...media, selector]);
+          else if (!selector.startsWith('@')) rules.push({ selector, body, media });
+          head = i + 1;
+        }
+      }
+    })(css.replace(/\/\*[\s\S]*?\*\//g, ''), []);
+    return rules;
+  };
+  const hiders = css => rulesOf(css)
+    .filter(rule => CONTROL.test(rule.selector) && !(rule.media.includes(PHONE_BLOCK) && PHONE_SWAP.has(rule.selector)))
+    .flatMap(rule => HIDING.filter(([pattern]) => pattern.test(rule.body)).map(([, what]) => `"${rule.selector}" sets ${what}`));
+
+  const rules = rulesOf(styles);
+  assert.ok(rules.length > 100, 'setup failure: the stylesheet did not parse into rules');
+  assert.deepEqual(hiders(styles), [],
+    'a rule takes a round control off the page. Both controls are always present (criterion 26): the ends are DISABLED, never hidden, and a page board / a sent page / an archive all keep the pager, since it is the only way off the page they are on.');
+  assert.ok(rules.some(r => r.media.includes(PHONE_BLOCK) && PHONE_SWAP.has(r.selector)), 'setup failure: the phone swap is not in the stylesheet');
+  assert.deepEqual(hiders(`${PHONE_BLOCK} { .round-pill-step:disabled { display: none; } .round-flip:disabled { opacity: 0; } }`),
+    ['".round-pill-step:disabled" sets display: none', '".round-flip:disabled" sets opacity: 0'], 'a state hide inside the phone block is still one');
+  assert.deepEqual(hiders('.round-flip, .round-pager-caption { display: none; }'),
+    ['".round-flip, .round-pager-caption" sets display: none'], 'the swap outside the phone block is still a hide');
 
   // The scan is only worth something if a control is actually in its net.
   assert.ok(rules.some(r => /\.round-flip/.test(r.selector)), 'setup failure: no .round-flip rule found to scan');
@@ -827,12 +852,9 @@ check('the fold keeps the first, the last, the rounds around the current one and
     ['on the first', { current: 1 }, '1 2 3 gap 19'],
     ['a waiting round splits a run', { current: 10, owed: [15] }, '1 gap 8 9 10 11 12 gap 15 gap 19'],
     ['a run of one shows its number', { current: 5, owed: [17] }, '1 2 3 4 5 6 7 gap 17 18 19'],
-    ['a phone keeps the next round alone', { current: 10, narrow: true }, '1 gap 10 11 gap 19'],
-    ['a phone keeps a waiting round', { current: 10, owed: [15], narrow: true }, '1 gap 10 11 gap 15 gap 19'],
-    ['a phone whose row still overflows has one gap', { current: 10, owed: [15, 17], narrow: true, oneGap: true }, '1 gap 10 11 15 17 19'],
   ];
   for (const [what, given, face] of rows) {
-    assert.equal(foldRounds({ rounds, owed: [], narrow: false, oneGap: false, ...given }).join(' '), face, what);
+    assert.equal(foldRounds({ rounds, owed: [], ...given }).join(' '), face, what);
   }
 });
 
@@ -868,6 +890,47 @@ check('a round arriving on a folded pager is on its face, and the round on scree
     }));
     assert.equal(pagerFace(document), '1 2 3 … 20');
   });
+});
+
+check('the phone pill reads this round of the board\'s rounds between its arrows, dotted while another round waits, on load, on a step and when a round arrives', () => {
+  const pill = document => {
+    const count = document.querySelector('button#round-pill-count');
+    return count.textContent + (count.classList.contains('round-pill-count-owed') ? ' dot' : '');
+  };
+  const board = longBoard(4);
+  const { document, es } = loadBoardWithEventSource(renderBoardPage(board));
+  assert.equal(pill(document), '4 / 4', 'the round on screen is the only one waiting');
+  assert.equal(document.querySelector('button#round-pill-next').disabled, true, 'the last round\'s next arrow is disabled');
+  click(document.querySelector('button#round-pill-prev'));
+  assert.equal(currentPage(document), '3');
+  assert.equal(pill(document), '3 / 4 dot', 'round 4 still waits');
+  applySubmit(board, { action: 'send', answers: [], comments: [] }, 4);
+  addRound(board, { title: 'Arrived', blocks: [Q] });
+  es.dispatch('round', JSON.stringify({
+    round: 5, mode: 'new-round', blockIds: [], html: renderRoundSection(board, 5, groupCommentsByBlock([])), board,
+  }));
+  assert.equal(pill(document), '3 / 5 dot', 'an arriving round counts and waits');
+  click(document.querySelector('button#round-pill-next'));
+  click(document.querySelector('button#round-pill-next'));
+  assert.equal(pill(document), '5 / 5');
+});
+
+check('a press on the phone pill\'s count opens the round numbers, and a pick jumps there and closes them, on a live board and on a saved one', () => {
+  for (const protocol of ['http:', 'file:']) {
+    const document = loadBoard(renderBoardPage(longBoard(19, [7])), { protocol });
+    const count = document.querySelector('button#round-pill-count');
+    const dock = document.querySelector('.round-pager-dock');
+    assert.equal(count.disabled, false, `${protocol} the count is live`);
+    click(count);
+    assert.deepEqual([count.getAttribute('aria-expanded'), dock.classList.contains('round-pager-open')], ['true', true], `${protocol} open`);
+    click(document.querySelector('.round-page[data-round="7"]'));
+    assert.equal(currentPage(document), '7');
+    assert.deepEqual([count.getAttribute('aria-expanded'), dock.classList.contains('round-pager-open')], ['false', false], `${protocol} a pick closes it`);
+    assert.equal(count.textContent, '7 / 19');
+    click(count);
+    keydown(document, 'Escape');
+    assert.equal(count.getAttribute('aria-expanded'), 'false', `${protocol} Escape closes it`);
+  }
 });
 
 check('a gap opens every number until one is picked, on a live board and on a saved one', () => {

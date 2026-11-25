@@ -301,23 +301,27 @@
   var roundPageLabel = function roundPageLabel(n, title) {
   return title ? roundNumberLabel(n) + ' · ' + title : roundNumberLabel(n);
 };
-  var foldRounds = function foldRounds({ rounds, current, owed, narrow, oneGap }) {
+  var foldRounds = function foldRounds({ rounds, current, owed }) {
   var at = rounds.indexOf(current);
-  var from = at - (narrow ? 0 : 2);
-  var to = at + (narrow ? 1 : 2);
   var items = [];
   var run = [];
   rounds.forEach(function (n, i) {
-    var kept = i === 0 || i === rounds.length - 1 || (i >= from && i <= to) || owed.indexOf(n) !== -1;
+    var kept = i === 0 || i === rounds.length - 1 || Math.abs(i - at) <= 2 || owed.indexOf(n) !== -1;
     if (!kept) { run.push(n); return; }
-    if (run.length === 1 && !oneGap) items.push(run[0]);
-    else if (run.length && !(oneGap && items.indexOf('gap') !== -1)) items.push('gap');
+    if (run.length === 1) items.push(run[0]);
+    else if (run.length) items.push('gap');
     run = [];
     items.push(n);
   });
   return items;
 };
   var PAGER_GAP_LABEL = "Show all rounds";
+  var roundCountLabel = function roundCountLabel(n, total) {
+  return n + ' / ' + total;
+};
+  var roundCountName = function roundCountName(n, total, waits) {
+  return roundNumberLabel(n) + ' of ' + total + (waits ? ', another round waits for an answer' : '') + '. ' + PAGER_GAP_LABEL;
+};
   var isPageRound = function isPageRound(blocks) {
   return blocks.length === 1 && blocks[0].kind === 'html' && !blocks[0].error;
 };
@@ -6229,6 +6233,18 @@
     // is a control the reviewer has to find again at round 2.
     if (prev) prev.disabled = currentRound <= first;
     if (next) next.disabled = currentRound >= last;
+    var pillPrev = document.querySelector('button#round-pill-prev');
+    var pillNext = document.querySelector('button#round-pill-next');
+    var pillCount = document.querySelector('button#round-pill-count');
+    if (pillPrev) pillPrev.disabled = currentRound <= first;
+    if (pillNext) pillNext.disabled = currentRound >= last;
+    if (pillCount) {
+      var waits = rounds.some(function (r) { return r.n !== currentRound && roundOwesAnswer(r); });
+      pillCount.textContent = roundCountLabel(currentRound, rounds.length);
+      pillCount.setAttribute('aria-label', roundCountName(currentRound, rounds.length, waits));
+      pillCount.classList.toggle('round-pill-count-owed', waits);
+      pillCount.disabled = false;
+    }
 
     // The layout follows the PAGE, not the board (entry 42: "a page-board round
     // is one page, filling the viewport; a question round is another"). This is
@@ -6327,21 +6343,14 @@
 
     var rounds = board.rounds || [];
     var numbers = rounds.map(function (r) { return r.n; });
-    var fold = {
-      rounds: numbers,
-      current: currentRound,
-      owed: rounds.filter(roundOwesAnswer).map(function (r) { return r.n; }),
-      narrow: narrow,
-      oneGap: false,
-    };
     showPagerItems(nav, numbers);
-    if (pagerOnOneLine(nav)) pagerOpen = false;
+    if (narrow || pagerOnOneLine(nav)) pagerOpen = false;
     else if (!pagerOpen) {
-      showPagerItems(nav, foldRounds(fold));
-      if (narrow && !pagerOnOneLine(nav)) {
-        fold.oneGap = true;
-        showPagerItems(nav, foldRounds(fold));
-      }
+      showPagerItems(nav, foldRounds({
+        rounds: numbers,
+        current: currentRound,
+        owed: rounds.filter(roundOwesAnswer).map(function (r) { return r.n; }),
+      }));
     }
 
     var current = pagerEntry(nav, currentRound);
@@ -6356,6 +6365,23 @@
       else if (box.bottom > row.bottom) nav.scrollTop += box.bottom - row.bottom;
     }
     liftSendBar();
+  }
+
+  function setPillListOpen(open) {
+    var dock = document.querySelector('div.round-pager-dock');
+    var count = document.querySelector('button#round-pill-count');
+    if (!dock || !count) return;
+    dock.classList.toggle('round-pager-open', open);
+    count.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (!open) return;
+    fitPager();
+    var current = pagerEntry(pagerNav(), currentRound);
+    if (current) current.focus({ preventScroll: true });
+  }
+
+  function pillListOpen() {
+    var dock = document.querySelector('div.round-pager-dock');
+    return !!dock && dock.classList.contains('round-pager-open');
   }
 
   function openPager() {
@@ -6671,8 +6697,28 @@
       var btn = ev.target.closest('.round-page');
       if (!btn) return;
       pagerOpen = false;
+      var picked = pillListOpen();
+      setPillListOpen(false);
       var n = parseInt(btn.getAttribute('data-round'), 10);
       if (isFinite(n)) goToRound(n);
+      if (picked) roundPillCountBtn.focus({ preventScroll: true });
+    });
+  }
+  var roundPillPrevBtn = document.querySelector('button#round-pill-prev');
+  var roundPillNextBtn = document.querySelector('button#round-pill-next');
+  var roundPillCountBtn = document.querySelector('button#round-pill-count');
+  if (roundPillPrevBtn) roundPillPrevBtn.addEventListener('click', function () { stepRound(-1); });
+  if (roundPillNextBtn) roundPillNextBtn.addEventListener('click', function () { stepRound(1); });
+  if (roundPillCountBtn) {
+    roundPillCountBtn.addEventListener('click', function () { setPillListOpen(!pillListOpen()); });
+    document.addEventListener('click', function (ev) {
+      if (!pillListOpen() || (ev.target && ev.target.closest && ev.target.closest('.round-pager-dock'))) return;
+      setPillListOpen(false);
+    });
+    document.addEventListener('keydown', function (ev) {
+      if (ev.key !== 'Escape' || !pillListOpen()) return;
+      setPillListOpen(false);
+      roundPillCountBtn.focus({ preventScroll: true });
     });
   }
   window.addEventListener('resize', fitPager);
