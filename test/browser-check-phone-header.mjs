@@ -279,7 +279,7 @@ async function main() {
         }
       });
 
-      await row('at 390 the ⋯ menu holds Comment, the theme control, Download round and the board and thread ids, reached by Tab and Enter, with menu roles, walked by the arrows, Home and End, copies an id on Enter with or without the clipboard API, and closes on Escape or a press outside', async note => {
+      await row('at 390 the ⋯ menu holds Comment, the theme control, Download round and the board and thread ids, reached by Tab and Enter, with menu roles, walked by the arrows, Home and End, copies an id on Enter with or without the clipboard API, and closes on Escape, Tab out of it or a press outside', async note => {
         const tab = await openPhone(send, onEvent, roundUrl, cookie);
         try {
           await tab.evalPage(`document.activeElement && document.activeElement.blur()`);
@@ -314,6 +314,11 @@ async function main() {
             visited.push((await tab.evalPage(MENU_EXPR)).focus);
           }
           assert.deepEqual(visited, opened.items.map(i => i.name), 'Tab walks every item in order');
+          await pressKey(tab, 'Tab');
+          const left = await tab.evalPage(MENU_EXPR);
+          assert.deepEqual([left.open, left.expanded], [false, 'false'], 'Tab past the last item leaves the menu and closes it');
+          await tab.evalPage(`document.querySelector('button.corner-more-btn').focus()`);
+          await pressKey(tab, 'Enter');
 
           await pressKey(tab, 'Escape');
           const closed = await tab.evalPage(MENU_EXPR);
