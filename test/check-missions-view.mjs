@@ -22,7 +22,9 @@ import { mkdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { SECRET_HEADER } from '../src/secret.mjs';
 import { startServer } from '../src/server.mjs';
-import { readBoard } from '../src/store.mjs';
+import { readBoard, readMission } from '../src/store.mjs';
+import { renderMissionsPage } from '../src/indexpage.mjs';
+import { missionsOverview } from '../src/missions.mjs';
 import { StandInEvent, fetchSettler, parseHTML } from './dom-stand-in.mjs';
 import { check, deadPid, runMain, secretHome, writeStub, rawRequest, writeHeaders, pageHarness, postBoard } from './support.mjs';
 
@@ -660,6 +662,57 @@ async function main() {
       } finally {
         await snapshot([]);
       }
+    });
+
+    await check('each of a card\'s newest three recovered hangs is a line naming the agent, how long ago and the outcome, the whole time in its tooltip, the older ones one count; a mission with none shows no such line', async () => {
+      const ago = ms => new Date(Date.now() - ms).toISOString();
+      const minute = 60 * 1000;
+      const hour = 60 * minute;
+      const hangs = [
+        { agent: 'Build the card', at: ago(4 * 24 * hour + 30 * minute), outcome: 'resumed' },
+        { agent: 'Build the card', at: ago(2 * 24 * hour + 12 * hour), outcome: 'replaced' },
+        { agent: 'Build the card', at: ago(3 * hour + 30 * minute), outcome: 'resumed' },
+        { agent: 'Build the card', at: ago(5 * minute + 30 * 1000), outcome: 'replaced' },
+        { agent: '<b>Fresh</b> card', at: ago(10 * 1000), outcome: 'reported' },
+      ];
+      assert.equal((await post('/api/mission/HUNG_ONE', { title: 'Hung one', state: 'waiting', hangs })).status, 200);
+      assert.equal((await post('/api/mission/HUNG_NONE', { title: 'Quiet one', state: 'waiting' })).status, 200);
+      const expectedLines = [
+        'Hung: Build the card, 3 h ago, resumed',
+        'Hung: Build the card, 5 min ago, replaced by a fresh agent',
+        'Hung: <b>Fresh</b> card, just now, left for the PM',
+      ];
+      const page = await rawRequest(port, 'GET', '/', { headers: { [SECRET_HEADER]: SECRET } });
+      const served = parseHTML(page.body);
+      const tab = await openMissionsTab();
+      try {
+        for (const doc of [served, tab.document]) {
+          const card = cardFor(doc, 'HUNG_ONE');
+          const lines = card.querySelectorAll('p.mission-fact[data-hang]');
+          assert.deepEqual(lines.map(l => l.textContent), expectedLines, 'the newest three, the agent named as text');
+          assert.deepEqual(lines.map(l => l.getAttribute('title')), hangs.slice(2).map(h => `Hung at ${h.at}`));
+          const older = card.querySelectorAll('p.mission-fact[data-hang-older]');
+          assert.deepEqual(older.map(l => l.textContent), ['2 earlier hangs']);
+          assert.equal(older[0].getAttribute('title'), 'Hung: Build the card, 4 d ago, resumed\nHung: Build the card, 2 d ago, replaced by a fresh agent');
+          const none = cardFor(doc, 'HUNG_NONE');
+          assert.equal(none.querySelector('p[data-hang]'), null, 'no hangs, no line');
+          assert.equal(none.querySelector('p[data-hang-older]'), null);
+          assert.ok(!none.textContent.includes('Hung'), 'nothing on the card speaks of a hang');
+        }
+      } finally {
+        tab.restoreFetch();
+      }
+    });
+
+    await check('a stored hang that is not well formed is left off its card, and every card still renders', async () => {
+      const good = { agent: 'Build the card', at: new Date(Date.now() - 5 * 60 * 1000 - 30 * 1000).toISOString(), outcome: 'resumed' };
+      assert.equal((await post('/api/mission/HUNG_BAD', { title: 'Hung bad', state: 'waiting', hangs: [good] })).status, 200);
+      assert.equal((await post('/api/mission/HUNG_BESIDE', { title: 'Beside it', state: 'waiting' })).status, 200);
+      const stored = { ...readMission('HUNG_BAD', home), hangs: [null, 'Build the card', { ...good, outcome: 'retried' }, { ...good, at: '2026-02-30T10:00:00Z' }, good] };
+      const doc = parseHTML(renderMissionsPage({ overview: missionsOverview({ home, records: [stored, readMission('HUNG_BESIDE', home)] }) }));
+      assert.deepEqual(cardFor(doc, 'HUNG_BAD').querySelectorAll('p[data-hang]').map(l => l.textContent), ['Hung: Build the card, 5 min ago, resumed']);
+      assert.equal(cardFor(doc, 'HUNG_BAD').querySelector('p[data-hang-older]'), null, 'the malformed entries are not counted either');
+      assert.ok(cardFor(doc, 'HUNG_BESIDE'), 'the card beside it renders');
     });
   } finally {
     server.close();
