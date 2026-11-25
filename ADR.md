@@ -120,7 +120,7 @@ link where it is worth reading.
 | 131 | [Sessions reach the board over a route, held in memory](.agents/adr/0131-sessions-reach-the-board-over-a-route-held-in-memory.md) | 2026-10-29 | relates to 5, 123, 125, 128, 129; amended by 141, 147, 150 |
 | 132 | [Any block may carry card fields](.agents/adr/0132-any-block-may-carry-card-fields.md) | 2026-10-29 | relates to 133 |
 | 133 | [Every block is a titled card, with no type caption](.agents/adr/0133-every-block-is-a-titled-card-with-no-type-caption.md) | 2026-10-29 | amends 110; relates to 28, 132 |
-| 134 | [Send covers the page on screen, and needs you reads a board's newest asking round](.agents/adr/0134-send-covers-the-page-on-screen.md) | 2026-10-29 | narrows 123, 125; relates to 42, 114; amended by 150, 155 |
+| 134 | [Send covers the page on screen, and needs you reads a board's newest asking round](.agents/adr/0134-send-covers-the-page-on-screen.md) | 2026-10-29 | narrows 123, 125; relates to 42, 114; amended by 150, 155, 160 |
 | 137 | [Mission cards are as tall as their text, and Boards is one grouped list](.agents/adr/0137-mission-cards-as-tall-as-their-text-and-boards-one-grouped-list.md) | 2026-10-29 | replaces 135; amends 124; relates to 123, 125, 133; narrowed by 142 |
 | 138 | [Round pages are one centred 1100px column, in Linear's card density](.agents/adr/0138-round-pages-one-centred-1100px-column-in-linear-card-density.md) | 2026-10-29 | replaces 136; narrows 121, 122; relates to 26, 110, 120, 133, 137 |
 | 139 | [Inter is bundled, and "no web fonts and no external assets" narrows to "no external assets"](.agents/adr/0139-inter-is-bundled-no-external-assets-only.md) | 2026-10-29 | relates to 62, 70, 95, 137, 138 |
@@ -144,3 +144,4 @@ link where it is worth reading.
 | 157 | [The wait is 50 minutes, ten inside a session's prompt cache](.agents/adr/0157-the-wait-is-50-minutes-ten-inside-a-sessions-prompt-cache.md) | 2026-11-24 | narrows 47; relates to 145, 151 |
 | 158 | [Away: the owner's devices reach the board through Tailscale's forwarder, each browser signed in by a link](.agents/adr/0158-away-the-owners-devices-reach-the-board-through-tailscales-forwarder.md) | 2026-11-24 | narrows 118; relates to 55, 125, 142, 159 |
 | 159 | [A sign-in lasts while it is used: 400 days, renewed, and a tapped link opens a board on a cookie of its own](.agents/adr/0159-a-sign-in-lasts-while-it-is-used.md) | 2026-11-24 | narrows 118; replaces the 2026-07-31 cut to 30 days (no entry); relates to 158 |
+| 160 | [Send and Discuss move on: to the board's next waiting round, else home](.agents/adr/0160-send-and-discuss-move-on.md) | 2026-11-25 | amends 134; relates to 42, 55, 91, 93, 114 |
