@@ -661,6 +661,37 @@ async function main() {
         await snapshot([]);
       }
     });
+
+    await check('each recovered hang is a line on its card naming the agent, its clock time and the outcome, the whole time in its tooltip; a mission with none shows no such line', async () => {
+      const hangs = [
+        { agent: 'Build the card', at: '2026-11-24T17:53:00Z', outcome: 'resumed' },
+        { agent: 'Build the card', at: '2026-11-24T18:20:00Z', outcome: 'replaced' },
+        { agent: '<b>Fresh</b> card', at: '2026-11-24T18:41:00Z', outcome: 'reported' },
+      ];
+      assert.equal((await post('/api/mission/HUNG_ONE', { title: 'Hung one', state: 'waiting', hangs })).status, 200);
+      assert.equal((await post('/api/mission/HUNG_NONE', { title: 'Quiet one', state: 'waiting' })).status, 200);
+      const clockOf = at => new Date(at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false });
+      const expectedLines = [
+        `Hung: Build the card at ${clockOf(hangs[0].at)}, resumed`,
+        `Hung: Build the card at ${clockOf(hangs[1].at)}, replaced by a fresh agent`,
+        `Hung: <b>Fresh</b> card at ${clockOf(hangs[2].at)}, left for the PM`,
+      ];
+      const page = await rawRequest(port, 'GET', '/', { headers: { [SECRET_HEADER]: SECRET } });
+      const served = parseHTML(page.body);
+      const tab = await openMissionsTab();
+      try {
+        for (const doc of [served, tab.document]) {
+          const lines = cardFor(doc, 'HUNG_ONE').querySelectorAll('p.mission-fact[data-hang]');
+          assert.deepEqual(lines.map(l => l.textContent), expectedLines, 'one line per hang, the agent named as text');
+          assert.deepEqual(lines.map(l => l.getAttribute('title')), hangs.map(h => `Hung at ${h.at}`));
+          const none = cardFor(doc, 'HUNG_NONE');
+          assert.equal(none.querySelector('p[data-hang]'), null, 'no hangs, no line');
+          assert.ok(!none.textContent.includes('Hung'), 'nothing on the card speaks of a hang');
+        }
+      } finally {
+        tab.restoreFetch();
+      }
+    });
   } finally {
     server.close();
     server.closeIdleConnections?.();

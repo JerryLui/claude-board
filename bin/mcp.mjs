@@ -806,7 +806,7 @@ const MISSION_TOOL = {
       all: { type: 'boolean', description: 'list: keep missions released more than 24 hours ago. A retired mission with no open PR and no release step is never listed.' },
       fields: {
         type: 'object',
-        description: 'write: the fields to set, from title cwd phase state summary waitingOn next prs handoff fire queue retiredAt.',
+        description: 'write: the fields to set, from title cwd phase state summary waitingOn next prs handoff fire queue retiredAt hangs.',
       },
       board: { type: 'string', description: 'relay, close: the board URL or bare board id.' },
       round: { type: 'integer', description: 'relay: the round being answered. close: the round to close.' },

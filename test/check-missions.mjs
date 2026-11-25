@@ -1433,6 +1433,39 @@ async function main() {
     assert.equal((await post('/api/mission/OK_SIZES', { summary: 'x'.repeat(280), handoff: 'x'.repeat(4096) })).status, 200);
   });
 
+  await check('hangs, the hung calls a session\'s agent watch recovered, reads [] until written, and a write replaces the whole list', async () => {
+    assert.equal((await post('/api/mission/HANGS', { title: 'Hangs' })).status, 200);
+    assert.deepEqual((await getJson('/api/mission/HANGS')).body.hangs, [], 'a mission never written one reads none');
+    const first = [{ agent: 'Build the card', at: '2026-11-24T17:53:00Z', outcome: 'resumed' }];
+    const r = await post('/api/mission/HANGS', { hangs: first });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.deepEqual(r.body.hangs, first);
+    const twenty = Array.from({ length: 20 }, (_, i) => ({
+      agent: i ? 'a'.repeat(80) : 'Build the card', at: `2026-11-24T18:${String(i).padStart(2, '0')}:00.123Z`, outcome: ['resumed', 'replaced', 'reported'][i % 3],
+    }));
+    assert.equal((await post('/api/mission/HANGS', { hangs: twenty })).status, 200, 'twenty entries, an 80-character agent, each outcome');
+    assert.deepEqual(readMission('HANGS', home).hangs, twenty, 'the write replaced the list it held');
+  });
+
+  await check('hangs is refused with a 400 that writes nothing: not an array, over 20 entries, a bad outcome, a bad at, an agent empty or over 80 characters, an unknown key in an entry', async () => {
+    const hang = { agent: 'Build the card', at: '2026-11-24T17:53:00Z', outcome: 'resumed' };
+    assert.equal((await post('/api/mission/HANGS_REFUSED', { title: 'Hangs refused', hangs: [hang] })).status, 200);
+    for (const hangs of [
+      hang, 'resumed',
+      Array.from({ length: 21 }, () => hang),
+      [{ ...hang, outcome: 'retried' }],
+      [{ ...hang, at: 'yesterday' }], [{ ...hang, at: '2026-11-24T17:53:00+01:00' }], [{ ...hang, at: '2026-11-24' }],
+      [{ ...hang, agent: 'a'.repeat(81) }], [{ ...hang, agent: ' ' }], [{ ...hang, agent: 7 }],
+      [{ ...hang, call: 'sleep 900' }],
+      ['Build the card'],
+    ]) {
+      const r = await post('/api/mission/HANGS_REFUSED', { hangs });
+      assert.equal(r.status, 400, `${JSON.stringify(hangs).slice(0, 80)} is refused`);
+      assert.equal(typeof r.body.error, 'string');
+    }
+    assert.deepEqual(readMission('HANGS_REFUSED', home).hangs, [hang], 'no refused write landed');
+  });
+
   await check('a key off the pattern is a 400, and an absent mission is a 404', async () => {
     assert.equal((await post('/api/mission/bad.key', { title: 'x' })).status, 400);
     assert.equal((await post(`/api/mission/${'K'.repeat(81)}`, { title: 'x' })).status, 400);
