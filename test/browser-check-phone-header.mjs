@@ -135,7 +135,7 @@ const MENU_EXPR = `(function () {
       return el.checkVisibility({ checkVisibilityCSS: true });
     }).map(function (el) {
       var r = el.getBoundingClientRect();
-      return { role: el.getAttribute('role'), name: el.textContent.replace(/\\s+/g, ' ').trim(), checked: el.getAttribute('aria-checked'), h: Math.round(r.height), inWindow: r.left >= 0 && r.right <= innerWidth };
+      return { role: el.getAttribute('role'), name: el.textContent.replace(/\\s+/g, ' ').trim(), checked: el.getAttribute('aria-checked'), disabled: el.disabled, h: Math.round(r.height), inWindow: r.left >= 0 && r.right <= innerWidth };
     }),
     theme: document.documentElement.getAttribute('data-theme') || 'system',
     commenting: document.body.classList.contains('comment-mode'),
@@ -273,7 +273,7 @@ async function main() {
           note(`items: ${opened.items.map(i => i.name).join(', ')}`);
           assert.equal(opened.open, true, 'a press on ⋯ opens the menu');
           const thread = await tab.evalPage(`JSON.parse(document.querySelector('script#board-data').textContent).thread`);
-          assert.deepEqual(opened.items.slice(-2).map(i => i.name), [`Board ${round.boardId}`, `Thread ${thread}`]);
+          assert.deepEqual(opened.items.slice(-2).map(i => [i.name, i.disabled]), [[`Board ${round.boardId}`, false], [`Thread ${thread}`, false]], 'the id items are on offer');
         } finally {
           await tab.close();
         }
