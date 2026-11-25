@@ -16,7 +16,10 @@
 // question; a waiting merge's summary, the brief's digest, shows whole, and its Merge opens
 // the brief scrolled to its merge question with the round left waiting; and on a 390px touch screen
 // both views are one column with nothing scrolling sideways and every control at least 44px,
-// the Stop question, a card's note and the settings panel too. Layout and a real press, which the DOM stand-in has none of (QUIRKS.md "The DOM
+// the Stop question, a card's note and the settings panel too, under a top bar that scrolls
+// away (ADR 124): the Missions and Boards switch page text, the mark and ⋯ floating in the
+// top corners, ⋯ holding Comment, the theme control, the timer's switch and Settings, whose
+// panel opens under ⋯ with the focus; at 1280 the bar is as before. Layout and a real press, which the DOM stand-in has none of (QUIRKS.md "The DOM
 // stand-in's ceilings"): test/check-missions-view.mjs holds the markup and the requests.
 //
 // NOT wired into test/run.mjs's `checks` array, on purpose: that suite has to pass on a
@@ -261,6 +264,62 @@ async function ordersSent(tab, key) {
   await tab.quiet();
   return tab.evalPage(`window.__cbNet.requests.filter(function (r) { return r === 'POST /api/mission/${key}/order'; }).length`);
 }
+
+/** A home view's top: its bar, the Missions and Boards switch, the corner buttons, whether
+ * the bar's own timer, Comment and theme controls are drawn, and every fixed element in
+ * its first 60px. */
+const HOME_TOP_EXPR = `(function () {
+  function box(el) {
+    var r = el.getBoundingClientRect();
+    return { x: Math.round(r.left), y: Math.round(r.top), r: Math.round(r.right), b: Math.round(r.bottom),
+      w: Math.round(r.width), h: Math.round(r.height), position: getComputedStyle(el).position,
+      shown: el.checkVisibility({ checkVisibilityCSS: true }) };
+  }
+  function drawn(sel) { var el = document.querySelector(sel); return !!el && el.checkVisibility({ checkVisibilityCSS: true }); }
+  return {
+    scrollY: scrollY,
+    head: box(document.querySelector('header.board-head')),
+    tabs: [].slice.call(document.querySelectorAll('a.view-tab')).map(function (t) {
+      return Object.assign(box(t), { text: t.firstChild.textContent.trim() });
+    }),
+    home: box(document.querySelector('a.back-to-index')),
+    homeHref: document.querySelector('a.back-to-index').getAttribute('href'),
+    more: box(document.querySelector('button.corner-more-btn')),
+    barControls: ['div#pomodoro-widget', 'button#comment-mode-toggle', 'button#theme-toggle'].map(drawn),
+    fixedTop: [].slice.call(document.querySelectorAll('body *')).filter(function (el) {
+      var cs = getComputedStyle(el);
+      if (cs.position !== 'fixed' && cs.position !== 'sticky') return false;
+      var r = el.getBoundingClientRect();
+      return r.top < 60 && r.height > 0 && r.width > 0 && el.checkVisibility({ checkVisibilityCSS: true });
+    }).map(function (el) { return el.className; }),
+  };
+})()`;
+
+/** The ⋯ menu on a home view: open or not, its items as a screen reader is offered them,
+ * the settings panel's box, where the focus is, the theme and comment mode. */
+const HOME_MENU_EXPR = `(function () {
+  var menu = document.querySelector('div.corner-menu');
+  var form = document.querySelector('form#pomodoro-settings-form');
+  var more = document.querySelector('button.corner-more-btn');
+  var fr = form.getBoundingClientRect();
+  var focus = document.activeElement;
+  return {
+    open: !menu.hidden && menu.checkVisibility({ checkVisibilityCSS: true }),
+    items: [].slice.call(menu.querySelectorAll('[role^="menuitem"]')).filter(function (el) {
+      return el.checkVisibility({ checkVisibilityCSS: true });
+    }).map(function (el) {
+      var r = el.getBoundingClientRect();
+      return { role: el.getAttribute('role'), name: el.textContent.replace(/\\s+/g, ' ').trim(), disabled: el.disabled,
+        h: Math.round(r.height), inWindow: r.left >= 0 && r.right <= innerWidth };
+    }),
+    panel: { shown: form.checkVisibility({ checkVisibilityCSS: true }), x: Math.round(fr.left), y: Math.round(fr.top), r: Math.round(fr.right), b: Math.round(fr.bottom) },
+    moreB: Math.round(more.getBoundingClientRect().bottom),
+    focus: focus === more ? 'more' : focus ? focus.tagName.toLowerCase() : null,
+    focusInPanel: !!focus && form.contains(focus),
+    theme: document.documentElement.getAttribute('data-theme') || 'system',
+    commenting: document.body.classList.contains('comment-mode'),
+  };
+})()`;
 
 async function main() {
   const daemon = await startScratchDaemon('cb-missions');
@@ -1039,7 +1098,7 @@ async function main() {
         });
       }
 
-      const BAR = ['.back-to-index', '.view-tab', '.pomodoro-settings-summary', '#comment-mode-toggle', '#theme-toggle'];
+      const BAR = ['.back-to-index', '.view-tab', '.corner-more-btn'];
       const onPhone = async (path, theme, fn) => {
         const tab = await openPhone(send, onEvent, `${origin}${path}`, cookie, { theme });
         try { await fn(tab); } finally { await tab.close(); }
@@ -1075,13 +1134,110 @@ async function main() {
         await tab.evalPage(`document.querySelector('#pomodoro-settings').open = true`);
         await hold(tab, note, 'settings', ['.pomodoro-field select', '.pomodoro-field input', '.pomodoro-btn']);
       }));
-      await row('on a phone the settings panel and the bar hold the same with the timer on', async note => {
+
+      for (const [view, path] of [['Missions', '/'], ['Boards', '/boards']]) {
+        await row(`at 390 by 844 ${view}' top bar scrolls away: the Missions and Boards switch is page text between home and ⋯, which float in the top corners`, note => onPhone(path, 'dark', async tab => {
+          await tab.evalPage(`document.body.style.paddingBottom = '2000px'`);
+          const rest = await tab.evalPage(HOME_TOP_EXPR);
+          note(`at rest: header ${rest.head.position} to ${rest.head.b}px; tabs ${rest.tabs.map(t => `${t.x}-${t.r} at ${t.y}`).join(', ')}; home ${rest.home.w}x${rest.home.h} at ${rest.home.x},${rest.home.y}; ⋯ ${rest.more.w}x${rest.more.h} at ${rest.more.x},${rest.more.y}; fixed at the top: ${rest.fixedTop.join(', ')}`);
+          assert.equal(rest.head.position, 'static', 'the bar is page text');
+          assert.deepEqual(rest.fixedTop.sort(), ['back-to-index', 'corner-more-btn'], 'nothing else is fixed at the top');
+          assert.deepEqual(rest.tabs.map(t => [t.text, t.position, t.shown]), [['Missions', 'static', true], ['Boards', 'static', true]], 'the switch shows, in the page');
+          assert.ok(rest.tabs.every(t => t.x >= rest.home.r + 8 && t.r <= rest.more.x - 8 && t.h >= 44), 'the switch sits between the corner buttons, 8px clear of each');
+          assert.deepEqual(rest.barControls, [false, false, false], 'the bar\'s own timer, Comment and theme controls are not drawn');
+          for (const [name, b] of [['home', rest.home], ['⋯', rest.more]]) {
+            assert.deepEqual([b.position, b.shown], ['fixed', true], `${name} floats`);
+            assert.ok(b.w >= 44 && b.h >= 44 && b.y <= 16, `${name} is at least 44px square, in the top edge`);
+          }
+          assert.ok(rest.home.x <= 16 && rest.more.r >= 390 - 16, 'home on the left, ⋯ on the right');
+          assert.equal(rest.homeHref, '/', 'home goes where the logo goes');
+
+          await tab.evalPage(`document.documentElement.style.scrollBehavior = 'auto'; window.scrollTo(0, 400)`);
+          await tab.quiet();
+          const down = await tab.evalPage(HOME_TOP_EXPR);
+          note(`scrolled to ${down.scrollY}px: header bottom ${down.head.b}px`);
+          assert.equal(down.scrollY, 400, 'setup: the view scrolls');
+          assert.ok(down.head.b <= 0 && down.tabs.every(t => t.b <= 0), 'the bar and its switch scrolled away');
+          assert.deepEqual([down.home.x, down.home.y, down.more.x, down.more.y, down.home.shown, down.more.shown],
+            [rest.home.x, rest.home.y, rest.more.x, rest.more.y, true, true], 'the corner buttons stay put');
+        }));
+      }
+
+      await row('at 390 ⋯ on Missions holds Comment, the theme control and Settings, the timer\'s settings opening from it under ⋯ with the focus, by touch and by keyboard', note => onPhone('/', 'dark', async tab => {
+        await tab.evalPage(`document.querySelector('button.corner-more-btn').click()`);
+        const opened = await tab.evalPage(HOME_MENU_EXPR);
+        note(`items: ${opened.items.map(i => `${i.role} "${i.name}"${i.disabled ? ' (off)' : ''}`).join(', ')}`);
+        assert.equal(opened.open, true, '⋯ opens its menu');
+        assert.deepEqual(opened.items.map(i => i.role), ['menuitemcheckbox', 'menuitem', 'menuitem']);
+        assert.deepEqual(opened.items.map(i => i.name.replace(/:.*/, '')), ['Comment', 'Theme', 'Settings']);
+        assert.ok(opened.items.every(i => i.h >= 44 && i.inWindow && !i.disabled), 'each item at least 44px tall, inside the window, on offer');
+
+        await tab.evalPage(`document.querySelector('.corner-menu [data-mirror][data-keep-open]').click()`);
+        const themed = await tab.evalPage(HOME_MENU_EXPR);
+        assert.notEqual(themed.theme, opened.theme, 'the theme item switches the theme');
+        assert.equal(themed.open, true, 'and leaves the menu open');
+
+        await tab.evalPage(`document.querySelector('.corner-menu [data-proxy^="summary"]').click()`);
+        await tab.quiet();
+        const settings = await tab.evalPage(HOME_MENU_EXPR);
+        note(`settings: ${settings.panel.x},${settings.panel.y} to ${settings.panel.r},${settings.panel.b}; focus on ${settings.focus}`);
+        assert.deepEqual([settings.open, settings.panel.shown], [false, true], 'Settings closes the menu and opens the panel');
+        assert.ok(settings.panel.x >= 0 && settings.panel.r <= 390 && settings.panel.y >= settings.moreB && settings.panel.b <= 844, 'the panel lies in the window, under ⋯');
+        assert.equal(settings.focusInPanel, true, 'the panel takes the focus');
+        await hold(tab, note, 'settings from ⋯', ['.pomodoro-field select', '.pomodoro-field input', '.pomodoro-btn']);
+
+        await tab.evalPage(`document.querySelector('form#pomodoro-settings-form input').focus()`);
+        await pressKey(tab, 'Escape');
+        await tab.quiet();
+        const closed = await tab.evalPage(HOME_MENU_EXPR);
+        assert.deepEqual([closed.panel.shown, closed.focus], [false, 'more'], 'Escape closes the panel and hands the focus to ⋯');
+
+        await tab.evalPage(`document.querySelector('.corner-menu [data-proxy^="button#comment"]').click()`);
+        const commenting = await tab.evalPage(HOME_MENU_EXPR);
+        assert.equal(commenting.commenting, true, 'Comment turns comment mode on');
+      }));
+
+      await row('at 390 ⋯ on Boards offers Comment off, as the bar does with nothing a comment can reach', note => onPhone('/boards', 'dark', async tab => {
+        await tab.evalPage(`document.querySelector('button.corner-more-btn').click()`);
+        const opened = await tab.evalPage(HOME_MENU_EXPR);
+        note(`items: ${opened.items.map(i => `"${i.name}"${i.disabled ? ' (off)' : ''}`).join(', ')}`);
+        assert.deepEqual(opened.items.map(i => [i.name.replace(/:.*/, ''), i.disabled]), [['Comment', true], ['Theme', false], ['Settings', false]]);
+      }));
+
+      await row('on a phone the settings panel and the bar hold the same with the timer on, and ⋯ starts and pauses it', async note => {
         await post('/api/pomodoro/settings', { enabled: true });
         await onPhone('/', 'dark', async tab => {
+          await tab.evalPage(`document.querySelector('button.corner-more-btn').click()`);
+          const opened = await tab.evalPage(HOME_MENU_EXPR);
+          note(`items: ${opened.items.map(i => `"${i.name}"`).join(', ')}`);
+          assert.deepEqual(opened.items.map(i => i.name.replace(/:.*/, '')), ['Comment', 'Theme', 'Start pomodoro', 'Settings']);
+          await tab.evalPage(`document.querySelector('.corner-menu [data-proxy="button#pomodoro-toggle"]').click()`);
+          await tab.until(`document.querySelector('button#pomodoro-toggle').getAttribute('aria-checked') === 'true'`, 'the timer running');
+          await tab.evalPage(`document.querySelector('button.corner-more-btn').click()`);
+          const running = await tab.evalPage(HOME_MENU_EXPR);
+          assert.equal(running.items[2].name, 'Pause pomodoro', 'the item names what a press does now');
+          await tab.evalPage(`document.querySelector('.corner-menu [data-proxy="button#pomodoro-toggle"]').click()`);
+          await tab.until(`document.querySelector('button#pomodoro-toggle').getAttribute('aria-checked') === 'false'`, 'the timer paused');
           await tab.evalPage(`document.querySelector('#pomodoro-settings').open = true`);
-          await hold(tab, note, 'the timer on', ['.pomodoro-ctl', '.pomodoro-switch', '.pomodoro-field input[type="number"]']);
+          await hold(tab, note, 'the timer on', ['.pomodoro-field input[type="number"]']);
         });
       });
+
+      for (const [view, path] of [['Missions', '/'], ['Boards', '/boards']]) {
+        await row(`at 1280 ${view}' top bar is as before: sticky, its tabs, timer, Comment and theme drawn in it, no ⋯`, async note => {
+          const tab = await openTab(send, onEvent, `${origin}${path}`, cookie, { width: 1280, height: 900, theme: 'light', expr: '1' });
+          try {
+            const m = await tab.evalPage(HOME_TOP_EXPR);
+            note(`header ${m.head.position} ${m.head.h}px; mark ${m.home.w}px; tabs at ${m.tabs.map(t => t.y).join(', ')}`);
+            assert.equal(m.head.position, 'sticky');
+            assert.deepEqual(m.barControls, [true, true, true], 'timer, Comment and theme drawn');
+            assert.deepEqual([m.more.shown, m.home.w, m.home.position], [false, 30, 'static'], 'the mark is the bar\'s own 30px, and no ⋯');
+            assert.ok(m.tabs.every(t => t.shown && t.y > m.head.y && t.b < m.head.b), 'the tabs sit in the bar');
+          } finally {
+            await tab.close();
+          }
+        });
+      }
     });
   } finally {
     await daemon.stop();

@@ -4,7 +4,9 @@
 // deadline while it is awaited) are page text that scrolls away, the mark floats in the
 // top left corner going where it always went, and a ⋯ button in the top right opens a
 // menu holding Comment, the theme control, Download round and the board's and thread's
-// ids, by keyboard as by touch. No countdown shows anywhere else. A full-page round pads
+// ids, by keyboard as by touch. No countdown shows anywhere else, and nothing fixed lies
+// over a card save the two buttons, the round pill, the send bar, Back to top and notices;
+// a read-only page has no home button. A full-page round pads
 // its mock under the two buttons, and they leave while the mock's own full-size view is
 // open. At 1280 the header, its condensing pill and the round caption are as before.
 //
@@ -116,6 +118,21 @@ const MENU_EXPR = `(function () {
   };
 })()`;
 
+/** The first class of every outermost fixed or sticky element drawn over a card of the
+ * round in view, at the page's scroll as it stands. */
+const OVER_CARDS_EXPR = `(function () {
+  var cards = [].slice.call(document.querySelectorAll('.round-current .block')).map(function (el) { return el.getBoundingClientRect(); });
+  function pinned(el) { var p = getComputedStyle(el).position; return p === 'fixed' || p === 'sticky'; }
+  return [].slice.call(document.querySelectorAll('body *')).filter(function (el) {
+    if (!pinned(el) || !el.checkVisibility({ checkVisibilityCSS: true, opacityProperty: true })) return false;
+    for (var p = el.parentElement; p && p !== document.body; p = p.parentElement) if (pinned(p)) return false;
+    var r = el.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1 || r.bottom <= 0 || r.top >= innerHeight) return false;
+    return cards.some(function (c) { return r.left < c.right && r.right > c.left && r.top < c.bottom && r.bottom > c.top; });
+  }).map(function (el) { return el.classList[0] || el.tagName.toLowerCase(); });
+})()`;
+const OVER_CARDS_ALLOWED = ['back-to-index', 'corner-more-btn', 'round-pager-dock', 'send-bar', 'back-to-top', 'notice'];
+
 /** With CLAUDE_BOARD_PHONE_HEADER_KEEP set to a folder, a screenshot of the tab there. */
 async function keep(tab, name) {
   const dir = process.env.CLAUDE_BOARD_PHONE_HEADER_KEEP;
@@ -201,6 +218,35 @@ async function main() {
           }
         });
       }
+
+      await row('at 390 by 844 nothing fixed lies over the round\'s cards save the two corner buttons, the pill, the send bar, Back to top and notices', async note => {
+        const tab = await openPhone(send, onEvent, roundUrl, cookie);
+        try {
+          const seen = new Set();
+          const height = await tab.evalPage(`document.documentElement.style.scrollBehavior = 'auto'; document.documentElement.scrollHeight`);
+          for (let y = 0; y < height; y += 300) {
+            await tab.evalPage(`window.scrollTo(0, ${y})`);
+            await tab.quiet();
+            for (const name of await tab.evalPage(OVER_CARDS_EXPR)) seen.add(name);
+          }
+          note(`scrolled through ${height}px; over the cards: ${[...seen].join(', ')}`);
+          assert.ok(seen.has('round-pager-dock') && seen.has('back-to-index') && seen.has('corner-more-btn'), 'setup: the pill and the corner buttons lie over the cards somewhere');
+          assert.deepEqual([...seen].filter(name => !OVER_CARDS_ALLOWED.includes(name)), [], 'nothing else fixed lies over a card');
+        } finally {
+          await tab.close();
+        }
+      });
+
+      await row('at 390 a read-only page (a round\'s file opened from disk) floats ⋯ and no home button, having no home to go to', async () => {
+        const tab = await openPhone(send, onEvent, roundUrl, cookie);
+        try {
+          await tab.evalPage(`document.body.classList.add('readonly')`);
+          const m = await tab.evalPage(TOP_EXPR);
+          assert.deepEqual([m.home.shown, m.more.shown], [false, true]);
+        } finally {
+          await tab.close();
+        }
+      });
 
       await row('at 390 the ⋯ menu holds Comment, the theme control, Download round and the board and thread ids, reached by Tab and Enter, with menu roles, and closed by Escape', async note => {
         const tab = await openPhone(send, onEvent, roundUrl, cookie);

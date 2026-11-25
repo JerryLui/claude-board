@@ -874,6 +874,13 @@ reserves nothing on a page that does not scroll, so a short view and a long one 
 until the home views scrolled their root always; and the first width read could predate the
 root's scrollbar (QUIRKS.md has both).
 
+**Why the phone's top bar scrolls away too (amended 2026-11-25).** A board page's header on a phone
+became page text with the mark and ⋯ floating (entry 40), and the same reason holds here: the stacked
+bar took two rows before the first card. The home views take the same corner buttons, so going from a
+card to its board still moves nothing in the corners. The timer reaches ⋯ as its switch and its
+Settings; its countdown, Restart and Forward are not carried over, the cost entry 124 names. The settings panel opens as a sheet under ⋯, since the bar that anchors it on a
+wider window is not drawn.
+
 ### Entry 102 — one copy of the mechanism
 
 **Why the description was fixed before anything else.** The manual already carried the routing rule

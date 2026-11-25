@@ -15,8 +15,8 @@ import path from 'node:path';
 import { faviconLink, markSvg } from './styles.mjs';
 import { STYLE_ASSET } from './assets.mjs';
 import { themeBootScript, themeToggle } from './theme.mjs';
-import { commentModeToggle } from './render.mjs';
-import { trackDocWidth, HOME_STORAGE_KEY } from './ui.mjs';
+import { commentModeToggle, cornerMenu, cornerItem, COMMENT_ICON } from './render.mjs';
+import { trackDocWidth, wireCornerMenu, HOME_STORAGE_KEY } from './ui.mjs';
 import { roundIsAwaited } from './badge.mjs';
 // formatCountdown only -- src/pomodoro.mjs's document shape, HTTP surface and
 // clock are owned by other tickets and stay untouched here (this file consumes
@@ -1721,12 +1721,13 @@ function onStorePruneClick() {
 // the way up: a click on the summary or inside the form is recognised by
 // closest() finding the panel above it, and is left alone (closing on the
 // summary's own click would fight the native <details> toggle and make the panel
-// impossible to open). Nothing here calls stopPropagation.
+// impossible to open). So is one in the phone header's ⋯ menu, whose Settings
+// item opens the panel by clicking that summary. Nothing here calls stopPropagation.
 function onDocumentClickClosePomodoroSettings(ev) {
   var panel = document.querySelector('details#pomodoro-settings');
   if (!panel || !panel.open) return;
   var t = ev.target;
-  if (t && t.closest && t.closest('details#pomodoro-settings')) return;
+  if (t && t.closest && (t.closest('details#pomodoro-settings') || t.closest('.corner-more'))) return;
   closePomodoroSettings();
 }
 
@@ -1765,9 +1766,37 @@ function openPomodoroSettingsFromFragment() {
   }
 }
 
+// At 560px wide and under the bar is hidden and its gear opens from the ⋯ menu
+// (src/styles.mjs), so the panel takes the focus as it opens, and Escape or its
+// closing hands it back to ⋯.
+function onPomodoroSettingsToggle() {
+  var panel = document.querySelector('details#pomodoro-settings');
+  var summary = panel && panel.querySelector('summary');
+  if (!summary || typeof getComputedStyle !== 'function' || getComputedStyle(summary).visibility !== 'hidden') return;
+  var more = document.querySelector('button.corner-more-btn');
+  if (panel.open) {
+    var first = panel.querySelector('form input, form select, form button');
+    if (first) first.focus();
+  } else if (more && (!document.activeElement || document.activeElement === document.body || panel.contains(document.activeElement))) {
+    more.focus();
+  }
+}
+function onPomodoroSettingsKeydown(ev) {
+  if (ev.key !== 'Escape') return;
+  var summary = ev.currentTarget.querySelector('summary');
+  if (!summary || typeof getComputedStyle !== 'function' || getComputedStyle(summary).visibility !== 'hidden') return;
+  ev.preventDefault();
+  closePomodoroSettings();
+}
+
 function initPomodoroWidget() {
   var widget = document.querySelector('div#pomodoro-widget');
   if (!widget) return;
+  var settings = document.querySelector('details#pomodoro-settings');
+  if (settings) {
+    settings.addEventListener('toggle', onPomodoroSettingsToggle);
+    settings.addEventListener('keydown', onPomodoroSettingsKeydown);
+  }
   var toggleBtn = document.querySelector('button#pomodoro-toggle');
   if (toggleBtn) toggleBtn.addEventListener('click', onPomodoroToggleClick);
   var restartBtn = document.querySelector('button#pomodoro-restart');
@@ -1893,6 +1922,7 @@ function initIndexStream() {
 initIndexStream();
 ` + '\nvar TAB_KEY_PREFIX = ' + JSON.stringify(TAB_KEY_PREFIX) + ';\n' + missionsParts.toString() + '\n' + missionsScript
   + '\n' + trackDocWidth.toString() + '\ntrackDocWidth();\n'
+  + '\nvar wireCornerMenu = ' + wireCornerMenu.toString() + ';\nwireCornerMenu();\n'
   + '\nvar HOME_STORAGE_KEY = ' + JSON.stringify(HOME_STORAGE_KEY) + ';\n' + rememberHomeView.toString() + '\nrememberHomeView();\n';
 
 /** Remembers the overview this page is, Missions or Boards, under HOME_STORAGE_KEY
@@ -2255,8 +2285,18 @@ export function renderTopBar({ active, waitingCount = 0, pomodoroEnabled = true,
       ${commentModeToggle({ inert: !commentable })}
       ${themeToggle()}
     </div>
+    ${cornerMenu([
+      cornerItem({ label: 'Comment', icon: COMMENT_ICON, proxy: 'button#comment-mode-toggle', checkbox: true }),
+      cornerItem({ label: 'Theme', proxy: 'button#theme-toggle', mirror: true, keepOpen: true, icon: BLANK_ICON }),
+      null,
+      cornerItem({ label: 'Start pomodoro', proxy: 'button#pomodoro-toggle', mirror: true, icon: MENU_TOMATO_ICON }),
+      cornerItem({ label: 'Settings', proxy: 'summary.pomodoro-settings-summary', mirror: true, icon: BLANK_ICON }),
+    ])}
   </header>`;
 }
+
+const BLANK_ICON = '<svg aria-hidden="true"></svg>';
+const MENU_TOMATO_ICON = TOMATO_ICON.replace(' role="img" aria-label="Pomodoro"><title>Pomodoro</title>', ' aria-hidden="true">');
 
 /** A home view's page: the top bar over `body`, in the board page's own shell
  * (`.board-shell`, the window's width up to 2560px), so the bar sits on the same

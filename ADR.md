@@ -110,7 +110,7 @@ link where it is worth reading.
 | 121 | [An html stage may carry the post limit](.agents/adr/0121-an-html-stage-may-carry-the-post-limit.md) | 2026-10-19 | amends 7; relates to 112, 117; amended by 122; narrowed by 138 |
 | 122 | [A page carries each stage once](.agents/adr/0122-a-page-carries-each-stage-once.md) | 2026-10-19 | amends 121; relates to 32, 42; narrowed by 138 |
 | 123 | [The board keeps missions beside its rounds](.agents/adr/0123-the-board-keeps-missions-beside-its-rounds.md) | 2026-10-28 | relates to 5, 71, 115; amended by 130, 140, 141; narrowed by 134 |
-| 124 | [The home page is Missions, in columns by state, under one top bar](.agents/adr/0124-the-home-page-is-missions-under-one-top-bar.md) | 2026-10-28 | relates to 30, 46, 87, 98, 123; amended by 137 |
+| 124 | [The home page is Missions, in columns by state, under one top bar](.agents/adr/0124-the-home-page-is-missions-under-one-top-bar.md) | 2026-10-28 | relates to 30, 46, 87, 98, 123; amended by 137; amended 2026-11-25 for phones |
 | 125 | [A card's Fire and Merge answer a live round; Stop is an order](.agents/adr/0125-a-cards-fire-and-merge-answer-a-live-round.md) | 2026-10-28 | relates to 46, 114, 123, 126; narrowed by 134, 142 |
 | 126 | [A relay answers a round on the person's words, marked relayed](.agents/adr/0126-a-relay-answers-a-round-on-the-persons-words.md) | 2026-10-28 | relates to 114, 115, 125 |
 | 127 | [A background session passes the guard and opens no tab](.agents/adr/0127-a-background-session-passes-the-guard-and-opens-no-tab.md) | 2026-10-28 | widens 116 |

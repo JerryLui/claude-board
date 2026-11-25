@@ -185,7 +185,7 @@ is the Phone header instead. _Avoid_: toolbar, nav, top bar.
 
 **Phone header**: the top strip at 560px wide and under: the title and the State line as page text
 that scrolls away, with the mark and a ⋯ button floating in the top corners, ⋯ holding the strip's
-controls and the board's ids. _Avoid_: mobile nav, hamburger.
+controls and the board's ids. The Top bar turns into one the same way, its tabs the page text. _Avoid_: mobile nav, hamburger.
 
 **State line**: the line under a phone header's title naming the round in view and its state, the
 deadline while it is awaited. _Avoid_: subtitle, round badge.
@@ -326,7 +326,7 @@ Missions view took `/`. One line per board, grouped "Waiting on you" (its Waitin
 the board. _Avoid_: index, index page.
 
 **Top bar**: the board page's own header, shared by the Missions and Boards views with one tab
-for each; switching tabs moves nothing in it. _Avoid_: nav bar, header (unqualified: a board
+for each; switching tabs moves nothing in it. On a phone it is a Phone header. _Avoid_: nav bar, header (unqualified: a board
 page has its own).
 
 **Mission card**: a Mission on the Missions view, as tall as its text: its long fields clamp to a

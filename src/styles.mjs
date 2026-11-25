@@ -2975,12 +2975,10 @@ body.page-board .board-head { margin-left: env(safe-area-inset-left, 0px); margi
   .lens-btn { min-width: 44px; min-height: 44px; }
   .stage-lens-body { padding: var(--space-2); padding-bottom: max(var(--space-2), env(safe-area-inset-bottom)); }
 
-  body.home-page .board-head { position: relative; }
   body.home-page .board-head h1 { position: absolute; width: 1px; height: 1px; clip-path: inset(50%); }
   body.home-page .board-head-ident { flex: none; }
   .view-tabs { flex: 1; margin-left: 0; }
   .view-tab { flex: 1; justify-content: center; min-height: 44px; }
-  body.home-page .board-head-actions { flex-wrap: wrap; justify-content: flex-end; }
   .pomodoro-widget, .pomodoro-settings { position: static; }
   .pomodoro-widget { margin-right: auto; }
   .pomodoro-switch { position: relative; width: 44px; height: 44px; padding: 0 4px; background: none; border-color: transparent; }
@@ -3048,23 +3046,24 @@ body.page-board .board-head { margin-left: env(safe-area-inset-left, 0px); margi
   body { --stage-p: 0 !important; }
 }
 
-/* --- the round page's phone header (ADR.md entries 40, 59, 152): at 560px and
-   under the title and the round's state line are page text that scrolls away,
-   the mark and ⋯ float in the top corners, and ⋯ holds the strip's controls.
-   The state line and ⋯ draw nowhere wider. --- */
+/* --- the phone header (ADR.md entries 40, 59, 124, 152): at 560px and under
+   a round page's title and state line, and a home page's Missions and Boards
+   switch, are page text that scrolls away, the mark and ⋯ float in the top
+   corners, and ⋯ holds the bar's controls. The state line and ⋯ draw nowhere
+   wider. --- */
 .head-round, .corner-more { display: none; }
 @media (max-width: 560px) {
   body:not(.home-page) { --head-clear: 64px; }
   /* a flip lands on the page's top, its title and state line in view */
   body:not(.home-page) .round { scroll-margin-top: 100vh; }
-  body:not(.home-page):not(.page-board) .board-head { position: static; }
+  body:not(.page-board) .board-head { position: static; }
   body:not(.home-page) .board-head {
     display: block; min-height: calc(60px + env(safe-area-inset-top, 0px)); margin-bottom: var(--space-3);
     padding: calc(var(--space-3) + env(safe-area-inset-top, 0px)) 44px var(--space-2);
     background: none; backdrop-filter: none; }
   body.page-board .board-head { padding-left: 60px; padding-right: 60px; }
-  body:not(.home-page):not(.page-board) .board-head::before,
-  body:not(.home-page):not(.page-board) .board-head::after { content: none; }
+  body:not(.page-board) .board-head::before,
+  body:not(.page-board) .board-head::after { content: none; }
   body.page-board .board-head::after { transition: opacity var(--dur) var(--ease); }
   body.page-board.stage-scrolled .board-head::after { opacity: 0; }
   body:not(.home-page) .board-head-title { display: block; pointer-events: none; }
@@ -3086,14 +3085,14 @@ body.page-board .board-head { margin-left: env(safe-area-inset-left, 0px); margi
   body:not(.home-page) .round-chips { display: none; }
   body:not(.home-page):not(.page-board) .readonly-banner { margin-top: var(--space-2); margin-right: 44px; }
 
-  body:not(.home-page) .back-to-index, body:not(.home-page) .corner-more-btn {
+  body:not(.readonly) .back-to-index, .corner-more-btn {
     position: fixed; z-index: 40; top: 8px; width: 44px; height: 44px; margin-top: env(safe-area-inset-top, 0px);
     display: inline-flex; align-items: center; justify-content: center; padding: 0; opacity: 1; pointer-events: auto;
     color: var(--ink-2); background: var(--panel); border: 1px solid var(--hairline); border-radius: var(--r-pill);
     box-shadow: var(--shadow-1); }
-  body:not(.home-page) .back-to-index { left: 8px; margin-left: env(safe-area-inset-left, 0px); }
-  body:not(.home-page) .back-to-index svg, body.page-board .back-to-index svg { width: 26px; height: 26px; }
-  body:not(.home-page) .corner-more { display: block; }
+  .back-to-index { left: 8px; margin-left: env(safe-area-inset-left, 0px); }
+  .back-to-index svg, body.page-board .back-to-index svg { width: 26px; height: 26px; }
+  .corner-more { display: block; }
   .corner-more-btn { right: 8px; margin-right: env(safe-area-inset-right, 0px); cursor: pointer; }
   .corner-more-btn[aria-expanded="true"] { color: var(--ink); border-color: var(--hairline-2); }
   .corner-menu { position: fixed; z-index: 41; top: 60px; right: 8px; display: flex; flex-direction: column;
@@ -3105,6 +3104,7 @@ body.page-board .board-head { margin-left: env(safe-area-inset-left, 0px); margi
     padding: 0 12px; font: inherit; font-size: 14px; font-weight: 500; line-height: 1.3; letter-spacing: 0;
     text-align: left; color: var(--ink); background: none; border: 0; border-radius: var(--r-md); cursor: pointer; }
   .corner-menu .corner-item:hover, .corner-menu .corner-item:focus-visible { background: var(--panel-2); }
+  .corner-menu .corner-item:disabled { opacity: 0.5; cursor: default; background: none; }
   .corner-menu .corner-item svg { flex: none; width: 16px; height: 16px; color: var(--ink-2); }
   .corner-menu .corner-item[aria-checked="true"], .corner-menu .corner-item[aria-checked="true"] svg { color: var(--accent); }
   .corner-menu .corner-item[aria-checked="true"]::after { content: "On"; margin-left: auto; font-size: 12px; font-weight: 600; }
@@ -3112,5 +3112,15 @@ body.page-board .board-head { margin-left: env(safe-area-inset-left, 0px); margi
   .corner-id-value { min-width: 0; margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     color: var(--muted); font: 12px ui-monospace, "SF Mono", Menlo, monospace; }
   .corner-sep { height: 1px; margin: 4px 8px; background: var(--hairline); }
+
+  body.home-page .board-head { display: block; margin-bottom: var(--space-3);
+    padding: calc(8px + env(safe-area-inset-top, 0px)) 44px var(--space-2); }
+  body.home-page .board-head-title { gap: 0; }
+  body.home-page .board-head-actions { position: absolute; top: 0; right: 0; width: 1px; height: 1px;
+    overflow: hidden; visibility: hidden; }
+  body.home-page .pomodoro-settings[open] .pomodoro-settings-form {
+    position: fixed; z-index: 41; top: 60px; left: 8px; right: 8px; margin: env(safe-area-inset-top, 0px) 0 0;
+    max-height: calc(100dvh - 68px - env(safe-area-inset-top, 0px)); overflow-y: auto; overscroll-behavior: contain;
+    visibility: visible; box-shadow: var(--shadow-2); }
 }
 `;
