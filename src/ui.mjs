@@ -2904,8 +2904,11 @@ export const ui = `
       lensApply();
     }, { passive: false });
 
+    var lastPressTouch = false;
     stage.addEventListener('dblclick', function (ev) {
-      if (!lens.open) return;
+      // A touch double-tap is zoomed on its second pointerup, below; the
+      // dblclick a browser may add after it would zoom a second time.
+      if (!lens.open || lastPressTouch) return;
       var r = lensStageRect();
       lensView = lensZoomAt(lensView, ev.clientX - r.left, ev.clientY - r.top, 2, LENS_MIN_SCALE, LENS_MAX_SCALE);
       lensApply();
@@ -2939,13 +2942,54 @@ export const ui = `
     // Invisible to a structural check, so test/check-mermaid-anchor.mjs
     // dispatches exactly that sequence.
     var drag = null;
+    var touches = {};
+    var pinch = null;
+    var lastTap = null;
+    function touchPoints() {
+      return Object.keys(touches).map(function (k) { return touches[k]; });
+    }
+    function pinchOf(pts) {
+      return { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2,
+        d: Math.max(1, Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y)) };
+    }
+    function startDrag(id, x, y) {
+      drag = { ox: x, oy: y, x: x, y: y, id: id, captured: false };
+    }
+    function zoomAtClient(x, y, factor) {
+      var r = lensStageRect();
+      lensView = lensZoomAt(lensView, x - r.left, y - r.top, factor, LENS_MIN_SCALE, LENS_MAX_SCALE);
+    }
     stage.addEventListener('pointerdown', function (ev) {
       if (!lens.open || ev.button) return;
-      drag = { ox: ev.clientX, oy: ev.clientY, x: ev.clientX, y: ev.clientY, id: ev.pointerId, captured: false };
+      lastPressTouch = ev.pointerType === 'touch';
+      if (lastPressTouch && ev.isPrimary) { touches = {}; pinch = null; }
+      if (lastPressTouch) touches[ev.pointerId] = { id: ev.pointerId, x: ev.clientX, y: ev.clientY };
+      var pts = touchPoints();
+      if (lastPressTouch && pts.length >= 2) {
+        pinch = pinchOf(pts);
+        drag = null;
+        lastTap = null;
+        lensDragMoved = true;
+        stage.classList.add('lens-dragging');
+        return;
+      }
+      startDrag(ev.pointerId, ev.clientX, ev.clientY);
       lensDragMoved = false;
     });
     stage.addEventListener('pointermove', function (ev) {
-      if (!drag) return;
+      if (touches[ev.pointerId]) {
+        touches[ev.pointerId].x = ev.clientX;
+        touches[ev.pointerId].y = ev.clientY;
+      }
+      if (pinch) {
+        var next = pinchOf(touchPoints());
+        zoomAtClient(pinch.x, pinch.y, next.d / pinch.d);
+        lensView = { x: lensView.x + next.x - pinch.x, y: lensView.y + next.y - pinch.y, s: lensView.s };
+        pinch = next;
+        lensApply();
+        return;
+      }
+      if (!drag || ev.pointerId !== drag.id) return;
       // A few pixels of jitter between press and release is a click, not a pan:
       // only past that does this become a drag at all -- suppressing the comment
       // gesture below, taking the pointer capture, and showing the grabbing
@@ -2964,7 +3008,25 @@ export const ui = `
       lensApply();
     });
     ['pointerup', 'pointercancel'].forEach(function (type) {
-      stage.addEventListener(type, function () {
+      stage.addEventListener(type, function (ev) {
+        var wasTouch = !!touches[ev.pointerId];
+        delete touches[ev.pointerId];
+        var rest = touchPoints();
+        if (pinch) {
+          if (rest.length >= 2) { pinch = pinchOf(rest); return; }
+          pinch = null;
+          if (rest.length === 1) { startDrag(rest[0].id, rest[0].x, rest[0].y); return; }
+        }
+        if (wasTouch && type === 'pointerup' && !lensDragMoved && lens.open) {
+          var now = Date.now();
+          if (lastTap && now - lastTap.t < 400 && Math.abs(ev.clientX - lastTap.x) < 24 && Math.abs(ev.clientY - lastTap.y) < 24) {
+            zoomAtClient(ev.clientX, ev.clientY, 2);
+            lensApply();
+            lastTap = null;
+          } else {
+            lastTap = { t: now, x: ev.clientX, y: ev.clientY };
+          }
+        }
         drag = null;
         stage.classList.remove('lens-dragging');
       });
