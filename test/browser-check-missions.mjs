@@ -1163,7 +1163,7 @@ async function main() {
         }));
       }
 
-      await row('at 390 ⋯ on Missions holds Comment, the theme control and Settings, the timer\'s settings opening from it under ⋯ with the focus, by touch and by keyboard', note => onPhone('/', 'dark', async tab => {
+      await row('at 390 ⋯ on Missions holds Comment, the theme control and Settings, the timer\'s settings opening from it under ⋯ with the focus', note => onPhone('/', 'dark', async tab => {
         await tab.evalPage(`document.querySelector('button.corner-more-btn').click()`);
         const opened = await tab.evalPage(HOME_MENU_EXPR);
         note(`items: ${opened.items.map(i => `${i.role} "${i.name}"${i.disabled ? ' (off)' : ''}`).join(', ')}`);

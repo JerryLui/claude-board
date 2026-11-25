@@ -691,7 +691,7 @@ await check('moving on: with no round waiting, a comment still queued only in th
   assert.equal(document.querySelectorAll('.comment-item.comment-pending').length, 1);
 });
 
-await check('moving on: a failed Send stays on the round with its error', async () => {
+await check('moving on: a failed Send or Discuss stays on the round with its error', async () => {
   const board = twoWaitingRounds();
   const location = { protocol: 'http:' };
   const document = loadBoard(renderBoardPage(board), { location, storage: missionsHome() });
