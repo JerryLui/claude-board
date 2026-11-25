@@ -214,7 +214,7 @@ export function wireCornerMenu() {
     field.setAttribute('readonly', '');
     field.style.position = 'fixed';
     field.style.opacity = '0';
-    document.body.appendChild(field);
+    menu.appendChild(field);
     field.select();
     try { if (document.execCommand('copy')) copied(item); } catch (e) { /* the id stays readable in the item */ }
     field.remove();
