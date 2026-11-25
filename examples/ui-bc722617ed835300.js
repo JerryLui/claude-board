@@ -301,23 +301,27 @@
   var roundPageLabel = function roundPageLabel(n, title) {
   return title ? roundNumberLabel(n) + ' · ' + title : roundNumberLabel(n);
 };
-  var foldRounds = function foldRounds({ rounds, current, owed, narrow, oneGap }) {
+  var foldRounds = function foldRounds({ rounds, current, owed }) {
   var at = rounds.indexOf(current);
-  var from = at - (narrow ? 0 : 2);
-  var to = at + (narrow ? 1 : 2);
   var items = [];
   var run = [];
   rounds.forEach(function (n, i) {
-    var kept = i === 0 || i === rounds.length - 1 || (i >= from && i <= to) || owed.indexOf(n) !== -1;
+    var kept = i === 0 || i === rounds.length - 1 || Math.abs(i - at) <= 2 || owed.indexOf(n) !== -1;
     if (!kept) { run.push(n); return; }
-    if (run.length === 1 && !oneGap) items.push(run[0]);
-    else if (run.length && !(oneGap && items.indexOf('gap') !== -1)) items.push('gap');
+    if (run.length === 1) items.push(run[0]);
+    else if (run.length) items.push('gap');
     run = [];
     items.push(n);
   });
   return items;
 };
   var PAGER_GAP_LABEL = "Show all rounds";
+  var roundCountLabel = function roundCountLabel(n, total) {
+  return n + ' / ' + total;
+};
+  var roundCountName = function roundCountName(n, total, waits) {
+  return roundNumberLabel(n) + ' of ' + total + (waits ? ', another round waits for an answer' : '') + '. ' + PAGER_GAP_LABEL;
+};
   var isPageRound = function isPageRound(blocks) {
   return blocks.length === 1 && blocks[0].kind === 'html' && !blocks[0].error;
 };
@@ -448,12 +452,15 @@
    * new read-only affordance is one edit, not two that drift apart silently. */
   function staysLive(el) {
     return !!(el.classList && (el.classList.contains('pull-out') || el.classList.contains('fold-toggle')))
-      || isStageFoldToggle(el);
+      || isStageFoldToggle(el) || isCornerControl(el);
   }
   // A line of its own rather than a third term above, so a sibling control
   // joining the carve-out does not have to rewrite this one.
   function isStageFoldToggle(el) {
     return !!(el.classList && el.classList.contains('stage-fold-toggle'));
+  }
+  function isCornerControl(el) {
+    return !!(el.classList && (el.classList.contains('corner-more-btn') || el.classList.contains('corner-id')));
   }
 
   // Read-only mode is enforced at the element level, not just by guarding the
@@ -1698,7 +1705,7 @@
 
   /** The page's own clearance under its sticky header: '--head-clear', the
    * token every scroll-to on this page lands by. Read off the root's computed
-   * style, since the narrow layout raises it; with no computed style to read,
+   * style, since the phone header lowers it; with no computed style to read,
    * the token's own default. */
   function headClear() {
     var clear = NaN;
@@ -2182,6 +2189,103 @@
   }
 };
   trackDocWidth();
+
+  var wireCornerMenu = function wireCornerMenu(onOpen) {
+  var btn = document.querySelector('button.corner-more-btn');
+  var menu = document.querySelector('div.corner-menu');
+  if (!btn || !menu) return;
+  function displayed(el) {
+    return typeof getComputedStyle !== 'function' || getComputedStyle(el).display !== 'none';
+  }
+  function items() {
+    return [].slice.call(menu.querySelectorAll('.corner-item')).filter(function (el) {
+      return !el.hidden && !el.disabled && displayed(el);
+    });
+  }
+  function sync() {
+    [].slice.call(menu.querySelectorAll('.corner-item[data-proxy]')).forEach(function (item) {
+      var target = document.querySelector(item.getAttribute('data-proxy'));
+      item.hidden = !target || !displayed(target);
+      if (!target) return;
+      item.disabled = !!target.disabled;
+      if (item.getAttribute('role') === 'menuitemcheckbox') {
+        item.setAttribute('aria-checked', target.getAttribute('aria-pressed') === 'true' ? 'true' : 'false');
+      }
+      if (item.hasAttribute('data-mirror')) {
+        var label = item.querySelector('.corner-item-label');
+        if (label) label.textContent = target.getAttribute('aria-label') || target.textContent;
+        var from = target.querySelector('svg'), to = item.querySelector('svg');
+        if (from && to) to.replaceWith(from.cloneNode(true));
+      }
+    });
+  }
+  function setOpen(open, focus) {
+    if (open) sync();
+    if (open && onOpen) onOpen();
+    menu.hidden = !open;
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open && focus) {
+      var list = items();
+      var to = focus === 'last' ? list[list.length - 1] : list[0];
+      if (to) to.focus();
+    } else if (!open && focus) btn.focus();
+  }
+  function copied(item) {
+    var label = item.querySelector('.corner-item-label');
+    if (!label) return;
+    var was = label.getAttribute('data-label') || label.textContent;
+    label.setAttribute('data-label', was);
+    label.textContent = 'Copied';
+    setTimeout(function () { label.textContent = was; }, 1200);
+  }
+  function copy(text, item) {
+    var clip = typeof navigator !== 'undefined' && navigator.clipboard;
+    if (clip && clip.writeText) { clip.writeText(text).then(function () { copied(item); }, function () {}); return; }
+    var field = document.createElement('textarea');
+    field.value = text;
+    field.setAttribute('readonly', '');
+    field.style.position = 'fixed';
+    field.style.opacity = '0';
+    menu.appendChild(field);
+    field.select();
+    try { if (document.execCommand('copy')) copied(item); } catch (e) { /* the id stays readable in the item */ }
+    field.remove();
+    item.focus();
+  }
+  btn.addEventListener('click', function () { setOpen(menu.hidden, menu.hidden ? 'first' : null); });
+  btn.addEventListener('keydown', function (ev) {
+    if (ev.key !== 'ArrowDown' && ev.key !== 'ArrowUp') return;
+    ev.preventDefault();
+    setOpen(true, ev.key === 'ArrowUp' ? 'last' : 'first');
+  });
+  menu.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); setOpen(false, true); return; }
+    var list = items();
+    var at = list.indexOf(document.activeElement);
+    var to = ev.key === 'ArrowDown' ? at + 1 : ev.key === 'ArrowUp' ? at - 1 : ev.key === 'Home' ? 0 : ev.key === 'End' ? list.length - 1 : null;
+    if (to == null || !list.length) return;
+    ev.preventDefault();
+    list[(to + list.length) % list.length].focus();
+  });
+  menu.addEventListener('click', function (ev) {
+    var item = ev.target && ev.target.closest ? ev.target.closest('.corner-item') : null;
+    if (!item || item.disabled) return;
+    var proxy = item.getAttribute('data-proxy');
+    var target = proxy && document.querySelector(proxy);
+    if (target) { target.click(); sync(); }
+    if (item.hasAttribute('data-copy')) copy(item.getAttribute('data-copy'), item);
+    if (!item.hasAttribute('data-keep-open')) setOpen(false, true);
+  });
+  menu.parentElement.addEventListener('focusout', function (ev) {
+    var next = ev.relatedTarget;
+    if (!menu.hidden && next && next.closest && !next.closest('.corner-more')) setOpen(false, null);
+  });
+  document.addEventListener('pointerdown', function (ev) {
+    if (menu.hidden || (ev.target && ev.target.closest && ev.target.closest('.corner-more'))) return;
+    setOpen(false, null);
+  });
+};
+  wireCornerMenu();
 
   /** How wide a scrollbar is inside a stage's frame, written to
    * '--stage-scrollbar-w' for the Pull-out, which moves in by it on a stage
@@ -2987,18 +3091,18 @@
       // Non-passive on purpose: without preventDefault the page behind the
       // dialog scrolls instead of the diagram zooming.
       if (ev.preventDefault) ev.preventDefault();
-      var r = lensStageRect();
       // A trackpad pinch arrives as a wheel event with ctrlKey set, an order of
       // magnitude coarser per notch than an ordinary scroll.
-      var factor = Math.pow(2, -ev.deltaY * (ev.ctrlKey ? 0.01 : 0.0022));
-      lensView = lensZoomAt(lensView, ev.clientX - r.left, ev.clientY - r.top, factor, LENS_MIN_SCALE, LENS_MAX_SCALE);
+      zoomAtClient(ev.clientX, ev.clientY, Math.pow(2, -ev.deltaY * (ev.ctrlKey ? 0.01 : 0.0022)));
       lensApply();
     }, { passive: false });
 
+    var lastPressTouch = false;
     stage.addEventListener('dblclick', function (ev) {
-      if (!lens.open) return;
-      var r = lensStageRect();
-      lensView = lensZoomAt(lensView, ev.clientX - r.left, ev.clientY - r.top, 2, LENS_MIN_SCALE, LENS_MAX_SCALE);
+      // A touch double-tap is zoomed on its second pointerup, below; the
+      // dblclick a browser may add after it would zoom a second time.
+      if (!lens.open || lastPressTouch) return;
+      zoomAtClient(ev.clientX, ev.clientY, 2);
       lensApply();
     });
 
@@ -3030,13 +3134,54 @@
     // Invisible to a structural check, so test/check-mermaid-anchor.mjs
     // dispatches exactly that sequence.
     var drag = null;
+    var touches = {};
+    var pinch = null;
+    var lastTap = null;
+    function touchPoints() {
+      return Object.keys(touches).map(function (k) { return touches[k]; });
+    }
+    function pinchOf(pts) {
+      return { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2,
+        d: Math.max(1, Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y)) };
+    }
+    function startDrag(id, x, y) {
+      drag = { ox: x, oy: y, x: x, y: y, id: id, captured: false };
+    }
+    function zoomAtClient(x, y, factor) {
+      var r = lensStageRect();
+      lensView = lensZoomAt(lensView, x - r.left, y - r.top, factor, LENS_MIN_SCALE, LENS_MAX_SCALE);
+    }
     stage.addEventListener('pointerdown', function (ev) {
       if (!lens.open || ev.button) return;
-      drag = { ox: ev.clientX, oy: ev.clientY, x: ev.clientX, y: ev.clientY, id: ev.pointerId, captured: false };
+      lastPressTouch = ev.pointerType === 'touch';
+      if (lastPressTouch && ev.isPrimary) { touches = {}; pinch = null; }
+      if (lastPressTouch) touches[ev.pointerId] = { id: ev.pointerId, x: ev.clientX, y: ev.clientY };
+      var pts = touchPoints();
+      if (lastPressTouch && pts.length >= 2) {
+        pinch = pinchOf(pts);
+        drag = null;
+        lastTap = null;
+        lensDragMoved = true;
+        stage.classList.add('lens-dragging');
+        return;
+      }
+      startDrag(ev.pointerId, ev.clientX, ev.clientY);
       lensDragMoved = false;
     });
     stage.addEventListener('pointermove', function (ev) {
-      if (!drag) return;
+      if (touches[ev.pointerId]) {
+        touches[ev.pointerId].x = ev.clientX;
+        touches[ev.pointerId].y = ev.clientY;
+      }
+      if (pinch) {
+        var next = pinchOf(touchPoints());
+        zoomAtClient(pinch.x, pinch.y, next.d / pinch.d);
+        lensView = { x: lensView.x + next.x - pinch.x, y: lensView.y + next.y - pinch.y, s: lensView.s };
+        pinch = next;
+        lensApply();
+        return;
+      }
+      if (!drag || ev.pointerId !== drag.id) return;
       // A few pixels of jitter between press and release is a click, not a pan:
       // only past that does this become a drag at all -- suppressing the comment
       // gesture below, taking the pointer capture, and showing the grabbing
@@ -3055,7 +3200,25 @@
       lensApply();
     });
     ['pointerup', 'pointercancel'].forEach(function (type) {
-      stage.addEventListener(type, function () {
+      stage.addEventListener(type, function (ev) {
+        var wasTouch = !!touches[ev.pointerId];
+        delete touches[ev.pointerId];
+        var rest = touchPoints();
+        if (pinch) {
+          if (rest.length >= 2) { pinch = pinchOf(rest); return; }
+          pinch = null;
+          if (rest.length === 1) { startDrag(rest[0].id, rest[0].x, rest[0].y); return; }
+        }
+        if (wasTouch && type === 'pointerup' && !lensDragMoved && lens.open) {
+          var now = Date.now();
+          if (lastTap && now - lastTap.t < 400 && Math.abs(ev.clientX - lastTap.x) < 24 && Math.abs(ev.clientY - lastTap.y) < 24) {
+            zoomAtClient(ev.clientX, ev.clientY, 2);
+            lensApply();
+            lastTap = null;
+          } else {
+            lastTap = { t: now, x: ev.clientX, y: ev.clientY };
+          }
+        }
         drag = null;
         stage.classList.remove('lens-dragging');
       });
@@ -4928,7 +5091,7 @@
       if (value == null) btn.removeAttribute(name); else btn.setAttribute(name, value);
     }
     if (!note) {
-      if (shown) shown.remove();
+      if (shown) shown.replaceWith();
       if (was) { put('title', was.title); put('aria-label', was.label); btn.__cbDownloadLabel = null; }
       return;
     }
@@ -4972,7 +5135,7 @@
   document.addEventListener('click', function (ev) {
     var btn = ev.target && ev.target.closest && ev.target.closest('button.round-download');
     if (!btn || readonly || btn.disabled) return;
-    var section = btn.classList.contains('head-download') ? document.querySelector('.round.round-current') : btn.closest('.round');
+    var section = btn.closest('.round') || document.querySelector('.round.round-current');
     if (!section) return;
     saveBehind(btn, downloadRound(section));
   });
@@ -6094,6 +6257,7 @@
     // title just after it -- both need to know whether the round on screen is
     // a page board's or an ordinary one's.
     var fullpage = isPageRound(blocksOfRound(currentRound));
+    var cur = roundEntry(currentRound);
     // ADR.md entry 46's half that outlives the first paint (src/render.mjs's own
     // 'pageUncommentable' is the render-time half): the comment-mode toggle has
     // to go on a page board that was never awaited AND on one whose wait dies
@@ -6101,7 +6265,7 @@
     // lives here rather than in refreshPager (which calls this on every flip
     // anyway, so the class is correct on both routes).
     document.body.classList.toggle('page-uncommentable',
-      fullpage && !roundIsCurrentlyAwaited(roundEntry(currentRound), now));
+      fullpage && !roundIsCurrentlyAwaited(cur, now));
     var meta = document.querySelector('span#round-meta');
     if (meta) {
       // 'fullpage' is what tells pageBoardPillMeta which of PILL_READONLY_TITLE
@@ -6109,15 +6273,26 @@
       // that function's own comment (src/badge.mjs): a page board's status
       // never leaves 'open' even once its wait dies, so the round object alone
       // cannot make this call.
-      var m = pageBoardPillMeta(roundEntry(currentRound), now, fullpage, !readonly && currentPageSendable());
+      var m = pageBoardPillMeta(cur, now, fullpage, !readonly && currentPageSendable());
       meta.textContent = m.text;
       meta.title = m.title;
+      var lineLabel = document.querySelector('span.head-round-label');
+      var lineState = document.querySelector('span.head-round-state');
+      if (lineLabel) lineLabel.textContent = roundPageLabel(currentRound, (cur && cur.title) || '');
+      if (lineState) lineState.textContent = m.text;
+    }
+    var pillCount = document.querySelector('button#round-pill-count');
+    if (pillCount) {
+      var rounds = board.rounds || [];
+      var waits = rounds.some(function (r) { return r.n !== currentRound && roundWaits(r, now); });
+      pillCount.setAttribute('aria-label', roundCountName(currentRound, rounds.length, waits));
+      pillCount.classList.toggle('round-pill-count-owed', waits);
     }
     var cd = document.querySelector('span#round-countdown');
     if (cd) {
       // The newest unsent page's wait, shown only on that page: Send answers the
       // page on screen, and an older page's wait is never the one an agent holds.
-      var text = currentRound === openRoundNumber() ? roundCountdownText(roundEntry(currentRound), now) : null;
+      var text = currentRound === openRoundNumber() ? roundCountdownText(cur, now) : null;
       cd.textContent = text || '';
       cd.title = text ? ROUND_COUNTDOWN_TITLE : '';
       cd.classList.toggle('visible', !!text);
@@ -6223,12 +6398,16 @@
     var rns = rounds.map(function (r) { return r.n; });
     var first = rns.length ? rns[0] : 1;
     var last = rns.length ? rns[rns.length - 1] : 1;
-    var prev = document.querySelector('button#round-prev');
-    var next = document.querySelector('button#round-next');
     // Disabled at the ends, never hidden: a control that disappears at round 1
     // is a control the reviewer has to find again at round 2.
-    if (prev) prev.disabled = currentRound <= first;
-    if (next) next.disabled = currentRound >= last;
+    qsa('button[data-step]').forEach(function (btn) {
+      btn.disabled = Number(btn.getAttribute('data-step')) < 0 ? currentRound <= first : currentRound >= last;
+    });
+    var pillCount = document.querySelector('button#round-pill-count');
+    if (pillCount) {
+      pillCount.textContent = roundCountLabel(currentRound, rounds.length);
+      pillCount.disabled = false;
+    }
 
     // The layout follows the PAGE, not the board (entry 42: "a page-board round
     // is one page, filling the viewport; a question round is another"). This is
@@ -6327,21 +6506,14 @@
 
     var rounds = board.rounds || [];
     var numbers = rounds.map(function (r) { return r.n; });
-    var fold = {
-      rounds: numbers,
-      current: currentRound,
-      owed: rounds.filter(roundOwesAnswer).map(function (r) { return r.n; }),
-      narrow: narrow,
-      oneGap: false,
-    };
     showPagerItems(nav, numbers);
-    if (pagerOnOneLine(nav)) pagerOpen = false;
+    if (narrow || pagerOnOneLine(nav)) pagerOpen = false;
     else if (!pagerOpen) {
-      showPagerItems(nav, foldRounds(fold));
-      if (narrow && !pagerOnOneLine(nav)) {
-        fold.oneGap = true;
-        showPagerItems(nav, foldRounds(fold));
-      }
+      showPagerItems(nav, foldRounds({
+        rounds: numbers,
+        current: currentRound,
+        owed: rounds.filter(roundOwesAnswer).map(function (r) { return r.n; }),
+      }));
     }
 
     var current = pagerEntry(nav, currentRound);
@@ -6356,6 +6528,23 @@
       else if (box.bottom > row.bottom) nav.scrollTop += box.bottom - row.bottom;
     }
     liftSendBar();
+  }
+
+  function setPillListOpen(open) {
+    var dock = document.querySelector('div.round-pager-dock');
+    var count = document.querySelector('button#round-pill-count');
+    if (!dock || !count) return;
+    dock.classList.toggle('round-pager-open', open);
+    count.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (!open) return;
+    fitPager();
+    var current = pagerEntry(pagerNav(), currentRound);
+    if (current) current.focus({ preventScroll: true });
+  }
+
+  function pillListOpen() {
+    var dock = document.querySelector('div.round-pager-dock');
+    return !!dock && dock.classList.contains('round-pager-open');
   }
 
   function openPager() {
@@ -6405,9 +6594,8 @@
     // arriving page it would send that page with no check at all.
     var flipped = n !== currentRound;
     if (flipped && sendArmed) disarmSend();
-    // What the top strip's Download said of the round being left (sayByDownload).
-    var headDownload = flipped && document.querySelector('.head-download');
-    if (headDownload) sayByDownload(headDownload, null);
+    // What the top strip's and the ⋯ menu's Download said of the round being left (sayByDownload).
+    if (flipped) qsa('.head-download, .round-download.corner-item').forEach(function (btn) { sayByDownload(btn, null); });
     currentRound = n;
     qsa('.round').forEach(function (s) { s.classList.toggle('round-current', s === section); });
     // The arriving page's diagrams are drawn now, not at load: a diagram drawn
@@ -6659,10 +6847,9 @@
   // delegated at the <nav> rather than per entry, so an entry created later by
   // refreshPager (a round arriving over SSE) is live the moment it exists,
   // with no second wiring pass and no chance of a double-registered listener.
-  var roundPrevBtn = document.querySelector('button#round-prev');
-  var roundNextBtn = document.querySelector('button#round-next');
-  if (roundPrevBtn) roundPrevBtn.addEventListener('click', function () { stepRound(-1); });
-  if (roundNextBtn) roundNextBtn.addEventListener('click', function () { stepRound(1); });
+  qsa('button[data-step]').forEach(function (btn) {
+    btn.addEventListener('click', function () { stepRound(Number(btn.getAttribute('data-step'))); });
+  });
   var roundPagerNav = pagerNav();
   if (roundPagerNav) {
     roundPagerNav.addEventListener('click', function (ev) {
@@ -6671,8 +6858,24 @@
       var btn = ev.target.closest('.round-page');
       if (!btn) return;
       pagerOpen = false;
+      var picked = pillListOpen();
+      setPillListOpen(false);
       var n = parseInt(btn.getAttribute('data-round'), 10);
       if (isFinite(n)) goToRound(n);
+      if (picked) roundPillCountBtn.focus({ preventScroll: true });
+    });
+  }
+  var roundPillCountBtn = document.querySelector('button#round-pill-count');
+  if (roundPillCountBtn) {
+    roundPillCountBtn.addEventListener('click', function () { setPillListOpen(!pillListOpen()); });
+    document.addEventListener('click', function (ev) {
+      if (!pillListOpen() || (ev.target && ev.target.closest && ev.target.closest('.round-pager-dock'))) return;
+      setPillListOpen(false);
+    });
+    document.addEventListener('keydown', function (ev) {
+      if (ev.key !== 'Escape' || !pillListOpen()) return;
+      setPillListOpen(false);
+      roundPillCountBtn.focus({ preventScroll: true });
     });
   }
   window.addEventListener('resize', fitPager);
@@ -7011,8 +7214,9 @@
       refreshPins(document);
       clearPendingMark();
       if (sendStatus) {
-        sendStatus.textContent = action === 'discuss' ? 'Handed over to chat.' : 'Sent.';
+        sendStatus.textContent = sentText(action);
       }
+      moveOnAfter(round);
       // Deliberately NOT re-enabled here: the round is out.
     }).catch(function (err) {
       submitInFlight = false;
@@ -7036,6 +7240,66 @@
     var round = roundEntry(sent.round);
     if (round && round.status === 'sent') return;
     applySubmittedPush(sent);
+  }
+
+  var MOVE_ON_MS = 1000;
+
+  /** ADR 160: where the page goes once the PM's own Send or Discuss of round 'sent'
+   * went out. The oldest other round that waits takes the page; with none, the page
+   * goes where the Home mark goes, unless a queued comment is still only in this tab. */
+  function moveOnAfter(sent) {
+    if (readonly) return;
+    setTimeout(function () {
+      if (currentRound !== sent) return;
+      var now = Date.now();
+      var next = null;
+      (board.rounds || []).forEach(function (r) {
+        if (next === null && r.n !== sent && roundWaits(r, now)) next = r.n;
+      });
+      if (next !== null) {
+        if (sendStatus) sendStatus.textContent = '';
+        goToRound(next);
+        sayInSendBar(next, roundNumberLabel(next) + ' still waits');
+        return;
+      }
+      if (pendingComments.length) return;
+      var home = document.querySelector('a.back-to-index');
+      location.href = (home && home.getAttribute('href')) || '/';
+    }, MOVE_ON_MS);
+  }
+
+  function sentText(action) {
+    return action === 'discuss' ? 'Handed over to chat.' : 'Sent.';
+  }
+
+  /** ADR 160's waiting round, asked by move-on and the pill's dot alike. */
+  function roundWaits(r, now) {
+    if (!r || r.status === 'sent') return false;
+    return roundOwesAnswer(r) || roundIsCurrentlyAwaited(r, now) || commentsSentFrom(r.n).length > 0 || holdsUnaddedComment(r.n);
+  }
+
+  function holdsUnaddedComment(n) {
+    return qsa('.comment-form', document).some(function (form) {
+      var id = form.getAttribute('data-block-id');
+      var input = form.querySelector('input[type=text]');
+      return roundOfBlockEl(id) === n && (!!(input && input.value.trim()) || !!draftImages['comment:' + id]);
+    });
+  }
+
+  function sayInSendBar(n, text) {
+    var section = roundSectionEl(n);
+    var bar = section && isPageRound(blocksOfRound(n)) ? section.querySelector('.page-send-bar') : null;
+    if (!bar) {
+      if (sendStatus) sendStatus.textContent = text;
+      return;
+    }
+    var say = bar.querySelector('.send-status');
+    if (!say) {
+      say = document.createElement('span');
+      say.className = 'send-status';
+      bar.insertBefore(say, bar.firstChild);
+    }
+    say.textContent = text;
   }
 
   if (sendBtn) {
@@ -7130,7 +7394,7 @@
    * left over stays queued, exactly the AC 12 promise ("comments already left
    * stay on screen and ride the thread's next packet") for a comment on some
    * OTHER round that has not gone out yet either. */
-  function submitPageRound(roundN, action) {
+  function submitPageRound(roundN, action, pressed) {
     if (readonly) return;
     var round = roundEntry(roundN);
     // Not sent, the same question openRoundNumber and the daemon's own submit guard
@@ -7143,7 +7407,7 @@
     if (afterImageReads('page:' + roundN, function () {
       delete heldPageWayOut[roundN];
       setPageWayOutHeld(roundN, action, false);
-      submitPageRound(roundN, action);
+      submitPageRound(roundN, action, pressed);
     })) {
       heldPageWayOut[roundN] = action;
       setPageWayOutHeld(roundN, action, true);
@@ -7183,6 +7447,9 @@
       applyOwnSend(result);
       refreshPins(document);
       clearPendingMark();
+      if (!pressed) return;
+      sayInSendBar(roundN, sentText(action));
+      moveOnAfter(roundN);
     }).catch(function () {
       // Nothing went out -- hand the controls back so the reviewer can retry,
       // the same recovery submitBoard's own catch performs. Except on a panel
@@ -7207,13 +7474,13 @@
     var sendBtn3 = ev.target.closest('.page-send-btn');
     if (sendBtn3) {
       var n1 = parseInt(sendBtn3.getAttribute('data-round'), 10);
-      if (isFinite(n1)) submitPageRound(n1, 'send');
+      if (isFinite(n1)) submitPageRound(n1, 'send', true);
       return;
     }
     var discussBtn3 = ev.target.closest('.page-discuss-btn');
     if (discussBtn3) {
       var n2 = parseInt(discussBtn3.getAttribute('data-round'), 10);
-      if (isFinite(n2)) submitPageRound(n2, 'discuss');
+      if (isFinite(n2)) submitPageRound(n2, 'discuss', true);
     }
   });
 

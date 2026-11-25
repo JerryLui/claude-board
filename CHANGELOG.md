@@ -7,6 +7,28 @@
   of its newest three, `Hung: <agent>, 5 min ago, resumed` (or `replaced by a fresh agent`, `left for
   the PM`), the whole time in its tooltip, and counts the older ones in one line. A mission with none
   looks as before. Restart the daemon to take it.
+- **The board on a phone, and Send moves on (ADR 40, 42, 124, 160)**:
+  - **Send and Discuss move on**, on every screen: once your Send or Discuss goes out, its status
+    shows for a second, then the page flips to the next round on the board still waiting for you,
+    saying "Round 9 still waits", or goes where the logo goes (Missions or Boards, the last used)
+    when none waits. A failed send, a round another tab already sent and a round opened from disk
+    stay where they are. On a Mac the board's next round then arrives as a banner, not in the tab.
+  - **Cmd+Enter sends a mission card's note** (Ctrl+Enter off a Mac), as Send to session does;
+    Enter still adds a line.
+  - **A phone header that scrolls away**: at 560px and under a round's title, two lines at most,
+    and its state line (the round, then `open`, `submitted`, `read-only` or the time left) are page
+    text that scrolls off. Only the logo, as the home button, and a ⋯ button float in the top
+    corners; ⋯ holds Comment, the theme, Download round and the board and thread ids. No countdown
+    shows anywhere else on a phone. A mock drawn full page starts under the two buttons.
+  - **The Missions and Boards pages get the same header** on a phone: the Missions and Boards
+    switch scrolls off with the page, and ⋯ holds Comment, the theme, the timer's switch and
+    Settings, which opens under ⋯.
+  - **The round pill reads `‹ 11 / 14 ›`** on a phone: this round of the board's rounds, its arrows
+    flipping a round, a dot on the count while another round waits for you. A press on the count
+    lists every round number to jump to. The arrows at the screen's edges and the caption above the
+    pill are gone there; above 560px the pager is as before.
+  - **Pinch to zoom a pulled-out diagram** on a touch screen, around your fingers; one finger pans,
+    and a double-tap zooms as a double-click does.
 - **The board from your phone, a longer wait and a lasting sign-in (ADR 157, 158, 159)**: take it
   with `./install.sh`, which rebuilds the launcher. Running sessions pick it up when they restart.
   - **A round waits 50 minutes**, up from 40, restarted by each pick, note or comment as before.

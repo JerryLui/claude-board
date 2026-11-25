@@ -754,6 +754,14 @@ reader's own finger, which is the feedback the instant flip used to get from the
 percentage inset interpolates where an intrinsic width does not, which is why the pill's half-width
 is a measurement of the surviving controls rather than a fact about the content.
 
+**Why a phone's header scrolls away (amended 2026-11-25).** Below 560px the header stacked into two
+rows and a round-title box, so the first card started about 175px down an 844px screen. **Rejected:
+a slim fixed one-row bar** (mark, a clipped title, ⋯), which kept the round named while scrolling and
+put nothing over the content; the PM chose the page text that scrolls away, with only home and ⋯
+floating, for the screen it gives back. **Rejected: the countdown on the send bar, and Comment as a
+third floating button**: the deadline is read at the page's top, and Comment lives in ⋯ with theme,
+Download round and the ids.
+
 ### Entry 42 — rounds are the board's pages
 
 **What broke.** Rounds stacked vertically down one board, which survives a round of three short
@@ -768,6 +776,12 @@ first version printed each round's full title; titles are
 agent-supplied and `ask` requires one on every call, so a five-round thread rendered five ellipsed
 stubs that named nothing, and the clipping also swallowed the owed dot, which sits past the
 truncated text. Naming one round well beat naming five badly.
+
+**Why a count on a phone.** At 390px the chevrons, 44px on a 16px margin, sat over the card text
+on both sides, the caption printed over the text above the pill, and the numerals with the
+arrows fitted six entries before wrapping. Moving the arrows into the pill and folding waiting
+rounds behind "…" still wrapped past about six entries; a count, `11 / 14`, is one line at any
+board length down to 320px, and the numbers are one press away on the count.
 
 ### Entry 45 — an awaited page board, declared by the caller
 
@@ -859,6 +873,13 @@ nothing": the restyled scrollbar takes 11px even under overlay scrollbars, where
 reserves nothing on a page that does not scroll, so a short view and a long one differed by 11px
 until the home views scrolled their root always; and the first width read could predate the
 root's scrollbar (QUIRKS.md has both).
+
+**Why the phone's top bar scrolls away too (amended 2026-11-25).** A board page's header on a phone
+became page text with the mark and ⋯ floating (entry 40), and the same reason holds here: the stacked
+bar took two rows before the first card. The home views take the same corner buttons, so going from a
+card to its board still moves nothing in the corners. The timer reaches ⋯ as its switch and its
+Settings; its countdown, Restart and Forward are not carried over, the cost entry 124 names. The settings panel opens as a sheet under ⋯, since the bar that anchors it on a
+wider window is not drawn.
 
 ### Entry 102 — one copy of the mechanism
 

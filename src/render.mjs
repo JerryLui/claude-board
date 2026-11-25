@@ -40,7 +40,7 @@
 import { palettes, faviconLink, markSvg } from './styles.mjs';
 import { SCRIPT_ASSET, STYLE_ASSET } from './assets.mjs';
 import { STATUS_TONES } from './card-status.mjs';
-import { ROUND_DOWNLOAD_BUTTON, HEAD_DOWNLOAD_BUTTON, STAGE_MARGIN_RESET } from './round-export.mjs';
+import { ROUND_DOWNLOAD_BUTTON, HEAD_DOWNLOAD_BUTTON, MENU_DOWNLOAD_BUTTON, STAGE_MARGIN_RESET } from './round-export.mjs';
 import { MAX_IMAGE_BYTES, megabytes } from './post-limit.mjs';
 import { themeBootScript, themeToggle } from './theme.mjs';
 import { resolveComments, stripDaemonOnly } from './board.mjs';
@@ -48,7 +48,7 @@ import { buildSteps, stepsToPath, pathToSteps, resolveSteps, videoIdentity, vide
 import { grammarFor, Prism } from './vendor/prism/index.mjs';
 import { MERMAID_ASSET } from './vendor/mermaid/index.mjs';
 import {
-  roundPageLabel, foldRounds, PAGER_GAP_LABEL, isPageRound, roundHasCommentable,
+  roundPageLabel, foldRounds, PAGER_GAP_LABEL, roundCountLabel, roundCountName, isPageRound, roundHasCommentable,
   roundIsAwaitedOpen, pageBoardPillMeta,
   ANSWER_CHIP_LABEL,
 } from './badge.mjs';
@@ -193,6 +193,40 @@ const PULL_OUT_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="non
 export function commentModeToggle({ inert = false } = {}) {
   const off = inert ? ' disabled title="Nothing here is waiting on a comment"' : '';
   return `<button type="button" id="comment-mode-toggle" class="mode-toggle" aria-pressed="false"${off}>${COMMENT_ICON}<span class="mode-toggle-label">Comment</span></button>`;
+}
+
+const MORE_ICON = '<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>';
+
+/** One item of the phone header's ⋯ menu (cornerMenu). `proxy` is a
+ * tag-qualified selector of a control elsewhere on the page: the item clicks it,
+ * shows only while it is displayed, and with `checkbox` mirrors its
+ * aria-pressed, with `mirror` its name and glyph. `copy` copies that text and
+ * shows it beside `label`. `keepOpen` leaves the menu open after it. */
+export function cornerItem({ label, icon = '', proxy = null, checkbox = false, mirror = false, copy = null, keepOpen = false }) {
+  const role = checkbox ? 'menuitemcheckbox" aria-checked="false' : 'menuitem';
+  const attrs = (proxy ? ` data-proxy="${escAttr(proxy)}"` : '') + (mirror ? ' data-mirror' : '')
+    + (copy != null ? ` data-copy="${escAttr(copy)}"` : '') + (keepOpen || copy != null ? ' data-keep-open' : '');
+  const value = copy != null ? `<span class="corner-id-value">${escHtml(copy)}</span>` : '';
+  return `<button type="button" role="${role}" class="corner-item${copy != null ? ' corner-id' : ''}"${attrs}>${icon}<span class="corner-item-label">${escHtml(label)}</span>${value ? ' ' + value : ''}</button>`;
+}
+
+export const BLANK_ICON = '<svg aria-hidden="true"></svg>';
+
+export function commentAndThemeItems() {
+  return [
+    cornerItem({ label: 'Comment', icon: COMMENT_ICON, proxy: 'button#comment-mode-toggle', checkbox: true }),
+    cornerItem({ label: 'Theme', proxy: 'button#theme-toggle', mirror: true, keepOpen: true, icon: BLANK_ICON }),
+  ];
+}
+
+/** The ⋯ button and its menu, which float in the top right corner at 560px
+ * wide and under while the header scrolls away (src/styles.mjs), the header's
+ * mark, '.back-to-index', floating in the left one. `items` is markup, each a
+ * cornerItem or another role="menuitem" button; null draws a separator.
+ * src/ui.mjs's wireCornerMenu wires it. */
+export function cornerMenu(items) {
+  const body = items.map(item => item == null ? '<div class="corner-sep" role="separator"></div>' : item).join('');
+  return `<div class="corner-more"><button type="button" class="corner-more-btn" aria-haspopup="menu" aria-expanded="false" aria-controls="corner-menu" aria-label="More" title="More">${MORE_ICON}</button><div class="corner-menu" id="corner-menu" role="menu" aria-label="More" hidden>${body}</div></div>`;
 }
 
 /** The Pull-out (ADR.md entry 120): the one way into the lens, for a stage
@@ -3499,6 +3533,8 @@ const PAGER_MOST_ENTRIES = 15;
  * correct -- current round, disabled ends, the dot on the round still owing an
  * answer -- so a board that opens on its newest round shows the right page with
  * no flash and no client script; src/ui.mjs's goToRound then owns all three.
+ * At 560px wide or less `.round-pill` stands in for the chevrons and the caption:
+ * its own arrows around this round's count, the count opening the numbers.
  *
  * The chevrons are siblings of the pill rather than children of it, because
  * '.round-pager' carries a `transform` to centre itself and a transformed
@@ -3520,7 +3556,7 @@ function roundPagerMarkup(board, currentN) {
   const numbers = rounds.map(r => r.n);
   const owed = rounds.filter(r => roundOwesAnswer(board, r)).map(r => r.n);
   const items = rounds.length > PAGER_MOST_ENTRIES
-    ? foldRounds({ rounds: numbers, current: currentN, owed, narrow: false, oneGap: false })
+    ? foldRounds({ rounds: numbers, current: currentN, owed })
     : numbers;
   const entry = r => {
     const classes = ['round-page'];
@@ -3541,17 +3577,28 @@ function roundPagerMarkup(board, currentN) {
   const first = rounds.length ? rounds[0].n : 1;
   const last = rounds.length ? rounds[rounds.length - 1].n : 1;
   const current = rounds.find(r => r.n === currentN);
+  const waits = rounds.some(r => r.n !== currentN && (owed.includes(r.n) || roundIsAwaitedOpen(r)));
   // The dock, not the pill, is the fixed and centred box: the caption has to sit
   // above the numerals and share their centre line, and stacking them inside one
   // fixed column is what keeps that true with no measured offset between them.
   // The chevrons stay OUTSIDE it for the reason they were already outside the
   // pill -- a transformed ancestor becomes the containing block for a fixed
   // descendant, which would pin them to this box instead of the viewport.
-  return `  <button type="button" class="round-flip round-flip-prev" id="round-prev" aria-label="Previous round" title="Previous round"${currentN <= first ? ' disabled' : ''}>‹</button>
-  <button type="button" class="round-flip round-flip-next" id="round-next" aria-label="Next round" title="Next round"${currentN >= last ? ' disabled' : ''}>›</button>
+  const step = (cls, id, by) => {
+    const name = by < 0 ? 'Previous round' : 'Next round';
+    const end = by < 0 ? currentN <= first : currentN >= last;
+    return `<button type="button" class="${cls}" id="${id}" data-step="${by}" aria-label="${name}" title="${name}"${end ? ' disabled' : ''}>${by < 0 ? '‹' : '›'}</button>`;
+  };
+  return `  ${step('round-flip round-flip-prev', 'round-prev', -1)}
+  ${step('round-flip round-flip-next', 'round-next', 1)}
   <div class="round-pager-dock">
     <div class="round-pager-caption" id="round-pager-caption">${escHtml(roundPageLabel(currentN, (current && current.title) || ''))}</div>
     <nav class="round-pager" id="round-pager" aria-label="Rounds"><span class="round-pager-lede" aria-hidden="true">Rounds</span>${pages}</nav>
+    <div class="round-pill">
+      ${step('round-pill-step', 'round-pill-prev', -1)}
+      <button type="button" class="round-pill-count${waits ? ' round-pill-count-owed' : ''}" id="round-pill-count" aria-controls="round-pager" aria-expanded="false" aria-label="${escAttr(roundCountName(currentN, rounds.length, waits))}">${roundCountLabel(currentN, rounds.length)}</button>
+      ${step('round-pill-step', 'round-pill-next', 1)}
+    </div>
   </div>`;
 }
 
@@ -3729,6 +3776,7 @@ ${faviconLink}
       <div class="board-head-ident">
         <h1>${escHtml(board.title || 'Untitled board')}</h1>
         <div class="meta">${escHtml(board.thread)} · ${escHtml(board.id)}</div>
+        <div class="head-round"><span class="head-round-label">${escHtml(roundPageLabel(initialRoundInView, (initialRound && initialRound.title) || ''))}</span><span class="head-round-state">${escHtml(roundMeta.text)}</span></div>
       </div>
     </div>
     <div class="board-head-actions">
@@ -3737,6 +3785,13 @@ ${faviconLink}
       ${themeToggle()}
       <span class="round-meta" id="round-meta" title="${escAttr(roundMeta.title)}">${escHtml(roundMeta.text)}</span>
     </div>
+    ${cornerMenu([
+      ...commentAndThemeItems(),
+      MENU_DOWNLOAD_BUTTON,
+      null,
+      cornerItem({ label: 'Board', copy: board.id }),
+      cornerItem({ label: 'Thread', copy: board.thread }),
+    ])}
   </header>
   <div class="blocks" id="blocks">
     ${roundsHtml}

@@ -15,8 +15,8 @@ import path from 'node:path';
 import { faviconLink, markSvg } from './styles.mjs';
 import { STYLE_ASSET } from './assets.mjs';
 import { themeBootScript, themeToggle } from './theme.mjs';
-import { commentModeToggle } from './render.mjs';
-import { trackDocWidth, HOME_STORAGE_KEY } from './ui.mjs';
+import { BLANK_ICON, commentAndThemeItems, commentModeToggle, cornerMenu, cornerItem } from './render.mjs';
+import { trackDocWidth, wireCornerMenu, HOME_STORAGE_KEY } from './ui.mjs';
 import { roundIsAwaited } from './badge.mjs';
 import { HANG_OUTCOMES } from './missions.mjs';
 // formatCountdown only -- src/pomodoro.mjs's document shape, HTTP surface and
@@ -651,6 +651,19 @@ function focusStop(key) {
   stop.focus();
 }
 
+function missionsSendComment(key, cardEl) {
+  var box = cardEl.querySelector('textarea.mission-comment-text');
+  var text = box ? String(box.value || '') : '';
+  if (!text.trim()) { if (box && box.focus) box.focus(); return; }
+  missionsUi.drafts[key] = text;
+  missionsOrder(key, { kind: 'comment', text: text }, 'Could not send the comment').then(function (ok) {
+    if (!ok) return;
+    delete missionsUi.commenting[key];
+    delete missionsUi.drafts[key];
+    paintMissions();
+  });
+}
+
 function onMissionsClick(ev) {
   var t = ev.target;
   if (!t || !t.closest) return;
@@ -695,16 +708,7 @@ function onMissionsClick(ev) {
     return;
   }
   if (t.closest('button.mission-comment-send')) {
-    var box = cardEl.querySelector('textarea.mission-comment-text');
-    var text = box ? String(box.value || '') : '';
-    if (!text.trim()) { if (box && box.focus) box.focus(); return; }
-    missionsUi.drafts[key] = text;
-    missionsOrder(key, { kind: 'comment', text: text }, 'Could not send the comment').then(function (ok) {
-      if (!ok) return;
-      delete missionsUi.commenting[key];
-      delete missionsUi.drafts[key];
-      paintMissions();
-    });
+    missionsSendComment(key, cardEl);
     return;
   }
   // The card opens its board through its title's link, whose box covers the card under
@@ -761,10 +765,16 @@ function onMissionsInput(ev) {
 
 function onMissionsKeydown(ev) {
   var t = ev.target;
-  if (!ev || ev.key !== 'Escape' || !t || !t.closest) return;
+  if (!ev || !t || !t.closest) return;
   var cardEl = t.closest('article.mission-card');
   if (!cardEl) return;
   var key = cardEl.getAttribute('data-mission-key');
+  if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey) && t.closest('textarea.mission-comment-text')) {
+    ev.preventDefault();
+    missionsSendComment(key, cardEl);
+    return;
+  }
+  if (ev.key !== 'Escape') return;
   if (missionsUi.commenting[key] && t.closest('div.mission-comment')) {
     delete missionsUi.commenting[key];
     delete missionsUi.drafts[key];
@@ -1712,12 +1722,17 @@ function onStorePruneClick() {
 // the way up: a click on the summary or inside the form is recognised by
 // closest() finding the panel above it, and is left alone (closing on the
 // summary's own click would fight the native <details> toggle and make the panel
-// impossible to open). Nothing here calls stopPropagation.
+// impossible to open). So is one in the phone header's ⋯ menu, whose Settings
+// item opens the panel by clicking that summary. Nothing here calls stopPropagation.
+function onCornerMenuOpen() {
+  var panel = document.querySelector('details#pomodoro-settings');
+  if (panel && panel.open) closePomodoroSettings();
+}
 function onDocumentClickClosePomodoroSettings(ev) {
   var panel = document.querySelector('details#pomodoro-settings');
   if (!panel || !panel.open) return;
   var t = ev.target;
-  if (t && t.closest && t.closest('details#pomodoro-settings')) return;
+  if (t && t.closest && (t.closest('details#pomodoro-settings') || t.closest('.corner-more'))) return;
   closePomodoroSettings();
 }
 
@@ -1756,9 +1771,38 @@ function openPomodoroSettingsFromFragment() {
   }
 }
 
+// At 560px wide and under the bar is hidden and its gear opens from the ⋯ menu
+// (src/styles.mjs), so the panel takes the focus as it opens, and Escape or its
+// closing hands it back to ⋯.
+function pomodoroSettingsInMenu(panel) {
+  var summary = panel && panel.querySelector('summary');
+  return !!summary && typeof getComputedStyle === 'function' && getComputedStyle(summary).visibility === 'hidden';
+}
+function onPomodoroSettingsToggle() {
+  var panel = document.querySelector('details#pomodoro-settings');
+  if (!pomodoroSettingsInMenu(panel)) return;
+  var more = document.querySelector('button.corner-more-btn');
+  if (panel.open) {
+    var first = panel.querySelector('form input, form select, form button');
+    if (first) first.focus();
+  } else if (more && (!document.activeElement || document.activeElement === document.body || panel.contains(document.activeElement))) {
+    more.focus();
+  }
+}
+function onPomodoroSettingsKeydown(ev) {
+  if (ev.key !== 'Escape' || !pomodoroSettingsInMenu(ev.currentTarget)) return;
+  ev.preventDefault();
+  closePomodoroSettings();
+}
+
 function initPomodoroWidget() {
   var widget = document.querySelector('div#pomodoro-widget');
   if (!widget) return;
+  var settings = document.querySelector('details#pomodoro-settings');
+  if (settings) {
+    settings.addEventListener('toggle', onPomodoroSettingsToggle);
+    settings.addEventListener('keydown', onPomodoroSettingsKeydown);
+  }
   var toggleBtn = document.querySelector('button#pomodoro-toggle');
   if (toggleBtn) toggleBtn.addEventListener('click', onPomodoroToggleClick);
   var restartBtn = document.querySelector('button#pomodoro-restart');
@@ -1884,6 +1928,7 @@ function initIndexStream() {
 initIndexStream();
 ` + '\nvar TAB_KEY_PREFIX = ' + JSON.stringify(TAB_KEY_PREFIX) + ';\nvar HANG_OUTCOMES = ' + JSON.stringify(HANG_OUTCOMES) + ';\n' + missionsParts.toString() + '\n' + missionsScript
   + '\n' + trackDocWidth.toString() + '\ntrackDocWidth();\n'
+  + '\nvar wireCornerMenu = ' + wireCornerMenu.toString() + ';\nwireCornerMenu(onCornerMenuOpen);\n'
   + '\nvar HOME_STORAGE_KEY = ' + JSON.stringify(HOME_STORAGE_KEY) + ';\n' + rememberHomeView.toString() + '\nrememberHomeView();\n';
 
 /** Remembers the overview this page is, Missions or Boards, under HOME_STORAGE_KEY
@@ -2265,8 +2310,16 @@ export function renderTopBar({ active, waitingCount = 0, pomodoroEnabled = true,
       ${commentModeToggle({ inert: !commentable })}
       ${themeToggle()}
     </div>
+    ${cornerMenu([
+      ...commentAndThemeItems(),
+      null,
+      cornerItem({ label: 'Start pomodoro', proxy: 'button#pomodoro-toggle', mirror: true, icon: MENU_TOMATO_ICON }),
+      cornerItem({ label: 'Settings', proxy: 'summary.pomodoro-settings-summary', mirror: true, icon: BLANK_ICON }),
+    ])}
   </header>`;
 }
+
+const MENU_TOMATO_ICON = TOMATO_ICON.replace(' role="img" aria-label="Pomodoro"><title>Pomodoro</title>', ' aria-hidden="true">');
 
 /** A home view's page: the top bar over `body`, in the board page's own shell
  * (`.board-shell`, the window's width up to 2560px), so the bar sits on the same

@@ -623,6 +623,12 @@ Once driving it, each of these silently produces a wrong measurement rather than
   empty area anchors nothing and reads like a dead gesture. Probe several points.
 - A pointer capture taken between a dispatched `mousePressed`/`mouseReleased` pair
   retargets the resulting `click` — see `setPointerCapture` above.
+- **`Input.dispatchTouchEvent` lifts one finger by `touchEnd` naming that finger**, not
+  by a `touchMove` that leaves it out: the omitted finger stays down and the next move
+  pinches again. `touchEnd` with an empty list lifts every finger.
+- **An inline `style.transform` reads back rounded to six significant digits**, so a
+  view parsed from it matches the page's own numbers only to that precision
+  (`test/browser-check-mermaid-stage.mjs`'s touch rows compare within it).
 - `/json/new` rejects a plain `GET` with a 200 response carrying an error STRING, so
   `resp.json()` fails pointing nowhere near the cause. Use `{ method: 'PUT' }`.
 - A race that only exists "while the render is in flight" needs the render to take
@@ -838,7 +844,7 @@ next page. Set `enabled` over `POST /api/pomodoro/settings` and open a new tab.
 ### The header checks read stylesheet text, so phone rules and safe-area insets have one shape
 
 `check-header-condense` takes everything from the sheet's first `@media (max-width: 560px)` to its
-end as the narrow block, so phone rules go in that one block, last. The pinned fixed chrome is
+end as the narrow block, so phone rules go in it or in a later 560px block after it (the phone header's own sits last). The pinned fixed chrome is
 matched by the text of its `left`, `right` and `bottom`, so a `env(safe-area-inset-*)` goes in as
 margin or padding, never into those. `check-round-pager` refuses a rule that hides a round-page
 class: hide an entry with the `hidden` attribute. And a `flex-wrap` row in a `left: 50%` fixed box

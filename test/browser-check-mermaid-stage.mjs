@@ -38,6 +38,10 @@
 //      test/check-mermaid-stage.mjs's own DOM stand-in cannot parse as a
 //      fragment at all) stays standards-mode inside the stage frame and the
 //      prelude still runs.
+//   6. TOUCH: a pulled-out diagram on a touch screen pinches around the
+//      fingers' midpoint within the lens's zoom limits, pans under one finger,
+//      keeps its zoom when a finger lifts mid-pinch, and zooms 2x on a
+//      double-tap (CDP `Input.dispatchTouchEvent`; the stand-in has no touch).
 //
 // The committed fixture (test/fixtures/mermaid-stage-artifact.html) is a
 // minimal full-document artifact carrying the /explain template's exact
@@ -54,7 +58,7 @@ import { MERMAID_ASSET_NAME } from '../src/assets.mjs';
 import { parseMermaidDomId, MERMAID_NODE_SELECTOR } from '../src/anchor.mjs';
 import { check, repoRoot, runMain, sleep, withTimeout } from './support.mjs';
 import {
-  copyArchive, createWitnessProxy, evalIn, guardRun, isChromeInfra, postJson, requireChrome,
+  copyArchive, createWitnessProxy, evalIn, guardRun, isChromeInfra, openPhone, postJson, requireChrome,
   setSessionCookie, startScratchDaemon, withChrome,
 } from './browser-support.mjs';
 
@@ -214,6 +218,122 @@ function copyMermaidArchive(pagesDir, boardId, { dropMermaid = false, corruptMer
 }
 
 // ---------------------------------------------------------------------------
+// The pulled-out diagram under touch.
+const TOUCH_DIAGRAM = `flowchart LR
+  a["start"] --> b["read"] --> c["check"] --> d["write"]
+  b --> e["fall back"] --> d`;
+
+async function touchLensChecks(daemonPort, secret, proxyPort) {
+  const posted = await postJson(`http://127.0.0.1:${daemonPort}/api/board`, {
+    title: 'pulled-out diagram under touch',
+    blocks: [{ kind: 'mermaid', text: TOUCH_DIAGRAM }],
+  }, secret);
+  const url = `http://127.0.0.1:${daemonPort}${new URL(posted.url).pathname}`;
+  await withFreshChrome(proxyPort, async ({ send, onEvent }) => {
+    const tab = await openPhone(send, onEvent, url, sessionToken(secret), { touchPoints: 5 });
+    try {
+      await tab.until(`document.querySelector('.mermaid-block .pull-out')`, 'the Pull-out');
+      await tab.evalPage(`document.querySelector('.mermaid-block .pull-out').click()`);
+      await tab.until(`document.querySelector('dialog[open] .lens-canvas svg')`, 'the open lens');
+
+      const frame = () => tab.sp('Runtime.evaluate', {
+        expression: 'new Promise(function (r) { requestAnimationFrame(function () { requestAnimationFrame(r); }); })',
+        awaitPromise: true,
+      });
+      const view = async () => {
+        await frame();
+        return tab.evalPage(`(function () {
+          var st = document.querySelector('dialog[open] .lens-stage').getBoundingClientRect();
+          var t = document.querySelector('dialog[open] .lens-canvas').style.transform.split(/[(), ]+/).map(parseFloat);
+          return { left: st.left, top: st.top, cx: st.left + st.width / 2, cy: st.top + st.height / 2, x: t[1], y: t[2], s: t[4] };
+        })()`);
+      };
+      const touch = (type, pts) => tab.sp('Input.dispatchTouchEvent', {
+        type, touchPoints: pts.map(([x, y, id]) => ({ x, y, id })),
+      });
+      const fit = async () => {
+        await tab.evalPage(`document.querySelector('dialog[open] .lens-btn[data-lens="fit"]').click()`);
+        return view();
+      };
+      const pinch = async (cx, cy, from, to, steps = 10) => {
+        await touch('touchStart', [[cx - from, cy, 0]]);
+        await touch('touchStart', [[cx - from, cy, 0], [cx + from, cy, 1]]);
+        for (let i = 1; i <= steps; i++) {
+          const half = from + (to - from) * i / steps;
+          await touch('touchMove', [[cx - half, cy, 0], [cx + half, cy, 1]]);
+        }
+        await touch('touchEnd', []);
+      };
+      const near = (got, want) => got.every((g, i) => Math.abs(g - want[i]) <= 0.01 + Math.abs(want[i]) * 1e-4);
+      const screenOf = (v, d) => ({ x: v.left + v.x + v.s * d.x, y: v.top + v.y + v.s * d.y });
+      const diagramAt = (v, x, y) => ({ x: (x - v.left - v.x) / v.s, y: (y - v.top - v.y) / v.s });
+
+      await check('TOUCH: a two-finger pinch zooms the pulled-out diagram, the point under the fingers\' midpoint staying put', async () => {
+        const before = await fit();
+        const mid = { x: before.cx + 17, y: before.cy - 23 };
+        const under = diagramAt(before, mid.x, mid.y);
+        await pinch(mid.x, mid.y, 30, 90);
+        const after = await view();
+        assert.ok(Math.abs(after.s / before.s - 3) < 0.05, `fingers spread 3x, scale went ${before.s} -> ${after.s}`);
+        const moved = screenOf(after, under);
+        assert.ok(Math.hypot(moved.x - mid.x, moved.y - mid.y) < 3,
+          `the diagram point under the midpoint drifted to ${JSON.stringify(moved)} from ${JSON.stringify(mid)}`);
+      });
+
+      await check('TOUCH: a pinch clamps at the lens\'s zoom limits, 8x and 0.1x', async () => {
+        const start = await fit();
+        for (let i = 0; i < 4; i++) await pinch(start.cx, start.cy, 30, 150);
+        assert.ok(near([(await view()).s], [8]), 'pinched out past the ceiling');
+        for (let i = 0; i < 6; i++) await pinch(start.cx, start.cy, 150, 30);
+        assert.ok(near([(await view()).s], [0.1]), 'pinched in past the floor');
+      });
+
+      await check('TOUCH: one finger pans the pulled-out diagram without zooming it', async () => {
+        const before = await fit();
+        await touch('touchStart', [[before.cx, before.cy, 0]]);
+        for (let i = 1; i <= 10; i++) await touch('touchMove', [[before.cx + 6 * i, before.cy + 3 * i, 0]]);
+        await touch('touchEnd', []);
+        const after = await view();
+        assert.ok(near([after.x - before.x, after.y - before.y, after.s], [60, 30, before.s]), `one finger moved 60,30: ${JSON.stringify([before, after])}`);
+      });
+
+      await check('TOUCH: lifting one finger mid-pinch keeps the zoom and pans with the finger left', async () => {
+        const before = await fit();
+        const { cx, cy } = before;
+        await touch('touchStart', [[cx - 40, cy, 0]]);
+        await touch('touchStart', [[cx - 40, cy, 0], [cx + 40, cy, 1]]);
+        for (let i = 1; i <= 8; i++) await touch('touchMove', [[cx - 40 - 5 * i, cy, 0], [cx + 40 + 5 * i, cy, 1]]);
+        const pinched = await view();
+        assert.ok(Math.abs(pinched.s / before.s - 2) < 0.05, `setup: the pinch doubled the scale, ${before.s} -> ${pinched.s}`);
+        await touch('touchEnd', [[cx + 80, cy, 1]]);
+        const lifted = await view();
+        assert.ok(near([lifted.x, lifted.y, lifted.s], [pinched.x, pinched.y, pinched.s]), `the lift itself moved the view: ${JSON.stringify([pinched, lifted])}`);
+        for (let i = 1; i <= 10; i++) await touch('touchMove', [[cx - 80 + 5 * i, cy + 2 * i, 0]]);
+        await touch('touchEnd', []);
+        const after = await view();
+        assert.ok(near([after.x - pinched.x, after.y - pinched.y, after.s], [50, 20, pinched.s]), `the finger left moved 50,20: ${JSON.stringify([pinched, after])}`);
+      });
+
+      await check('TOUCH: a double-tap zooms 2x around the tap, as a double-click does', async () => {
+        const before = await fit();
+        const at = { x: before.cx - 31, y: before.cy + 19 };
+        const under = diagramAt(before, at.x, at.y);
+        for (let i = 0; i < 2; i++) {
+          await touch('touchStart', [[at.x, at.y, 0]]);
+          await touch('touchEnd', []);
+        }
+        const after = await view();
+        assert.ok(Math.abs(after.s / before.s - 2) < 1e-4, `a double-tap took the scale ${before.s} -> ${after.s}`);
+        const moved = screenOf(after, under);
+        assert.ok(Math.hypot(moved.x - at.x, moved.y - at.y) < 1, `the tapped point drifted to ${JSON.stringify(moved)}`);
+      });
+    } finally {
+      await tab.close();
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
 async function main() {
   requireChrome('browser-check-mermaid-stage');
 
@@ -364,6 +484,8 @@ async function main() {
         rmSync(corrupt.dest, { recursive: true, force: true });
       });
     });
+
+    await touchLensChecks(daemonPort, daemon.secret, proxyPort);
 
     await check('AC4 (final): still nothing non-loopback across the whole run, including both degrade passes', async () => {
       const offenders = witness.seen.filter(e => !isChromeInfra(e.hostname));
