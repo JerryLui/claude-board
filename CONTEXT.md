@@ -193,7 +193,8 @@ deadline while it is awaited. _Avoid_: subtitle, round badge.
 **Pill**: the header once it condenses while scrolling — the mark, the comment toggle, Download
 round's icon on a Page board, the theme control and the state label, in that order, on a
 floating centred band. Also names the
-pager dock and the unanswered-count chip elsewhere in this codebase, a collision left
+pager dock, the unanswered-count chip and a phone's round pill (`.round-pill`, the pager's
+arrows around this round of the board's rounds) elsewhere in this codebase, collisions left
 unresolved. _Avoid_: capsule, chip, bar, collapse, minimize, shrink.
 
 **Lens**: the full-viewport surface a stage or a diagram opens into, reached only by its
