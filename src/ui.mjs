@@ -4920,7 +4920,7 @@ export const ui = `
       if (value == null) btn.removeAttribute(name); else btn.setAttribute(name, value);
     }
     if (!note) {
-      if (shown) shown.remove();
+      if (shown) shown.replaceWith();
       if (was) { put('title', was.title); put('aria-label', was.label); btn.__cbDownloadLabel = null; }
       return;
     }
@@ -6426,9 +6426,8 @@ export const ui = `
     // arriving page it would send that page with no check at all.
     var flipped = n !== currentRound;
     if (flipped && sendArmed) disarmSend();
-    // What the top strip's Download said of the round being left (sayByDownload).
-    var headDownload = flipped && document.querySelector('.head-download');
-    if (headDownload) sayByDownload(headDownload, null);
+    // What the top strip's and the ⋯ menu's Download said of the round being left (sayByDownload).
+    if (flipped) qsa('.head-download, .round-download.corner-item').forEach(function (btn) { sayByDownload(btn, null); });
     currentRound = n;
     qsa('.round').forEach(function (s) { s.classList.toggle('round-current', s === section); });
     // The arriving page's diagrams are drawn now, not at load: a diagram drawn

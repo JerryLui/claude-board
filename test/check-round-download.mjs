@@ -313,6 +313,25 @@ await check('a mock whose stage a newer build of the board wrote, its stand-in f
   }
 });
 
+await check('the ⋯ menu\'s Download round drops its note on a flip to another round, as the top strip\'s does', async () => {
+  const board = createBoard({ title: 'Newer board', blocks: [{ kind: 'html', html: DRAWS }] });
+  addRound(board, { title: 'Next', blocks: [Q1] });
+  const stubs = savingStubs(LIBRARY);
+  try {
+    const document = loadSaving(renderBoardPage(board), stubs);
+    press(document.querySelector('.round-page[data-round="1"]'));
+    document.querySelector('.round-current iframe.html-stage').setAttribute('srcdoc', rewordedStage(DRAWS));
+    const btn = document.querySelector('.corner-menu .round-download');
+    press(btn);
+    await waitFor(() => btn.querySelector('.download-note'), { what: 'the note under the menu item' });
+    press(document.querySelector('.round-page[data-round="2"]'));
+    assert.deepEqual({ note: btn.querySelector('.download-note'), label: btn.getAttribute('aria-label'), title: btn.getAttribute('title') },
+      { note: null, label: null, title: 'Download round' });
+  } finally {
+    stubs.restore();
+  }
+});
+
 await check('a read-only archive saves nothing and reads nothing, from the top strip\'s Download round or from a mock\'s Pull-out', async () => {
   const page = createBoard({ title: 'Archived page', blocks: [{ kind: 'html', html: DRAWS }] });
   const mixed = createBoard({ title: 'Archived mock', blocks: [{ kind: 'html', title: 'Flow', html: DRAWS }, Q1] });
