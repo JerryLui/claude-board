@@ -3577,22 +3577,27 @@ function roundPagerMarkup(board, currentN) {
   const first = rounds.length ? rounds[0].n : 1;
   const last = rounds.length ? rounds[rounds.length - 1].n : 1;
   const current = rounds.find(r => r.n === currentN);
-  const waits = owed.some(n => n !== currentN);
+  const waits = rounds.some(r => r.n !== currentN && (owed.includes(r.n) || roundIsAwaitedOpen(r)));
   // The dock, not the pill, is the fixed and centred box: the caption has to sit
   // above the numerals and share their centre line, and stacking them inside one
   // fixed column is what keeps that true with no measured offset between them.
   // The chevrons stay OUTSIDE it for the reason they were already outside the
   // pill -- a transformed ancestor becomes the containing block for a fixed
   // descendant, which would pin them to this box instead of the viewport.
-  return `  <button type="button" class="round-flip round-flip-prev" id="round-prev" aria-label="Previous round" title="Previous round"${currentN <= first ? ' disabled' : ''}>‹</button>
-  <button type="button" class="round-flip round-flip-next" id="round-next" aria-label="Next round" title="Next round"${currentN >= last ? ' disabled' : ''}>›</button>
+  const step = (cls, id, by) => {
+    const name = by < 0 ? 'Previous round' : 'Next round';
+    const end = by < 0 ? currentN <= first : currentN >= last;
+    return `<button type="button" class="${cls}" id="${id}" data-step="${by}" aria-label="${name}" title="${name}"${end ? ' disabled' : ''}>${by < 0 ? '‹' : '›'}</button>`;
+  };
+  return `  ${step('round-flip round-flip-prev', 'round-prev', -1)}
+  ${step('round-flip round-flip-next', 'round-next', 1)}
   <div class="round-pager-dock">
     <div class="round-pager-caption" id="round-pager-caption">${escHtml(roundPageLabel(currentN, (current && current.title) || ''))}</div>
     <nav class="round-pager" id="round-pager" aria-label="Rounds"><span class="round-pager-lede" aria-hidden="true">Rounds</span>${pages}</nav>
     <div class="round-pill">
-      <button type="button" class="round-pill-step" id="round-pill-prev" aria-label="Previous round" title="Previous round"${currentN <= first ? ' disabled' : ''}>‹</button>
+      ${step('round-pill-step', 'round-pill-prev', -1)}
       <button type="button" class="round-pill-count${waits ? ' round-pill-count-owed' : ''}" id="round-pill-count" aria-controls="round-pager" aria-expanded="false" aria-label="${escAttr(roundCountName(currentN, rounds.length, waits))}">${roundCountLabel(currentN, rounds.length)}</button>
-      <button type="button" class="round-pill-step" id="round-pill-next" aria-label="Next round" title="Next round"${currentN >= last ? ' disabled' : ''}>›</button>
+      ${step('round-pill-step', 'round-pill-next', 1)}
     </div>
   </div>`;
 }

@@ -529,7 +529,169 @@ await check('moving on: a page round\'s own Send says "Sent." in its send bar, t
   assert.equal(location.href, undefined);
 });
 
-await check('moving on: a failed Send stays on the round with its error', async () => {
+const pill = document => document.getElementById('round-pill-count');
+
+await check('moving on: the pill\'s dot lights for an awaited page round that asks nothing, and Send flips to it with "Round 2 still waits" in its send bar', async () => {
+  const board = twoWaitingRounds([{ kind: 'html', html: ARTIFACT }]);
+  const location = { protocol: 'http:' };
+  const document = loadBoard(renderBoardPage(board), { location, storage: missionsHome() });
+  flipTo(document, 1);
+  assert.equal(pill(document).classList.contains('round-pill-count-owed'), true, 'the awaited page round waits, so the count must carry the dot');
+  assert.equal(pill(document).getAttribute('aria-label'), 'Round 1 of 2, another round waits for an answer. Show all rounds');
+  answerSingle(roundSection(document, 1), 'Yes');
+  await withSendClock(() => sentAnswer(board, 1), async clock => {
+    document.getElementById('send-btn').dispatchEvent(new StandInEvent('click'));
+    await flush();
+    assert.equal(clock.posts[0].body.round, 1, 'setup failure: Send names round 1');
+    clock.elapse(1100);
+  });
+  assert.equal(pageOnScreen(document), '2');
+  assert.equal(roundSection(document, 2).querySelector('.page-send-bar .send-status').textContent, 'Round 2 still waits');
+  assert.equal(location.href, undefined);
+});
+
+await check('moving on: with two rounds still waiting, Send flips to the oldest', async () => {
+  const board = twoWaitingRounds();
+  addRound(board, { title: 'Third ask', blocks: [ASK], wait: true });
+  const location = { protocol: 'http:' };
+  const document = loadBoard(renderBoardPage(board), { location, storage: missionsHome() });
+  answerSingle(roundSection(document, 3), 'Yes');
+  await withSendClock(() => sentAnswer(board, 3), async clock => {
+    document.getElementById('send-btn').dispatchEvent(new StandInEvent('click'));
+    await flush();
+    clock.elapse(1100);
+  });
+  assert.equal(pageOnScreen(document), '1');
+  assert.equal(sendStatusText(document), 'Round 1 still waits');
+});
+
+/** Round 1 shows two mocks and asks nothing, so nothing waits on it; round 2 asks. */
+function mocksThenAsk() {
+  const board = createBoard({ title: 'Mocks, then a question', blocks: [{ kind: 'html', html: ARTIFACT }, { kind: 'html', html: ARTIFACT }] });
+  addRound(board, { title: 'The ask', blocks: [ASK], wait: true });
+  return board;
+}
+
+/** Opens the comment form on round 1's first mock, on screen. */
+function openMockComment(document, board) {
+  flipTo(document, 1);
+  const blockId = board.blocks.find(b => b.round === 1).id;
+  document.querySelector(`.comment-btn[data-block-id="${blockId}"]`).dispatchEvent(new StandInEvent('click'));
+  return document.getElementById('comment-form-' + blockId);
+}
+
+async function sendRoundTwo(document, board) {
+  flipTo(document, 2);
+  answerSingle(roundSection(document, 2), 'Yes');
+  await withSendClock(() => sentAnswer(board, 2), async clock => {
+    document.getElementById('send-btn').dispatchEvent(new StandInEvent('click'));
+    await flush();
+    assert.equal(sendStatusText(document), 'Sent.', 'setup failure: the Send must go out');
+    clock.elapse(1100);
+  });
+}
+
+await check('moving on: a newest round that asks nothing and is not awaited, holding a queued comment, takes the page with the comment still queued', async () => {
+  const board = createBoard({ title: 'A question, then mocks', blocks: [ASK], wait: true });
+  addRound(board, { title: 'Mocks', blocks: [{ kind: 'html', html: ARTIFACT }, { kind: 'html', html: ARTIFACT }] });
+  const location = { protocol: 'http:' };
+  const document = loadBoard(renderBoardPage(board), { location, storage: missionsHome() });
+  const blockId = board.blocks.find(b => b.round === 2).id;
+  document.querySelector(`.comment-btn[data-block-id="${blockId}"]`).dispatchEvent(new StandInEvent('click'));
+  const form = document.getElementById('comment-form-' + blockId);
+  form.querySelector('input[type=text]').value = 'queued on the mock';
+  form.dispatchEvent(new StandInEvent('submit'));
+  assert.equal(document.querySelectorAll('.comment-item.comment-pending').length, 1, 'setup failure: one comment queued');
+  flipTo(document, 1);
+  answerSingle(roundSection(document, 1), 'Yes');
+  await withSendClock(() => sentAnswer(board, 1), async clock => {
+    document.getElementById('send-btn').dispatchEvent(new StandInEvent('click'));
+    await flush();
+    assert.equal(clock.posts[0].body.comments.length, 0, 'setup failure: the mock\'s comment rides its own round\'s Send, not round 1\'s');
+    clock.elapse(1100);
+  });
+  assert.equal(pageOnScreen(document), '2');
+  assert.equal(sendStatusText(document), 'Round 2 still waits');
+  assert.equal(document.querySelectorAll('.comment-item.comment-pending').length, 1);
+  assert.equal(location.href, undefined);
+});
+
+globalThis.FileReader ??= class {
+  readAsDataURL(file) {
+    file.arrayBuffer().then(b => { this.result = `data:${file.type};base64,${Buffer.from(b).toString('base64')}`; this.onload(); });
+  }
+};
+const PNG = Buffer.from('89504e470d0a1a0a0000000d4948445200000001000000010806000000', 'hex');
+
+for (const [what, fill] of [
+  ['typed text', async input => { input.value = 'typed, never added'; }],
+  ['a pasted image', async input => {
+    input.dispatchEvent(new StandInEvent('paste', { clipboardData: { files: [new File([PNG], 'clip', { type: 'image/png' })] } }));
+    await flush();
+  }],
+]) {
+  await check(`moving on: a comment box holding ${what} it never added takes the page like a queued comment, never home`, async () => {
+    const board = mocksThenAsk();
+    const location = { protocol: 'http:' };
+    const document = loadBoard(renderBoardPage(board), { location, storage: missionsHome() });
+    const form = openMockComment(document, board);
+    const input = form.querySelector('input[type=text]');
+    await fill(input);
+    await sendRoundTwo(document, board);
+    assert.equal(pageOnScreen(document), '1');
+    assert.equal(sendStatusText(document), 'Round 1 still waits');
+    assert.equal(location.href, undefined, 'leaving the board would lose the unadded comment');
+    assert.equal(form.querySelector('input[type=text]').value, input.value);
+    assert.equal(form.querySelectorAll('.thumb-row img').length, what === 'a pasted image' ? 1 : 0);
+  });
+}
+
+await check('moving on: a PM who flipped to another round during the second stays on it', async () => {
+  const board = lastWaitingRound();
+  const location = { protocol: 'http:' };
+  const document = loadBoard(renderBoardPage(board), { location, storage: missionsHome() });
+  answerSingle(roundSection(document, 2), 'Yes');
+  await withSendClock(() => sentAnswer(board, 2), async clock => {
+    document.getElementById('send-btn').dispatchEvent(new StandInEvent('click'));
+    await flush();
+    assert.equal(sendStatusText(document), 'Sent.', 'setup failure: the Send must go out');
+    flipTo(document, 1);
+    clock.elapse(1100);
+  });
+  assert.equal(pageOnScreen(document), '1');
+  assert.equal(location.href, undefined);
+});
+
+await check('moving on: with no round waiting, a comment still queued only in this tab keeps the page on the board', async () => {
+  const board = createBoard({ title: 'Mock and ask', blocks: [{ kind: 'html', html: ARTIFACT }, ASK], wait: true });
+  addRound(board, { title: 'Second ask', blocks: [ASK], wait: true });
+  const location = { protocol: 'http:' };
+  const { document, es } = loadBoardWithEventSource(renderBoardPage(board), { location, storage: missionsHome() });
+  flipTo(document, 1);
+  const blockId = board.blocks.find(b => b.round === 1 && b.kind === 'html').id;
+  document.querySelector(`.comment-btn[data-block-id="${blockId}"]`).dispatchEvent(new StandInEvent('click'));
+  const form = document.getElementById('comment-form-' + blockId);
+  form.querySelector('input[type=text]').value = 'queued before another tab sent round 1';
+  form.dispatchEvent(new StandInEvent('submit'));
+  flipTo(document, 2);
+  answerSingle(roundSection(document, 2), 'Yes');
+  const bothSent = structuredClone(board);
+  applySubmit(bothSent, { action: 'send', answers: [], comments: [] }, 2);
+  applySubmit(bothSent, { action: 'send', answers: [], comments: [] }, 1);
+  await withSendClock(call => (call.method === 'POST' ? sentAnswer(board, 2) : { ok: false, status: 503, json: async () => ({}) }), async clock => {
+    document.getElementById('send-btn').dispatchEvent(new StandInEvent('click'));
+    await flush();
+    assert.equal(sendStatusText(document), 'Sent.', 'setup failure: the Send must go out');
+    es.dispatch('submitted', JSON.stringify(buildSubmittedPushPayload(bothSent, 1)));
+    await flush();
+    clock.elapse(1100);
+  });
+  assert.equal(pageOnScreen(document), '2');
+  assert.equal(location.href, undefined, 'going home would destroy the comment queued only in this tab');
+  assert.equal(document.querySelectorAll('.comment-item.comment-pending').length, 1);
+});
+
+await check('moving on: a failed Send or Discuss stays on the round with its error', async () => {
   const board = twoWaitingRounds();
   const location = { protocol: 'http:' };
   const document = loadBoard(renderBoardPage(board), { location, storage: missionsHome() });

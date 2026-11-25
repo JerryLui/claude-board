@@ -1825,31 +1825,22 @@ async function main() {
     assert.equal(total, r.body.missions.length + tabsNeedingYou, 'every listed mission is counted in one column, and a tab only in Needs you');
   });
 
-  await check('Cmd+Enter in a mission card\'s comment box sends the comment, as Send to session does', async () => {
-    await liveMission('KEY_CMD_ENTER');
-    const { tab, box } = await openNote('KEY_CMD_ENTER', 'Ship it');
-    try {
-      box.dispatchEvent(new StandInEvent('keydown', { key: 'Enter', metaKey: true }));
-      await tab.settle();
-      assert.deepEqual(readMission('KEY_CMD_ENTER', home).orders.map(o => [o.kind, o.text]), [['comment', 'Ship it']]);
-      assert.equal(cardFor(tab.document, 'KEY_CMD_ENTER').querySelector('textarea'), null, 'the note closes once sent');
-    } finally {
-      tab.restoreFetch();
-    }
-  });
-
-  await check('Ctrl+Enter in a mission card\'s comment box sends the comment, as Send to session does', async () => {
-    await liveMission('KEY_CTRL_ENTER');
-    const { tab, box } = await openNote('KEY_CTRL_ENTER', 'Ship it');
-    try {
-      box.dispatchEvent(new StandInEvent('keydown', { key: 'Enter', ctrlKey: true }));
-      await tab.settle();
-      assert.deepEqual(readMission('KEY_CTRL_ENTER', home).orders.map(o => [o.kind, o.text]), [['comment', 'Ship it']]);
-      assert.equal(cardFor(tab.document, 'KEY_CTRL_ENTER').querySelector('textarea'), null, 'the note closes once sent');
-    } finally {
-      tab.restoreFetch();
-    }
-  });
+  for (const [chord, mod, key] of [['Cmd+Enter', 'metaKey', 'KEY_CMD_ENTER'], ['Ctrl+Enter', 'ctrlKey', 'KEY_CTRL_ENTER']]) {
+    await check(`${chord} in a mission card's comment box sends the comment, as Send to session does, and adds no newline`, async () => {
+      await liveMission(key);
+      const { tab, box } = await openNote(key, 'Ship it');
+      try {
+        const ev = new StandInEvent('keydown', { key: 'Enter', [mod]: true });
+        box.dispatchEvent(ev);
+        await tab.settle();
+        assert.equal(ev.defaultPrevented, true, 'the chord adds no newline');
+        assert.deepEqual(readMission(key, home).orders.map(o => [o.kind, o.text]), [['comment', 'Ship it']]);
+        assert.equal(cardFor(tab.document, key).querySelector('textarea'), null, 'the note closes once sent');
+      } finally {
+        tab.restoreFetch();
+      }
+    });
+  }
 
   await check('plain Enter in the comment box sends nothing and is left to the browser\'s own newline', async () => {
     await liveMission('KEY_PLAIN_ENTER');

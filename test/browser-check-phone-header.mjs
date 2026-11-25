@@ -24,7 +24,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { sessionToken } from '../src/secret.mjs';
 import { repoRoot, runMain, sleep } from './support.mjs';
-import { clickAt, evalIn, guardRun, openPhone, openTab, postJson, requireChrome, row, startScratchDaemon, withChrome } from './browser-support.mjs';
+import { clickAt, copyArchive, evalIn, guardRun, openPhone, openTab, postJson, requireChrome, row, startScratchDaemon, withChrome } from './browser-support.mjs';
 
 guardRun('browser-check-phone-header', { deadlineMs: 180000 });
 
@@ -47,6 +47,30 @@ async function pressKey(tab, key) {
   await tab.sp('Input.dispatchKeyEvent', { type: 'keyUp', ...down });
   await sleep(50);
 }
+
+/** Presses an arrow, Home or End key, which carries no character: no native key code, so
+ * Chrome opens nothing in front (QUIRKS.md "A synthetic key with no character opens
+ * chrome://help"). */
+async function pressNavKey(tab, key) {
+  const down = { key, code: key, windowsVirtualKeyCode: { ArrowDown: 40, ArrowUp: 38, Home: 36, End: 35 }[key] };
+  await tab.sp('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...down });
+  await tab.sp('Input.dispatchKeyEvent', { type: 'keyUp', ...down });
+  await sleep(50);
+}
+
+/** Stands in for the clipboard, the page's one way out to the system: what the
+ * clipboard API is given, or with `api` false no API and what `execCommand('copy')`
+ * finds selected, lands in `window.__copied`. */
+const CLIPBOARD_STAND_IN = api => `(function () {
+  window.__copied = null;
+  var clip = ${api} ? { writeText: function (text) { window.__copied = text; return Promise.resolve(); } } : undefined;
+  Object.defineProperty(Navigator.prototype, 'clipboard', { get: function () { return clip; }, configurable: true });
+  document.execCommand = function (cmd) {
+    var f = document.activeElement;
+    window.__copied = cmd + ': ' + f.value.slice(f.selectionStart, f.selectionEnd);
+    return true;
+  };
+})()`;
 
 /** A touch screen `width` by `height`, as openPhone opens 390 by 844. */
 function openTouch(send, onEvent, url, cookie, { width, height, prepare = null }) {
@@ -114,7 +138,7 @@ const MENU_EXPR = `(function () {
       return el.checkVisibility({ checkVisibilityCSS: true });
     }).map(function (el) {
       var r = el.getBoundingClientRect();
-      return { role: el.getAttribute('role'), name: el.textContent.replace(/\\s+/g, ' ').trim(), checked: el.getAttribute('aria-checked'), h: Math.round(r.height), inWindow: r.left >= 0 && r.right <= innerWidth };
+      return { role: el.getAttribute('role'), name: el.textContent.replace(/\\s+/g, ' ').trim(), checked: el.getAttribute('aria-checked'), disabled: el.disabled, h: Math.round(r.height), inWindow: r.left >= 0 && r.right <= innerWidth };
     }),
     theme: document.documentElement.getAttribute('data-theme') || 'system',
     commenting: document.body.classList.contains('comment-mode'),
@@ -243,12 +267,19 @@ async function main() {
         }
       });
 
-      await row('at 390 a read-only page (a round\'s file opened from disk) floats ⋯ and no home button, having no home to go to', async () => {
-        const tab = await openPhone(send, onEvent, roundUrl, cookie);
+      await row('at 390 a round\'s file opened from disk floats a live ⋯ offering the board and thread ids, and no home button, having no home to go to', async note => {
+        const { pageUrl: savedUrl } = copyArchive(path.join(daemon.home, 'pages'), round.boardId, 'cb-phone-header');
+        const tab = await openPhone(send, onEvent, savedUrl, cookie);
         try {
-          await tab.evalPage(`document.body.classList.add('readonly')`);
           const m = await tab.evalPage(TOP_EXPR);
+          assert.equal(await tab.evalPage(`document.body.classList.contains('readonly')`), true, 'setup: the saved copy is read-only');
           assert.deepEqual([m.home.shown, m.more.shown], [false, true]);
+          await clickAt(tab, { x: m.more.x + m.more.w / 2, y: m.more.y + m.more.h / 2 });
+          const opened = await tab.evalPage(MENU_EXPR);
+          note(`items: ${opened.items.map(i => i.name).join(', ')}`);
+          assert.equal(opened.open, true, 'a press on ⋯ opens the menu');
+          const thread = await tab.evalPage(`JSON.parse(document.querySelector('script#board-data').textContent).thread`);
+          assert.deepEqual(opened.items.slice(-2).map(i => [i.name, i.disabled]), [[`Board ${round.boardId}`, false], [`Thread ${thread}`, false]], 'the id items are on offer');
         } finally {
           await tab.close();
         }
@@ -297,7 +328,7 @@ async function main() {
         }
       });
 
-      await row('at 390 the ⋯ menu holds Comment, the theme control, Download round and the board and thread ids, reached by Tab and Enter, with menu roles, and closed by Escape', async note => {
+      await row('at 390 the ⋯ menu holds Comment, the theme control, Download round and the board and thread ids, reached by Tab and Enter, with menu roles, walked by the arrows, Home and End, copies an id on Enter with or without the clipboard API, and closes on Escape, Tab out of it or a press outside', async note => {
         const tab = await openPhone(send, onEvent, roundUrl, cookie);
         try {
           await tab.evalPage(`document.activeElement && document.activeElement.blur()`);
@@ -332,6 +363,11 @@ async function main() {
             visited.push((await tab.evalPage(MENU_EXPR)).focus);
           }
           assert.deepEqual(visited, opened.items.map(i => i.name), 'Tab walks every item in order');
+          await pressKey(tab, 'Tab');
+          const left = await tab.evalPage(MENU_EXPR);
+          assert.deepEqual([left.open, left.expanded], [false, 'false'], 'Tab past the last item leaves the menu and closes it');
+          await tab.evalPage(`document.querySelector('button.corner-more-btn').focus()`);
+          await pressKey(tab, 'Enter');
 
           await pressKey(tab, 'Escape');
           const closed = await tab.evalPage(MENU_EXPR);
@@ -352,6 +388,36 @@ async function main() {
           assert.notEqual(themed.theme, opened.theme, 'Enter on the theme item switches the theme');
           assert.equal(themed.items[1].name, `Theme: ${themed.theme[0].toUpperCase()}${themed.theme.slice(1)}`, 'and it names the new one');
           assert.equal(themed.open, true, 'the menu stays open for another switch');
+
+          const keyed = [];
+          for (const key of ['End', 'Home', 'ArrowDown', 'ArrowUp']) {
+            await pressNavKey(tab, key);
+            keyed.push((await tab.evalPage(MENU_EXPR)).focus);
+          }
+          const names = themed.items.map(i => i.name);
+          assert.deepEqual(keyed, [names[4], names[0], names[1], names[0]], 'End, Home and the arrows move through the items');
+
+          await tab.evalPage(CLIPBOARD_STAND_IN(true));
+          await pressNavKey(tab, 'End');
+          await pressNavKey(tab, 'ArrowUp');
+          await pressKey(tab, 'Enter');
+          const copiedBoard = await tab.evalPage(MENU_EXPR);
+          assert.equal(copiedBoard.items[3].name, `Copied ${round.boardId}`, 'Enter on the Board item says Copied');
+          assert.equal(await tab.evalPage('window.__copied'), round.boardId, 'and the clipboard is given the board id');
+          await sleep(1300);
+          assert.equal((await tab.evalPage(MENU_EXPR)).items[3].name, `Board ${round.boardId}`, 'the label comes back');
+
+          await tab.evalPage(CLIPBOARD_STAND_IN(false));
+          await pressNavKey(tab, 'ArrowDown');
+          await pressKey(tab, 'Enter');
+          const copiedThread = await tab.evalPage(MENU_EXPR);
+          const thread = await tab.evalPage(`JSON.parse(document.querySelector('script#board-data').textContent).thread`);
+          assert.equal(copiedThread.items[4].name, `Copied ${thread}`, 'with no clipboard API the Thread item still says Copied');
+          assert.equal(await tab.evalPage('window.__copied'), `copy: ${thread}`, 'and its fallback copies the thread id, selected');
+
+          await clickAt(tab, { x: 195, y: 600 });
+          const outside = await tab.evalPage(MENU_EXPR);
+          assert.deepEqual([outside.open, outside.expanded], [false, 'false'], 'a press outside closes it');
         } finally {
           await tab.close();
         }

@@ -214,7 +214,7 @@ export function wireCornerMenu() {
     field.setAttribute('readonly', '');
     field.style.position = 'fixed';
     field.style.opacity = '0';
-    document.body.appendChild(field);
+    menu.appendChild(field);
     field.select();
     try { if (document.execCommand('copy')) copied(item); } catch (e) { /* the id stays readable in the item */ }
     field.remove();
@@ -3006,11 +3006,9 @@ export const ui = `
       // Non-passive on purpose: without preventDefault the page behind the
       // dialog scrolls instead of the diagram zooming.
       if (ev.preventDefault) ev.preventDefault();
-      var r = lensStageRect();
       // A trackpad pinch arrives as a wheel event with ctrlKey set, an order of
       // magnitude coarser per notch than an ordinary scroll.
-      var factor = Math.pow(2, -ev.deltaY * (ev.ctrlKey ? 0.01 : 0.0022));
-      lensView = lensZoomAt(lensView, ev.clientX - r.left, ev.clientY - r.top, factor, LENS_MIN_SCALE, LENS_MAX_SCALE);
+      zoomAtClient(ev.clientX, ev.clientY, Math.pow(2, -ev.deltaY * (ev.ctrlKey ? 0.01 : 0.0022)));
       lensApply();
     }, { passive: false });
 
@@ -3019,8 +3017,7 @@ export const ui = `
       // A touch double-tap is zoomed on its second pointerup, below; the
       // dblclick a browser may add after it would zoom a second time.
       if (!lens.open || lastPressTouch) return;
-      var r = lensStageRect();
-      lensView = lensZoomAt(lensView, ev.clientX - r.left, ev.clientY - r.top, 2, LENS_MIN_SCALE, LENS_MAX_SCALE);
+      zoomAtClient(ev.clientX, ev.clientY, 2);
       lensApply();
     });
 
@@ -4920,7 +4917,7 @@ export const ui = `
       if (value == null) btn.removeAttribute(name); else btn.setAttribute(name, value);
     }
     if (!note) {
-      if (shown) shown.remove();
+      if (shown) shown.replaceWith();
       if (was) { put('title', was.title); put('aria-label', was.label); btn.__cbDownloadLabel = null; }
       return;
     }
@@ -6084,6 +6081,7 @@ export const ui = `
     // title just after it -- both need to know whether the round on screen is
     // a page board's or an ordinary one's.
     var fullpage = isPageRound(blocksOfRound(currentRound));
+    var cur = roundEntry(currentRound);
     // ADR.md entry 46's half that outlives the first paint (src/render.mjs's own
     // 'pageUncommentable' is the render-time half): the comment-mode toggle has
     // to go on a page board that was never awaited AND on one whose wait dies
@@ -6091,7 +6089,7 @@ export const ui = `
     // lives here rather than in refreshPager (which calls this on every flip
     // anyway, so the class is correct on both routes).
     document.body.classList.toggle('page-uncommentable',
-      fullpage && !roundIsCurrentlyAwaited(roundEntry(currentRound), now));
+      fullpage && !roundIsCurrentlyAwaited(cur, now));
     var meta = document.querySelector('span#round-meta');
     if (meta) {
       // 'fullpage' is what tells pageBoardPillMeta which of PILL_READONLY_TITLE
@@ -6099,20 +6097,26 @@ export const ui = `
       // that function's own comment (src/badge.mjs): a page board's status
       // never leaves 'open' even once its wait dies, so the round object alone
       // cannot make this call.
-      var m = pageBoardPillMeta(roundEntry(currentRound), now, fullpage, !readonly && currentPageSendable());
+      var m = pageBoardPillMeta(cur, now, fullpage, !readonly && currentPageSendable());
       meta.textContent = m.text;
       meta.title = m.title;
       var lineLabel = document.querySelector('span.head-round-label');
       var lineState = document.querySelector('span.head-round-state');
-      var cur = roundEntry(currentRound);
       if (lineLabel) lineLabel.textContent = roundPageLabel(currentRound, (cur && cur.title) || '');
       if (lineState) lineState.textContent = m.text;
+    }
+    var pillCount = document.querySelector('button#round-pill-count');
+    if (pillCount) {
+      var rounds = board.rounds || [];
+      var waits = rounds.some(function (r) { return r.n !== currentRound && roundWaits(r, now); });
+      pillCount.setAttribute('aria-label', roundCountName(currentRound, rounds.length, waits));
+      pillCount.classList.toggle('round-pill-count-owed', waits);
     }
     var cd = document.querySelector('span#round-countdown');
     if (cd) {
       // The newest unsent page's wait, shown only on that page: Send answers the
       // page on screen, and an older page's wait is never the one an agent holds.
-      var text = currentRound === openRoundNumber() ? roundCountdownText(roundEntry(currentRound), now) : null;
+      var text = currentRound === openRoundNumber() ? roundCountdownText(cur, now) : null;
       cd.textContent = text || '';
       cd.title = text ? ROUND_COUNTDOWN_TITLE : '';
       cd.classList.toggle('visible', !!text);
@@ -6218,22 +6222,14 @@ export const ui = `
     var rns = rounds.map(function (r) { return r.n; });
     var first = rns.length ? rns[0] : 1;
     var last = rns.length ? rns[rns.length - 1] : 1;
-    var prev = document.querySelector('button#round-prev');
-    var next = document.querySelector('button#round-next');
     // Disabled at the ends, never hidden: a control that disappears at round 1
     // is a control the reviewer has to find again at round 2.
-    if (prev) prev.disabled = currentRound <= first;
-    if (next) next.disabled = currentRound >= last;
-    var pillPrev = document.querySelector('button#round-pill-prev');
-    var pillNext = document.querySelector('button#round-pill-next');
+    qsa('button[data-step]').forEach(function (btn) {
+      btn.disabled = Number(btn.getAttribute('data-step')) < 0 ? currentRound <= first : currentRound >= last;
+    });
     var pillCount = document.querySelector('button#round-pill-count');
-    if (pillPrev) pillPrev.disabled = currentRound <= first;
-    if (pillNext) pillNext.disabled = currentRound >= last;
     if (pillCount) {
-      var waits = rounds.some(function (r) { return r.n !== currentRound && roundOwesAnswer(r); });
       pillCount.textContent = roundCountLabel(currentRound, rounds.length);
-      pillCount.setAttribute('aria-label', roundCountName(currentRound, rounds.length, waits));
-      pillCount.classList.toggle('round-pill-count-owed', waits);
       pillCount.disabled = false;
     }
 
@@ -6422,9 +6418,8 @@ export const ui = `
     // arriving page it would send that page with no check at all.
     var flipped = n !== currentRound;
     if (flipped && sendArmed) disarmSend();
-    // What the top strip's Download said of the round being left (sayByDownload).
-    var headDownload = flipped && document.querySelector('.head-download');
-    if (headDownload) sayByDownload(headDownload, null);
+    // What the top strip's and the ⋯ menu's Download said of the round being left (sayByDownload).
+    if (flipped) qsa('.head-download, .round-download.corner-item').forEach(function (btn) { sayByDownload(btn, null); });
     currentRound = n;
     qsa('.round').forEach(function (s) { s.classList.toggle('round-current', s === section); });
     // The arriving page's diagrams are drawn now, not at load: a diagram drawn
@@ -6676,10 +6671,9 @@ export const ui = `
   // delegated at the <nav> rather than per entry, so an entry created later by
   // refreshPager (a round arriving over SSE) is live the moment it exists,
   // with no second wiring pass and no chance of a double-registered listener.
-  var roundPrevBtn = document.querySelector('button#round-prev');
-  var roundNextBtn = document.querySelector('button#round-next');
-  if (roundPrevBtn) roundPrevBtn.addEventListener('click', function () { stepRound(-1); });
-  if (roundNextBtn) roundNextBtn.addEventListener('click', function () { stepRound(1); });
+  qsa('button[data-step]').forEach(function (btn) {
+    btn.addEventListener('click', function () { stepRound(Number(btn.getAttribute('data-step'))); });
+  });
   var roundPagerNav = pagerNav();
   if (roundPagerNav) {
     roundPagerNav.addEventListener('click', function (ev) {
@@ -6695,11 +6689,7 @@ export const ui = `
       if (picked) roundPillCountBtn.focus({ preventScroll: true });
     });
   }
-  var roundPillPrevBtn = document.querySelector('button#round-pill-prev');
-  var roundPillNextBtn = document.querySelector('button#round-pill-next');
   var roundPillCountBtn = document.querySelector('button#round-pill-count');
-  if (roundPillPrevBtn) roundPillPrevBtn.addEventListener('click', function () { stepRound(-1); });
-  if (roundPillNextBtn) roundPillNextBtn.addEventListener('click', function () { stepRound(1); });
   if (roundPillCountBtn) {
     roundPillCountBtn.addEventListener('click', function () { setPillListOpen(!pillListOpen()); });
     document.addEventListener('click', function (ev) {
@@ -7048,7 +7038,7 @@ export const ui = `
       refreshPins(document);
       clearPendingMark();
       if (sendStatus) {
-        sendStatus.textContent = action === 'discuss' ? 'Handed over to chat.' : 'Sent.';
+        sendStatus.textContent = sentText(action);
       }
       moveOnAfter(round);
       // Deliberately NOT re-enabled here: the round is out.
@@ -7079,9 +7069,8 @@ export const ui = `
   var MOVE_ON_MS = 1000;
 
   /** ADR 160: where the page goes once the PM's own Send or Discuss of round 'sent'
-   * went out. The oldest other round still waiting, or holding what its own Send
-   * would post, takes the page; with none, the page goes where the Home mark goes,
-   * unless a queued comment is still only in this tab. */
+   * went out. The oldest other round that waits takes the page; with none, the page
+   * goes where the Home mark goes, unless a queued comment is still only in this tab. */
   function moveOnAfter(sent) {
     if (readonly) return;
     setTimeout(function () {
@@ -7089,8 +7078,7 @@ export const ui = `
       var now = Date.now();
       var next = null;
       (board.rounds || []).forEach(function (r) {
-        if (next !== null || r.n === sent || r.status === 'sent') return;
-        if (roundOwesAnswer(r) || roundIsCurrentlyAwaited(r, now) || commentsSentFrom(r.n).length) next = r.n;
+        if (next === null && r.n !== sent && roundWaits(r, now)) next = r.n;
       });
       if (next !== null) {
         if (sendStatus) sendStatus.textContent = '';
@@ -7102,6 +7090,24 @@ export const ui = `
       var home = document.querySelector('a.back-to-index');
       location.href = (home && home.getAttribute('href')) || '/';
     }, MOVE_ON_MS);
+  }
+
+  function sentText(action) {
+    return action === 'discuss' ? 'Handed over to chat.' : 'Sent.';
+  }
+
+  /** ADR 160's waiting round, asked by move-on and the pill's dot alike. */
+  function roundWaits(r, now) {
+    if (!r || r.status === 'sent') return false;
+    return roundOwesAnswer(r) || roundIsCurrentlyAwaited(r, now) || commentsSentFrom(r.n).length > 0 || holdsUnaddedComment(r.n);
+  }
+
+  function holdsUnaddedComment(n) {
+    return qsa('.comment-form', document).some(function (form) {
+      var id = form.getAttribute('data-block-id');
+      var input = form.querySelector('input[type=text]');
+      return roundOfBlockEl(id) === n && (!!(input && input.value.trim()) || !!draftImages['comment:' + id]);
+    });
   }
 
   function sayInSendBar(n, text) {
@@ -7266,7 +7272,7 @@ export const ui = `
       refreshPins(document);
       clearPendingMark();
       if (!pressed) return;
-      sayInSendBar(roundN, action === 'discuss' ? 'Handed over to chat.' : 'Sent.');
+      sayInSendBar(roundN, sentText(action));
       moveOnAfter(roundN);
     }).catch(function () {
       // Nothing went out -- hand the controls back so the reviewer can retry,
